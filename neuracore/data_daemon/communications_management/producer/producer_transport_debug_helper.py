@@ -9,7 +9,7 @@ from neuracore.data_daemon.helpers import is_debug_mode
 
 from .producer_transport_debug_models import (
     ProducerChannelMessageSenderDebugStats,
-    ProducerSharedRingBufferDebugStats,
+    ProducerSharedMemoryDebugStats,
     ProducerTransportTimingStats,
 )
 
@@ -27,16 +27,16 @@ class ProducerTransportDebugHelper:
         self._socket_send_count = 0
         self._socket_send_total_s = 0.0
         self._socket_send_max_s = 0.0
-        self._shared_ring_dispatch_count = 0
-        self._shared_ring_dispatch_total_s = 0.0
-        self._shared_ring_dispatch_max_s = 0.0
-        self._shared_ring_open_count = 0
-        self._shared_ring_open_total_s = 0.0
-        self._shared_ring_open_max_s = 0.0
-        self._shared_ring_write_count = 0
-        self._shared_ring_write_bytes = 0
-        self._shared_ring_write_total_s = 0.0
-        self._shared_ring_write_max_s = 0.0
+        self._shared_memory_dispatch_count = 0
+        self._shared_memory_dispatch_total_s = 0.0
+        self._shared_memory_dispatch_max_s = 0.0
+        self._shared_memory_open_count = 0
+        self._shared_memory_open_total_s = 0.0
+        self._shared_memory_open_max_s = 0.0
+        self._shared_memory_write_count = 0
+        self._shared_memory_write_bytes = 0
+        self._shared_memory_write_total_s = 0.0
+        self._shared_memory_write_max_s = 0.0
         self._send_error_count = 0
         self._last_send_error: str | None = None
 
@@ -71,48 +71,48 @@ class ProducerTransportDebugHelper:
             self._socket_send_total_s += elapsed_s
             self._socket_send_max_s = max(self._socket_send_max_s, elapsed_s)
 
-    def record_shared_ring_dispatch(self, started_at: float | None) -> None:
-        """Record shared-ring dispatch timing from the sender thread."""
+    def record_shared_memory_dispatch(self, started_at: float | None) -> None:
+        """Record shared-memory dispatch timing from the sender thread."""
         elapsed_s = self._elapsed_from(started_at)
         if elapsed_s is None:
             return
         with self._lock:
-            self._shared_ring_dispatch_count += 1
-            self._shared_ring_dispatch_total_s += elapsed_s
-            self._shared_ring_dispatch_max_s = max(
-                self._shared_ring_dispatch_max_s,
+            self._shared_memory_dispatch_count += 1
+            self._shared_memory_dispatch_total_s += elapsed_s
+            self._shared_memory_dispatch_max_s = max(
+                self._shared_memory_dispatch_max_s,
                 elapsed_s,
             )
 
-    def record_shared_ring_open(self, started_at: float | None) -> None:
-        """Record shared-ring open timing."""
+    def record_shared_memory_open(self, started_at: float | None) -> None:
+        """Record shared-memory open timing."""
         elapsed_s = self._elapsed_from(started_at)
         if elapsed_s is None:
             return
         with self._lock:
-            self._shared_ring_open_count += 1
-            self._shared_ring_open_total_s += elapsed_s
-            self._shared_ring_open_max_s = max(
-                self._shared_ring_open_max_s,
+            self._shared_memory_open_count += 1
+            self._shared_memory_open_total_s += elapsed_s
+            self._shared_memory_open_max_s = max(
+                self._shared_memory_open_max_s,
                 elapsed_s,
             )
 
-    def record_shared_ring_write(
+    def record_shared_memory_write(
         self,
         *,
         started_at: float | None,
         bytes_written: int,
     ) -> None:
-        """Record shared-ring write timing and payload size."""
+        """Record shared-memory write timing and payload size."""
         elapsed_s = self._elapsed_from(started_at)
         if elapsed_s is None:
             return
         with self._lock:
-            self._shared_ring_write_count += 1
-            self._shared_ring_write_bytes += bytes_written
-            self._shared_ring_write_total_s += elapsed_s
-            self._shared_ring_write_max_s = max(
-                self._shared_ring_write_max_s,
+            self._shared_memory_write_count += 1
+            self._shared_memory_write_bytes += bytes_written
+            self._shared_memory_write_total_s += elapsed_s
+            self._shared_memory_write_max_s = max(
+                self._shared_memory_write_max_s,
                 elapsed_s,
             )
 
@@ -156,37 +156,37 @@ class ProducerTransportDebugHelper:
                     total_s=self._socket_send_total_s,
                     max_s=self._socket_send_max_s,
                 ),
-                shared_ring_dispatch=ProducerTransportTimingStats(
-                    count=self._shared_ring_dispatch_count,
-                    total_s=self._shared_ring_dispatch_total_s,
-                    max_s=self._shared_ring_dispatch_max_s,
+                shared_memory_dispatch=ProducerTransportTimingStats(
+                    count=self._shared_memory_dispatch_count,
+                    total_s=self._shared_memory_dispatch_total_s,
+                    max_s=self._shared_memory_dispatch_max_s,
                 ),
                 send_error_count=self._send_error_count,
                 last_send_error=self._last_send_error,
             )
 
-    def shared_ring_stats(
+    def shared_memory_stats(
         self,
         *,
-        shared_ring_buffer_name: str | None,
-        shared_ring_buffer_size: int,
-    ) -> ProducerSharedRingBufferDebugStats:
-        """Return shared-ring stats, with debug timings when enabled."""
+        shared_memory_name: str | None,
+        shared_memory_size: int,
+    ) -> ProducerSharedMemoryDebugStats:
+        """Return shared-memory stats, with debug timings when enabled."""
         with self._lock:
-            return ProducerSharedRingBufferDebugStats(
-                shared_ring_buffer_name=shared_ring_buffer_name,
-                shared_ring_buffer_size=shared_ring_buffer_size,
-                shared_ring_open=ProducerTransportTimingStats(
-                    count=self._shared_ring_open_count,
-                    total_s=self._shared_ring_open_total_s,
-                    max_s=self._shared_ring_open_max_s,
+            return ProducerSharedMemoryDebugStats(
+                shared_memory_name=shared_memory_name,
+                shared_memory_size=shared_memory_size,
+                shared_memory_open=ProducerTransportTimingStats(
+                    count=self._shared_memory_open_count,
+                    total_s=self._shared_memory_open_total_s,
+                    max_s=self._shared_memory_open_max_s,
                 ),
-                shared_ring_write=ProducerTransportTimingStats(
-                    count=self._shared_ring_write_count,
-                    total_s=self._shared_ring_write_total_s,
-                    max_s=self._shared_ring_write_max_s,
+                shared_memory_write=ProducerTransportTimingStats(
+                    count=self._shared_memory_write_count,
+                    total_s=self._shared_memory_write_total_s,
+                    max_s=self._shared_memory_write_max_s,
                 ),
-                shared_ring_write_bytes=self._shared_ring_write_bytes,
+                shared_memory_write_bytes=self._shared_memory_write_bytes,
             )
 
     def _elapsed_from(self, started_at: float | None) -> float | None:

@@ -11,33 +11,45 @@ from collections.abc import Iterator, Sequence
 
 import zmq
 
-from neuracore.data_daemon.communications_management.communications_manager import (
-    CommunicationsManager,
-    MessageEnvelope,
-)
 from neuracore.data_daemon.const import (
     DEFAULT_CHUNK_SIZE,
-    DEFAULT_RING_BUFFER_SIZE,
+    DEFAULT_SHARED_MEMORY_SIZE,
     DEFAULT_VIDEO_CHUNK_SIZE,
-    DEFAULT_VIDEO_RING_BUFFER_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+    DEFAULT_VIDEO_SLOT_SIZE,
 )
-from neuracore.data_daemon.models import CommandType, DataType
+from neuracore.data_daemon.models import (
+    BatchedJointDataPayload,
+    CommandType,
+    DataChunkPayload,
+    DataType,
+    SharedMemoryChunkMetadata,
+    TraceTransportMetadata,
+)
 
+from ..shared_transport.communications_manager import CommunicationsManager
+from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
 from .producer_channel_message_sender import (
     ProducerChannelMessageSender,
-    QueuedSharedRingWrite,
+    QueuedEnvelope,
 )
 from .producer_heartbeat_service import ProducerHeartbeatService
-from .producer_shared_ring_buffer_transport import ProducerSharedRingBufferTransport
-from .producer_transport_debug_models import ProducerTransportDebugStats
-from .ring_buffer import RingBuffer
+from .producer_transport_debug_models import (
+    ProducerSharedMemoryDebugStats,
+    ProducerTransportDebugStats,
+    ProducerTransportTimingStats,
+)
 
 logger = logging.getLogger(__name__)
 
 BytePart = bytes | bytearray | memoryview
 
-__all__ = ["ProducerChannel", "RingBuffer", "producer_transport_args_for_data_type"]
+__all__ = ["ProducerChannel", "producer_transport_args_for_data_type"]
+
+
+def data_type_uses_shared_slot_transport(data_type: DataType) -> bool:
+    """Return True when the data type should use shared-slot transport."""
+    return data_type == DataType.RGB_IMAGES
 
 
 def producer_transport_args_for_data_type(
@@ -47,14 +59,14 @@ def producer_transport_args_for_data_type(
     if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
         return (
             DEFAULT_VIDEO_CHUNK_SIZE,
-            DEFAULT_VIDEO_RING_BUFFER_SIZE,
+            DEFAULT_VIDEO_SLOT_SIZE,
             DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
         )
 
     return (
         DEFAULT_CHUNK_SIZE,
-        DEFAULT_RING_BUFFER_SIZE,
-        0,
+        DEFAULT_SHARED_MEMORY_SIZE,
+        512,
     )
 
 
@@ -70,7 +82,7 @@ class ProducerChannel:
         chunk_size: int | None = None,
         send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
-        ring_buffer_size: int | None = None,
+        shared_memory_size: int | None = None,
     ) -> None:
         """Initialize the producer channel."""
         if data_type is None:
@@ -78,7 +90,7 @@ class ProducerChannel:
 
         (
             default_chunk_size,
-            default_ring_buffer_size,
+            default_shared_memory_size,
             default_send_queue_maxsize,
         ) = producer_transport_args_for_data_type(data_type)
 
@@ -97,18 +109,25 @@ class ProducerChannel:
         self.trace_id: str | None = None
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
-        self._shared_ring_transport = ProducerSharedRingBufferTransport(
-            int(
-                default_ring_buffer_size
-                if ring_buffer_size is None
-                else ring_buffer_size
+        self._data_type = data_type
+        self._use_shared_slot_transport = data_type_uses_shared_slot_transport(
+            data_type
+        )
+        self._shared_slot_transport = (
+            SharedSlotVideoTransport(
+                slot_size=int(
+                    default_shared_memory_size
+                    if shared_memory_size is None
+                    else shared_memory_size
+                )
             )
+            if self._use_shared_slot_transport
+            else None
         )
         self._message_sender = ProducerChannelMessageSender(
             producer_id=self.channel_id,
             comm=self._comm,
             send_queue_maxsize=self.send_queue_maxsize,
-            write_shared_ring_record=self._shared_ring_transport.write_record,
         )
         self._heartbeat_service = ProducerHeartbeatService(
             interval_s=self._heartbeat_interval,
@@ -118,7 +137,7 @@ class ProducerChannel:
     @property
     def _send_queue(
         self,
-    ) -> queue.Queue[MessageEnvelope | QueuedSharedRingWrite | None]:
+    ) -> queue.Queue[QueuedEnvelope | None]:
         """Expose the sender queue for compatibility with existing tests."""
         return self._message_sender.queue
 
@@ -138,6 +157,27 @@ class ProducerChannel:
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set the recording ID for the producer."""
         self.recording_id = recording_id
+
+    def start_recording_session(
+        self,
+        *,
+        recording_id: str | None = None,
+        shared_memory_size: int | None = None,
+    ) -> None:
+        """Start a fresh recording session for this producer channel."""
+        if recording_id is not None:
+            self.set_recording_id(recording_id)
+        if not self.recording_id:
+            raise ValueError("recording_id is required; set on ProducerChannel init.")
+        if self.trace_id is not None:
+            raise RuntimeError(
+                "Cannot start a new recording session while a trace is active."
+            )
+
+        self.start_producer_channel()
+        self.start_new_trace()
+        if self._use_shared_slot_transport:
+            self.open_fixed_shared_slots(slot_size=shared_memory_size)
 
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
@@ -167,13 +207,34 @@ class ProducerChannel:
     def stop_producer_channel(self) -> None:
         """Stops the producer channel and cleans up any associated resources."""
         self._stop_heartbeat_service()
+
+        # Ensure all descriptors were actually sent
+        cutoff_sequence = self.get_last_enqueued_sequence_number()
+        self.wait_until_sequence_sent(cutoff_sequence)
+
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
+
+        self._close_shared_slot_transport()
         self._stop_message_sender()
-        self._close_shared_ring_transport()
         self._comm.cleanup_producer()
 
     def _send(self, command: CommandType, payload: dict | None = None) -> int:
         """Send a message to the daemon."""
-        return self._message_sender.send(command, payload)
+        sequence_number = None
+        if self._use_shared_slot_transport and self._shared_slot_transport is not None:
+            sequence_number = self._shared_slot_transport.next_sequence_number()
+        return self._message_sender.send(
+            command,
+            payload,
+            sequence_number=sequence_number,
+            on_failed_send=(
+                self._shared_slot_transport.notify_sender_failure
+                if self._use_shared_slot_transport
+                and self._shared_slot_transport is not None
+                else None
+            ),
+        )
 
     def get_last_sent_sequence_number(self) -> int:
         """Return the most recent sequence number successfully sent on the socket."""
@@ -197,25 +258,60 @@ class ProducerChannel:
             heartbeat_thread_alive=self._heartbeat_service.get_stats()[
                 "heartbeat_thread_alive"
             ],
-            shared_ring=self._shared_ring_transport.get_stats(),
+            shared_memory=(
+                self._shared_slot_transport.get_stats()
+                if self._shared_slot_transport is not None
+                else ProducerSharedMemoryDebugStats(
+                    shared_memory_name=None,
+                    shared_memory_size=0,
+                    shared_memory_open=ProducerTransportTimingStats(),
+                    shared_memory_write=ProducerTransportTimingStats(),
+                    shared_memory_write_bytes=0,
+                )
+            ),
             message_sender=self._message_sender.get_stats(),
         )
 
-    def open_ring_buffer(self, size: int | None = None) -> None:
-        """Open the daemon-side ring buffer transport for this producer."""
-        payload = self._shared_ring_transport.open(size)
+    def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
+        """Announce the fixed shared-slot transport for this producer."""
+        if not self._use_shared_slot_transport or self._shared_slot_transport is None:
+            return
+        if (
+            slot_size is not None
+            and not self._shared_slot_transport.is_announced()
+            and int(slot_size) != self._shared_slot_transport.slot_size
+        ):
+            self._shared_slot_transport.close()
+            self._shared_slot_transport = SharedSlotVideoTransport(
+                slot_size=int(slot_size)
+            )
+        if self._shared_slot_transport.is_announced():
+            return
+        payload = self._shared_slot_transport.open_payload()
+        sequence_number = self._send(
+            CommandType.OPEN_FIXED_SHARED_SLOTS,
+            {
+                "open_fixed_shared_slots": payload.model_dump(exclude_none=True),
+            },
+        )
+        if not self.wait_until_sequence_sent(sequence_number):
+            raise RuntimeError(
+                "Failed to send OPEN_FIXED_SHARED_SLOTS before video transport use"
+            )
+
+    def _send_socket_data_chunk(self, payload: DataChunkPayload) -> None:
+        """Send one DATA_CHUNK payload directly over the producer socket."""
         self._send(
-            CommandType.OPEN_RING_BUFFER,
-            {"open_ring_buffer": payload},
+            CommandType.DATA_CHUNK,
+            {"data_chunk": payload.to_dict()},
         )
 
-    def _ensure_shared_ring_buffer(self) -> None:
-        """Create and announce the shared ring buffer on first data send."""
-        if self._shared_ring_transport.is_open():
-            return
-
-        self.open_ring_buffer()
-        self._shared_ring_transport.ensure_open()
+    def send_batched_joint_data(self, payload: BatchedJointDataPayload) -> None:
+        """Send one explicit batched joint payload over the producer socket."""
+        self._send(
+            CommandType.BATCHED_JOINT_DATA,
+            {CommandType.BATCHED_JOINT_DATA.value: payload.to_dict()},
+        )
 
     def send_data(
         self,
@@ -319,28 +415,62 @@ class ProducerChannel:
         if not dataset_id and not dataset_name:
             raise ValueError("Dataset ID or name required")
 
-        self._ensure_shared_ring_buffer()
-
         total_chunks = math.ceil(total_bytes / self.chunk_size)
         produced_chunks = 0
+        trace_metadata = TraceTransportMetadata(
+            recording_id=recording_id,
+            data_type=data_type,
+            data_type_name=data_type_name,
+            dataset_id=dataset_id,
+            dataset_name=dataset_name,
+            robot_name=robot_name,
+            robot_id=robot_id,
+            robot_instance=robot_instance,
+        )
+
+        if not self._use_shared_slot_transport:
+            if not normalised_parts:
+                return
+            payload_bytes = (
+                bytes(normalised_parts[0])
+                if len(normalised_parts) == 1
+                else b"".join(bytes(part) for part in normalised_parts)
+            )
+            self._send_socket_data_chunk(
+                DataChunkPayload(
+                    channel_id=self.channel_id,
+                    recording_id=recording_id,
+                    trace_id=trace_id,
+                    chunk_index=0,
+                    total_chunks=1,
+                    data_type_name=data_type_name,
+                    dataset_id=dataset_id,
+                    dataset_name=dataset_name,
+                    robot_name=robot_name,
+                    robot_id=robot_id,
+                    robot_instance=robot_instance,
+                    data=payload_bytes,
+                    data_type=data_type,
+                )
+            )
+            return
+
+        self.open_fixed_shared_slots()
+        shared_slot_transport = self._shared_slot_transport
+        if shared_slot_transport is None:
+            raise RuntimeError("Shared-slot transport is not available")
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
             produced_chunks += 1
-            self._message_sender.enqueue_shared_ring_write(
-                metadata={
-                    "channel_id": self.channel_id,
-                    "recording_id": recording_id,
-                    "trace_id": trace_id,
-                    "chunk_index": idx,
-                    "total_chunks": total_chunks,
-                    "data_type": data_type.value,
-                    "data_type_name": data_type_name,
-                    "dataset_name": dataset_name,
-                    "dataset_id": dataset_id,
-                    "robot_name": robot_name,
-                    "robot_id": robot_id,
-                    "robot_instance": robot_instance,
-                },
+            shared_slot_transport.enqueue_packet(
+                producer_id=self.channel_id,
+                sender=self._message_sender,
+                metadata=SharedMemoryChunkMetadata(
+                    trace_id=trace_id,
+                    chunk_index=idx,
+                    total_chunks=total_chunks,
+                    trace_metadata=trace_metadata if idx == 0 else None,
+                ).to_dict(),
                 chunk=chunk,
             )
 
@@ -351,18 +481,39 @@ class ProducerChannel:
 
     def initialize_new_producer_channel(
         self,
-        ring_buffer_size: int | None = None,
+        shared_memory_size: int | None = None,
     ) -> None:
-        """Initialize a new producer channel."""
-        if not self.trace_id:
-            self.start_new_trace()
+        """Initialize a new producer channel for recording."""
+        self.start_recording_session(shared_memory_size=shared_memory_size)
 
-        self.start_producer_channel()
-        self.open_ring_buffer(size=ring_buffer_size)
+    def cleanup_producer_channel(
+        self,
+        *,
+        wait_for_slot_drain: bool = True,
+    ) -> None:
+        """Finish one trace after all queued payload descriptors are sent.
 
-    def cleanup_producer_channel(self) -> None:
-        """Clean up the producer channel."""
+        When ``wait_for_slot_drain`` is False, this returns after the producer has
+        pushed all currently queued shared-slot descriptors and the TRACE_END
+        control message onto the socket. Slot credits may still return
+        asynchronously while the channel remains alive for later cleanup.
+        """
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_payload_handed_off(timeout_s=30.0)
+
+        cutoff_sequence = self.get_last_enqueued_sequence_number()
+        self.wait_until_sequence_sent(cutoff_sequence)
+
+        if wait_for_slot_drain and self._shared_slot_transport is not None:
+            self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
+
         self.end_trace()
+
+        trace_end_sequence = self.get_last_enqueued_sequence_number()
+        self.wait_until_sequence_sent(trace_end_sequence)
+
+        if wait_for_slot_drain and self._shared_slot_transport is not None:
+            self._shared_slot_transport.finish_recording_session()
 
     def _stop_heartbeat_service(self) -> None:
         self._heartbeat_service.stop(join_timeout_s=1.0)
@@ -370,5 +521,7 @@ class ProducerChannel:
     def _stop_message_sender(self) -> None:
         self._message_sender.close(join_timeout_s=2.0)
 
-    def _close_shared_ring_transport(self) -> None:
-        self._shared_ring_transport.close()
+    def _close_shared_slot_transport(self) -> None:
+        if self._shared_slot_transport is not None:
+            self._shared_slot_transport.close()
+            self._shared_slot_transport = None

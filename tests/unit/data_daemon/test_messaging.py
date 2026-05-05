@@ -3,48 +3,104 @@ import struct
 import threading
 import time
 from datetime import datetime, timedelta, timezone
+from multiprocessing.shared_memory import SharedMemory
 
+import pytest
+import zmq
 from neuracore_types import DataType
 
-from neuracore.data_daemon.communications_management.channel_reader import (
-    ChannelMessageReader,
+from neuracore.data_daemon.communications_management.consumer import (
+    bridge_chunk_spool as bridge_chunk_spool_module,
 )
-from neuracore.data_daemon.communications_management.data_bridge import (
+from neuracore.data_daemon.communications_management.consumer.completion_worker import (
+    CompletionWorker,
+)
+from neuracore.data_daemon.communications_management.consumer.data_bridge import Daemon
+from neuracore.data_daemon.communications_management.consumer.models import (
     ChannelState,
-    Daemon,
+    CompletionChunkWork,
+    SharedSlotSequenceProgressRequest,
+    TraceMetadataRegistrationRequest,
+    TraceMetadataSnapshot,
 )
-from neuracore.data_daemon.communications_management.producer_channel import (
+from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
-from neuracore.data_daemon.communications_management.ring_buffer import RingBuffer
+from neuracore.data_daemon.communications_management.shared_transport import (
+    shared_slot_transport as shared_slot_transport_module,
+)
+from neuracore.data_daemon.communications_management.shared_transport.models import (
+    QueuedSharedSlotPacket,
+)
+from neuracore.data_daemon.communications_management.shared_transport.registry import (
+    SharedSlotRegistry,
+)
 from neuracore.data_daemon.const import (
-    CHUNK_HEADER_FORMAT,
-    DATA_TYPE_FIELD_SIZE,
+    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
+    DEFAULT_VIDEO_SLOT_COUNT,
     HEARTBEAT_TIMEOUT_SECS,
-    SHARED_RING_RECORD_HEADER_FORMAT,
-    SHARED_RING_RECORD_MAGIC,
-    TRACE_ID_FIELD_SIZE,
+    SHARED_MEMORY_RECORD_HEADER_FORMAT,
 )
 from neuracore.data_daemon.models import (
+    BatchedJointDataItemPayload,
+    BatchedJointDataPayload,
     CommandType,
     CompleteMessage,
     DataChunkPayload,
     MessageEnvelope,
+    SharedSlotCreditReturn,
+    SharedSlotDescriptor,
+    SharedSlotOpenFailedModel,
+    SharedSlotReadyModel,
+    TraceTransportMetadata,
 )
 
 
+def _decode_shared_memory_write(packet: bytes) -> tuple[dict, bytes]:
+    _magic, metadata_len, chunk_len = struct.unpack(
+        SHARED_MEMORY_RECORD_HEADER_FORMAT,
+        packet[: struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)],
+    )
+    metadata_start = struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)
+    metadata_end = metadata_start + metadata_len
+    metadata = json.loads(packet[metadata_start:metadata_end].decode("utf-8"))
+    chunk = packet[metadata_end : metadata_end + chunk_len]
+    return metadata, chunk
+
+
+def _read_shared_slot_packet(envelope: MessageEnvelope) -> tuple[dict, bytes]:
+    descriptor = SharedSlotDescriptor.from_dict(
+        envelope.payload[CommandType.SHARED_SLOT_DESCRIPTOR.value]
+    )
+    shm = SharedMemory(name=descriptor.shm_name)
+    try:
+        packet = bytes(
+            shm.buf[descriptor.offset : descriptor.offset + descriptor.length]
+        )
+    finally:
+        shm.close()
+    return parse_shared_frame_packet(packet)
+
+
 def test_message_envelope_round_trip() -> None:
-    payload = {"open_ring_buffer": {"size": 2048}}
+    payload = {
+        "open_fixed_shared_slots": {
+            "transport_mode": "FIXED_SHARED_SLOTS_DAEMON_OWNED",
+            "control_endpoint": "ipc://test-message-round-trip",
+            "slot_size": 2048,
+            "slot_count": 16,
+        }
+    }
     envelope = MessageEnvelope(
         producer_id="producer-123",
-        command=CommandType.OPEN_RING_BUFFER,
+        command=CommandType.OPEN_FIXED_SHARED_SLOTS,
         payload=payload,
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
 
     assert parsed.producer_id == "producer-123"
-    assert parsed.command == CommandType.OPEN_RING_BUFFER
+    assert parsed.command == CommandType.OPEN_FIXED_SHARED_SLOTS
     assert parsed.payload == payload
 
 
@@ -68,6 +124,35 @@ def test_data_chunk_payload_round_trip() -> None:
     restored = DataChunkPayload.from_dict(chunk.to_dict())
 
     assert restored == chunk
+
+
+def test_batched_joint_data_payload_round_trip() -> None:
+    payload = BatchedJointDataPayload(
+        recording_id="rec-1",
+        timestamp=123.456,
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=3,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-1",
+                data_type_name="joint1",
+                value=0.1,
+            ),
+            BatchedJointDataItemPayload(
+                trace_id="trace-2",
+                data_type_name="joint2",
+                value=-0.2,
+            ),
+        ],
+    )
+
+    restored = BatchedJointDataPayload.from_dict(payload.to_dict())
+
+    assert restored == payload
 
 
 def test_complete_message_batch_record_round_trip() -> None:
@@ -104,74 +189,6 @@ def test_complete_message_batch_record_round_trip() -> None:
     assert datetime.fromisoformat(parsed.received_at)
     assert parsed.data == b"hello"
     assert parsed.final_chunk is True
-
-
-def test_channel_reader_reassembles_chunks() -> None:
-    ring = RingBuffer(size=2048)
-    reader = ChannelMessageReader(ring)
-    trace_id = "7"
-    chunks = [b"robot", b"ics"]
-
-    for idx, chunk in enumerate(chunks):
-        trace_id_bytes = trace_id.encode("utf-8")
-        trace_id_field = trace_id_bytes[:TRACE_ID_FIELD_SIZE].ljust(
-            TRACE_ID_FIELD_SIZE, b"\x00"
-        )
-        data_type_bytes = DataType.CUSTOM_1D.value.encode("utf-8")
-        data_type_field = data_type_bytes[:DATA_TYPE_FIELD_SIZE].ljust(
-            DATA_TYPE_FIELD_SIZE, b"\x00"
-        )
-        header = struct.pack(
-            CHUNK_HEADER_FORMAT,
-            trace_id_field,
-            data_type_field,
-            idx,
-            len(chunks),
-            len(chunk),
-        )
-        ring.write(header + chunk)
-
-    assembled = reader.poll_one()
-    while assembled is None:
-        assembled = reader.poll_one()
-
-    assert assembled == (trace_id, DataType.CUSTOM_1D, b"robotics")
-
-
-def test_channel_reader_reassembles_shared_ring_records() -> None:
-    ring = RingBuffer(size=4096)
-    reader = ChannelMessageReader(ring)
-
-    for idx, chunk in enumerate((b"robot", b"ics")):
-        metadata = {
-            "trace_id": "trace-shared",
-            "recording_id": "rec-shared",
-            "chunk_index": idx,
-            "total_chunks": 2,
-            "data_type": DataType.CUSTOM_1D.value,
-            "data_type_name": "custom",
-            "robot_instance": 1,
-            "robot_id": "robot-1",
-            "dataset_id": "dataset-1",
-        }
-        metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-        ring.write(
-            struct.pack(
-                SHARED_RING_RECORD_HEADER_FORMAT,
-                SHARED_RING_RECORD_MAGIC,
-                len(metadata_bytes),
-                len(chunk),
-            )
-            + metadata_bytes
-            + chunk
-        )
-
-    assembled = reader.poll_one()
-    while assembled is None:
-        assembled = reader.poll_one()
-
-    assert assembled == ("trace-shared", DataType.CUSTOM_1D, b"robotics")
-    assert assembled.metadata["recording_id"] == "rec-shared"
 
 
 class DummyComm:
@@ -218,60 +235,202 @@ def _wait_for_envelopes(
 
 def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
     messages: list[MessageEnvelope] = []
+    control_context = zmq.Context()
+    control_sockets: dict[str, zmq.Socket] = {}
+    control_endpoints: dict[str, str] = {}
+    shared_memories: dict[str, SharedMemory] = {}
 
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.create_producer_socket",
         lambda self: None,
     )
+
+    def _send_message(_self, message):
+        messages.append(message)
+
+        if message.command == CommandType.OPEN_FIXED_SHARED_SLOTS:
+            payload = message.payload["open_fixed_shared_slots"]
+            control_endpoint = payload["control_endpoint"]
+            shm_name = f"neuracore-slots-test-{len(shared_memories)}"
+            shm = SharedMemory(
+                name=shm_name,
+                create=True,
+                size=int(payload["slot_size"]) * int(payload["slot_count"]),
+            )
+            shared_memories[shm_name] = shm
+            control_endpoints[str(message.producer_id)] = control_endpoint
+            socket_obj = control_sockets.get(control_endpoint)
+            if socket_obj is None:
+                socket_obj = control_context.socket(zmq.PUSH)
+                socket_obj.setsockopt(zmq.LINGER, 0)
+                socket_obj.connect(control_endpoint)
+                control_sockets[control_endpoint] = socket_obj
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_READY,
+                    payload={
+                        CommandType.SHARED_SLOT_READY.value: SharedSlotReadyModel(
+                            shm_name=shm_name,
+                            slot_size=int(payload["slot_size"]),
+                            slot_count=int(payload["slot_count"]),
+                        ).model_dump()
+                    },
+                ).to_bytes()
+            )
+            return
+
+        if message.command == CommandType.SHARED_SLOT_DESCRIPTOR:
+            descriptor = SharedSlotDescriptor.from_dict(
+                message.payload[CommandType.SHARED_SLOT_DESCRIPTOR.value]
+            )
+            control_endpoint = control_endpoints.get(str(message.producer_id))
+            if control_endpoint is None:
+                raise RuntimeError(
+                    "Missing control endpoint for shared-slot descriptor"
+                )
+            socket_obj = control_sockets[control_endpoint]
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_CREDIT_RETURN,
+                    payload={
+                        CommandType.SHARED_SLOT_CREDIT_RETURN.value: (
+                            SharedSlotCreditReturn(
+                                shm_name=descriptor.shm_name,
+                                slot_id=descriptor.slot_id,
+                                sequence_id=descriptor.sequence_id,
+                            ).to_dict()
+                        )
+                    },
+                ).to_bytes()
+            )
+
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.send_message",
-        lambda self, message: messages.append(message),
+        _send_message,
     )
+
+    def _cleanup_producer(_self) -> None:
+        for socket_obj in control_sockets.values():
+            socket_obj.close(0)
+        control_sockets.clear()
+        for shm in shared_memories.values():
+            shm.close()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        shared_memories.clear()
+        control_context.term()
+
     monkeypatch.setattr(
         "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.cleanup_producer",
-        lambda self: None,
+        _cleanup_producer,
     )
 
     return messages
 
 
-def test_producer_open_ring_buffer_sends_payload(monkeypatch) -> None:
+def test_send_batched_joint_data_enqueues_expected_command(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(data_type=DataType.CUSTOM_1D)
+    producer = ProducerChannel(
+        id="producer-joint-batch",
+        recording_id="rec-1",
+        data_type=DataType.JOINT_POSITIONS,
+    )
+
+    payload = BatchedJointDataPayload(
+        recording_id="rec-1",
+        timestamp=123.456,
+        dataset_id="dataset-1",
+        dataset_name="dataset",
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=0,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-1",
+                data_type_name="joint1",
+                value=0.25,
+            )
+        ],
+    )
 
     try:
-        with monkeypatch.context() as ring_patch:
-            ring_patch.setattr(
-                "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-                lambda size: DummySharedRingBuffer(shared_name="rb-open"),
-            )
-            producer.open_ring_buffer(size=2048)
+        producer.send_batched_joint_data(payload)
+        _wait_for_envelopes(messages, expected=1)
     finally:
         producer.stop_producer_channel()
 
     assert len(messages) == 1
     envelope = messages[0]
-    assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "rb-open"}
-    }
+    assert envelope.command == CommandType.BATCHED_JOINT_DATA
+    assert envelope.payload[CommandType.BATCHED_JOINT_DATA.value] == payload.to_dict()
 
 
-def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
+def test_producer_open_fixed_shared_slots_sends_payload(monkeypatch) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+    producer = ProducerChannel(data_type=DataType.RGB_IMAGES)
+
+    try:
+        producer.open_fixed_shared_slots(slot_size=2048)
+        _wait_for_envelopes(messages, 1)
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 1
+    envelope = messages[0]
+    assert envelope.command == CommandType.OPEN_FIXED_SHARED_SLOTS
+    payload = envelope.payload["open_fixed_shared_slots"]
+    assert payload["slot_size"] == 2048
+    assert payload["slot_count"] == DEFAULT_VIDEO_SLOT_COUNT
+    assert payload["control_endpoint"].startswith("ipc://")
+
+
+def test_producer_send_data_parts_lazily_opens_shared_memory(
     monkeypatch,
 ) -> None:
     messages = _stub_producer_transport(monkeypatch)
-    shared_ring = DummySharedRingBuffer()
-
-    monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
-    )
 
     producer = ProducerChannel(
         chunk_size=2,
         recording_id="rec-1",
-        ring_buffer_size=2048,
+        shared_memory_size=2048,
+        data_type=DataType.RGB_IMAGES,
+    )
+
+    try:
+        producer.start_new_trace()
+        producer.send_data(
+            b"abcd",
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            robot_name="robot",
+            dataset_id="dataset-1",
+            dataset_name="dataset",
+        )
+        _wait_for_envelopes(messages, 3)
+        first_metadata, first_chunk = _read_shared_slot_packet(messages[1])
+        second_metadata, second_chunk = _read_shared_slot_packet(messages[2])
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 3
+    assert messages[0].command == CommandType.OPEN_FIXED_SHARED_SLOTS
+    assert messages[1].command == CommandType.SHARED_SLOT_DESCRIPTOR
+    assert messages[2].command == CommandType.SHARED_SLOT_DESCRIPTOR
+    assert first_chunk == b"ab"
+    assert second_chunk == b"cd"
+
+
+def test_producer_send_data_parts_uses_socket_for_non_video(monkeypatch) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+    producer = ProducerChannel(
+        recording_id="rec-1",
         data_type=DataType.CUSTOM_1D,
     )
 
@@ -287,49 +446,74 @@ def test_producer_send_data_parts_lazily_opens_shared_ring_buffer(
             dataset_id="dataset-1",
             dataset_name="dataset",
         )
-
-        deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 6 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        _wait_for_envelopes(messages, 1)
     finally:
         producer.stop_producer_channel()
 
     assert len(messages) == 1
     envelope = messages[0]
-    assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "test-shared"}
-    }
-    assert shared_ring.writes[2::3] == [b"ab", b"cd"]
+    assert envelope.command == CommandType.DATA_CHUNK
+    payload = DataChunkPayload.from_dict(envelope.payload["data_chunk"])
+    assert payload.channel_id == producer.channel_id
+    assert payload.recording_id == "rec-1"
+    assert payload.trace_id == producer.trace_id
+    assert payload.chunk_index == 0
+    assert payload.total_chunks == 1
+    assert payload.data_type == DataType.CUSTOM_1D
+    assert payload.data == b"abcd"
 
 
-class DummySharedRingBuffer:
-    def __init__(self, shared_name: str = "test-shared") -> None:
-        self.shared_name = shared_name
-        self.writes: list[bytes] = []
-        self.closed = False
+def test_producer_ensure_shared_memory_does_not_reannounce(
+    monkeypatch,
+) -> None:
+    messages = _stub_producer_transport(monkeypatch)
 
-    def write(self, data: bytes | bytearray | memoryview) -> None:
-        self.writes.append(bytes(data))
+    producer = ProducerChannel(
+        recording_id="rec-1",
+        shared_memory_size=2048,
+        data_type=DataType.RGB_IMAGES,
+    )
 
-    def close(self) -> None:
-        self.closed = True
+    try:
+        producer.start_new_trace()
+        producer.open_fixed_shared_slots(slot_size=2048)
+        _wait_for_envelopes(messages, 1)
+        control_endpoint = messages[0].payload["open_fixed_shared_slots"][
+            "control_endpoint"
+        ]
+        trace_id = producer.trace_id
+
+        producer.send_data(
+            b"ab",
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            robot_name="robot",
+            dataset_id="dataset-1",
+            dataset_name="dataset",
+        )
+        _wait_for_envelopes(messages, 2)
+        metadata, _chunk = _read_shared_slot_packet(messages[1])
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 2
+    assert (
+        messages[0].payload["open_fixed_shared_slots"]["control_endpoint"]
+        == control_endpoint
+    )
+    assert metadata["trace_id"] == trace_id
 
 
 def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
-    shared_ring = DummySharedRingBuffer()
-
-    monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
-    )
 
     producer = ProducerChannel(
         chunk_size=3,
         recording_id="rec-1",
-        ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        shared_memory_size=2048,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
@@ -338,7 +522,7 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
         producer.send_data_parts(
             (b"ab", memoryview(b"cdef"), b"gh"),
             total_bytes=8,
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
@@ -346,54 +530,47 @@ def test_producer_send_data_parts_chunks_across_multiple_buffers(monkeypatch) ->
             dataset_id="dataset-1",
             dataset_name="dataset",
         )
-
-        deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 9 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        _wait_for_envelopes(messages, 4)
+        packets = [_read_shared_slot_packet(packet) for packet in messages[1:]]
     finally:
         producer.stop_producer_channel()
 
-    assert len(messages) == 1
+    assert len(messages) == 4
     envelope = messages[0]
-    assert envelope.command == CommandType.OPEN_RING_BUFFER
-    assert envelope.payload == {
-        "open_ring_buffer": {"size": 2048, "shared_memory_name": "test-shared"}
-    }
-    assert shared_ring.writes[2::3] == [b"abc", b"def", b"gh"]
+    assert envelope.command == CommandType.OPEN_FIXED_SHARED_SLOTS
+    payload = envelope.payload["open_fixed_shared_slots"]
+    assert payload["slot_size"] == 2048
+    assert payload["control_endpoint"].startswith("ipc://")
+    assert [chunk for _, chunk in packets] == [b"abc", b"def", b"gh"]
+    assert packets[0][0]["recording_id"] == "rec-1"
+    assert "recording_id" not in packets[1][0]
+    assert "recording_id" not in packets[2][0]
 
 
-def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
+def test_producer_transport_stats_include_sender_and_shared_memory_metrics(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("NDD_DEBUG", "true")
     _stub_producer_transport(monkeypatch)
-    shared_ring = DummySharedRingBuffer()
-
-    monkeypatch.setattr(
-        "neuracore.data_daemon.communications_management.producer_channel.RingBuffer.create_shared",
-        lambda size: shared_ring,
-    )
 
     producer = ProducerChannel(
         chunk_size=2,
         recording_id="rec-1",
-        ring_buffer_size=2048,
-        data_type=DataType.CUSTOM_1D,
+        shared_memory_size=2048,
+        data_type=DataType.RGB_IMAGES,
     )
 
     try:
         producer.start_new_trace()
         producer.send_data(
             b"abcd",
-            data_type=DataType.CUSTOM_1D,
+            data_type=DataType.RGB_IMAGES,
             data_type_name="custom",
             robot_instance=2,
             robot_id="robot-1",
             dataset_id="dataset-1",
         )
-        deadline = time.monotonic() + 1.0
-        while len(shared_ring.writes) < 6 and time.monotonic() < deadline:
-            time.sleep(0.02)
+        time.sleep(0.1)
         stats = producer.get_transport_stats()
     finally:
         producer.stop_producer_channel()
@@ -401,21 +578,328 @@ def test_producer_transport_stats_include_sender_and_shared_ring_metrics(
     assert stats["channel_id"] == producer.channel_id
     assert stats["recording_id"] == "rec-1"
     assert stats["trace_id"] is not None
-    assert stats["shared_ring_buffer_name"] == "test-shared"
-    assert stats["shared_ring_buffer_size"] == 2048
+    assert str(stats["shared_memory_name"]).startswith("neuracore-slots-")
+    assert stats["shared_memory_size"] == 2048 * DEFAULT_VIDEO_SLOT_COUNT
     assert stats["send_queue_qsize"] == 0
-    assert stats["send_queue_maxsize"] == 0
-    assert stats["last_enqueued_sequence_number"] == 1
-    assert stats["last_socket_sent_sequence_number"] == 1
+    assert stats["send_queue_maxsize"] == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
+    assert stats["last_enqueued_sequence_number"] >= 1
+    assert stats["last_socket_sent_sequence_number"] >= 1
     assert stats["pending_sequence_count"] == 0
     assert stats["sender_thread_alive"] is True
-    assert stats["shared_ring_open_count"] == 1
-    assert stats["shared_ring_write_count"] == 2
-    assert stats["shared_ring_dispatch_count"] == 2
-    assert stats["socket_send_count"] == 1
-    assert stats["queue_put_count"] == 3
+    assert stats["shared_memory_open_count"] == 0
+    assert stats["shared_memory_write_count"] == 0
+    assert stats["shared_memory_dispatch_count"] == 0
+    assert stats["socket_send_count"] >= 1
+    assert stats["queue_put_count"] >= 3
     assert stats["send_error_count"] == 0
     assert stats["last_send_error"] is None
+
+
+def test_producer_shared_memory_rejects_oversized_packet(monkeypatch) -> None:
+    monkeypatch.setenv("NDD_DEBUG", "true")
+    _stub_producer_transport(monkeypatch)
+
+    producer = ProducerChannel(
+        chunk_size=16,
+        recording_id="rec-1",
+        shared_memory_size=8,
+        data_type=DataType.RGB_IMAGES,
+    )
+
+    try:
+        producer.start_new_trace()
+        try:
+            producer.send_data(
+                b"abcdefgh",
+                data_type=DataType.RGB_IMAGES,
+                data_type_name="custom",
+                robot_instance=2,
+                robot_id="robot-1",
+                dataset_id="dataset-1",
+            )
+        except PacketTooLarge:
+            oversized = True
+        else:
+            oversized = False
+    finally:
+        producer.stop_producer_channel()
+
+    assert oversized is True
+
+
+def test_producer_sender_failure_stops_waiters(monkeypatch) -> None:
+    monkeypatch.setenv("NDD_DEBUG", "true")
+    sent = {"count": 0}
+    control_context = zmq.Context()
+    control_sockets: dict[str, zmq.Socket] = {}
+    shared_memories: dict[str, SharedMemory] = {}
+
+    def flaky_send(_self, message):
+        sent["count"] += 1
+        if message.command == CommandType.OPEN_FIXED_SHARED_SLOTS:
+            payload = message.payload["open_fixed_shared_slots"]
+            control_endpoint = payload["control_endpoint"]
+            shm_name = "neuracore-slots-test-failure"
+            shm = SharedMemory(
+                name=shm_name,
+                create=True,
+                size=int(payload["slot_size"]) * int(payload["slot_count"]),
+            )
+            shared_memories[shm_name] = shm
+            socket_obj = control_sockets.get(control_endpoint)
+            if socket_obj is None:
+                socket_obj = control_context.socket(zmq.PUSH)
+                socket_obj.setsockopt(zmq.LINGER, 0)
+                socket_obj.connect(control_endpoint)
+                control_sockets[control_endpoint] = socket_obj
+            socket_obj.send(
+                MessageEnvelope(
+                    producer_id=None,
+                    command=CommandType.SHARED_SLOT_READY,
+                    payload={
+                        CommandType.SHARED_SLOT_READY.value: SharedSlotReadyModel(
+                            shm_name=shm_name,
+                            slot_size=int(payload["slot_size"]),
+                            slot_count=int(payload["slot_count"]),
+                        ).model_dump()
+                    },
+                ).to_bytes()
+            )
+            return
+        if message.command == CommandType.SHARED_SLOT_DESCRIPTOR:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.create_producer_socket",
+        lambda self: None,
+    )
+    monkeypatch.setattr(
+        "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.send_message",
+        flaky_send,
+    )
+
+    def _cleanup_producer(_self) -> None:
+        for socket_obj in control_sockets.values():
+            socket_obj.close(0)
+        control_sockets.clear()
+        for shm in shared_memories.values():
+            shm.close()
+            try:
+                shm.unlink()
+            except FileNotFoundError:
+                pass
+        shared_memories.clear()
+        control_context.term()
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.communications_management.communications_manager.CommunicationsManager.cleanup_producer",
+        _cleanup_producer,
+    )
+
+    producer = ProducerChannel(
+        chunk_size=2,
+        recording_id="rec-1",
+        shared_memory_size=2048,
+        data_type=DataType.RGB_IMAGES,
+    )
+
+    try:
+        producer.start_new_trace()
+        producer.send_data(
+            b"abcd",
+            data_type=DataType.RGB_IMAGES,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            dataset_id="dataset-1",
+        )
+        deadline = time.monotonic() + 1.0
+        while (
+            producer.get_transport_stats()["sender_thread_alive"]
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.02)
+        try:
+            producer._send(CommandType.HEARTBEAT, {})
+        except RuntimeError:
+            wait_result = False
+        else:
+            wait_result = True
+    finally:
+        producer.stop_producer_channel()
+
+    assert sent["count"] >= 1
+    assert wait_result is False
+
+
+def test_shared_slot_video_worker_surfaces_background_failure() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=2)
+    worker = SharedSlotVideoWorker.acquire(registry)
+
+    def raise_worker_error(_item) -> None:
+        raise RuntimeError("boom")
+
+    worker._process_item = raise_worker_error  # type: ignore[method-assign]
+
+    packet = QueuedSharedSlotPacket(
+        producer_id="producer-1",
+        sender=None,  # type: ignore[arg-type]
+        metadata_bytes=b"{}",
+        chunk=b"x",
+        packet_length=1,
+    )
+
+    try:
+        worker.enqueue_packet(packet=packet)
+        deadline = time.monotonic() + 1.0
+        while worker._thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.02)
+
+        with pytest.raises(RuntimeError, match="Shared-slot video worker failed"):
+            worker.enqueue_packet(packet=packet)
+    finally:
+        SharedSlotVideoWorker.reset_shared_instance_for_tests()
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+
+
+def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
+    registry = SharedSlotRegistry.acquire(
+        slot_size=2048,
+        slot_count=2,
+        ack_timeout_s=0.01,
+        allocate_timeout_s=0.01,
+    )
+    shm = SharedMemory(name="test-credit-timeout", create=True, size=2048 * 2)
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-credit-timeout",
+                slot_size=2048,
+                slot_count=2,
+            )
+        )
+        slot_id, _offset = registry.allocate_slot()
+        sequence_id = registry.mark_in_flight(slot_id)
+
+        time.sleep(0.03)
+        with registry._condition:
+            registry._check_for_timeouts_locked()
+        snapshot = registry.debug_snapshot()
+        assert snapshot["healthy"] is True
+        assert sequence_id in snapshot["in_flight_sequence_ids"]
+
+        registry.mark_sent(sequence_id)
+        time.sleep(0.03)
+        with registry._condition:
+            registry._check_for_timeouts_locked()
+        assert registry.is_healthy() is False
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
+
+
+def test_shared_slot_registry_runtime_starts_and_stops_cleanly() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=2)
+
+    try:
+        assert registry.control_endpoint.startswith("ipc://")
+        assert registry._runtime.control_thread.is_alive()
+        assert registry._runtime.watchdog_thread.is_alive()
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+
+    assert not registry._runtime.control_thread.is_alive()
+    assert not registry._runtime.watchdog_thread.is_alive()
+
+
+def test_shared_slot_ready_message_populates_free_slots() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=3)
+    shm = SharedMemory(
+        name="test-ready-populates-free-slots", create=True, size=2048 * 3
+    )
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-ready-populates-free-slots",
+                slot_size=2048,
+                slot_count=3,
+            )
+        )
+
+        snapshot = registry.debug_snapshot()
+        assert snapshot["ready"] is True
+        assert snapshot["free_slot_count"] == 3
+        assert registry.slot_size == 2048
+        assert registry.slot_count == 3
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
+
+
+def test_shared_slot_ready_message_adopts_daemon_slot_dimensions() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=1024, slot_count=1)
+    shm = SharedMemory(
+        name="test-ready-adopts-slot-dimensions", create=True, size=4096 * 4
+    )
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name="test-ready-adopts-slot-dimensions",
+                slot_size=4096,
+                slot_count=4,
+            )
+        )
+
+        assert registry.slot_size == 4096
+        assert registry.slot_count == 4
+        assert registry.total_shared_memory_bytes == 4096 * 4
+        assert registry.debug_snapshot()["free_slot_count"] == 4
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
+        shm.close()
+        shm.unlink()
+
+
+def test_shared_slot_open_failure_message_surfaces_daemon_error() -> None:
+    registry = SharedSlotRegistry.acquire(slot_size=2048, slot_count=3)
+    error_message = (
+        "Not enough shared-memory for data throughput requirements. "
+        "remaining=3.31MiB"
+    )
+
+    try:
+        registry._process_control_message(
+            MessageEnvelope(
+                producer_id=None,
+                command=CommandType.SHARED_SLOT_OPEN_FAILED,
+                payload={
+                    CommandType.SHARED_SLOT_OPEN_FAILED.value: (
+                        SharedSlotOpenFailedModel(
+                            error_message=error_message
+                        ).model_dump()
+                    )
+                },
+            )
+        )
+
+        snapshot = registry.debug_snapshot()
+        assert snapshot["healthy"] is False
+        assert snapshot["ready"] is False
+        assert snapshot["unhealthy_reason"] == "open_failed"
+        assert snapshot["failure_message"] == error_message
+
+        with pytest.raises(RuntimeError, match="Not enough shared-memory"):
+            registry.ensure_healthy()
+
+        with pytest.raises(RuntimeError, match="Not enough shared-memory"):
+            registry.allocate_slot()
+    finally:
+        SharedSlotRegistry.reset_shared_instance_for_tests()
 
 
 def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(
@@ -491,48 +975,65 @@ class DummyRecordingDiskManager:
         self.messages.append(msg)
 
 
-def test_daemon_registers_trace_from_shared_ring_metadata(emitter) -> None:
+def test_completion_worker_assembles_spooled_chunks(tmp_path) -> None:
     rdm = DummyRecordingDiskManager()
-    daemon = Daemon(
-        comm_manager=DummyComm(),
+    chunk_spool = BridgeChunkSpool(tmp_path / "chunk-spool", segment_max_bytes=8)
+    worker = CompletionWorker(
+        chunk_spool=chunk_spool,
         recording_disk_manager=rdm,
-        emitter=emitter,
+        shard_count=1,
     )
-    channel = ChannelState(producer_id="shared")
-    daemon.channels["shared"] = channel
-    channel.set_ring_buffer(RingBuffer(size=4096))
+    metadata = TraceTransportMetadata(
+        recording_id="rec-1",
+        data_type=DataType.RGB_IMAGES,
+        data_type_name="camera_0",
+        dataset_id="dataset-1",
+        robot_id="robot-1",
+        robot_instance=2,
+    )
 
-    metadata = {
-        "trace_id": "trace-shared",
-        "recording_id": "rec-shared",
-        "chunk_index": 0,
-        "total_chunks": 1,
-        "data_type": DataType.CUSTOM_1D.value,
-        "data_type_name": "custom",
-        "robot_instance": 1,
-        "robot_id": "robot-1",
-        "dataset_id": "dataset-1",
-    }
-    payload = b"robotics"
-    metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
-    channel.ring_buffer.write(
-        struct.pack(
-            SHARED_RING_RECORD_HEADER_FORMAT,
-            SHARED_RING_RECORD_MAGIC,
-            len(metadata_bytes),
-            len(payload),
+    try:
+        worker.enqueue_chunk(
+            CompletionChunkWork(
+                producer_id="producer-1",
+                trace_id="trace-1",
+                recording_id="rec-1",
+                chunk_index=0,
+                total_chunks=2,
+                chunk_spool=chunk_spool,
+                chunk_spool_ref=chunk_spool.append(memoryview(b"ab")),
+                trace_metadata=metadata,
+                fallback_data_type=DataType.RGB_IMAGES,
+            )
         )
-        + metadata_bytes
-        + payload
-    )
+        worker.enqueue_chunk(
+            CompletionChunkWork(
+                producer_id="producer-1",
+                trace_id="trace-1",
+                recording_id="rec-1",
+                chunk_index=1,
+                total_chunks=2,
+                chunk_spool=chunk_spool,
+                chunk_spool_ref=chunk_spool.append(memoryview(b"cd")),
+                trace_metadata=metadata,
+                fallback_data_type=DataType.RGB_IMAGES,
+            )
+        )
 
-    daemon._drain_single_channel_messages(channel)
+        deadline = time.monotonic() + 1.0
+        while len(rdm.messages) < 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        worker.close()
 
-    assert daemon._trace_recordings["trace-shared"] == "rec-shared"
-    assert (
-        daemon._trace_metadata["trace-shared"]["data_type"] == DataType.CUSTOM_1D.value
-    )
     assert len(rdm.messages) == 1
+    message = rdm.messages[0]
+    assert message.trace_id == "trace-1"
+    assert message.recording_id == "rec-1"
+    assert message.data == b"abcd"
+    assert message.data_type == DataType.RGB_IMAGES
+    assert message.data_type_name == "camera_0"
+    assert (tmp_path / "chunk-spool").exists() is False
 
 
 def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:
@@ -546,11 +1047,11 @@ def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:
         last_heartbeat=datetime.now(timezone.utc)
         - timedelta(seconds=HEARTBEAT_TIMEOUT_SECS + 1),
     )
-    daemon.channels["stale"] = channel
+    daemon.channels.add(channel)
 
     daemon._cleanup_expired_channels()
 
-    assert "stale" not in daemon.channels
+    assert daemon.channels.get("stale") is None
 
 
 def test_cleanup_keeps_recent_channel(emitter) -> None:
@@ -563,8 +1064,85 @@ def test_cleanup_keeps_recent_channel(emitter) -> None:
         producer_id="active",
         last_heartbeat=datetime.now(timezone.utc) - timedelta(seconds=1),
     )
-    daemon.channels["active"] = channel
+    daemon.channels.add(channel)
 
     daemon._cleanup_expired_channels()
 
-    assert "active" in daemon.channels
+    assert daemon.channels.get("active") is channel
+
+
+def test_cleanup_keeps_stale_shared_memory_channel_with_pending_descriptor(
+    emitter, monkeypatch
+) -> None:
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
+    )
+    producer_id = "stale-shm-producer"
+    recording_id = "rec-1"
+    trace_id = "trace-1"
+    cutoff_sequence_number = 5
+
+    channel = ChannelState(
+        producer_id=producer_id,
+        last_heartbeat=datetime.now(timezone.utc)
+        - timedelta(seconds=HEARTBEAT_TIMEOUT_SECS + 1),
+        trace_id=trace_id,
+        last_sequence_number=cutoff_sequence_number,
+    )
+    channel.mark_shared_slot_transport_open(
+        control_endpoint="ipc://test-shared-slot-control",
+        shm_name="neuracore-slots-test",
+    )
+    daemon.channels.add(channel)
+
+    daemon._trace_lifecycle.register_trace(recording_id, trace_id)
+    daemon._trace_lifecycle.register_trace_metadata(
+        TraceMetadataRegistrationRequest(
+            trace_id=trace_id,
+            metadata=TraceMetadataSnapshot(
+                data_type=DataType.RGB_IMAGES.value,
+                data_type_name="camera_0",
+            ),
+        )
+    )
+    daemon._trace_lifecycle.handle_recording_stopped(
+        MessageEnvelope(
+            producer_id=None,
+            command=CommandType.RECORDING_STOPPED,
+            payload={
+                "recording_stopped": {
+                    "recording_id": recording_id,
+                    "producer_stop_sequence_numbers": {
+                        producer_id: cutoff_sequence_number,
+                    },
+                }
+            },
+        )
+    )
+    daemon._trace_lifecycle.mark_shared_slot_sequence_pending(
+        SharedSlotSequenceProgressRequest(
+            producer_id=producer_id,
+            sequence_number=cutoff_sequence_number,
+        )
+    )
+
+    cleanup_calls: list[str] = []
+    monkeypatch.setattr(
+        daemon._shared_slot_handler,
+        "cleanup_channel_resources",
+        lambda cleanup_channel: cleanup_calls.append(cleanup_channel.producer_id),
+    )
+
+    daemon._cleanup_expired_channels()
+
+    assert daemon.channels.get(producer_id) is channel
+    assert cleanup_calls == []
+    assert daemon._closed_producers.contains(producer_id) is False
+
+
+BridgeChunkSpool = bridge_chunk_spool_module.BridgeChunkSpool
+PacketTooLarge = shared_slot_transport_module.PacketTooLarge
+SharedSlotVideoWorker = shared_slot_transport_module.SharedSlotVideoWorker
+parse_shared_frame_packet = shared_slot_transport_module.parse_shared_frame_packet

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
+from typing import Any
 
 from neuracore_types import DataType
 
@@ -54,4 +55,62 @@ class _BatchJob:
 
     trace_key: _TraceKey
     batch_path: pathlib.Path
+    trace_done: bool
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class _RGBFrameRef:
+    """Reference to one raw RGB frame stored in a per-trace spool file."""
+
+    spool_path: pathlib.Path
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class _RGBIndexedFrame:
+    """One RGB frame's metadata plus its raw-byte reference."""
+
+    metadata: dict[str, Any]
+    frame_ref: _RGBFrameRef
+
+
+@dataclass(slots=True, repr=True)
+class _RGBWriteState:
+    """In-memory write state for one RGB trace."""
+
+    trace_key: _TraceKey
+    trace_dir: pathlib.Path
+    frames: list[_RGBIndexedFrame]
+    trace_done: bool
+    data_type_name: str
+    robot_instance: int
+    dataset_id: str | None
+    dataset_name: str | None
+    robot_name: str | None
+    robot_id: str | None
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class _RGBTraceMessage:
+    """RGB trace ingress item that stores frame metadata and a spool ref."""
+
+    trace_key: _TraceKey
+    data_type_name: str
+    robot_instance: int
+    dataset_id: str | None
+    dataset_name: str | None
+    robot_name: str | None
+    robot_id: str | None
+    frame_metadata: dict[str, Any] | None
+    frame_ref: _RGBFrameRef | None
+    final_chunk: bool
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class _RGBSpoolJob:
+    """Encoder work item for one RGB trace backed by raw frame refs."""
+
+    trace_key: _TraceKey
+    frames: list[_RGBIndexedFrame]
     trace_done: bool
