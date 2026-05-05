@@ -43,6 +43,14 @@ class ConcreteTestImporter(NeuracoreDatasetImporter):
         """Dummy implementation."""
         pass
 
+    def _resolve_source_path(self, source, source_name):
+        """Dummy implementation."""
+        if not source_name:
+            return source
+        for key in source_name.split("."):
+            source = source[key]
+        return source
+
 
 @pytest.fixture
 def mock_dataset_config():

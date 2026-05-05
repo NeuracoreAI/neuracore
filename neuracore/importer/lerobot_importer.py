@@ -246,58 +246,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             return (ds[i] for i in indices), total_steps
         return (ep_rows[i] for i in range(total_steps)), total_steps
 
-    def _extract_source_data(
-        self,
-        source: Any,
-        item: Any,
-        import_source_path: str,
-        data_type: DataType,
-    ) -> Any:
-        if not import_source_path:
-            if item.source_name is not None:
-                source_data = source[item.source_name]
-            else:
-                source_data = source
-        else:
-            if item.source_name is not None:
-                source_data = source[".".join([import_source_path, item.source_name])]
-            else:
-                source_data = source[import_source_path]
-
-        try:
-            if item.index_range is not None:
-                source_data = source_data[item.index_range.start : item.index_range.end]
-            elif item.index is not None:
-                source_data = source_data[item.index]
-        except Exception as exc:
-            shape_str = (
-                f" with shape {source_data.shape}"
-                if hasattr(source_data, "shape")
-                else ""
-            )
-            raise ImportError(
-                f"Cannot index or slice for '{data_type.value}'. "
-                f"Source path '{import_source_path}' resolved to a "
-                f"{type(source_data)}{shape_str}, not an indexable tensor. "
-                f"Check your dataset config. {exc}"
-            )
-
-        return source_data
-
-    def _convert_source_data(
-        self,
-        source_data: Any,
-        data_type: DataType,
-        item_name: str | None,
-    ) -> Any:
-        try:
-            return source_data.numpy()
-        except Exception as exc:
-            suffix = f".{item_name}" if item_name else ""
-            raise ImportError(
-                f"Failed to convert data to numpy array for "
-                f"{data_type.value}{suffix}: {exc}."
-            )
+    def _resolve_source_path(self, source: Any, source_name: str | None) -> Any:
+        if not source_name:
+            return source
+        return source[source_name]
 
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""

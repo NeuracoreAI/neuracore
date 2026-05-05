@@ -21,6 +21,13 @@ class _DiskUsageTestImporter(NeuracoreDatasetImporter):
     def _record_step(self, step: dict, timestamp: float) -> None:
         return None
 
+    def _resolve_source_path(self, source, source_name):
+        if not source_name:
+            return source
+        for key in source_name.split("."):
+            source = source[key]
+        return source
+
     def _get_disk_check_path(self) -> Path:
         return self._disk_check_path
 
