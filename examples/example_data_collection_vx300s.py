@@ -25,13 +25,14 @@ def main(args):
     # Setup parameters
     record = args["record"]
     num_episodes = args["num_episodes"]
+    dataset = None
 
     if record:
         nc.create_dataset(
             name="My Example Dataset",
             description="This is an example dataset",
         )
-        nc.connect_dataset("My Example Dataset")
+        dataset = nc.connect_dataset("My Example Dataset")
         print("Created Dataset...")
 
     try:
@@ -47,7 +48,7 @@ def main(args):
 
             # Start recording if enabled
             if record:
-                nc.start_recording()
+                dataset.start_recording()
 
             # Log initial state
             t = time.time()
@@ -84,13 +85,13 @@ def main(args):
             # Stop recording if enabled
             if record:
                 print("Finishing recording...")
-                nc.stop_recording()
+                dataset.stop_recording()
                 print("Finished recording!")
 
             print(f"Episode {episode_idx} done")
     except KeyboardInterrupt:
         if record:
-            nc.cancel_recording()
+            dataset.cancel_recording()
         raise
 
 

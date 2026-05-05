@@ -16,7 +16,7 @@ from neuracore.core.utils.http_session import get_session
 
 
 def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
-    """Get a dataset by name or ID.
+    """Get a dataset by name or ID without connecting to it.
 
     Args:
         name: Dataset name
@@ -38,7 +38,6 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
         _active_dataset = Dataset.get_by_name(name)
     if _active_dataset is None:
         raise ValueError(f"No Dataset found with the given name: {name} or ID: {id}")
-    GlobalSingleton()._active_dataset_id = _active_dataset.id
     return _active_dataset
 
 
@@ -85,7 +84,6 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
         is_shared=dataset_model.is_shared,
         data_types=list(dataset_model.all_data_types.keys()),
     )
-    GlobalSingleton()._active_dataset_id = merged.id
     return merged
 
 
@@ -94,9 +92,8 @@ def create_dataset(
     description: str | None = None,
     tags: list[str] | None = None,
     shared: bool = False,
-    exist_ok: bool = False,
 ) -> Dataset:
-    """Create a new dataset for robot demonstrations.
+    """Create a new dataset for robot demonstrations without connecting to it.
 
     Args:
         name: Dataset name
@@ -110,15 +107,15 @@ def create_dataset(
         Dataset: The newly created dataset instance
 
     Raises:
-        DatasetError: If dataset creation fails
+        DatasetError: If dataset creation fails or the dataset already exists.
     """
     existing = Dataset.get_by_name(name, non_exist_ok=True)
 
-    if existing:
-        if not exist_ok:
-            raise DatasetError(f"Dataset with name '{name}' already exists.")
-
-        return existing
+    if existing is not None:
+        raise DatasetError(
+            f"Dataset with name '{name}' already exists. "
+            "Call connect_dataset() to connect to the existing dataset."
+        )
 
     # Create new dataset
     dataset = Dataset.create(name, description, tags, shared)
@@ -126,10 +123,10 @@ def create_dataset(
 
 
 def connect_dataset(dataset: Dataset | str) -> Dataset:
-    """Connect to an existing dataset instance.
+    """Connect to an existing dataset and make it active for recording.
 
     Args:
-        dataset: The dataset instance to connect to
+        dataset: The dataset instance or dataset name to connect to
 
     Returns:
         Dataset: The connected dataset instance
@@ -137,5 +134,7 @@ def connect_dataset(dataset: Dataset | str) -> Dataset:
     if isinstance(dataset, str):
         dataset = get_dataset(name=dataset)
 
-    GlobalSingleton()._active_dataset_id = dataset.id
+    global_state = GlobalSingleton()
+    global_state._active_dataset = dataset
+    global_state._active_dataset_id = dataset.id
     return dataset

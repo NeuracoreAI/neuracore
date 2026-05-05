@@ -26,7 +26,8 @@ def test_log_joints_and_cams(
     )
 
     # Connect robot
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_joint_positions(
         positions={"vx300s_left/waist": 0.5, "vx300s_right/waist": -0.3},
@@ -52,7 +53,8 @@ def test_log_with_extrinsics_intrinsics(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     # Create test data
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
@@ -78,7 +80,8 @@ def test_log_gripper_data(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_parallel_gripper_open_amount(name="gripper1", value=0.5)
     nc.log_parallel_gripper_open_amount(name="gripper2", value=0.7)
@@ -96,7 +99,8 @@ def test_log_joint_velocities_and_torques(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_joint_velocities({"joint1": 0.5, "joint2": -0.3})
     nc.log_joint_torques({"joint1": 1.5, "joint2": 2.3})
@@ -115,7 +119,8 @@ def test_log_visual_joint_positions(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     # Test plural function with dict
     nc.log_visual_joint_positions({"finger1": 0.5, "finger2": -0.3})
@@ -136,7 +141,8 @@ def test_log_language(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_language(name="instruction", language="Pick up the red cube")
     nc.log_language(name="sub_task", language="Move to the table")
@@ -153,7 +159,8 @@ def test_log_custom_data(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
     nc.log_custom_1d("vision_detections", np.array([10, 20, 50, 60]))
 
 
@@ -168,7 +175,8 @@ def test_log_point_cloud(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     points = np.random.rand(1000, 3).astype(np.float16)
 
@@ -201,7 +209,8 @@ def test_log_invalid_data_format(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     # Test invalid joint positions (not float)
     with pytest.raises(ValueError, match="Joint data must be floats"):
@@ -288,7 +297,8 @@ def test_log_end_effector_poses(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_end_effector_pose(
         name="left_ee",
@@ -306,7 +316,8 @@ def test_log_pose(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_pose(
         name="object_pose",
@@ -324,7 +335,8 @@ def test_log_parallel_gripper_open_amounts(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     nc.log_parallel_gripper_open_amount(
         name="gripper1",
@@ -346,7 +358,8 @@ def test_log_parallel_gripper_target_open_amounts(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     # Test singular function
     nc.log_parallel_gripper_target_open_amount(
@@ -372,7 +385,8 @@ def test_log_parallel_gripper_target_open_amount_validation(
         json={"robot_id": "mock_robot_id", "has_urdf": True},
         status_code=200,
     )
-    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    nc.connect_robot("test_robot")
 
     # Test invalid value type
     with pytest.raises(

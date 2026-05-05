@@ -1,5 +1,6 @@
 import json
 
+import pytest
 import requests_mock
 
 import neuracore as nc
@@ -116,12 +117,110 @@ def test_connect_robot(
         status_code=200,
     )
 
-    # Connect robot
-    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+    robot = nc.connect_robot("test_robot")
 
     # Verify robot connection
     assert robot is not None
     assert robot.name == "test_robot"
+
+
+def test_create_robot_does_not_set_active_robot(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Test robot creation without connecting it as active."""
+    nc.login("test_api_key")
+    api_core.GlobalSingleton()._active_robot = None
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+
+    robot = nc.create_robot("test_robot", urdf_path=mock_urdf)
+
+    assert robot is not None
+    assert robot.name == "test_robot"
+    assert robot.id == "mock_robot_id"
+    assert api_core.GlobalSingleton()._active_robot is None
+
+
+def test_create_robot_errors_when_robot_already_created(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    nc.login("test_api_key")
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+
+    nc.create_robot("test_robot", urdf_path=mock_urdf)
+
+    with pytest.raises(
+        nc.RobotError,
+        match="already exists",
+    ):
+        nc.create_robot("test_robot", urdf_path=mock_urdf)
+
+
+def test_create_robot_errors_when_robot_exists_on_server(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=false",
+        json=[{"id": "existing_robot_id", "name": "test_robot"}],
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=true",
+        json=[],
+        status_code=200,
+    )
+
+    with pytest.raises(
+        nc.RobotError,
+        match="already exists in Neuracore",
+    ):
+        nc.create_robot("test_robot", urdf_path=mock_urdf)
+
+
+def test_connect_robot_errors_when_robot_has_not_been_created(
+    temp_config_dir, mock_auth_requests, reset_neuracore
+):
+    nc.login("test_api_key")
+
+    with pytest.raises(
+        nc.RobotError,
+        match="Call create_robot",
+    ):
+        nc.connect_robot("missing_robot")
+
+
+def test_connect_robot_registers_existing_server_robot(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    nc.login("test_api_key")
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=false",
+        json=[{"id": "existing_robot_id", "name": "test_robot"}],
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=true",
+        json=[],
+        status_code=200,
+    )
+
+    robot = nc.connect_robot("test_robot", instance=2)
+
+    assert robot.id == "existing_robot_id"
+    assert robot.name == "test_robot"
+    assert robot.instance == 2
+    assert api_core.GlobalSingleton()._active_robot is robot
 
 
 def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):

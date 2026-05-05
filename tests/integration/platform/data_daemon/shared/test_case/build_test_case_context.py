@@ -643,20 +643,20 @@ def log_frames(
     return [marker_name]
 
 
-def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> None:
+def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> nc.Dataset:
     """Ensure a worker is bound to the shared dataset before recording."""
     if create_dataset:
         with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
-            nc.create_dataset(dataset_name)
-        return
+            dataset = nc.create_dataset(dataset_name)
+        with Timer(MAX_TIME_TO_START_S, label="nc.connect_dataset", always_log=True):
+            return nc.connect_dataset(dataset)
 
     last_error: Exception | None = None
     deadline = time.time() + MAX_TIME_TO_START_S
-    with Timer(MAX_TIME_TO_START_S, label="nc.get_dataset", always_log=True):
+    with Timer(MAX_TIME_TO_START_S, label="nc.connect_dataset", always_log=True):
         while time.time() < deadline:
             try:
-                nc.get_dataset(dataset_name)
-                return
+                return nc.connect_dataset(dataset_name)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 time.sleep(DATASET_POLL_INTERVAL_S)
@@ -695,12 +695,15 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     wall_stopped_at: float = 0.0
 
     try:
-        _bind_worker_dataset(
+        dataset = _bind_worker_dataset(
             dataset_name=spec.dataset_name,
             create_dataset=spec.context_index == 0,
         )
+        if spec.context_index == 0:
+            with Timer(MAX_TIME_TO_START_S, label="nc.create_robot", always_log=True):
+                nc.create_robot(spec.robot_name)
         with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
-            robot = nc.connect_robot(spec.robot_name, overwrite=False)
+            robot = nc.connect_robot(spec.robot_name)
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] | None = (
             {} if not use_real_timestamps else None
@@ -716,7 +719,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 label="nc.start_recording",
                 always_log=True,
             ):
-                nc.start_recording(robot_name=spec.robot_name)
+                dataset.start_recording(robot_name=spec.robot_name)
             if wall_started_at is None:
                 wall_started_at = time.time()
             recording_id = str(robot.get_current_recording_id() or "")
@@ -780,7 +783,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 always_log=True,
                 assert_limit=False,
             ):
-                nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
+                dataset.stop_recording(robot_name=spec.robot_name, wait=case.wait)
             wall_stopped_at = time.time()
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
@@ -814,7 +817,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         if robot is not None:
             try:
                 if robot.is_recording():
-                    nc.cancel_recording(robot_name=spec.robot_name)
+                    dataset.cancel_recording(robot_name=spec.robot_name)
             except Exception:  # noqa: BLE001
                 logger.warning(
                     "Failed to cancel active matrix recording for %s",

@@ -789,6 +789,21 @@ def get_robot(robot_name: str, instance: int) -> Robot:
     return _robots[key]
 
 
+def register_existing_robot(
+    robot_name: str,
+    robot_id: str,
+    instance: int,
+    shared: bool = False,
+) -> Robot:
+    """Register an existing server-side robot in the local process."""
+    robot = Robot(robot_name, instance, shared=shared)
+    robot.id = robot_id
+    robot.archived = False
+    _robot_name_id_mapping[robot_name] = robot_id
+    _robots[RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)] = robot
+    return robot
+
+
 def _update_local_robot_name_cache(robot_id: str, new_robot_name: str) -> None:
     """Update in-memory robot name mappings for a renamed robot."""
     for name, rid in list(_robot_name_id_mapping.items()):

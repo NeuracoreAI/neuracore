@@ -22,7 +22,6 @@ from neuracore_types.importer.data_config import (
 )
 from neuracore_types.nc_data import DatasetImportConfig
 
-import neuracore as nc
 from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import (
     ImportItem,
@@ -147,8 +146,13 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             item.index + 1,
             self.num_episodes,
         )
+        output_dataset = self.output_dataset
         if not self.dry_run:
-            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
+            if output_dataset is None:
+                raise ImportError("Worker dataset was not connected.")
+            output_dataset.start_recording(
+                robot_name=self.robot_name, instance=self._worker_id
+            )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=str(episode_id)
@@ -181,7 +185,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 episode_label=str(episode_id),
             )
         if not self.dry_run:
-            nc.stop_recording(
+            assert output_dataset is not None
+            output_dataset.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
