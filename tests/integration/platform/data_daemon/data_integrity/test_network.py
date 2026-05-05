@@ -27,7 +27,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
-    STORAGE_STATE_PRESERVE,
+    STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -36,7 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_INTEGRITY_CASES,
-    storage_state_action=STORAGE_STATE_PRESERVE,
+    storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
 

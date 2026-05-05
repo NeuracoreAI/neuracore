@@ -643,13 +643,8 @@ def log_frames(
     return [marker_name]
 
 
-def _bind_worker_dataset(*, dataset_name: str, create_dataset: bool) -> None:
-    """Ensure a worker is bound to the shared dataset before recording."""
-    if create_dataset:
-        with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
-            nc.create_dataset(dataset_name)
-        return
-
+def _bind_worker_dataset(*, dataset_name: str) -> None:
+    """Poll until the worker pool-shared dataset is visible to this worker."""
     last_error: Exception | None = None
     deadline = time.time() + MAX_TIME_TO_START_S
     with Timer(MAX_TIME_TO_START_S, label="nc.get_dataset", always_log=True):
@@ -695,10 +690,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     wall_stopped_at: float = 0.0
 
     try:
-        _bind_worker_dataset(
-            dataset_name=spec.dataset_name,
-            create_dataset=spec.context_index == 0,
-        )
+        _bind_worker_dataset(dataset_name=spec.dataset_name)
         with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
@@ -856,6 +848,10 @@ def run_case_contexts(
     """
     if specs is None:
         specs = build_context_specs(case, assert_deadline=assert_deadline)
+
+    if specs:
+        with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
+            nc.create_dataset(specs[0].dataset_name)
 
     if case.parallel_contexts == 1:
         results = [context_worker(specs[0])]
