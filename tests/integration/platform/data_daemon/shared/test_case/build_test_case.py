@@ -399,6 +399,8 @@ def log_run_analysis(
     extra_sections: list[str] | None = None,
     include_in_session_summary: bool = True,
     disk_durations: dict[str, float] | None = None,
+    label_prefix: str | None = None,
+    test_wall_s: float | None = None,
 ) -> str:
     """Log a detailed analysis of a test run for diagnostics."""
 
@@ -411,8 +413,11 @@ def log_run_analysis(
         shown = ", ".join(cleaned[:max_items])
         return f"{shown}, ... (+{len(cleaned) - max_items} more)"
 
+    display_case_id = (
+        f"{label_prefix}-{case_id(case)}" if label_prefix else case_id(case)
+    )
     separator = "=" * 64
-    report_title = title or f"Run analysis: {case_id(case)}"
+    report_title = title or f"Run analysis: {display_case_id}"
     lines = [separator, report_title, separator]
 
     if status is not None:
@@ -437,6 +442,9 @@ def log_run_analysis(
     if case.has_video:
         total_video_frames = case.recording_count * case.expected_video_frames
         lines.append(f"  Total video frames:  {total_video_frames}")
+
+    if test_wall_s is not None:
+        lines.append(f"\n  Test wall time:  {test_wall_s:.1f}s")
 
     if results:
         lines.append(f"\n  Dataset: {results[0].dataset_name!r}")
@@ -483,8 +491,9 @@ def log_run_analysis(
 
     if include_in_session_summary:
         SESSION_RUNS.append({
-            "case_id": case_id(case),
+            "case_id": display_case_id,
             "dataset_name": results[0].dataset_name if results else None,
+            "test_wall_s": test_wall_s,
             "timer_stats": {
                 label: dict(Timer._stats[label])
                 for label in session_labels

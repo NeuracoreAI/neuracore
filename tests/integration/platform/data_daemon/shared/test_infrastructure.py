@@ -51,6 +51,7 @@ sys.path.append(str(THIS_DIR.parent.parent.parent.parent.parent / "examples"))
 
 logger = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -222,6 +223,8 @@ def build_isolation_run_analysis(
     final_cleanup_s: float | None = None,
     status: str = "generated",
     disk_durations: dict[str, float] | None = None,
+    label_prefix: str | None = None,
+    test_wall_s: float | None = None,
 ) -> str:
     """Build isolation analysis with daemon shutdown timings.
 
@@ -234,6 +237,8 @@ def build_isolation_run_analysis(
         daemon_shutdown_s: Optional measured daemon shutdown duration in seconds.
         final_cleanup_s: Optional measured total cleanup duration in seconds.
         status: Free-form status string embedded in the report header.
+        label_prefix: Optional prefix (e.g. ``"offline"``, ``"online"``) to
+            disambiguate multi-run summaries for the same case.
 
     Returns:
         The formatted analysis report as a multi-line string.
@@ -244,16 +249,21 @@ def build_isolation_run_analysis(
     if final_cleanup_s is not None:
         daemon_lines.append(f"    final cleanup:    {final_cleanup_s:.3f}s")
 
+    display_case_id = (
+        f"{label_prefix}/{case_id(case)}" if label_prefix else case_id(case)
+    )
     extra_sections = ["", "  Daemon shutdown:", *daemon_lines] if daemon_lines else None
     return log_run_analysis(
         case=case,
         results=results,
-        title=f"Isolation run analysis: {case_id(case)}",
+        title=f"Isolation run analysis: {display_case_id}",
         status=status,
         note="Timing diagnostics are informational only.",
         extra_sections=extra_sections,
         include_in_session_summary=True,
         disk_durations=disk_durations,
+        label_prefix=label_prefix,
+        test_wall_s=test_wall_s,
     )
 
 
@@ -265,6 +275,8 @@ def set_case_analysis_report(
     daemon_shutdown_s: float | None = None,
     final_cleanup_s: float | None = None,
     disk_durations: dict[str, float] | None = None,
+    label_prefix: str | None = None,
+    test_wall_s: float | None = None,
 ) -> None:
     """Attach an isolation analysis report to the pytest node for terminal output.
 
@@ -278,7 +290,12 @@ def set_case_analysis_report(
         results: Per-context result dicts collected during the run.
         daemon_shutdown_s: Optional measured daemon shutdown duration.
         final_cleanup_s: Optional measured total cleanup duration.
+        label_prefix: Optional prefix (e.g. ``"offline"``, ``"online"``) to
+            disambiguate multi-run summaries for the same case.
     """
+    display_case_id = (
+        f"{label_prefix}-{case_id(case)}" if label_prefix else case_id(case)
+    )
     try:
         request.node.run_analysis_report = build_isolation_run_analysis(
             case=case,
@@ -287,11 +304,13 @@ def set_case_analysis_report(
             final_cleanup_s=final_cleanup_s,
             status="generated",
             disk_durations=disk_durations,
+            label_prefix=label_prefix,
+            test_wall_s=test_wall_s,
         )
     except Exception as exc:  # noqa: BLE001
         request.node.run_analysis_report = "\n".join([
             "=" * 64,
-            f"Isolation run analysis: {case_id(case)}",
+            f"Isolation run analysis: {display_case_id}",
             "=" * 64,
             f"  Analysis status: failed ({exc})",
             "  Timing diagnostics are informational only.",
