@@ -64,9 +64,9 @@ from .modules import (
     MLPConnector,
     TinyVLMBackbone,
     VLMBackbone,
-    _add_action_step_positional_encoding,
-    _load_pretrained_state_dict,
+    add_action_step_positional_encoding,
 )
+from .utils import load_pretrained_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -525,7 +525,7 @@ class Groot(NeuracoreModel):
         if self.action_position_embedding is None:
             return
 
-        full_state_dict = _load_pretrained_state_dict(model_path)
+        full_state_dict = load_pretrained_state_dict(model_path)
         checkpoint_key = "action_head.position_embedding.weight"
         checkpoint_weight = full_state_dict.get(checkpoint_key)
         if checkpoint_weight is None:
@@ -785,7 +785,7 @@ class Groot(NeuracoreModel):
             )
 
             action_tokens = self.action_encoder_mlp(x_t)
-            action_tokens = _add_action_step_positional_encoding(
+            action_tokens = add_action_step_positional_encoding(
                 action_tokens=action_tokens,
                 action_position_embedding=self.action_position_embedding,
                 max_action_pos_embeddings=self.max_action_pos_embeddings,
@@ -948,7 +948,7 @@ class Groot(NeuracoreModel):
         # -- 5. DiT predicts velocity --
         t_discretized = (t * self.num_timestep_buckets).long()
         action_tokens = self.action_encoder_mlp(x_t)
-        action_tokens = _add_action_step_positional_encoding(
+        action_tokens = add_action_step_positional_encoding(
             action_tokens=action_tokens,
             action_position_embedding=self.action_position_embedding,
             max_action_pos_embeddings=self.max_action_pos_embeddings,
