@@ -151,7 +151,7 @@ def _start_daemon_subprocess(
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
             )
 
         return subprocess.Popen(
@@ -188,9 +188,13 @@ def launch_daemon_subprocess(
 
     while time.monotonic() < daemon_startup_timeout_s:
         if process.poll() is not None:
+            stderr_output = ""
+            if process.stderr is not None:
+                stderr_output = process.stderr.read().decode(errors="replace").strip()
+            detail = f"\n{stderr_output}" if stderr_output else ""
             raise RuntimeError(
                 f"Daemon process exited unexpectedly during startup "
-                f"(exit code {process.returncode})."
+                f"(exit code {process.returncode}).{detail}"
             )
         if SOCKET_PATH.exists():
             break
