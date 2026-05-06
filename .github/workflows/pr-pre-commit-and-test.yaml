@@ -91,7 +91,9 @@ jobs:
 
       - name: Run non-ML unit tests
         if: env.SHOULD_RUN == 'true'
+        shell: bash
         run: |
+          set -euo pipefail
           if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
             uv run pytest tests/unit \
               --ignore=tests/unit/ml \
