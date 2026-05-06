@@ -23,11 +23,11 @@ from transformers.models.paligemma.modeling_paligemma import (
 )
 from transformers.utils import cached_file
 
-from neuracore.ml.algorithms.pi05.gemma_pytorch import (
+from neuracore.ml.algorithms.pi05_full.gemma_pytorch import (
     PaliGemmaWithExpertModel,
     get_gemma_config,
 )
-from neuracore.ml.algorithms.pi05.utils import (
+from neuracore.ml.algorithms.pi05_full.utils import (
     OPENPI_ATTENTION_MASK_VALUE,
     PI05Config,
     _align_mask_length,
@@ -537,7 +537,7 @@ class PI05FullPolicy(nn.Module):
             **kwargs: Additional arguments (cache_dir, force_download, etc.)
 
         Returns:
-            PI05FullPolicy model with loaded weights.
+            PI05Policy model with loaded weights.
         """
         if pretrained_name_or_path is None:
             pretrained_name_or_path = "lerobot/pi05_base"
