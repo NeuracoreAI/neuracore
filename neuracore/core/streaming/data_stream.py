@@ -146,9 +146,17 @@ class DataStream(ABC):
         """
         return self._latest_data
 
+    def set_latest_data(self, data: NCData) -> None:
+        """Update the locally cached latest sample without transport side effects."""
+        self._latest_data = data
+
     def get_producer_channel(self) -> ProducerChannel | None:
         """Return the active producer channel for this stream, if present."""
         return self._producer_channel
+
+    def get_recording_context(self) -> DataRecordingContext | None:
+        """Return the active recording context for this stream, if present."""
+        return self._context
 
     def _send_to_daemon(self, data: bytes) -> None:
         """Send data to the daemon via the producer.

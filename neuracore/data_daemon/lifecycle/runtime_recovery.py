@@ -9,10 +9,6 @@ import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from neuracore.data_daemon.lifecycle.daemon_os_control import (
-    DaemonLifecycleError,
-    remove_pid_file,
-)
 from neuracore.data_daemon.models import TraceErrorCode, TraceUploadStatus
 from neuracore.data_daemon.state_management.state_store import StateStore
 
@@ -24,6 +20,15 @@ _NEURACORE_SHARED_SLOT_PREFIX = "neuracore-slots-"
 
 class SharedMemoryCapacityError(RuntimeError):
     """Raised when /dev/shm lacks space for a new shared-memory allocation."""
+
+
+def _daemon_lifecycle_error(message: str) -> RuntimeError:
+    """Construct the daemon lifecycle error lazily to avoid import cycles."""
+    from neuracore.data_daemon.lifecycle.daemon_os_control import (
+        DaemonLifecycleError,
+    )
+
+    return DaemonLifecycleError(message)
 
 
 def _format_bytes(value: int) -> str:
@@ -80,23 +85,12 @@ def shared_memory_required_bytes(
     return int(total_payload_bytes) + int(metadata_size)
 
 
-def cleanup_stale_shared_memory_buffers(
-    *,
-    shm_dir: Path = _SHARED_MEMORY_DIR,
-) -> int:
-    """Backward-compatible alias for stale shared-slot cleanup."""
-    return cleanup_stale_shared_slot_segments(shm_dir=shm_dir)
-
-
 def cleanup_stale_shared_slot_segments(
-    *,
     shm_dir: Path = _SHARED_MEMORY_DIR,
-) -> int:
+) -> None:
     """Remove stale daemon-owned shared-slot segments from /dev/shm."""
     if not shm_dir.exists():
-        return 0
-
-    cleaned = 0
+        return
 
     for shm_path in shm_dir.iterdir():
         if not shm_path.name.startswith(_NEURACORE_SHARED_SLOT_PREFIX):
@@ -104,7 +98,6 @@ def cleanup_stale_shared_slot_segments(
 
         try:
             shm_path.unlink()
-            cleaned += 1
         except FileNotFoundError:
             continue
         except OSError as exc:
@@ -113,8 +106,6 @@ def cleanup_stale_shared_slot_segments(
                 shm_path,
                 exc,
             )
-
-    return cleaned
 
 
 def cleanup_socket_files(paths: Iterable[Path]) -> None:
@@ -152,7 +143,7 @@ def validate_or_recover_sqlite(db_path: Path, *, recover: bool = True) -> bool:
         return True
 
     if not recover:
-        raise DaemonLifecycleError("SQLite integrity check failed")
+        raise _daemon_lifecycle_error("SQLite integrity check failed")
 
     ts = int(time.time())
     corrupt_path = db_path.with_suffix(db_path.suffix + f".corrupt-{ts}")
@@ -246,6 +237,8 @@ def shutdown(
     db_path: Path,
 ) -> None:
     """Run shutdown steps and cleanup."""
+    from neuracore.data_daemon.lifecycle.daemon_os_control import remove_pid_file
+
     checkpoint_sqlite(db_path)
     cleanup_socket_files(socket_paths)
     remove_pid_file(pid_path)
@@ -253,7 +246,6 @@ def shutdown(
 
 __all__ = [
     "checkpoint_sqlite",
-    "cleanup_stale_shared_memory_buffers",
     "cleanup_stale_shared_slot_segments",
     "cleanup_socket_files",
     "ensure_shared_memory_capacity",

@@ -7,6 +7,7 @@ All logging functions support optional robot identification and timestamping.
 
 import logging
 import time
+from dataclasses import dataclass
 from warnings import filterwarnings, warn
 
 import numpy as np
@@ -43,6 +44,11 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
+from neuracore.data_daemon.models import (
+    BatchedJointDataItemPayload,
+    BatchedJointDataPayload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +60,15 @@ class ExperimentalPointCloudWarning(UserWarning):
 
 
 filterwarnings("once", category=ExperimentalPointCloudWarning)
+
+
+@dataclass(frozen=True)
+class JointStreamBinding:
+    """Resolved per-joint stream metadata and stream instance."""
+
+    stream_id: str
+    storage_name: str
+    stream: JsonDataStream
 
 
 def _publish_json_to_p2p(
@@ -144,53 +159,60 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
         data_stream.start_recording(context)
 
 
-def _log_single_joint_data(
+def _get_or_create_joint_stream(
     data_type: DataType,
     name: str,
-    value: float,
     robot: Robot,
-    timestamp: float,
-    dry_run: bool = False,
-) -> None:
-    """Log single joint data for a robot.
-
-    Args:
-        data_type: Type of joint data (e.g. DataType.JOINT_POSITIONS)
-        name: Name of the joint
-        value: Joint data value
-        robot: Robot instance
-        timestamp: Timestamp of the data
-        dry_run: If True, skip actual logging (validation only)
-    """
-    if dry_run:
-        return
-
+) -> JointStreamBinding:
+    """Return the stream id, storage name, and JsonDataStream for one joint."""
     storage_name = validate_safe_name(name)
     str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
     if joint_stream is None:
         joint_stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
         robot.add_data_stream(str_id, joint_stream)
+    assert isinstance(
+        joint_stream, JsonDataStream
+    ), "Expected stream to be instance of JSONDataStream"
+    return JointStreamBinding(
+        stream_id=str_id,
+        storage_name=storage_name,
+        stream=joint_stream,
+    )
 
+
+def _publish_joint_data_point(
+    *,
+    data_type: DataType,
+    name: str,
+    value: float,
+    robot: Robot,
+    timestamp: float,
+ ) -> tuple[JointStreamBinding, str | None]:
+    """Publish one joint sample locally and return its binding + active trace ID."""
+    joint_stream_binding = _get_or_create_joint_stream(data_type, name, robot)
+    joint_stream = joint_stream_binding.stream
     start_stream(robot, joint_stream)
 
     data = JointData(
         timestamp=timestamp,
         value=value,
     )
-    assert isinstance(
-        joint_stream, JsonDataStream
-    ), "Expected stream to be instance of JSONDataStream"
-    joint_stream.log(data=data)
+    joint_stream.set_latest_data(data)
+
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
 
-    StreamManagerOrchestrator().get_provider_manager(
-        robot.id, robot.instance
-    ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
-        data.model_dump(mode="json")
+    _publish_json_to_p2p(robot, joint_stream_binding.stream_id, data_type, data)
+
+    producer_channel = joint_stream.get_producer_channel()
+    trace_id = (
+        producer_channel.trace_id
+        if producer_channel is not None
+        and joint_stream.get_recording_context() is not None
+        else None
     )
-    _publish_json_to_p2p(robot, str_id, data_type, data)
+    return joint_stream_binding, trace_id
 
 
 def _log_group_of_joint_data(
@@ -227,9 +249,87 @@ def _log_group_of_joint_data(
     if dry_run:
         return
 
+    total_started = time.monotonic()
     robot = _get_robot(robot_name, instance)
+    batched_items: list[BatchedJointDataItemPayload] = []
+    batch_transport_stream: JsonDataStream | None = None
+    per_joint_started = time.monotonic()
+
     for key, value in joint_data.items():
-        _log_single_joint_data(data_type, key, value, robot, timestamp, dry_run)
+        joint_stream_binding, trace_id = _publish_joint_data_point(
+            data_type=data_type,
+            name=key,
+            value=value,
+            robot=robot,
+            timestamp=timestamp,
+        )
+
+        if trace_id is not None:
+            joint_stream = joint_stream_binding.stream
+            if batch_transport_stream is None:
+                batch_transport_stream = joint_stream
+            batched_items.append(
+                BatchedJointDataItemPayload(
+                    trace_id=trace_id,
+                    data_type_name=joint_stream_binding.storage_name,
+                    value=value,
+                )
+            )
+    per_joint_elapsed = time.monotonic() - per_joint_started
+    record_duration(
+        "client.grouped_joint.per_joint_publish",
+        data_type.value,
+        per_joint_elapsed,
+    )
+    observe_value(
+        "client.grouped_joint.items",
+        data_type.value,
+        float(len(batched_items)),
+    )
+
+    if batch_transport_stream is None or not batched_items:
+        raise ValueError("No joint data to log")
+
+    batch_context = batch_transport_stream.get_recording_context()
+    batch_transport_channel = batch_transport_stream.get_producer_channel()
+    if batch_context is None or batch_transport_channel is None:
+        return
+
+    batch_transport_started = time.monotonic()
+    batch_transport_channel.send_batched_joint_data(
+        BatchedJointDataPayload(
+            recording_id=batch_context.recording_id,
+            timestamp=timestamp,
+            dataset_id=batch_context.dataset_id,
+            dataset_name=batch_context.dataset_name,
+            robot_name=batch_context.robot_name,
+            robot_id=batch_context.robot_id,
+            robot_instance=batch_context.robot_instance,
+            data_type=data_type,
+            items=batched_items,
+        )
+    )
+    batch_transport_elapsed = time.monotonic() - batch_transport_started
+    record_duration(
+        "client.grouped_joint.batch_transport",
+        data_type.value,
+        batch_transport_elapsed,
+    )
+    total_elapsed = time.monotonic() - total_started
+    record_duration(
+        "client.grouped_joint.total",
+        data_type.value,
+        total_elapsed,
+    )
+    if total_elapsed >= 0.1:
+        logger.warning(
+            "PROFILE grouped_joint_slow data_type=%s total=%.3fs per_joint_publish=%.3fs batch_transport=%.3fs items=%d",
+            data_type.value,
+            total_elapsed,
+            per_joint_elapsed,
+            batch_transport_elapsed,
+            len(batched_items),
+        )
 
 
 def _validate_extrinsics_intrinsics(

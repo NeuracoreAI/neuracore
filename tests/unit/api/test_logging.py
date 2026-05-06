@@ -1,9 +1,11 @@
 import numpy as np
 import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
+from neuracore.core.streaming.data_stream import JsonDataStream
 
 
 def test_log_joints_and_cams(
@@ -102,6 +104,39 @@ def test_log_joint_velocities_and_torques(
     nc.log_joint_torques({"joint1": 1.5, "joint2": 2.3})
     nc.log_joint_velocity(name="joint1", velocity=0.5)
     nc.log_joint_torque(name="joint2", torque=2.3)
+
+
+def test_grouped_joint_logging_skips_json_stream_log_but_updates_latest_data(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """Joint group logging should bypass JsonDataStream.log and cache latest data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    def fail_log(self, data, *, send_to_daemon=True):
+        raise AssertionError(
+            "Grouped joint logging should not call JsonDataStream.log()"
+        )
+
+    monkeypatch.setattr(JsonDataStream, "log", fail_log)
+
+    nc.log_joint_positions({"joint1": 0.5})
+
+    stream = robot.get_data_stream(f"{DataType.JOINT_POSITIONS.value}:joint1")
+    assert isinstance(stream, JsonDataStream)
+    latest_data = stream.get_latest_data()
+    assert latest_data is not None
+    assert latest_data.value == 0.5
 
 
 def test_log_visual_joint_positions(

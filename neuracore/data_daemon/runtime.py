@@ -25,6 +25,8 @@ from neuracore.data_daemon.const import (
     DEFAULT_SHARED_MEMORY_SIZE,
     DEFAULT_VIDEO_SLOT_COUNT,
     DEFAULT_VIDEO_SLOT_SIZE,
+    SOCKET_PATH,
+    VIDEO_SOCKET_PATH,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
@@ -32,7 +34,6 @@ from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
-    cleanup_stale_shared_memory_buffers,
     cleanup_stale_shared_slot_segments,
     reconcile_state_with_filesystem,
     shared_memory_free_bytes,
@@ -56,6 +57,7 @@ class DaemonContext:
     config: DaemonConfig
     loop_manager: EventLoopManager
     comm_manager: CommunicationsManager
+    video_comm_manager: CommunicationsManager
     services: DaemonServices
     recording_disk_manager: rdm.RecordingDiskManager
 
@@ -88,19 +90,7 @@ class DaemonRuntime:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
 
-        cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
-        if cleaned_shared_buffers:
-            logger.info(
-                "Recovered %d stale shared-memory allocation(s) from /dev/shm",
-                cleaned_shared_buffers,
-            )
-
-        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
-        if cleaned_shared_slots:
-            logger.info(
-                "Recovered %d stale shared-slot segment(s) from /dev/shm",
-                cleaned_shared_slots,
-            )
+        cleanup_stale_shared_slot_segments()
 
         cleanup_socket_files(self._socket_paths)
 
@@ -335,11 +325,13 @@ class DaemonRuntime:
             return None
 
         logger.debug("[8/8] Creating communications runtime...")
-        comm_manager = CommunicationsManager()
+        comm_manager = CommunicationsManager(socket_path=SOCKET_PATH)
+        video_comm_manager = CommunicationsManager(socket_path=VIDEO_SOCKET_PATH)
         self._daemon = DataBridge(
             recording_disk_manager=recording_disk_manager,
             emitter=emitter,
             comm_manager=comm_manager,
+            video_comm_manager=video_comm_manager,
         )
         logger.debug("       ZMQ sockets ready")
 
@@ -347,6 +339,7 @@ class DaemonRuntime:
             config=config,
             loop_manager=loop_manager,
             comm_manager=comm_manager,
+            video_comm_manager=video_comm_manager,
             services=services,
             recording_disk_manager=recording_disk_manager,
         )
@@ -391,12 +384,7 @@ class DaemonRuntime:
         self._daemon = None
         self._context = None
 
-        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
-        if cleaned_shared_slots:
-            logger.info(
-                "Cleaned %d shared-slot segment(s) during daemon shutdown",
-                cleaned_shared_slots,
-            )
+        cleanup_stale_shared_slot_segments()
 
         logger.info("Daemon runtime shutdown complete")
 

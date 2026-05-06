@@ -5,7 +5,7 @@ from __future__ import annotations
 import atexit
 import logging
 
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.const import ALL_SOCKET_PATHS
 from neuracore.data_daemon.helpers import (
     get_daemon_db_path,
     get_daemon_pid_path,
@@ -50,7 +50,7 @@ def main() -> None:
     runtime = DaemonRuntime(
         db_path=db_path,
         pid_path=pid_path,
-        socket_paths=(SOCKET_PATH,),
+        socket_paths=ALL_SOCKET_PATHS,
     )
     cleaned_up = False
 
@@ -62,7 +62,7 @@ def main() -> None:
         runtime.shutdown()
         shutdown(
             pid_path=pid_path,
-            socket_paths=(SOCKET_PATH,),
+            socket_paths=ALL_SOCKET_PATHS,
             db_path=db_path,
         )
         cleaned_up = True

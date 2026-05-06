@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from neuracore_types import DataType
 
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager import (
     recording_disk_manager as rdm_module,
@@ -57,6 +58,12 @@ class _CompletionShard:
 
     def enqueue(self, work: CompletionChunkWork | FinalTraceWork) -> None:
         self._ensure_running()
+        qsize_before_put = self._queue.qsize()
+        observe_value(
+            "daemon.completion.queue_qsize_before_put",
+            f"shard_{self._shard_index}",
+            float(qsize_before_put),
+        )
         self._queue.put(work)
 
     def close(self) -> None:
@@ -96,6 +103,7 @@ class _CompletionShard:
                 self._queue.task_done()
 
     def _process_chunk_work(self, work: CompletionChunkWork) -> None:
+        started = time.monotonic()
         key = (work.producer_id, work.trace_id)
         partial = self._partials.get(key)
         partial_released = False
@@ -162,8 +170,21 @@ class _CompletionShard:
             if not partial_released:
                 self._partials.pop(key, None)
                 self._release_partial_refs(partial)
+            chunk_elapsed = time.monotonic() - started
+            record_duration(
+                "daemon.completion.chunk_process",
+                f"shard_{self._shard_index}",
+                chunk_elapsed,
+            )
+            if chunk_elapsed >= 0.05:
+                logger.warning(
+                    "PROFILE daemon_completion_chunk_slow shard=%d elapsed=%.3fs",
+                    self._shard_index,
+                    chunk_elapsed,
+                )
 
     def _process_final_trace_work(self, work: FinalTraceWork) -> None:
+        started = time.monotonic()
         partial = self._partials.pop((work.producer_id, work.trace_id), None)
         if partial is not None:
             self._release_partial_refs(partial)
@@ -176,6 +197,11 @@ class _CompletionShard:
             metadata=work.metadata,
             data=b"",
             final_chunk=True,
+        )
+        record_duration(
+            "daemon.completion.final_trace",
+            f"shard_{self._shard_index}",
+            time.monotonic() - started,
         )
 
     def _enqueue_complete_message(

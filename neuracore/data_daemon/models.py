@@ -34,6 +34,7 @@ class CommandType(Enum):
     SHARED_SLOT_CREDIT_RETURN = "shared_slot_credit_return"
     HEARTBEAT = "heartbeat"
     DATA_CHUNK = "data_chunk"
+    BATCHED_JOINT_DATA = "batched_joint_data"
     TRACE_END = "trace_end"
     RECORDING_STOPPED = "recording_stopped"
 
@@ -590,6 +591,85 @@ class DataChunkPayload:
             "robot_instance": self.robot_instance,
             "data": base64.b64encode(self.data).decode("ascii"),
             "data_type": self.data_type.value,
+        }
+
+
+@dataclass
+class BatchedJointDataItemPayload:
+    """One joint sample carried inside a batched joint transport message."""
+
+    trace_id: str
+    data_type_name: str
+    value: float
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BatchedJointDataItemPayload":
+        """Construct one batched joint item from a dict."""
+        return cls(
+            trace_id=str(data["trace_id"]),
+            data_type_name=str(data["data_type_name"]),
+            value=float(data["value"]),
+        )
+
+    def to_dict(self) -> dict[str, str | float]:
+        """Return a JSON-friendly dict for one batched joint item."""
+        return {
+            "trace_id": self.trace_id,
+            "data_type_name": self.data_type_name,
+            "value": self.value,
+        }
+
+
+@dataclass
+class BatchedJointDataPayload:
+    """Payload for one explicit batched joint transport message."""
+
+    recording_id: str
+    timestamp: float
+    dataset_id: str | None
+    dataset_name: str | None
+    robot_name: str | None
+    robot_id: str | None
+    robot_instance: int
+    data_type: DataType
+    items: list[BatchedJointDataItemPayload]
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "BatchedJointDataPayload":
+        """Construct batched joint transport payload from a dict."""
+        robot_instance_raw = data.get("robot_instance")
+        if robot_instance_raw is None:
+            raise ValueError("robot_instance is required")
+        data_type_raw = data.get("data_type")
+        if data_type_raw is None:
+            raise ValueError("data_type is required")
+        return cls(
+            recording_id=str(data["recording_id"]),
+            timestamp=float(data["timestamp"]),
+            dataset_id=data.get("dataset_id"),
+            dataset_name=data.get("dataset_name"),
+            robot_name=data.get("robot_name"),
+            robot_id=data.get("robot_id"),
+            robot_instance=int(robot_instance_raw),
+            data_type=DataType(data_type_raw),
+            items=[
+                BatchedJointDataItemPayload.from_dict(item)
+                for item in list(data.get("items") or [])
+            ],
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly dict for batched joint transport."""
+        return {
+            "recording_id": self.recording_id,
+            "timestamp": self.timestamp,
+            "dataset_id": self.dataset_id,
+            "dataset_name": self.dataset_name,
+            "robot_name": self.robot_name,
+            "robot_id": self.robot_id,
+            "robot_instance": self.robot_instance,
+            "data_type": self.data_type.value,
+            "items": [item.to_dict() for item in self.items],
         }
 
 

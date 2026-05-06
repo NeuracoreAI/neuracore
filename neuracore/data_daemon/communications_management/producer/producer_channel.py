@@ -17,8 +17,11 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     DEFAULT_VIDEO_SLOT_SIZE,
+    SOCKET_PATH,
+    VIDEO_SOCKET_PATH,
 )
 from neuracore.data_daemon.models import (
+    BatchedJointDataPayload,
     CommandType,
     DataChunkPayload,
     DataType,
@@ -33,11 +36,6 @@ from .producer_channel_message_sender import (
     QueuedEnvelope,
 )
 from .producer_heartbeat_service import ProducerHeartbeatService
-from .producer_transport_debug_models import (
-    ProducerSharedMemoryDebugStats,
-    ProducerTransportDebugStats,
-    ProducerTransportTimingStats,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +46,7 @@ __all__ = ["ProducerChannel", "producer_transport_args_for_data_type"]
 
 def data_type_uses_shared_slot_transport(data_type: DataType) -> bool:
     """Return True when the data type should use shared-slot transport."""
-    return data_type == DataType.RGB_IMAGES
+    return data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES)
 
 
 def producer_transport_args_for_data_type(
@@ -67,6 +65,13 @@ def producer_transport_args_for_data_type(
         DEFAULT_SHARED_MEMORY_SIZE,
         512,
     )
+
+
+def producer_socket_path_for_data_type(data_type: DataType) -> str:
+    """Return the daemon socket path for the given producer data type."""
+    if data_type_uses_shared_slot_transport(data_type):
+        return str(VIDEO_SOCKET_PATH)
+    return str(SOCKET_PATH)
 
 
 class ProducerChannel:
@@ -92,9 +97,10 @@ class ProducerChannel:
             default_shared_memory_size,
             default_send_queue_maxsize,
         ) = producer_transport_args_for_data_type(data_type)
+        socket_path = producer_socket_path_for_data_type(data_type)
 
         self.channel_id = id or str(uuid.uuid4())
-        self._comm = CommunicationsManager(context=context)
+        self._comm = CommunicationsManager(context=context, socket_path=socket_path)
         self._comm.create_producer_socket()
         self.chunk_size = int(default_chunk_size if chunk_size is None else chunk_size)
         self.send_queue_maxsize = max(
@@ -159,7 +165,6 @@ class ProducerChannel:
 
     def start_recording_session(
         self,
-        *,
         recording_id: str | None = None,
         shared_memory_size: int | None = None,
     ) -> None:
@@ -247,30 +252,6 @@ class ProducerChannel:
         """Block until the sender thread has sent up to `sequence_number`."""
         return self._message_sender.wait_until_sequence_sent(sequence_number)
 
-    def get_transport_stats(self) -> ProducerTransportDebugStats:
-        """Return a typed snapshot of producer transport debug state."""
-        return ProducerTransportDebugStats(
-            channel_id=self.channel_id,
-            recording_id=self.recording_id,
-            trace_id=self.trace_id,
-            chunk_size=self.chunk_size,
-            heartbeat_thread_alive=self._heartbeat_service.get_stats()[
-                "heartbeat_thread_alive"
-            ],
-            shared_memory=(
-                self._shared_slot_transport.get_stats()
-                if self._shared_slot_transport is not None
-                else ProducerSharedMemoryDebugStats(
-                    shared_memory_name=None,
-                    shared_memory_size=0,
-                    shared_memory_open=ProducerTransportTimingStats(),
-                    shared_memory_write=ProducerTransportTimingStats(),
-                    shared_memory_write_bytes=0,
-                )
-            ),
-            message_sender=self._message_sender.get_stats(),
-        )
-
     def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
         """Announce the fixed shared-slot transport for this producer."""
         if not self._use_shared_slot_transport or self._shared_slot_transport is None:
@@ -303,6 +284,13 @@ class ProducerChannel:
         self._send(
             CommandType.DATA_CHUNK,
             {"data_chunk": payload.to_dict()},
+        )
+
+    def send_batched_joint_data(self, payload: BatchedJointDataPayload) -> None:
+        """Send one explicit batched joint payload over the producer socket."""
+        self._send(
+            CommandType.BATCHED_JOINT_DATA,
+            {CommandType.BATCHED_JOINT_DATA.value: payload.to_dict()},
         )
 
     def send_data(

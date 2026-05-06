@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 from neuracore.data_daemon.models import CommandType
 
 from ..shared_transport.communications_manager import (
@@ -14,10 +16,26 @@ from ..shared_transport.communications_manager import (
     MessageEnvelope,
 )
 from .models import QueuedEnvelope
-from .producer_transport_debug_helper import ProducerTransportDebugHelper
-from .producer_transport_debug_models import ProducerChannelMessageSenderDebugStats
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_label(envelope: MessageEnvelope) -> str:
+    command = envelope.command.value
+    payload = envelope.payload or {}
+
+    if envelope.command == CommandType.BATCHED_JOINT_DATA:
+        batch = payload.get(CommandType.BATCHED_JOINT_DATA.value, {})
+        data_type = batch.get("data_type") or "unknown"
+        item_count = len(batch.get("items") or [])
+        return f"{command}:{data_type}:{item_count}items"
+
+    if envelope.command == CommandType.DATA_CHUNK:
+        chunk = payload.get("data_chunk", payload)
+        data_type_name = chunk.get("data_type_name") or chunk.get("data_type") or "unknown"
+        return f"{command}:{data_type_name}"
+
+    return command
 
 
 class ProducerChannelMessageSender:
@@ -47,7 +65,6 @@ class ProducerChannelMessageSender:
         self._sender_error: Exception | None = None
         self._sequence_cv = threading.Condition()
         self._enqueue_lock = threading.Lock()
-        self._debug_helper = ProducerTransportDebugHelper()
         self._sender_thread.start()
 
     @property
@@ -131,23 +148,6 @@ class ProducerChannelMessageSender:
                 self._sequence_cv.wait()
             return True
 
-    def get_stats(self) -> ProducerChannelMessageSenderDebugStats:
-        """Return a lightweight snapshot of ordered sender state."""
-        with self._sequence_cv:
-            last_enqueued_sequence_number = self._last_enqueued_sequence_number
-            last_socket_sent_sequence_number = self._last_socket_sent_sequence_number
-
-        sender_thread = self._sender_thread
-        return self._debug_helper.sender_stats(
-            send_queue_qsize=self._send_queue.qsize(),
-            send_queue_maxsize=self._send_queue.maxsize,
-            last_enqueued_sequence_number=last_enqueued_sequence_number,
-            last_socket_sent_sequence_number=last_socket_sent_sequence_number,
-            sender_thread_alive=(
-                sender_thread.is_alive() if sender_thread is not None else False
-            ),
-        )
-
     def _build_envelope(
         self,
         command: CommandType,
@@ -183,7 +183,9 @@ class ProducerChannelMessageSender:
         with self._sequence_cv:
             if self._sender_error is not None:
                 raise RuntimeError("Sender thread is no longer healthy")
-        started_at = self._debug_helper.start_timer()
+        label = _profile_label(envelope)
+        qsize_before_put = self._send_queue.qsize()
+        started = time.monotonic()
         self._send_queue.put(
             QueuedEnvelope(
                 envelope=envelope,
@@ -191,7 +193,30 @@ class ProducerChannelMessageSender:
                 on_failed_send=on_failed_send,
             )
         )
-        self._debug_helper.record_queue_put(started_at)
+        record_duration(
+            "producer.queue_put",
+            label,
+            time.monotonic() - started,
+        )
+        queue_put_elapsed = time.monotonic() - started
+        observe_value(
+            "producer.queue_qsize_before_put",
+            label,
+            float(qsize_before_put),
+        )
+        observe_value(
+            "producer.queue_capacity",
+            label,
+            float(self._send_queue.maxsize),
+        )
+        if queue_put_elapsed >= 0.05:
+            logger.warning(
+                "PROFILE producer_queue_put_blocked label=%s blocked=%.3fs qsize_before=%d maxsize=%d",
+                label,
+                queue_put_elapsed,
+                qsize_before_put,
+                self._send_queue.maxsize,
+            )
 
     def _sender_loop(self) -> None:
         """Serialize socket messages on one thread."""
@@ -202,9 +227,28 @@ class ProducerChannelMessageSender:
                     break
 
                 try:
-                    started_at = self._debug_helper.start_timer()
+                    label = _profile_label(item.envelope)
+                    qsize_after_get = self._send_queue.qsize()
+                    started = time.monotonic()
                     self._comm.send_message(item.envelope)
-                    self._debug_helper.record_socket_send(started_at)
+                    socket_send_elapsed = time.monotonic() - started
+                    record_duration(
+                        "producer.socket_send",
+                        label,
+                        socket_send_elapsed,
+                    )
+                    observe_value(
+                        "producer.queue_qsize_after_get",
+                        label,
+                        float(qsize_after_get),
+                    )
+                    if socket_send_elapsed >= 0.05:
+                        logger.warning(
+                            "PROFILE producer_socket_send_slow label=%s send=%.3fs remaining_qsize=%d",
+                            label,
+                            socket_send_elapsed,
+                            qsize_after_get,
+                        )
                     if item.on_sent is not None:
                         try:
                             item.on_sent()
@@ -221,7 +265,6 @@ class ProducerChannelMessageSender:
                                 )
                             self._sequence_cv.notify_all()
                 except Exception as exc:
-                    self._debug_helper.record_send_error(exc)
                     if item.on_failed_send is not None:
                         try:
                             item.on_failed_send()

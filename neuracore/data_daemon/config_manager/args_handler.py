@@ -30,7 +30,7 @@ from neuracore.data_daemon.config_manager.profiles import (
     ProfileManager,
     ProfileNotFound,
 )
-from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME, SOCKET_PATH
+from neuracore.data_daemon.const import ALL_SOCKET_PATHS, DEFAULT_PROFILE_NAME
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
@@ -251,7 +251,7 @@ def run_stop() -> None:
     if not pid_is_running(pid_value):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(Path(str(SOCKET_PATH)),),
+            socket_paths=tuple(Path(str(path)) for path in ALL_SOCKET_PATHS),
             db_path=db_path,
         )
         typer.echo("Daemon stopped.")
@@ -264,7 +264,7 @@ def run_stop() -> None:
     if wait_for_exit(pid_value, timeout_s=10.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(Path(str(SOCKET_PATH)),),
+            socket_paths=tuple(Path(str(path)) for path in ALL_SOCKET_PATHS),
             db_path=db_path,
         )
         typer.echo("Daemon stopped.")
@@ -277,7 +277,7 @@ def run_stop() -> None:
     if wait_for_exit(pid_value, timeout_s=5.0):
         shutdown(
             pid_path=pid_path,
-            socket_paths=(Path(str(SOCKET_PATH)),),
+            socket_paths=tuple(Path(str(path)) for path in ALL_SOCKET_PATHS),
             db_path=db_path,
         )
         typer.echo("Daemon stopped (forced).")
@@ -301,7 +301,7 @@ def run_status() -> None:
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
-            socket_paths=(str(SOCKET_PATH),),
+            socket_paths=tuple(str(path) for path in ALL_SOCKET_PATHS),
         )
         typer.echo("Daemon not running.")
         return

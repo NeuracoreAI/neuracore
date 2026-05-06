@@ -5,9 +5,12 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 import zlib
 from collections.abc import Callable
 from pathlib import Path
+
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 
 from ..shared_transport.shared_slot_daemon_handler import SharedSlotDaemonHandler
 from .bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
@@ -66,9 +69,29 @@ class _SpoolShard:
 
     def enqueue(self, channel: ChannelState, descriptor_payload: dict) -> None:
         self._ensure_running()
+        qsize_before_put = self._queue.qsize()
+        started = time.monotonic()
         self._queue.put(
             SpoolDescriptorWork(channel=channel, descriptor_payload=descriptor_payload)
         )
+        enqueue_elapsed = time.monotonic() - started
+        record_duration(
+            "daemon.spool.enqueue",
+            "shared_slot_descriptor",
+            enqueue_elapsed,
+        )
+        observe_value(
+            "daemon.spool.queue_qsize_before_put",
+            "shared_slot_descriptor",
+            float(qsize_before_put),
+        )
+        if enqueue_elapsed >= 0.05:
+            logger.warning(
+                "PROFILE daemon_spool_enqueue_blocked blocked=%.3fs qsize_before=%d maxsize=%d",
+                enqueue_elapsed,
+                qsize_before_put,
+                self._queue.maxsize,
+            )
 
     def close(self) -> None:
         self._queue.put(None)
@@ -100,14 +123,27 @@ class _SpoolShard:
                 self._queue.task_done()
 
     def _process(self, work: SpoolDescriptorWork) -> None:
+        started = time.monotonic()
         self._acquire_spool_admission()
         chunk_spool_ref: ChunkSpoolRef | None = None
         try:
+            handle_started = time.monotonic()
             transport_result = self._shared_slot_handler.handle_descriptor(
                 work.channel,
                 work.descriptor_payload,
                 self._chunk_spool,
             )
+            handle_elapsed = time.monotonic() - handle_started
+            record_duration(
+                "daemon.spool.handle_descriptor",
+                "shared_slot_descriptor",
+                handle_elapsed,
+            )
+            if handle_elapsed >= 0.05:
+                logger.warning(
+                    "PROFILE daemon_spool_handle_descriptor_slow elapsed=%.3fs",
+                    handle_elapsed,
+                )
             chunk_spool_ref = transport_result.chunk_spool_ref
         except Exception:
             self._release_spool_admission()
@@ -205,6 +241,17 @@ class _SpoolShard:
         finally:
             if chunk_spool_ref is not None:
                 self._release_chunk_ref(chunk_spool_ref)
+            total_elapsed = time.monotonic() - started
+            record_duration(
+                "daemon.spool.total_process",
+                "shared_slot_descriptor",
+                total_elapsed,
+            )
+            if total_elapsed >= 0.05:
+                logger.warning(
+                    "PROFILE daemon_spool_total_process_slow elapsed=%.3fs",
+                    total_elapsed,
+                )
 
     def _release_chunk_ref(self, ref: ChunkSpoolRef) -> None:
         try:

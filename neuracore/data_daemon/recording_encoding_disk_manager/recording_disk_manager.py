@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import struct
+import time
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from neuracore.data_daemon.const import (
     SENTINEL,
     STORAGE_REFRESH_SECONDS,
 )
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
@@ -78,7 +80,7 @@ class RecordingDiskManager:
 
         self.trace_message_queue: asyncio.Queue[
             CompleteMessage | _RGBTraceMessage | object
-        ] = asyncio.Queue(maxsize=1)
+        ] = asyncio.Queue()
 
         self.recording_traces: dict[str, dict[str, Any]] = {}
 
@@ -182,11 +184,21 @@ class RecordingDiskManager:
         if self._loop_manager is None:
             raise RuntimeError("RecordingDiskManager not started")
 
+        started = time.monotonic()
         queue_item = self._queue_item_for(complete_message)
-        future = self._loop_manager.schedule_on_general_loop(
+        observe_value(
+            "daemon.rdm.trace_queue_qsize_before_put",
+            complete_message.data_type.value,
+            float(self.trace_message_queue.qsize()),
+        )
+        self._loop_manager.schedule_on_general_loop(
             self.trace_message_queue.put(queue_item)
         )
-        future.result()
+        record_duration(
+            "daemon.rdm.enqueue_schedule",
+            complete_message.data_type.value,
+            time.monotonic() - started,
+        )
 
     def _queue_item_for(
         self, complete_message: CompleteMessage

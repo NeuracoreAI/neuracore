@@ -28,7 +28,11 @@ class CommunicationsManager:
     - Producers use `create_producer_socket()` and `send_message()`.
     """
 
-    def __init__(self, context: zmq.Context | None = None) -> None:
+    def __init__(
+        self,
+        context: zmq.Context | None = None,
+        socket_path: Path | str | None = None,
+    ) -> None:
         """Initialize the CommunicationsManager."""
         self._owns_context = context is None
         # ProducerChannel instances may coexist within one process. Using the
@@ -40,6 +44,7 @@ class CommunicationsManager:
         self._consumer_socket: zmq.Socket | None = None
 
         self._producer_socket: zmq.Socket | None = None
+        self._socket_path: Path | str = SOCKET_PATH if socket_path is None else socket_path
 
     def _endpoint(self, socket_path: Path | str) -> str:
         """Build a ZMQ endpoint from a socket path or address."""
@@ -49,11 +54,13 @@ class CommunicationsManager:
             return socket_path
         return f"tcp://{socket_path}"
 
-    def start_consumer(self) -> None:
+    def start_consumer(self, socket_path: Path | str | None = None) -> None:
         """Bind a PULL socket for the daemon.
 
         Enforces a single daemon by failing if the socket path is already bound.
         """
+        if socket_path is not None:
+            self._socket_path = socket_path
         if isinstance(BASE_DIR, Path):
             BASE_DIR.mkdir(parents=True, exist_ok=True)
         if isinstance(self._producer_socket, zmq.Socket):
@@ -64,17 +71,21 @@ class CommunicationsManager:
         if not isinstance(self._consumer_socket, zmq.Socket):
             self._consumer_socket = self._context.socket(zmq.PULL)
 
-        endpoint = _build_endpoint(SOCKET_PATH)
+        endpoint = _build_endpoint(self._socket_path)
 
         try:
             self._consumer_socket.bind(endpoint)
         except zmq.error.ZMQError as e:
             if e.errno == zmq.EADDRINUSE:
-                if isinstance(SOCKET_PATH, Path) and SOCKET_PATH.exists():
+                if (
+                    isinstance(self._socket_path, Path)
+                    and self._socket_path.exists()
+                ):
                     try:
-                        SOCKET_PATH.unlink()
+                        self._socket_path.unlink()
                         logger.warning(
-                            "Removed stale daemon socket file at %s", SOCKET_PATH
+                            "Removed stale daemon socket file at %s",
+                            self._socket_path,
                         )
                     except OSError as cleanup_err:
                         logger.warning(
@@ -105,8 +116,10 @@ class CommunicationsManager:
             return None
         return self._consumer_socket.recv()
 
-    def create_producer_socket(self) -> None:
+    def create_producer_socket(self, socket_path: Path | str | None = None) -> None:
         """Create a PUSH socket to send messages to the daemon."""
+        if socket_path is not None:
+            self._socket_path = socket_path
         if self._consumer_socket is not None:
             raise RuntimeError((
                 "Consumer socket already initialized. ",
@@ -122,7 +135,7 @@ class CommunicationsManager:
         # 1 second timeout for backwards compatibility
         self._producer_socket.setsockopt(zmq.LINGER, 1)
 
-        endpoint = _build_endpoint(SOCKET_PATH)
+        endpoint = _build_endpoint(self._socket_path)
         self._producer_socket.connect(endpoint)
         logger.debug(f"Producer connected to {endpoint}")
 
@@ -141,9 +154,9 @@ class CommunicationsManager:
             self._consumer_socket.close(0)
             self._consumer_socket = None
 
-        if isinstance(SOCKET_PATH, Path) and SOCKET_PATH.exists():
+        if isinstance(self._socket_path, Path) and self._socket_path.exists():
             try:
-                SOCKET_PATH.unlink()
+                self._socket_path.unlink()
             except OSError as e:
                 logger.warning(f"Failed to remove socket file: {e}")
 

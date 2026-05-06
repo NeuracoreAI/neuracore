@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import neuracore as nc
+from neuracore.data_daemon.debug_profiling import log_summary as log_profile_summary
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
@@ -55,6 +56,29 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+
+
+def _log_recording_timer_maxima(*, recording_index: int) -> None:
+    """Log the current max logging-call durations once a recording finishes logging."""
+    labels = (
+        "nc.log_joint_positions",
+        "nc.log_joint_velocities",
+        "nc.log_joint_torques",
+        "nc.log_custom_1d",
+        "nc.log_rgb",
+    )
+    parts: list[str] = []
+    for label in labels:
+        stats = Timer._stats.get(label)
+        if stats is None or stats.get("count", 0.0) <= 0:
+            continue
+        parts.append(f"{label} max={stats['max']:.3f}s")
+    if parts:
+        logger.info(
+            "Recording %d logging timer maxima: %s",
+            recording_index,
+            ", ".join(parts),
+        )
 
 
 def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
@@ -771,6 +795,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 recording_index=recording_index,
                 marker_name="marker_synchronous",
             )
+            _log_recording_timer_maxima(recording_index=recording_index)
+            log_profile_summary(prefix=f"client-recording-{recording_index}", summary_logger=logger)
             if not marker_names:
                 marker_names = current_marker_names
 

@@ -43,6 +43,8 @@ DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS = 5.0
 
 BASE_DIR = Path("/tmp/ndd")
 SOCKET_PATH = BASE_DIR / "management.sock"
+VIDEO_SOCKET_PATH = BASE_DIR / "video_management.sock"
+ALL_SOCKET_PATHS = (SOCKET_PATH, VIDEO_SOCKET_PATH)
 ACK_BASE_DIR = BASE_DIR / "slot_acks"
 
 # Uploads Configuration paths and files

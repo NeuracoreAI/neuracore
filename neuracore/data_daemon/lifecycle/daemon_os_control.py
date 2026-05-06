@@ -14,9 +14,12 @@ from typing import cast
 
 import filelock
 
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.const import ALL_SOCKET_PATHS, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
-
+from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    cleanup_stale_shared_slot_segments,
+    shutdown,
+)
 # cspell:ignore WNOHANG waitpid
 
 
@@ -92,11 +95,6 @@ def cleanup_stale_client_state(
     if existing_pid is None and not pid_file_present and not sockets_present:
         return
 
-    from neuracore.data_daemon.lifecycle.runtime_recovery import (
-        cleanup_stale_shared_slot_segments,
-        shutdown,
-    )
-
     shutdown(
         pid_path=pid_path,
         socket_paths=tuple(Path(path) for path in socket_paths),
@@ -104,36 +102,18 @@ def cleanup_stale_client_state(
     )
     cleanup_stale_shared_slot_segments()
 
-
-def _build_daemon_runner_command() -> list[str]:
-    """Build the command used to launch the daemon runner entrypoint."""
-    return [
-        sys.executable,
-        "-m",
-        "neuracore.data_daemon.runner_entry",
-    ]
-
-
 def _build_daemon_launch_env(
-    *,
-    pid_path: Path,
-    db_path: Path,
     env_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the environment for launching the daemon subprocess."""
     environment = os.environ.copy()
-    environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
-    environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-    environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
+
     if env_overrides:
         environment.update(env_overrides)
     return cast(dict[str, str], environment)
 
 
 def _start_daemon_subprocess(
-    *,
-    pid_path: Path,
-    db_path: Path,
     background: bool,
     env_overrides: dict[str, str] | None = None,
     stdout: int | None = None,
@@ -141,18 +121,20 @@ def _start_daemon_subprocess(
 ) -> subprocess.Popen:
     """Start the daemon runner subprocess with the requested terminal mode."""
     environment = _build_daemon_launch_env(
-        pid_path=pid_path,
-        db_path=db_path,
         env_overrides=env_overrides,
     )
-    current_working_directory = str(Path.cwd())
-
+    runner_command = [
+        sys.executable,
+        "-m",
+        "neuracore.data_daemon.runner_entry",
+    ]
+    
     try:
         if background:
             return subprocess.Popen(
-                _build_daemon_runner_command(),
+                runner_command,
                 close_fds=True,
-                cwd=current_working_directory,
+                cwd=str(Path.cwd()),
                 env=environment,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
@@ -161,9 +143,9 @@ def _start_daemon_subprocess(
             )
 
         return subprocess.Popen(
-            _build_daemon_runner_command(),
+            runner_command,
             close_fds=True,
-            cwd=current_working_directory,
+            cwd=str(Path.cwd()),
             env=environment,
             start_new_session=False,
             stdout=stdout,
@@ -174,9 +156,7 @@ def _start_daemon_subprocess(
 
 
 def launch_daemon_subprocess(
-    *,
     pid_path: Path,
-    db_path: Path,
     background: bool = True,
     timeout_s: float = 10.0,
     env_overrides: dict[str, str] | None = None,
@@ -187,8 +167,6 @@ def launch_daemon_subprocess(
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
     process = _start_daemon_subprocess(
-        pid_path=pid_path,
-        db_path=db_path,
         background=background,
         env_overrides=env_overrides,
         stdout=stdout,
@@ -219,7 +197,6 @@ def launch_daemon_subprocess(
 
 
 def launch_new_daemon_subprocess(
-    *,
     pid_path: Path,
     db_path: Path,
     background: bool,
@@ -240,12 +217,11 @@ def launch_new_daemon_subprocess(
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
-            socket_paths=(str(SOCKET_PATH),),
+            socket_paths=tuple(str(path) for path in ALL_SOCKET_PATHS),
         )
 
         return launch_daemon_subprocess(
             pid_path=pid_path,
-            db_path=db_path,
             background=background,
             timeout_s=timeout_s,
             env_overrides=env_overrides,
@@ -264,9 +240,6 @@ def ensure_daemon_running(
     db_path = get_daemon_db_path()
     pid_file_lock = str(pid_path) + ".lock"
 
-    os.environ.setdefault("NEURACORE_DAEMON_PID_PATH", str(pid_path))
-    os.environ.setdefault("NEURACORE_DAEMON_DB_PATH", str(db_path))
-
     with filelock.FileLock(pid_file_lock):
         existing_pid = read_pid_from_file(pid_path)
         if existing_pid is not None and pid_is_running(existing_pid):
@@ -275,11 +248,10 @@ def ensure_daemon_running(
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
-            socket_paths=(str(SOCKET_PATH),),
+            socket_paths=tuple(str(path) for path in ALL_SOCKET_PATHS),
         )
         process = launch_daemon_subprocess(
             pid_path=pid_path,
-            db_path=db_path,
             background=True,
             timeout_s=timeout_s,
             env_overrides=env_overrides,

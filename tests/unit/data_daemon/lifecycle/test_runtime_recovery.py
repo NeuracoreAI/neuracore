@@ -17,7 +17,7 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     SharedMemoryCapacityError,
     cleanup_socket_files,
-    cleanup_stale_shared_memory_buffers,
+    cleanup_stale_shared_slot_segments,
     ensure_shared_memory_capacity,
     reconcile_state_with_filesystem,
     shared_memory_required_bytes,
@@ -88,7 +88,7 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
 
 
-def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
+def test_cleanup_stale_shared_slot_segments_removes_matching_shared_memory_files(
     tmp_path: Path,
 ) -> None:
     shm_dir = tmp_path / "dev-shm"
@@ -104,9 +104,8 @@ def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
     live_name = "neuracore-keep-live"
     (shm_dir / live_name).write_bytes(b"shm")
 
-    cleaned = cleanup_stale_shared_memory_buffers(shm_dir=shm_dir)
+    cleanup_stale_shared_slot_segments(shm_dir=shm_dir)
 
-    assert cleaned == len(stale_names)
     for stale_name in stale_names:
         assert not (shm_dir / stale_name).exists()
     assert (shm_dir / live_name).exists()

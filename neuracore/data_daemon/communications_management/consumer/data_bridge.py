@@ -4,16 +4,25 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timezone
+import json
 
 from neuracore_types import DataType
 
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path, utc_now
+from neuracore.data_daemon.const import SOCKET_PATH, VIDEO_SOCKET_PATH
+from neuracore.data_daemon.debug_profiling import (
+    log_summary as log_profile_summary,
+    observe_value,
+    record_duration,
+)
 from neuracore.data_daemon.models import (
+    BatchedJointDataPayload,
     CommandType,
     CompleteMessage,
     DataChunkPayload,
@@ -63,6 +72,7 @@ class DataBridge:
         recording_disk_manager: RecordingDiskManager,
         emitter: Emitter,
         comm_manager: CommunicationsManager | None = None,
+        video_comm_manager: CommunicationsManager | None = None,
     ) -> None:
         """Initializes the daemon.
 
@@ -73,7 +83,10 @@ class DataBridge:
             comm_manager: The communications manager for ZMQ operations.
                 If not provided, a new instance will be created.
         """
-        self.comm = comm_manager or CommunicationsManager()
+        self.comm = comm_manager or CommunicationsManager(socket_path=SOCKET_PATH)
+        self.video_comm = video_comm_manager or CommunicationsManager(
+            socket_path=VIDEO_SOCKET_PATH
+        )
         self.recording_disk_manager = recording_disk_manager
         self.channels = ChannelRegistry()
         self._closed_producers = ClosedProducerRegistry()
@@ -106,12 +119,17 @@ class DataBridge:
             CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
             CommandType.SHARED_SLOT_DESCRIPTOR: self._handle_shared_slot_descriptor,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
+            CommandType.BATCHED_JOINT_DATA: self._handle_batched_joint_data,
             CommandType.HEARTBEAT: self._handle_heartbeat,
             CommandType.TRACE_END: self._handle_end_trace,
         }
 
         self._emitter = emitter
         self._running = False
+        self._state_lock = threading.RLock()
+        self._receiver_errors: queue.Queue[Exception] = queue.Queue()
+        self._receiver_threads: list[threading.Thread] = []
+        self._housekeeping_thread: threading.Thread | None = None
         self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_channel_on_trace_written)
 
     def run(self) -> None:
@@ -133,36 +151,55 @@ class DataBridge:
 
         self._running = True
         self.comm.start_consumer()
+        self.video_comm.start_consumer()
 
         logger.info("Daemon started and ready to receive messages...")
         try:
-            last_receive_log_at = datetime.now(timezone.utc)
-            datetime.now(timezone.utc)
-            loop_count = 0
+            self._receiver_threads = [
+                threading.Thread(
+                    target=self._receiver_loop,
+                    args=(self.comm,),
+                    name="daemon-management-receiver",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=self._receiver_loop,
+                    args=(self.video_comm,),
+                    name="daemon-video-receiver",
+                    daemon=True,
+                ),
+            ]
+            for thread in self._receiver_threads:
+                thread.start()
+
+            self._housekeeping_thread = threading.Thread(
+                target=self._housekeeping_loop,
+                name="daemon-housekeeping",
+                daemon=True,
+            )
+            self._housekeeping_thread.start()
 
             while self._running:
-                loop_count += 1
-                self._trace_lifecycle.finalize_closing_recordings()
-
-                raw = self.comm.receive_raw()
-
-                now = datetime.now(timezone.utc)
-
-                if raw:
-                    self.process_raw_message(raw)
-
-                if (now - last_receive_log_at).total_seconds() >= 1.0:
-                    last_receive_log_at = now
-
-                self._cleanup_expired_channels()
+                try:
+                    exc = self._receiver_errors.get(timeout=0.1)
+                except queue.Empty:
+                    continue
+                raise RuntimeError("Daemon receiver loop failed") from exc
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._running = False
+            for thread in self._receiver_threads:
+                thread.join(timeout=1.0)
+            if self._housekeeping_thread is not None:
+                self._housekeeping_thread.join(timeout=1.0)
+            log_profile_summary(prefix="daemon", summary_logger=logger)
             self._spool_worker.close()
             self._completion_worker.close()
             self._spool_worker.cleanup()
             self._shared_slot_handler.close()
             self.comm.cleanup_daemon()
+            self.video_comm.cleanup_daemon()
 
     def stop(
         self,
@@ -173,6 +210,29 @@ class DataBridge:
         to exit on the next iteration.
         """
         self._running = False
+
+    def _receiver_loop(self, comm: CommunicationsManager) -> None:
+        """Drain one daemon socket continuously until shutdown."""
+        try:
+            while self._running:
+                raw = comm.receive_raw()
+                if raw:
+                    self.process_raw_message(raw)
+        except Exception as exc:
+            self._receiver_errors.put(exc)
+            self._running = False
+
+    def _housekeeping_loop(self) -> None:
+        """Run periodic lifecycle housekeeping independently of socket drain."""
+        try:
+            while self._running:
+                with self._state_lock:
+                    self._trace_lifecycle.finalize_closing_recordings()
+                    self._cleanup_expired_channels()
+                time.sleep(0.01)
+        except Exception as exc:
+            self._receiver_errors.put(exc)
+            self._running = False
 
     def process_raw_message(self, raw: bytes) -> None:
         """Process a raw message from a producer.
@@ -214,48 +274,70 @@ class DataBridge:
             if cmd != CommandType.RECORDING_STOPPED:
                 logger.warning("Missing producer_id for command %s", cmd)
                 return
-            self._trace_lifecycle.handle_recording_stopped(message)
+            with self._state_lock:
+                self._trace_lifecycle.handle_recording_stopped(message)
             return
 
-        if (
-            self._closed_producers.contains(producer_id)
-            and cmd != CommandType.OPEN_FIXED_SHARED_SLOTS
-        ):
-            return
+        with self._state_lock:
+            if (
+                self._closed_producers.contains(producer_id)
+                and cmd != CommandType.OPEN_FIXED_SHARED_SLOTS
+            ):
+                return
 
-        if (
-            cmd == CommandType.OPEN_FIXED_SHARED_SLOTS
-            and self._closed_producers.contains(producer_id)
-        ):
-            self._closed_producers.discard(producer_id)
+            if (
+                cmd == CommandType.OPEN_FIXED_SHARED_SLOTS
+                and self._closed_producers.contains(producer_id)
+            ):
+                self._closed_producers.discard(producer_id)
 
-        existing = self.channels.get(producer_id)
-        if existing is None:
-            existing = ChannelState(producer_id=producer_id)
-            self.channels.add(existing)
-        channel = existing
-        channel.touch()
+            existing = self.channels.get(producer_id)
+            if existing is None:
+                existing = ChannelState(producer_id=producer_id)
+                self.channels.add(existing)
+            channel = existing
+            channel.touch()
 
-        handler = self._command_handlers.get(cmd)
-        if handler is None:
-            logger.warning("Unknown command %s from producer_id=%s", cmd, producer_id)
-            return
-
-        if message.sequence_number is not None:
-            if message.sequence_number > channel.last_sequence_number:
-                channel.last_sequence_number = message.sequence_number
-                self._trace_lifecycle.note_producer_sequence(
-                    producer_id, channel.last_sequence_number
-                )
-            else:
+            handler = self._command_handlers.get(cmd)
+            if handler is None:
                 logger.warning(
-                    "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
-                    message.sequence_number,
-                    producer_id,
-                    channel.last_sequence_number,
+                    "Unknown command %s from producer_id=%s", cmd, producer_id
                 )
+                return
+
+            if message.sequence_number is not None:
+                if message.sequence_number > channel.last_sequence_number:
+                    channel.last_sequence_number = message.sequence_number
+                    self._trace_lifecycle.note_producer_sequence(
+                        producer_id, channel.last_sequence_number
+                    )
+                else:
+                    logger.warning(
+                        "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
+                        message.sequence_number,
+                        producer_id,
+                        channel.last_sequence_number,
+                    )
         try:
-            handler(channel, message)
+            started = time.monotonic()
+            if cmd == CommandType.SHARED_SLOT_DESCRIPTOR:
+                handler(channel, message)
+            else:
+                with self._state_lock:
+                    handler(channel, message)
+            handle_elapsed = time.monotonic() - started
+            record_duration(
+                "daemon.handle_message",
+                cmd.value,
+                handle_elapsed,
+            )
+            if handle_elapsed >= 0.05:
+                logger.warning(
+                    "PROFILE daemon_handle_message_slow command=%s elapsed=%.3fs producer_id=%s",
+                    cmd.value,
+                    handle_elapsed,
+                    producer_id,
+                )
         except Exception:
             logger.exception(
                 "Failed to handle command %s from producer_id=%s",
@@ -279,21 +361,23 @@ class DataBridge:
         if sequence_number is None:
             raise ValueError("Shared-slot descriptor missing sequence_number")
 
-        self._mark_shared_slot_sequence_pending(
-            SharedSlotSequenceProgressRequest(
-                producer_id=channel.producer_id,
-                sequence_number=sequence_number,
-            )
-        )
-        try:
-            self._spool_worker.enqueue(channel, descriptor_payload)
-        except Exception:
-            self._mark_shared_slot_sequence_completed(
+        with self._state_lock:
+            self._mark_shared_slot_sequence_pending(
                 SharedSlotSequenceProgressRequest(
                     producer_id=channel.producer_id,
                     sequence_number=sequence_number,
                 )
             )
+        try:
+            self._spool_worker.enqueue(channel, descriptor_payload)
+        except Exception:
+            with self._state_lock:
+                self._mark_shared_slot_sequence_completed(
+                    SharedSlotSequenceProgressRequest(
+                        producer_id=channel.producer_id,
+                        sequence_number=sequence_number,
+                    )
+                )
             raise
 
     def _on_complete_message(
@@ -460,6 +544,83 @@ class DataBridge:
             recording_id=recording_id,
         )
 
+    def _handle_batched_joint_data(
+        self, channel: ChannelState, message: MessageEnvelope
+    ) -> None:
+        """Handle one batched joint transport message from a producer."""
+        batch_payload_dict = message.payload.get(CommandType.BATCHED_JOINT_DATA.value, {})
+
+        batch_payload = BatchedJointDataPayload.from_dict(batch_payload_dict)
+        if not batch_payload.items:
+            logger.warning("BATCHED_JOINT_DATA received without items")
+            return
+        observe_value(
+            "daemon.batched_joint.items",
+            batch_payload.data_type.value,
+            float(len(batch_payload.items)),
+        )
+
+        recording_id = batch_payload.recording_id
+        if not recording_id:
+            logger.warning(
+                "BATCHED_JOINT_DATA missing recording_id producer_id=%s",
+                channel.producer_id,
+            )
+            return
+
+        first_trace_id = batch_payload.items[0].trace_id
+        if self._should_drop_recording_data(
+            RecordingDataDropRequest(
+                channel=channel,
+                recording_id=recording_id,
+                trace_id=first_trace_id,
+                sequence_number=message.sequence_number,
+            )
+        ):
+            return
+
+        started = time.monotonic()
+        for item in batch_payload.items:
+            self._trace_lifecycle.register_trace(recording_id, item.trace_id)
+            self._trace_lifecycle.register_trace_metadata(
+                TraceMetadataRegistrationRequest(
+                    trace_id=item.trace_id,
+                    metadata=TraceMetadataSnapshot(
+                        dataset_id=batch_payload.dataset_id,
+                        dataset_name=batch_payload.dataset_name,
+                        robot_name=batch_payload.robot_name,
+                        robot_id=batch_payload.robot_id,
+                        robot_instance=batch_payload.robot_instance,
+                        data_type=batch_payload.data_type.value,
+                        data_type_name=item.data_type_name,
+                    ),
+                )
+            )
+            joint_bytes = json.dumps({
+                "timestamp": batch_payload.timestamp,
+                "value": item.value,
+            }).encode("utf-8")
+            self._on_complete_message(
+                channel=channel,
+                trace_id=item.trace_id,
+                data_type=batch_payload.data_type,
+                data=joint_bytes,
+                recording_id=recording_id,
+            )
+        expand_elapsed = time.monotonic() - started
+        record_duration(
+            "daemon.batched_joint.expand_and_enqueue",
+            batch_payload.data_type.value,
+            expand_elapsed,
+        )
+        if expand_elapsed >= 0.05:
+            logger.warning(
+                "PROFILE daemon_batched_joint_slow data_type=%s elapsed=%.3fs items=%d",
+                batch_payload.data_type.value,
+                expand_elapsed,
+                len(batch_payload.items),
+            )
+
     def _handle_end_trace(
         self,
         channel: ChannelState,
@@ -485,29 +646,30 @@ class DataBridge:
         :param trace_id: ID of the trace to clean up
         :param bytes_written: total number of bytes written for the trace (unused)
         """
-        self._trace_lifecycle.cleanup_trace_written(trace_id)
+        with self._state_lock:
+            self._trace_lifecycle.cleanup_trace_written(trace_id)
 
-        channel = next(
-            (ch for ch in self.channels.values() if ch.trace_id == trace_id),
-            None,
-        )
-        if channel is not None:
-            if channel.uses_shared_memory_transport() and (
-                channel.shared_slot.shm_name is not None
-                or channel.socket_pending_messages
-            ):
-                logger.debug(
-                    "Cleaning up channel after TRACE_WRITTEN producer_id=%s "
-                    "trace_id=%s shm_name=%s pending_partial_traces=%d",
-                    channel.producer_id,
-                    trace_id,
-                    channel.shared_slot.shm_name,
-                    len(channel.socket_pending_messages),
-                )
-            channel.trace_id = None
-            if channel.uses_shared_memory_transport():
-                self._shared_slot_handler.cleanup_channel_resources(channel)
-            channel.clear_transport_state()
+            channel = next(
+                (ch for ch in self.channels.values() if ch.trace_id == trace_id),
+                None,
+            )
+            if channel is not None:
+                if channel.uses_shared_memory_transport() and (
+                    channel.shared_slot.shm_name is not None
+                    or channel.socket_pending_messages
+                ):
+                    logger.debug(
+                        "Cleaning up channel after TRACE_WRITTEN producer_id=%s "
+                        "trace_id=%s shm_name=%s pending_partial_traces=%d",
+                        channel.producer_id,
+                        trace_id,
+                        channel.shared_slot.shm_name,
+                        len(channel.socket_pending_messages),
+                    )
+                channel.trace_id = None
+                if channel.uses_shared_memory_transport():
+                    self._shared_slot_handler.cleanup_channel_resources(channel)
+                channel.clear_transport_state()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""

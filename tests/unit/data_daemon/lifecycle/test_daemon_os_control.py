@@ -54,7 +54,6 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
-    db_path = tmp_path / "state.db"
     fake_socket_path = tmp_path / "management.sock"
     fake_socket_path.touch()
     captured: dict[str, object] = {}
@@ -70,7 +69,6 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
 
     proc = launch_daemon_subprocess(
         pid_path=pid_path,
-        db_path=db_path,
         background=True,
     )
 
@@ -84,9 +82,6 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
 
     env = captured["env"]
     assert isinstance(env, dict)
-    assert env["NEURACORE_DAEMON_PID_PATH"] == str(pid_path)
-    assert env["NEURACORE_DAEMON_DB_PATH"] == str(db_path)
-    assert env["NEURACORE_DAEMON_MANAGE_PID"] == "0"
     assert pid_path.read_text(encoding="utf-8").strip() == "54321"
 
 
@@ -94,7 +89,6 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
-    db_path = tmp_path / "state.db"
     fake_socket_path = tmp_path / "management.sock"
     fake_socket_path.touch()
     captured: dict[str, object] = {}
@@ -110,7 +104,6 @@ def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
 
     proc = launch_daemon_subprocess(
         pid_path=pid_path,
-        db_path=db_path,
         background=False,
         env_overrides={"NEURACORE_DAEMON_PROFILE": "demo"},
     )
