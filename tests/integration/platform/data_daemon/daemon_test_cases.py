@@ -1,5 +1,3 @@
-from dataclasses import replace
-
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
 )
@@ -12,7 +10,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TIMESTAMP_MODE_STOCHASTIC,
 )
 
-INTEGRITY_CASES = (
+PRE_NETWORK_INTEGRITY_CASES = (
     DataDaemonTestCase(
         duration_sec=10,
         joint_count=7,
@@ -93,8 +91,85 @@ INTEGRITY_CASES = (
     ),
 )
 
-PRE_NETWORK_INTEGRITY_CASES = INTEGRITY_CASES
-NETWORK_INTEGRITY_CASES = INTEGRITY_CASES + (
+NETWORK_INTEGRITY_CASES = (
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        parallel_contexts=1,
+        recording_count=1,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=4,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+        producer_channels=PRODUCER_PER_THREAD,
+        parallel_contexts=2,
+        mode=MODE_STAGGERED,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=4,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+        producer_channels=PRODUCER_PER_THREAD,
+        parallel_contexts=2,
+        mode=MODE_STAGGERED,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=1,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=1000,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+        wait=False,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=4,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=500,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        wait=False,
+    ),
     DataDaemonTestCase(
         duration_sec=5,
         joint_count=7,
@@ -185,12 +260,162 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
     ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=1,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=1000,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+        wait=False,
+    ),
 )
 
 NETWORK_PERFORMANCE_CASES = (
-    *[
-        c
-        for pair in PRE_NETWORK_PERFORMANCE_CASES
-        for c in (pair, replace(pair, wait=True))
-    ],
+    # High frequency robot control at 210Hz joint data
+    # Tests: high-frequency sampling, temporal jitter, joint-only streaming
+    DataDaemonTestCase(
+        duration_sec=60,
+        joint_count=7,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=5,
+        context_duration_mode=DURATION_MODE_FIXED,
+        joint_fps=210,
+    ),
+    DataDaemonTestCase(
+        duration_sec=60,
+        joint_count=7,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=5,
+        context_duration_mode=DURATION_MODE_FIXED,
+        joint_fps=210,
+        wait=True,
+    ),
+    # High number of medium-throughput robots with synchronized
+    # recordings. Tests: multi-robot contention, mixed data types,
+    # moderate-res cameras (256x256),
+    # one producer thread per robot, back-to-back recordings
+    DataDaemonTestCase(
+        duration_sec=20,
+        joint_count=7,
+        video_count=1,
+        image_width=256,
+        image_height=256,
+        parallel_contexts=8,
+        recording_count=16,
+        joint_fps=80,
+        producer_channels=PRODUCER_PER_THREAD,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+    ),
+    DataDaemonTestCase(
+        duration_sec=20,
+        joint_count=7,
+        video_count=1,
+        image_width=256,
+        image_height=256,
+        parallel_contexts=8,
+        recording_count=16,
+        joint_fps=80,
+        producer_channels=PRODUCER_PER_THREAD,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        wait=True,
+    ),
+    # Large number of joints without cameras (1000 joints)
+    # Tests: high joint dimensionality, memory efficiency, sensor-only workload
+    DataDaemonTestCase(
+        duration_sec=30,
+        joint_count=1000,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=3,
+    ),
+    DataDaemonTestCase(
+        duration_sec=30,
+        joint_count=1000,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=3,
+        wait=True,
+    ),
+    # 3x longer duration recordings
+    # Tests: long-running stability, memory leak detection, large dataset
+    # accumulation
+    DataDaemonTestCase(
+        duration_sec=300,
+        joint_count=10,
+        video_count=1,
+        image_width=1920,
+        image_height=1080,
+        parallel_contexts=2,
+        recording_count=16,
+        context_duration_mode=DURATION_MODE_FIXED,
+    ),
+    DataDaemonTestCase(
+        duration_sec=300,
+        joint_count=10,
+        video_count=1,
+        image_width=1920,
+        image_height=1080,
+        parallel_contexts=2,
+        recording_count=16,
+        context_duration_mode=DURATION_MODE_FIXED,
+        wait=True,
+    ),
+    DataDaemonTestCase(
+        duration_sec=300,
+        joint_count=10,
+        video_count=1,
+        image_width=1920,
+        image_height=1080,
+        parallel_contexts=2,
+        recording_count=16,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+    ),
+    DataDaemonTestCase(
+        duration_sec=300,
+        joint_count=10,
+        video_count=1,
+        image_width=1920,
+        image_height=1080,
+        parallel_contexts=2,
+        recording_count=16,
+        context_duration_mode=DURATION_MODE_VARIABLE,
+        video_fps=30,
+        joint_fps=15,
+        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        wait=True,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=1,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=1000,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+    ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        recording_count=1,
+        video_count=1,
+        image_height=120,
+        image_width=120,
+        video_fps=120,
+        joint_fps=1000,
+        producer_channels=PRODUCER_PER_THREAD,
+        timestamp_mode=TIMESTAMP_MODE_REAL,
+        wait=True,
+    ),
 )

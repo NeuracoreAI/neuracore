@@ -347,6 +347,7 @@ def log_synchronous_frames(
                 label="nc.log_joint_positions",
                 deadline=joint_deadline if assert_deadline else None,
                 timing_tolerance=timing_tolerance,
+                assert_limit=assert_deadline,
             ):
                 nc.log_joint_positions(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -356,6 +357,7 @@ def log_synchronous_frames(
                 label="nc.log_joint_velocities",
                 deadline=joint_deadline if assert_deadline else None,
                 timing_tolerance=timing_tolerance,
+                assert_limit=assert_deadline,
             ):
                 nc.log_joint_velocities(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -365,6 +367,7 @@ def log_synchronous_frames(
                 label="nc.log_joint_torques",
                 deadline=joint_deadline if assert_deadline else None,
                 timing_tolerance=timing_tolerance,
+                assert_limit=assert_deadline,
             ):
                 nc.log_joint_torques(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -374,6 +377,7 @@ def log_synchronous_frames(
                 label="nc.log_custom_1d",
                 deadline=joint_deadline if assert_deadline else None,
                 timing_tolerance=timing_tolerance,
+                assert_limit=assert_deadline,
             ):
                 nc.log_custom_1d(
                     marker_name,
@@ -405,6 +409,7 @@ def log_synchronous_frames(
                     label="nc.log_rgb",
                     deadline=video_deadline if assert_deadline else None,
                     timing_tolerance=timing_tolerance,
+                    assert_limit=assert_deadline,
                 ):
                     nc.log_rgb(
                         camera_name,
@@ -506,6 +511,7 @@ def run_threaded_logging(
                             label="nc.log_rgb",
                             deadline=frame_deadline if assert_deadline else None,
                             timing_tolerance=timing_tolerance,
+                            assert_limit=assert_deadline,
                         ):
                             nc.log_rgb(
                                 camera_id,
@@ -524,6 +530,7 @@ def run_threaded_logging(
                             label="nc.log_joint_positions",
                             deadline=frame_deadline if assert_deadline else None,
                             timing_tolerance=timing_tolerance,
+                            assert_limit=assert_deadline,
                         ):
                             nc.log_joint_positions(
                                 joint_values,
@@ -536,6 +543,7 @@ def run_threaded_logging(
                             label="nc.log_joint_velocities",
                             deadline=frame_deadline if assert_deadline else None,
                             timing_tolerance=timing_tolerance,
+                            assert_limit=assert_deadline,
                         ):
                             nc.log_joint_velocities(
                                 joint_values,
@@ -548,6 +556,7 @@ def run_threaded_logging(
                             label="nc.log_joint_torques",
                             deadline=frame_deadline if assert_deadline else None,
                             timing_tolerance=timing_tolerance,
+                            assert_limit=assert_deadline,
                         ):
                             nc.log_joint_torques(
                                 joint_values,
@@ -559,6 +568,7 @@ def run_threaded_logging(
                     label="nc.log_custom_1d",
                     deadline=frame_deadline if assert_deadline else None,
                     timing_tolerance=timing_tolerance,
+                    assert_limit=assert_deadline,
                 ):
                     nc.log_custom_1d(
                         marker_name,
@@ -830,7 +840,6 @@ def run_case_contexts(
     case: DataDaemonTestCase,
     *,
     specs: list[ContextSpec] | None = None,
-    assert_deadline: bool = False,
     assert_mode: bool = True,
     wait_for_traces: bool = False,
 ) -> list[ContextResult]:
@@ -844,8 +853,6 @@ def run_case_contexts(
         case: The test case defining parallelism level and context matrix.
         specs: Pre-built context specs to run. If None, built from ``case``
             via :func:`build_context_specs`.
-        assert_deadline: Passed through to :func:`build_context_specs` when
-            ``specs`` is ``None``.
         assert_mode: When ``True`` (default), calls :func:`assert_context_mode`
             after running to verify expected parallelization behaviour.
         wait_for_traces: When ``True``, waits for all traces to be written to
@@ -855,7 +862,7 @@ def run_case_contexts(
         List of result dicts from each context worker, one per spec.
     """
     if specs is None:
-        specs = build_context_specs(case, assert_deadline=assert_deadline)
+        specs = build_context_specs(case)
 
     if case.parallel_contexts == 1:
         results = [context_worker(specs[0])]

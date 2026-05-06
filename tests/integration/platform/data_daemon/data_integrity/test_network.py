@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    PRE_NETWORK_INTEGRITY_CASES,
+    NETWORK_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
@@ -35,7 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 _CASES = DataDaemonTestBatch(
-    cases=PRE_NETWORK_INTEGRITY_CASES,
+    cases=NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_PRESERVE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
@@ -91,7 +91,6 @@ def test_cloud_data_integrity(
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
-
     with scoped_storage_state(case, dataset_name=dataset_name):
         try:
             with online_daemon_running():

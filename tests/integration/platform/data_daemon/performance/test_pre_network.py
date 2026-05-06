@@ -15,6 +15,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_ids,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    build_context_specs,
     create_testing_dataset_name,
     run_case_contexts,
 )
@@ -49,11 +50,12 @@ def test_disk_db_write_performance(
     """
 
     dataset_name = create_testing_dataset_name(case)
+    specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
     with scoped_storage_state(case, dataset_name=dataset_name):
         with offline_daemon_running():
             results = []
             try:
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, wait_for_traces=True)
+                results = run_case_contexts(case, specs=specs, wait_for_traces=True)
             finally:
                 log_run_analysis_on_teardown(case, results)
