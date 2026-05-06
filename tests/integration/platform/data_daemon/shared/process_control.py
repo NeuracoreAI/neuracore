@@ -77,7 +77,7 @@ class Timer:
             ``max_time``.
         log_threshold: Log at INFO level when elapsed time meets or exceeds
             this value.  ``None`` disables.
-        assert_limit: When ``True`` (default), raise ``AssertionError`` if
+        assert_deadline: When ``True`` (default), raise ``AssertionError`` if
             the block exceeds ``max_time``.  Set to ``False`` to log only.
     """
 
@@ -89,17 +89,13 @@ class Timer:
         label: str | None = None,
         always_log: bool = False,
         log_threshold: float | None = None,
-        assert_limit: bool = True,
-        deadline: float | None = None,
-        timing_tolerance: float | None = None,
+        assert_deadline: bool = True,
     ) -> None:
         self.max_time = max_time
         self.label = label
         self.always_log = always_log
         self.log_threshold = log_threshold
-        self.assert_limit = assert_limit
-        self.deadline = deadline
-        self.timing_tolerance = timing_tolerance
+        self.assert_deadline = assert_deadline
 
     def __enter__(self) -> Timer:
         self.wall_start = time.time()
@@ -139,14 +135,7 @@ class Timer:
         if had_exception:
             return False
 
-        if self.assert_limit:
-            if self.deadline is not None and self.timing_tolerance is not None:
-                lateness = self.wall_start - self.deadline
-                assert abs(lateness) <= self.timing_tolerance, (
-                    f"{self.label or 'Function'} logged at wrong moment: "
-                    f"lateness={lateness:+.3f}s, "
-                    f"tolerance=±{self.timing_tolerance:.3f}s"
-                )
+        if self.assert_deadline:
             assert self.interval < self.max_time, (
                 f"{self.label or 'Function'} took too long: "
                 f"{self.interval:.3f}s >= {self.max_time:.3f}s"
@@ -163,6 +152,19 @@ class Timer:
             existing["count"] += incoming["count"]
             existing["total"] += incoming["total"]
             existing["max"] = max(existing["max"], incoming["max"])
+
+
+def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
+    """Assert the producer fired at the intended wall-clock moment.
+
+    Independent of any duration check: bounds *when* a logging call started,
+    not how long it took.
+    """
+    lateness = time.time() - deadline
+    assert abs(lateness) <= tolerance, (
+        f"{label} fired at wrong moment: "
+        f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +245,7 @@ def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -
         if not pid_is_running(pid):
             continue
         if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-            with Timer(5.0, label="stop_daemon_escalated", assert_limit=False):
+            with Timer(5.0, label="stop_daemon_escalated", assert_deadline=False):
                 force_kill(pid)
                 wait_for_exit(pid, timeout_s=5.0)
 
@@ -274,7 +276,7 @@ def stop_daemon(
         graceful_timeout_s: Seconds to wait for graceful exit before escalating
             to SIGKILL.  Ignored when ``method="sigkill"``.
     """
-    with Timer(15.0, label=f"stop_daemon[{method}]", assert_limit=False):
+    with Timer(15.0, label=f"stop_daemon[{method}]", assert_deadline=False):
         candidate_pids = _collect_candidate_pids()
         _send_initial_stop(method, candidate_pids)
         if method == STOP_METHOD_SIGKILL:

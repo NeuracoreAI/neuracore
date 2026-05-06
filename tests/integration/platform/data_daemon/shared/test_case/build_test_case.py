@@ -270,9 +270,9 @@ def case_id(case: DataDaemonTestCase) -> str:
         f"{case.duration_sec}s",
         f"{case.recording_count}recs",
         *(["variable"] if case.context_duration_mode == DURATION_MODE_VARIABLE else []),
-        f"{case.parallel_contexts}ctx",
     ]
     if case.parallel_contexts > DataDaemonTestCase.parallel_contexts:
+        parts.append(f"{case.parallel_contexts}ctx")
         parts.append(mode_short)
     parts.append(f"{case.joint_count}joints")
     if case.joint_fps != DataDaemonTestCase.joint_fps:

@@ -112,7 +112,7 @@ def test_cancel_recording_produces_no_data(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                     label="nc.cancel_recording",
                     always_log=True,
-                    assert_limit=False,
+                    assert_deadline=False,
                 ):
                     nc.cancel_recording(robot_name=robot_name)
 
@@ -122,7 +122,7 @@ def test_cancel_recording_produces_no_data(
                     MAX_TIME_TO_START_S,
                     label="nc.get_dataset",
                     always_log=True,
-                    assert_limit=False,
+                    assert_deadline=False,
                 ):
                     dataset = nc.get_dataset(dataset_name)
                 assert (
@@ -196,7 +196,7 @@ def test_cancel_then_start_new_recording(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                     label="nc.cancel_recording",
                     always_log=True,
-                    assert_limit=False,
+                    assert_deadline=False,
                 ):
                     nc.cancel_recording(robot_name=robot_name)
 
@@ -219,7 +219,7 @@ def test_cancel_then_start_new_recording(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                     label="nc.stop_recording",
                     always_log=True,
-                    assert_limit=False,
+                    assert_deadline=False,
                 ):
                     nc.stop_recording(robot_name=robot_name, wait=True)
                 wall_stopped_at = time.time()

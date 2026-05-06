@@ -23,6 +23,7 @@ from tests.integration.platform.data_daemon.shared.assertions import assert_cont
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
+    assert_on_schedule,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
@@ -45,6 +46,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
+    SCHEDULER_TOLERANCE_S,
     STOCHASTIC_JITTER_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
     TIMESTAMP_MODE_REAL,
@@ -309,7 +311,6 @@ def log_synchronous_frames(
     Joint and video frames are interleaved in a single loop using a wall-clock
     deadline scheduler, so both streams advance together in time order.
     """
-    timing_tolerance = STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
@@ -336,6 +337,10 @@ def log_synchronous_frames(
             remaining = joint_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
+            if assert_deadline and use_stochastic_timestamps:
+                assert_on_schedule(
+                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
+                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -345,8 +350,7 @@ def log_synchronous_frames(
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_positions",
-                deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                assert_deadline=assert_deadline,
             ):
                 nc.log_joint_positions(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -354,8 +358,7 @@ def log_synchronous_frames(
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_velocities",
-                deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                assert_deadline=assert_deadline,
             ):
                 nc.log_joint_velocities(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -363,8 +366,7 @@ def log_synchronous_frames(
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_torques",
-                deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                assert_deadline=assert_deadline,
             ):
                 nc.log_joint_torques(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -372,8 +374,7 @@ def log_synchronous_frames(
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_custom_1d",
-                deadline=joint_deadline if assert_deadline else None,
-                timing_tolerance=timing_tolerance,
+                assert_deadline=assert_deadline,
             ):
                 nc.log_custom_1d(
                     marker_name,
@@ -386,6 +387,10 @@ def log_synchronous_frames(
             remaining = video_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
+            if assert_deadline and use_stochastic_timestamps:
+                assert_on_schedule(
+                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
+                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -403,8 +408,7 @@ def log_synchronous_frames(
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
-                    deadline=video_deadline if assert_deadline else None,
-                    timing_tolerance=timing_tolerance,
+                    assert_deadline=assert_deadline,
                 ):
                     nc.log_rgb(
                         camera_name,
@@ -472,15 +476,18 @@ def run_threaded_logging(
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             thread_wall_start = time.time()
-            jitter = get_jitter(use_stochastic_timestamps)
-            timing_tolerance = (
-                STOCHASTIC_JITTER_S if use_stochastic_timestamps else None
-            )
             for frame_index in range(frame_count):
-                frame_deadline = thread_wall_start + (frame_index / fps)
+                jitter = get_jitter(use_stochastic_timestamps)
+                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
                 remaining = frame_deadline - time.time()
                 if remaining > 0:
                     time.sleep(remaining)
+                if assert_deadline and use_stochastic_timestamps:
+                    assert_on_schedule(
+                        frame_deadline,
+                        SCHEDULER_TOLERANCE_S,
+                        label=f"{role_name} frame",
+                    )
                 if use_real_timestamps:
                     timestamp = None
                 else:
@@ -504,8 +511,7 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
-                            deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            assert_deadline=assert_deadline,
                         ):
                             nc.log_rgb(
                                 camera_id,
@@ -522,8 +528,7 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_positions",
-                            deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            assert_deadline=assert_deadline,
                         ):
                             nc.log_joint_positions(
                                 joint_values,
@@ -534,8 +539,7 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_velocities",
-                            deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            assert_deadline=assert_deadline,
                         ):
                             nc.log_joint_velocities(
                                 joint_values,
@@ -546,8 +550,7 @@ def run_threaded_logging(
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_torques",
-                            deadline=frame_deadline if assert_deadline else None,
-                            timing_tolerance=timing_tolerance,
+                            assert_deadline=assert_deadline,
                         ):
                             nc.log_joint_torques(
                                 joint_values,
@@ -557,8 +560,7 @@ def run_threaded_logging(
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_custom_1d",
-                    deadline=frame_deadline if assert_deadline else None,
-                    timing_tolerance=timing_tolerance,
+                    assert_deadline=assert_deadline,
                 ):
                     nc.log_custom_1d(
                         marker_name,
@@ -667,9 +669,12 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     On Linux, Pool uses fork so workers inherit a copy of the parent's
     Timer._stats. Clearing it here ensures workers only capture their own
     timers and the parent's pre-fork timers (e.g. nc.login) are not
-    double-counted when stats are merged back.
+    double-counted when stats are merged back. The stochastic-timestamp RNG
+    is reseeded per-context so parallel workers produce independent jitter
+    sequences instead of replaying the parent's seed.
     """
     Timer._stats.clear()
+    STOCHASTIC_TIMESTAMP_RANDOM.seed(1 + spec.context_index)
     return context_worker(spec)
 
 
@@ -707,6 +712,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 MAX_TIME_TO_START_S,
                 label="nc.start_recording",
                 always_log=True,
+                assert_deadline=spec.assert_deadline,
             ):
                 nc.start_recording(robot_name=spec.robot_name)
             if wall_started_at is None:
@@ -770,7 +776,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
                 label="nc.stop_recording",
                 always_log=True,
-                assert_limit=False,
+                assert_deadline=spec.assert_deadline,
             ):
                 nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
             wall_stopped_at = time.time()
@@ -822,7 +828,6 @@ def run_case_contexts(
     case: DataDaemonTestCase,
     *,
     specs: list[ContextSpec] | None = None,
-    assert_deadline: bool = False,
     assert_mode: bool = True,
     wait_for_traces: bool = False,
 ) -> list[ContextResult]:
@@ -836,8 +841,6 @@ def run_case_contexts(
         case: The test case defining parallelism level and context matrix.
         specs: Pre-built context specs to run. If None, built from ``case``
             via :func:`build_context_specs`.
-        assert_deadline: Passed through to :func:`build_context_specs` when
-            ``specs`` is ``None``.
         assert_mode: When ``True`` (default), calls :func:`assert_context_mode`
             after running to verify expected parallelization behaviour.
         wait_for_traces: When ``True``, waits for all traces to be written to
@@ -847,7 +850,7 @@ def run_case_contexts(
         List of result dicts from each context worker, one per spec.
     """
     if specs is None:
-        specs = build_context_specs(case, assert_deadline=assert_deadline)
+        specs = build_context_specs(case)
 
     if specs:
         with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):

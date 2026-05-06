@@ -35,6 +35,8 @@ TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
 TIMESTAMP_MODE_STOCHASTIC = "stochastic"
 STOCHASTIC_JITTER_S = 0.05
+# OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
+SCHEDULER_TOLERANCE_S = 0.05
 
 # ---------------------------------------------------------------------------
 # Value sets (tuples for static validation)
