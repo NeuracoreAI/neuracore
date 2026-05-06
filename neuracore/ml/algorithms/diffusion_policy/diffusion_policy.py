@@ -227,6 +227,7 @@ class DiffusionPolicy(NeuracoreModel):
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
             max_cameras = len(stats)
+            self.image_normalizers = nn.ModuleList()
             self.image_encoders = nn.ModuleList()
             for i in range(max_cameras):
                 if use_resnet_stats:
@@ -235,23 +236,16 @@ class DiffusionPolicy(NeuracoreModel):
                     mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
                     mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
                     std = std_c_h_w.mean(axis=(1, 2)).tolist()
-
-                encoder = nn.ModuleDict({
-                    "transform": torch.nn.Sequential(
-                        T.Resize((224, 224)),
-                        T.Normalize(mean=mean, std=std),
-                    ),
-                    "encoder": DiffusionPolicyImageEncoder(
+                self.image_normalizers.append(T.Normalize(mean=mean, std=std))
+                self.image_encoders.append(
+                    DiffusionPolicyImageEncoder(
                         feature_dim=hidden_dim,
                         spatial_softmax_num_keypoints=spatial_softmax_num_keypoints,
                         use_pretrained_weights=use_pretrained_weights,
-                    ),
-                })
-                self.image_encoders.append(encoder)
+                    )
+                )
 
-            global_cond_dim += (
-                self.image_encoders[0]["encoder"].feature_dim * max_cameras
-            )
+            global_cond_dim += self.image_encoders[0].feature_dim * max_cameras
 
         self.unet = DiffusionConditionalUnet1d(
             action_dim=self.max_output_size,
@@ -429,12 +423,12 @@ class DiffusionPolicy(NeuracoreModel):
             batch_size = batched_rgb_data[0].frame.shape[0]
 
         # Extract image features.
-        for cam_id, (encoder_dict, input_rgb) in enumerate(
-            zip(self.image_encoders, batched_rgb_data)
+        for cam_id, (normalizer, encoder, input_rgb) in enumerate(
+            zip(self.image_normalizers, self.image_encoders, batched_rgb_data)
         ):
             last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
-            transformed = encoder_dict["transform"](last_frame)
-            features = encoder_dict["encoder"](transformed)
+            transformed = normalizer(last_frame)
+            features = encoder(transformed)
             features = features * camera_images_mask[:, cam_id].view(batch_size, 1)
             global_cond_feats.append(features)
 

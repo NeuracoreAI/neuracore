@@ -28,6 +28,10 @@ from neuracore.core.const import (
 )
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    resolve_preprocessing_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +90,8 @@ class ModelServer:
         org_id: str,
         input_embodiment_description: EmbodimentDescription | None = None,
         output_embodiment_description: EmbodimentDescription | None = None,
+        input_preprocessing_config: PreprocessingConfiguration | None = None,
+        output_preprocessing_config: PreprocessingConfiguration | None = None,
         job_id: str | None = None,
         device: str | None = None,
         robot_id: str | None = None,
@@ -101,6 +107,10 @@ class ModelServer:
             device: Device the model loaded on
             robot_id: Robot ID used to select embodiments from the model
                 archive or training metadata.
+            input_preprocessing_config: Preprocessing configuration for the input
+                data.
+            output_preprocessing_config: Preprocessing configuration for the output
+                data.
         """
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
@@ -108,6 +118,8 @@ class ModelServer:
         self.policy_inference = PolicyInference(
             input_embodiment_description=input_embodiment_description,
             output_embodiment_description=output_embodiment_description,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
             org_id=org_id,
             job_id=job_id,
             model_file=model_file,
@@ -204,6 +216,8 @@ def start_server(
     org_id: str,
     input_embodiment_description: EmbodimentDescription | None = None,
     output_embodiment_description: EmbodimentDescription | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
+    output_preprocessing_config: PreprocessingConfiguration | None = None,
     job_id: str | None = None,
     host: str = "0.0.0.0",
     port: int = 8080,
@@ -229,6 +243,8 @@ def start_server(
         device: Device model loaded on
         robot_id: Robot ID used to select embodiments from the model archive
             or training metadata.
+        input_preprocessing_config: Preprocessing configuration for the input data.
+        output_preprocessing_config: Preprocessing configuration for the output data.
 
     Returns:
         ModelServer instance
@@ -238,6 +254,8 @@ def start_server(
     server = ModelServer(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
+        input_preprocessing_config=input_preprocessing_config,
+        output_preprocessing_config=output_preprocessing_config,
         model_file=model_file,
         org_id=org_id,
         job_id=job_id,
@@ -271,6 +289,22 @@ if __name__ == "__main__":
             "dict mapping DataType to list of strings. If not provided, "
             "the robot ID will be used to select embodiments from the model "
             "archive or training metadata."
+        ),
+    )
+    parser.add_argument(
+        "--input-preprocessing-config",
+        required=False,
+        help=(
+            "Input preprocessing config as JSON mapping DataType to "
+            "PreprocessingMethod."
+        ),
+    )
+    parser.add_argument(
+        "--output-preprocessing-config",
+        required=False,
+        help=(
+            "Output preprocessing config as JSON mapping DataType to "
+            "PreprocessingMethod."
         ),
     )
     parser.add_argument(
@@ -314,9 +348,27 @@ if __name__ == "__main__":
             output_embodiment_description = _parse_embodiment_description(
                 args.output_embodiment_description
             )
+        input_preprocessing_config = None
+        if args.input_preprocessing_config is not None:
+            input_preprocessing_config_serialized = json.loads(
+                args.input_preprocessing_config
+            )
+            input_preprocessing_config = resolve_preprocessing_config(
+                input_preprocessing_config_serialized
+            )
+        output_preprocessing_config = None
+        if args.output_preprocessing_config is not None:
+            output_preprocessing_config_serialized = json.loads(
+                args.output_preprocessing_config
+            )
+            output_preprocessing_config = resolve_preprocessing_config(
+                output_preprocessing_config_serialized
+            )
         start_server(
             input_embodiment_description=input_embodiment_description,
             output_embodiment_description=output_embodiment_description,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=output_preprocessing_config,
             model_file=Path(args.model_file),
             org_id=args.org_id,
             job_id=args.job_id,

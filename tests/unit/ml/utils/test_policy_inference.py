@@ -22,14 +22,20 @@ def _make_policy_inference(
     policy_inference = PolicyInference.__new__(PolicyInference)
     policy_inference.output_embodiment_description = output_embodiment_description or {}
     policy_inference.input_embodiment_description = {}
+    policy_inference.input_preprocessing_config = {}
+    policy_inference.output_preprocessing_config = {}
     policy_inference.org_id = "test_org"
     policy_inference.job_id = None
     policy_inference.device = torch.device("cpu")
     policy_inference.model = None
     policy_inference.input_dataset_statistics = {}
+    policy_inference.input_preprocessing_config = {}
+    policy_inference.output_preprocessing_config = {}
     policy_inference.prediction_horizon = 1
     policy_inference.model = SimpleNamespace(
-        model_init_description=SimpleNamespace(input_data_types=[])
+        model_init_description=SimpleNamespace(
+            input_data_types=[],
+        )
     )
     return policy_inference
 
@@ -259,12 +265,16 @@ def test_init_loads_embodiments_from_archive_when_robot_id_provided(
             fake_model,
             {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
             {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
+            {"JOINT_POSITIONS": []},
+            {"JOINT_TARGET_POSITIONS": []},
         ),
     )
 
     inference = PolicyInference(
         input_embodiment_description=None,
         output_embodiment_description=None,
+        input_preprocessing_config=None,
+        output_preprocessing_config=None,
         model_file=Path("dummy.nc.zip"),
         org_id="org",
         robot_id="robot-1",
@@ -286,7 +296,7 @@ def test_init_raises_when_no_descriptions_and_no_robot_id(
     )
     monkeypatch.setattr(
         "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
-        lambda model_file, device=None: (fake_model, {}, {}),
+        lambda model_file, device=None: (fake_model, {}, {}, {}, {}),
     )
 
     with pytest.raises(
@@ -299,6 +309,8 @@ def test_init_raises_when_no_descriptions_and_no_robot_id(
         PolicyInference(
             input_embodiment_description=None,
             output_embodiment_description=None,
+            input_preprocessing_config=None,
+            output_preprocessing_config=None,
             model_file=Path("dummy.nc.zip"),
             org_id="org",
         )

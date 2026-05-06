@@ -340,6 +340,8 @@ class TestSaveModelArtifacts:
             algorithm_config={},
             input_cross_embodiment_description=INPUT_CROSS_EMBODIMENT_DESCRIPTION,
             output_cross_embodiment_description=OUTPUT_CROSS_EMBODIMENT_DESCRIPTION,
+            input_preprocessing_config={},
+            output_preprocessing_config={},
         )
 
     def test_save_model_artifacts_uploads_each_artifact_file_to_cloud(
@@ -359,6 +361,8 @@ class TestSaveModelArtifacts:
             algorithm_config,
             input_cross_embodiment_description,
             output_cross_embodiment_description,
+            input_preprocessing_config,
+            output_preprocessing_config,
         ):
             (output_dir / "model.pt").write_bytes(b"model_data")
             (output_dir / "config.json").write_bytes(b"{}")

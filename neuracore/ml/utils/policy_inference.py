@@ -25,6 +25,10 @@ from neuracore.core.utils.robot_data_spec_utils import (
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
+from neuracore.ml.utils.preprocessing_utils import (
+    PreprocessingConfiguration,
+    apply_preprocessing_configs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,8 @@ class PolicyInference:
         org_id: str,
         input_embodiment_description: EmbodimentDescription | None = None,
         output_embodiment_description: EmbodimentDescription | None = None,
+        input_preprocessing_config: PreprocessingConfiguration | None = None,
+        output_preprocessing_config: PreprocessingConfiguration | None = None,
         job_id: str | None = None,
         device: str | None = None,
         robot_id: str | None = None,
@@ -69,6 +75,11 @@ class PolicyInference:
             robot_id: Robot ID used to select embodiments from cross-embodiment
                 metadata in the model archive when explicit embodiments are not
                 provided.
+            input_preprocessing_config: preprocessing configuration for the input data.
+                When None, values are loaded from the model archive.
+            output_preprocessing_config: preprocessing configuration for the output
+                data.
+                When None, values are loaded from the model archive.
         """
         self.org_id = org_id
         self.job_id = job_id
@@ -76,6 +87,8 @@ class PolicyInference:
             self.model,
             input_cross_embodiment_description,
             output_cross_embodiment_description,
+            archive_input_preprocessing_config,
+            archive_output_preprocessing_config,
         ) = load_model_from_nc_archive(model_file, device=device)
         self.model.eval()
         self.input_dataset_statistics = (
@@ -94,6 +107,32 @@ class PolicyInference:
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
         )
+        effective_input_preprocessing_config = (
+            input_preprocessing_config
+            if input_preprocessing_config is not None
+            else archive_input_preprocessing_config
+        )
+        effective_output_preprocessing_config = (
+            output_preprocessing_config
+            if output_preprocessing_config is not None
+            else archive_output_preprocessing_config
+        )
+        if effective_input_preprocessing_config:
+            self.input_preprocessing_config = effective_input_preprocessing_config
+        else:
+            raise ValueError(
+                "Input preprocessing configuration is missing "
+                "from policy initialization and not found in the model archive! "
+                "Please provide a input preprocessing configuration."
+            )
+        if effective_output_preprocessing_config:
+            self.output_preprocessing_config = effective_output_preprocessing_config
+        else:
+            raise ValueError(
+                "Output preprocessing configuration is missing "
+                "from policy initialization and not found in the model archive! "
+                "Please provide a output preprocessing configuration."
+            )
 
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
@@ -137,9 +176,16 @@ class PolicyInference:
                 dtype=torch.float32,
             )
             inputs_mask[data_type].unsqueeze_(0)  # Add batch dimension
-            for name, nc_data in sync_point.data[data_type].items():
+            for slot_idx, (name, nc_data) in enumerate(
+                sync_point.data[data_type].items()
+            ):
                 tensor = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type].from_nc_data(
                     nc_data
+                )
+                tensor = apply_preprocessing_configs(
+                    data_type=data_type,
+                    batched_data=tensor,
+                    preprocessing_configs=self.input_preprocessing_config,
                 )
                 inputs[data_type].append(tensor)
         return BatchedInferenceInputs(
