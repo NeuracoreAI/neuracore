@@ -35,3 +35,7 @@ class DatasetDetectionError(ImporterError):
 
 class DatasetOperationError(ImporterError):
     """Raised when dataset CRUD operations fail."""
+
+
+class UploaderError(ImporterError):
+    """Raised when upload setup or worker execution fails."""

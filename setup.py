@@ -60,7 +60,7 @@ setup(
         "greenlet",
         "filelock>=3.0.0",
         "omegaconf",
-        "msgpack",
+        "msgpack>=1.0.8",
     ],
     extras_require={
         "examples": [
@@ -120,6 +120,10 @@ setup(
             "tensorflow-datasets>=4.9.9",
             "tensorflow>=2.20.0",
             "pin-pink>=4",
+            "mcap>=1.3.1,<2",
+            "mcap-protobuf-support>=0.5.4,<0.6",
+            "mcap-ros1-support>=0.7.4,<0.8",
+            "mcap-ros2-support>=0.5.7,<0.6",
         ],
     },
     entry_points={

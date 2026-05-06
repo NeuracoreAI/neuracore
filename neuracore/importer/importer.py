@@ -35,6 +35,7 @@ from neuracore.importer.core.validation import (
     validate_dataset_config_against_robot_model,
 )
 from neuracore.importer.lerobot_importer import LeRobotDatasetImporter
+from neuracore.importer.mcap.mcap_importer import MCAPDatasetImporter
 from neuracore.importer.rlds_tfds_importer import (
     RLDSDatasetImporter,
     TFDSDatasetImporter,
@@ -85,7 +86,7 @@ def cli_args_validation(args: SimpleNamespace) -> None:
 
 
 def detect_dataset_type(dataset_dir: Path) -> DatasetTypeConfig:
-    """Detect whether the dataset is TFDS, RLDS, or LeRobot."""
+    """Detect whether the dataset is MCAP, TFDS, RLDS, or LeRobot."""
     detector = DatasetDetector()
     try:
         return detector.detect(dataset_dir)
@@ -240,9 +241,9 @@ def _run_import(
         searched_locations = (
             ", ".join(search_hints) if search_hints else "none provided"
         )
-        raise CLIError(
-            "Could not find a robot description file (.urdf or .xml/.mjcf). "
-            f"Searched: {searched_locations}."
+        logger.warning(
+            f"No robot description files found. Searched: {searched_locations}. "
+            "Robot information will not be populated in the dataset.",
         )
 
     if urdf_path is not None and mjcf_path is not None:
@@ -287,10 +288,34 @@ def _run_import(
     logger.info("Setup complete; beginning import.")
 
     skip_on_error = args.skip_on_error
-    importer: TFDSDatasetImporter | RLDSDatasetImporter | LeRobotDatasetImporter
+    importer: (
+        TFDSDatasetImporter
+        | RLDSDatasetImporter
+        | LeRobotDatasetImporter
+        | MCAPDatasetImporter
+    )
     if dataset_type == DatasetTypeConfig.TFDS:
         logger.info("Starting TFDS dataset import from %s", args.dataset_dir)
         importer = TFDSDatasetImporter(
+            input_dataset_name=dataconfig.input_dataset_name,
+            output_dataset_name=dataconfig.output_dataset.name,
+            dataset_dir=args.dataset_dir,
+            dataset_config=dataconfig,
+            joint_info=robot.joint_info,
+            urdf_path=urdf_path,
+            ik_init_config=ik_init_config,
+            dry_run=args.dry_run,
+            suppress_warnings=args.no_validation_warnings,
+            max_workers=args.max_workers,
+            skip_on_error=skip_on_error,
+            random_sample=args.random_sample,
+            storage_limit=args.storage_limit,
+            shared=args.shared,
+        )
+        importer.import_all()
+    elif dataset_type == DatasetTypeConfig.MCAP:
+        logger.info(f"Starting MCAP dataset import from {args.dataset_dir}")
+        importer = MCAPDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
             output_dataset_name=dataconfig.output_dataset.name,
             dataset_dir=args.dataset_dir,
