@@ -4,6 +4,7 @@ addfinalizer
 agilex
 aiolimiter
 aiortc
+agentview
 allclose
 altclip
 asarray
@@ -38,6 +39,7 @@ chonk
 CLIPMLP
 cmap
 cmaps
+closedness
 cnnmlp
 CNNMLP
 CNNMLPP
