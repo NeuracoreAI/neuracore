@@ -1260,7 +1260,7 @@ class NeuracoreDatasetImporter(ABC):
             TimeElapsedColumn(),
             TimeRemainingColumn(),
             refresh_per_second=10,
-            transient=True,
+            transient=False,
             console=get_shared_console(),
         ) as progress:
             overall_task = progress.add_task("Importing episodes", total=total_items)
