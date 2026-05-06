@@ -21,12 +21,11 @@ from neuracore.data_daemon.config_manager.profiles import (
     ProfileManager,
 )
 from neuracore.data_daemon.const import (
+    ALL_SOCKET_PATHS,
     DEFAULT_PROFILE_NAME,
     DEFAULT_SHARED_MEMORY_SIZE,
     DEFAULT_VIDEO_SLOT_COUNT,
     DEFAULT_VIDEO_SLOT_SIZE,
-    SOCKET_PATH,
-    VIDEO_SOCKET_PATH,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
@@ -56,8 +55,7 @@ class DaemonContext:
 
     config: DaemonConfig
     loop_manager: EventLoopManager
-    comm_manager: CommunicationsManager
-    video_comm_manager: CommunicationsManager
+    comm_managers: list[CommunicationsManager]
     services: DaemonServices
     recording_disk_manager: rdm.RecordingDiskManager
 
@@ -325,21 +323,21 @@ class DaemonRuntime:
             return None
 
         logger.debug("[8/8] Creating communications runtime...")
-        comm_manager = CommunicationsManager(socket_path=SOCKET_PATH)
-        video_comm_manager = CommunicationsManager(socket_path=VIDEO_SOCKET_PATH)
+        comm_managers = [
+            CommunicationsManager(socket_path=socket_path)
+            for socket_path in ALL_SOCKET_PATHS
+        ]
         self._daemon = DataBridge(
             recording_disk_manager=recording_disk_manager,
             emitter=emitter,
-            comm_manager=comm_manager,
-            video_comm_manager=video_comm_manager,
+            comm_managers=comm_managers,
         )
         logger.debug("       ZMQ sockets ready")
 
         self._context = DaemonContext(
             config=config,
             loop_manager=loop_manager,
-            comm_manager=comm_manager,
-            video_comm_manager=video_comm_manager,
+            comm_managers=comm_managers,
             services=services,
             recording_disk_manager=recording_disk_manager,
         )

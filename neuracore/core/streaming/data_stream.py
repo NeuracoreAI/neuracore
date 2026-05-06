@@ -16,9 +16,14 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
+from neuracore.data_daemon.const import CONTROL_SOCKET_PATH
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
+from neuracore.data_daemon.communications_management.producer.shared_sender_registry import (
+    SharedSenderRegistry,
+)
+from neuracore.data_daemon.models import CommandType
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +52,16 @@ class DataStream(ABC):
     has its own ProducerChannel for sending data to the daemon.
     """
 
-    def __init__(self, data_type: DataType, stream_name: str) -> None:
+    def __init__(
+        self,
+        data_type: DataType,
+        stream_name: str,
+        *,
+        transport_group: str | None = None,
+        trace_only: bool = False,
+        transport_only: bool = False,
+        share_transport: bool = False,
+    ) -> None:
         """Initialize the data stream.
 
         Args:
@@ -63,6 +77,14 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
+        self._producer_id = (
+            f"{self._data_type.value}:{self._stream_name}:{uuid.uuid4().hex[:8]}"
+        )
+        self._trace_id: str | None = None
+        self._transport_group = transport_group
+        self._trace_only = trace_only
+        self._transport_only = transport_only
+        self._share_transport = share_transport
 
     @property
     def data_type(self) -> DataType:
@@ -87,7 +109,9 @@ class DataStream(ABC):
             self.stop_recording()
         self._recording = True
         self._context = context
-        self._handle_ensure_producer_channel(context)
+        self._trace_id = str(uuid.uuid4())
+        if not self._trace_only:
+            self._handle_ensure_producer_channel(context)
 
     def _handle_ensure_producer_channel(self, context: DataRecordingContext) -> None:
         """Ensures a producer is available for this data stream.
@@ -101,16 +125,18 @@ class DataStream(ABC):
                 the recording session, robot, and dataset.
         """
         if self._producer_channel is None:
-            channel_id = f"{self._data_type.value}:\
-            {self._stream_name}:{uuid.uuid4().hex[:8]}"
             self._producer_channel = ProducerChannel(
-                id=channel_id,
+                id=self._producer_id,
                 recording_id=context.recording_id,
                 data_type=self._data_type,
+                transport_group=self._transport_group,
+                share_transport=self._share_transport,
             )
 
         self._producer_channel.start_recording_session(
-            recording_id=context.recording_id
+            recording_id=context.recording_id,
+            trace_id=self._trace_id,
+            create_trace=not self._transport_only,
         )
 
     def stop_recording(self, *, wait_for_drain: bool = True) -> None:
@@ -118,8 +144,17 @@ class DataStream(ABC):
         self._recording = False
         producer_channel = self._producer_channel
         self._producer_channel = None
+        trace_id = self._trace_id
+        self._trace_id = None
+        context = self._context
+        self._context = None
 
         if not isinstance(producer_channel, ProducerChannel):
+            if self._trace_only and trace_id is not None and context is not None:
+                self._send_trace_end_without_data_channel(
+                    trace_id=trace_id,
+                    recording_id=context.recording_id,
+                )
             return
 
         try:
@@ -153,6 +188,12 @@ class DataStream(ABC):
     def get_producer_channel(self) -> ProducerChannel | None:
         """Return the active producer channel for this stream, if present."""
         return self._producer_channel
+
+    def get_trace_id(self) -> str | None:
+        """Return the active trace identifier for this stream, if present."""
+        if self._producer_channel is not None and self._producer_channel.trace_id is not None:
+            return self._producer_channel.trace_id
+        return self._trace_id
 
     def get_recording_context(self) -> DataRecordingContext | None:
         """Return the active recording context for this stream, if present."""
@@ -198,6 +239,32 @@ class DataStream(ABC):
             dataset_name=self._context.dataset_name,
         )
 
+    def _send_trace_end_without_data_channel(
+        self,
+        *,
+        trace_id: str,
+        recording_id: str,
+    ) -> None:
+        """Send TRACE_END for a trace-only stream over the shared control sender."""
+        handle = SharedSenderRegistry.acquire(
+            socket_path=str(CONTROL_SOCKET_PATH),
+            send_queue_maxsize=512,
+        )
+        try:
+            cutoff_sequence = handle.sender.send(
+                CommandType.TRACE_END,
+                {
+                    "trace_end": {
+                        "trace_id": trace_id,
+                        "recording_id": recording_id,
+                    }
+                },
+                producer_id=self._producer_id,
+            )
+            handle.sender.wait_until_sequence_sent(cutoff_sequence)
+        finally:
+            handle.release()
+
 
 class JsonDataStream(DataStream):
     """Stream that logs and sends structured JSON data to the daemon.
@@ -206,14 +273,30 @@ class JsonDataStream(DataStream):
     for persistence during recording sessions.
     """
 
-    def __init__(self, data_type: DataType, data_type_name: str):
+    def __init__(
+        self,
+        data_type: DataType,
+        data_type_name: str,
+        *,
+        transport_group: str | None = None,
+        trace_only: bool = False,
+        transport_only: bool = False,
+        share_transport: bool = True,
+    ):
         """Initialize the JSON data stream.
 
         Args:
             data_type: Type of data being recorded (e.g., JSON events)
             data_type_name: Name of the JSON data stream
         """
-        super().__init__(data_type=data_type, stream_name=data_type_name)
+        super().__init__(
+            data_type=data_type,
+            stream_name=data_type_name,
+            transport_group=transport_group,
+            trace_only=trace_only,
+            transport_only=transport_only,
+            share_transport=share_transport,
+        )
 
     def log(self, data: NCData) -> None:
         """Log structured data as JSON.

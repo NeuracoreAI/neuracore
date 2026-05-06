@@ -12,7 +12,7 @@ from collections.abc import Callable
 
 from neuracore_types import DataType
 
-from neuracore.data_daemon.const import SOCKET_PATH, VIDEO_SOCKET_PATH
+from neuracore.data_daemon.const import ALL_SOCKET_PATHS, SOCKET_PATH
 from neuracore.data_daemon.debug_profiling import log_summary as log_profile_summary
 from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 from neuracore.data_daemon.event_emitter import Emitter
@@ -68,7 +68,7 @@ class DataBridge:
         recording_disk_manager: RecordingDiskManager,
         emitter: Emitter,
         comm_manager: CommunicationsManager | None = None,
-        video_comm_manager: CommunicationsManager | None = None,
+        comm_managers: list[CommunicationsManager] | None = None,
     ) -> None:
         """Initializes the daemon.
 
@@ -79,9 +79,17 @@ class DataBridge:
             comm_manager: The communications manager for ZMQ operations.
                 If not provided, a new instance will be created.
         """
-        self.comm = comm_manager or CommunicationsManager(socket_path=SOCKET_PATH)
-        self.video_comm = video_comm_manager or CommunicationsManager(
-            socket_path=VIDEO_SOCKET_PATH
+        default_comms = [
+            CommunicationsManager(socket_path=path) for path in ALL_SOCKET_PATHS
+        ]
+        if comm_managers is not None:
+            self._comms = list(comm_managers)
+        elif comm_manager is not None:
+            self._comms = [comm_manager]
+        else:
+            self._comms = default_comms
+        self.comm = self._comms[0] if self._comms else CommunicationsManager(
+            socket_path=SOCKET_PATH
         )
         self.recording_disk_manager = recording_disk_manager
         self.channels = ChannelRegistry()
@@ -146,24 +154,19 @@ class DataBridge:
             raise RuntimeError("Daemon is already running")
 
         self._running = True
-        self.comm.start_consumer()
-        self.video_comm.start_consumer()
+        for comm in self._comms:
+            comm.start_consumer()
 
         logger.info("Daemon started and ready to receive messages...")
         try:
             self._receiver_threads = [
                 threading.Thread(
                     target=self._receiver_loop,
-                    args=(self.comm,),
-                    name="daemon-management-receiver",
+                    args=(comm,),
+                    name=f"daemon-receiver-{index}",
                     daemon=True,
-                ),
-                threading.Thread(
-                    target=self._receiver_loop,
-                    args=(self.video_comm,),
-                    name="daemon-video-receiver",
-                    daemon=True,
-                ),
+                )
+                for index, comm in enumerate(self._comms)
             ]
             for thread in self._receiver_threads:
                 thread.start()
@@ -194,8 +197,8 @@ class DataBridge:
             self._completion_worker.close()
             self._spool_worker.cleanup()
             self._shared_slot_handler.close()
-            self.comm.cleanup_daemon()
-            self.video_comm.cleanup_daemon()
+            for comm in self._comms:
+                comm.cleanup_daemon()
 
     def stop(
         self,
@@ -245,6 +248,15 @@ class DataBridge:
             message = MessageEnvelope.from_bytes(raw)
         except Exception:
             logger.exception("Failed to parse incoming message bytes")
+            return
+        if message.command == CommandType.ENVELOPE_BATCH:
+            for envelope_dict in list(message.payload.get("envelopes") or []):
+                try:
+                    inner_message = MessageEnvelope.from_dict(envelope_dict)
+                except Exception:
+                    logger.exception("Failed to parse incoming batched envelope")
+                    continue
+                self.handle_message(inner_message)
             return
         self.handle_message(message)
 
@@ -327,13 +339,6 @@ class DataBridge:
                 cmd.value,
                 handle_elapsed,
             )
-            if handle_elapsed >= 0.05:
-                logger.warning(
-                    "PROFILE daemon_handle_message_slow command=%s elapsed=%.3fs producer_id=%s",
-                    cmd.value,
-                    handle_elapsed,
-                    producer_id,
-                )
         except Exception:
             logger.exception(
                 "Failed to handle command %s from producer_id=%s",
@@ -611,13 +616,6 @@ class DataBridge:
             batch_payload.data_type.value,
             expand_elapsed,
         )
-        if expand_elapsed >= 0.05:
-            logger.warning(
-                "PROFILE daemon_batched_joint_slow data_type=%s elapsed=%.3fs items=%d",
-                batch_payload.data_type.value,
-                expand_elapsed,
-                len(batch_payload.items),
-            )
 
     def _handle_end_trace(
         self,

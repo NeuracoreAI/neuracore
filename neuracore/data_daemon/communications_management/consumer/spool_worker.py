@@ -85,13 +85,6 @@ class _SpoolShard:
             "shared_slot_descriptor",
             float(qsize_before_put),
         )
-        if enqueue_elapsed >= 0.05:
-            logger.warning(
-                "PROFILE daemon_spool_enqueue_blocked blocked=%.3fs qsize_before=%d maxsize=%d",
-                enqueue_elapsed,
-                qsize_before_put,
-                self._queue.maxsize,
-            )
 
     def close(self) -> None:
         self._queue.put(None)
@@ -139,11 +132,6 @@ class _SpoolShard:
                 "shared_slot_descriptor",
                 handle_elapsed,
             )
-            if handle_elapsed >= 0.05:
-                logger.warning(
-                    "PROFILE daemon_spool_handle_descriptor_slow elapsed=%.3fs",
-                    handle_elapsed,
-                )
             chunk_spool_ref = transport_result.chunk_spool_ref
         except Exception:
             self._release_spool_admission()
@@ -247,11 +235,6 @@ class _SpoolShard:
                 "shared_slot_descriptor",
                 total_elapsed,
             )
-            if total_elapsed >= 0.05:
-                logger.warning(
-                    "PROFILE daemon_spool_total_process_slow elapsed=%.3fs",
-                    total_elapsed,
-                )
 
     def _release_chunk_ref(self, ref: ChunkSpoolRef) -> None:
         try:

@@ -27,6 +27,7 @@ def get_content_type(data_type: DataType) -> str:
 class CommandType(Enum):
     """Commands sent from the producer to the daemon."""
 
+    ENVELOPE_BATCH = "envelope_batch"
     OPEN_FIXED_SHARED_SLOTS = "open_fixed_shared_slots"
     SHARED_SLOT_DESCRIPTOR = "shared_slot_descriptor"
     SHARED_SLOT_READY = "shared_slot_ready"
@@ -706,6 +707,15 @@ class MessageEnvelope:
             ),
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Return a JSON-friendly representation of this envelope."""
+        return {
+            "producer_id": self.producer_id,
+            "command": self.command.value,
+            "payload": self.payload,
+            "sequence_number": self.sequence_number,
+        }
+
     @classmethod
     def from_bytes(cls, raw: bytes) -> "MessageEnvelope":
         """Construct a MessageEnvelope from a JSON-serialized bytes object.
@@ -727,12 +737,7 @@ class MessageEnvelope:
 
         :return: bytes object containing the serialized message envelope data
         """
-        return json.dumps({
-            "producer_id": self.producer_id,
-            "command": self.command.value,
-            "payload": self.payload,
-            "sequence_number": self.sequence_number,
-        }).encode("utf-8")
+        return json.dumps(self.to_dict()).encode("utf-8")
 
 
 @dataclass

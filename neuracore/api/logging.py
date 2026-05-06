@@ -169,7 +169,11 @@ def _get_or_create_joint_stream(
     str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
     if joint_stream is None:
-        joint_stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
+        joint_stream = JsonDataStream(
+            data_type=data_type,
+            data_type_name=storage_name,
+            trace_only=True,
+        )
         robot.add_data_stream(str_id, joint_stream)
     assert isinstance(
         joint_stream, JsonDataStream
@@ -179,6 +183,34 @@ def _get_or_create_joint_stream(
         storage_name=storage_name,
         stream=joint_stream,
     )
+
+
+def _batched_joint_transport_group(data_type: DataType) -> str:
+    mapping = {
+        DataType.JOINT_POSITIONS: "joint_positions",
+        DataType.JOINT_VELOCITIES: "joint_velocities",
+        DataType.JOINT_TORQUES: "joint_torques",
+        DataType.VISUAL_JOINT_POSITIONS: "visual_joint_positions",
+    }
+    return mapping.get(data_type, "default_json")
+
+
+def _get_or_create_batched_joint_transport_stream(
+    data_type: DataType,
+    robot: Robot,
+) -> JsonDataStream:
+    str_id = f"__batched_joint_transport__:{data_type.value}"
+    stream = robot.get_data_stream(str_id)
+    if stream is None:
+        stream = JsonDataStream(
+            data_type=data_type,
+            data_type_name=f"batched_{data_type.value}",
+            transport_group=_batched_joint_transport_group(data_type),
+            transport_only=True,
+        )
+        robot.add_data_stream(str_id, stream)
+    assert isinstance(stream, JsonDataStream)
+    return stream
 
 
 def _publish_joint_data_point(
@@ -205,11 +237,9 @@ def _publish_joint_data_point(
 
     _publish_json_to_p2p(robot, joint_stream_binding.stream_id, data_type, data)
 
-    producer_channel = joint_stream.get_producer_channel()
     trace_id = (
-        producer_channel.trace_id
-        if producer_channel is not None
-        and joint_stream.get_recording_context() is not None
+        joint_stream.get_trace_id()
+        if joint_stream.get_recording_context() is not None
         else None
     )
     return joint_stream_binding, trace_id
@@ -252,7 +282,6 @@ def _log_group_of_joint_data(
     total_started = time.monotonic()
     robot = _get_robot(robot_name, instance)
     batched_items: list[BatchedJointDataItemPayload] = []
-    batch_transport_stream: JsonDataStream | None = None
     per_joint_started = time.monotonic()
 
     for key, value in joint_data.items():
@@ -265,9 +294,6 @@ def _log_group_of_joint_data(
         )
 
         if trace_id is not None:
-            joint_stream = joint_stream_binding.stream
-            if batch_transport_stream is None:
-                batch_transport_stream = joint_stream
             batched_items.append(
                 BatchedJointDataItemPayload(
                     trace_id=trace_id,
@@ -287,9 +313,14 @@ def _log_group_of_joint_data(
         float(len(batched_items)),
     )
 
-    if batch_transport_stream is None or not batched_items:
-        raise ValueError("No joint data to log")
+    if not batched_items:
+        return
 
+    batch_transport_stream = _get_or_create_batched_joint_transport_stream(
+        data_type,
+        robot,
+    )
+    start_stream(robot, batch_transport_stream)
     batch_context = batch_transport_stream.get_recording_context()
     batch_transport_channel = batch_transport_stream.get_producer_channel()
     if batch_context is None or batch_transport_channel is None:
@@ -321,15 +352,6 @@ def _log_group_of_joint_data(
         data_type.value,
         total_elapsed,
     )
-    if total_elapsed >= 0.1:
-        logger.warning(
-            "PROFILE grouped_joint_slow data_type=%s total=%.3fs per_joint_publish=%.3fs batch_transport=%.3fs items=%d",
-            data_type.value,
-            total_elapsed,
-            per_joint_elapsed,
-            batch_transport_elapsed,
-            len(batched_items),
-        )
 
 
 def _validate_extrinsics_intrinsics(
@@ -462,7 +484,9 @@ def log_custom_1d(
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
-            data_type=DataType.CUSTOM_1D, data_type_name=storage_name
+            data_type=DataType.CUSTOM_1D,
+            data_type_name=storage_name,
+            transport_group="custom_1d",
         )
         robot.add_data_stream(str_id, stream)
 
@@ -848,7 +872,11 @@ def log_pose(
     str_id = f"{DataType.POSES.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
-        stream = JsonDataStream(data_type=DataType.POSES, data_type_name=storage_name)
+        stream = JsonDataStream(
+            data_type=DataType.POSES,
+            data_type_name=storage_name,
+            transport_group="poses",
+        )
         robot.add_data_stream(str_id, stream)
 
     start_stream(robot, stream)
@@ -912,7 +940,9 @@ def log_end_effector_pose(
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
-            data_type=DataType.END_EFFECTOR_POSES, data_type_name=storage_name
+            data_type=DataType.END_EFFECTOR_POSES,
+            data_type_name=storage_name,
+            transport_group="end_effector_poses",
         )
         robot.add_data_stream(str_id, stream)
 
@@ -966,6 +996,7 @@ def log_parallel_gripper_open_amount(
         stream = JsonDataStream(
             data_type=DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             data_type_name=storage_name,
+            transport_group="parallel_gripper_open_amounts",
         )
         robot.add_data_stream(str_id, stream)
 
@@ -1062,6 +1093,7 @@ def log_parallel_gripper_target_open_amount(
         stream = JsonDataStream(
             data_type=DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
             data_type_name=storage_name,
+            transport_group="parallel_gripper_target_open_amounts",
         )
         robot.add_data_stream(str_id, stream)
 
@@ -1149,7 +1181,9 @@ def log_language(
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
-            data_type=DataType.LANGUAGE, data_type_name=storage_name
+            data_type=DataType.LANGUAGE,
+            data_type_name=storage_name,
+            transport_group="language",
         )
         robot.add_data_stream(str_id, stream)
     start_stream(robot, stream)
@@ -1335,7 +1369,9 @@ def log_point_cloud(
     stream = robot.get_data_stream(str_id)
     if stream is None:
         stream = JsonDataStream(
-            data_type=DataType.POINT_CLOUDS, data_type_name=storage_name
+            data_type=DataType.POINT_CLOUDS,
+            data_type_name=storage_name,
+            transport_group="point_clouds",
         )
         robot.add_data_stream(str_id, stream)
     assert isinstance(

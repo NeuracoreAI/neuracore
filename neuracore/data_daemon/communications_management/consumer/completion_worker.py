@@ -176,12 +176,6 @@ class _CompletionShard:
                 f"shard_{self._shard_index}",
                 chunk_elapsed,
             )
-            if chunk_elapsed >= 0.05:
-                logger.warning(
-                    "PROFILE daemon_completion_chunk_slow shard=%d elapsed=%.3fs",
-                    self._shard_index,
-                    chunk_elapsed,
-                )
 
     def _process_final_trace_work(self, work: FinalTraceWork) -> None:
         started = time.monotonic()
