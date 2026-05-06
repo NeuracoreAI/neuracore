@@ -27,6 +27,8 @@ class TrainingStorageHandler(UploadStorageMixin):
         local_dir: str | None,
         training_job_id: str | None = None,
         algorithm_config: dict = {},
+        input_cross_embodiment_description: dict[str, Any] = {},
+        output_cross_embodiment_description: dict[str, Any] = {},
     ) -> None:
         """Initialize the storage handler.
 
@@ -34,10 +36,16 @@ class TrainingStorageHandler(UploadStorageMixin):
             local_dir: Local directory to save artifacts and checkpoints.
             training_job_id: Optional ID of the training job for cloud logging.
             algorithm_config: Optional configuration for the algorithm.
+            input_cross_embodiment_description: Input embodiment mapping
+                to persist with model artifacts.
+            output_cross_embodiment_description: Output embodiment mapping
+                to persist with model artifacts.
         """
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
         self.algorithm_config = algorithm_config
+        self.input_cross_embodiment_description = input_cross_embodiment_description
+        self.output_cross_embodiment_description = output_cross_embodiment_description
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
@@ -225,6 +233,8 @@ class TrainingStorageHandler(UploadStorageMixin):
             model=model,
             output_dir=artifacts_dir,
             algorithm_config=self.algorithm_config,
+            input_cross_embodiment_description=self.input_cross_embodiment_description,
+            output_cross_embodiment_description=self.output_cross_embodiment_description,
         )
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):

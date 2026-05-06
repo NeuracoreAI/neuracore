@@ -82,22 +82,25 @@ class ModelServer:
 
     def __init__(
         self,
-        input_embodiment_description: EmbodimentDescription,
-        output_embodiment_description: EmbodimentDescription,
         model_file: Path,
         org_id: str,
+        input_embodiment_description: EmbodimentDescription | None = None,
+        output_embodiment_description: EmbodimentDescription | None = None,
         job_id: str | None = None,
         device: str | None = None,
+        robot_id: str | None = None,
     ):
         """Initialize the model server.
 
         Args:
-            input_embodiment_description: Model input data order
-            output_embodiment_description: Model output data order
             model_file: Path to the .nc.zip model archive
             org_id: Organization ID for the model
+            input_embodiment_description: Input mapping per supported robot type.
+            output_embodiment_description: Output mapping per supported robot type.
             job_id: Job ID for the model
             device: Device the model loaded on
+            robot_id: Robot ID used to select embodiments from the model
+                archive or training metadata.
         """
         # Import here to avoid the need for pytorch unless the user uses this policy
         from neuracore.ml.utils.policy_inference import PolicyInference
@@ -109,6 +112,7 @@ class ModelServer:
             job_id=job_id,
             model_file=model_file,
             device=device,
+            robot_id=robot_id,
         )
         self.app = self._create_app()
         logger.info(
@@ -196,10 +200,10 @@ class ModelServer:
 
 
 def start_server(
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
     model_file: Path,
     org_id: str,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     job_id: str | None = None,
     host: str = "0.0.0.0",
     port: int = 8080,
@@ -207,6 +211,7 @@ def start_server(
     log_file_path: str | None = None,
     startup_status_file_path: str | None = None,
     device: str | None = None,
+    robot_id: str | None = None,
 ) -> ModelServer:
     """Start a model server instance.
 
@@ -214,12 +219,16 @@ def start_server(
         model_file: Path to the .nc.zip model archive
         org_id: Organization ID
         job_id: Job ID
+        input_embodiment_description: Input mapping per supported robot type.
+        output_embodiment_description: Output mapping per supported robot type.
         host: Host to bind to
         port: Port to bind to
         log_level: Logging level
         log_file_path: Optional log file path for structured server logs.
         startup_status_file_path: Optional file path used to report startup status.
         device: Device model loaded on
+        robot_id: Robot ID used to select embodiments from the model archive
+            or training metadata.
 
     Returns:
         ModelServer instance
@@ -233,6 +242,7 @@ def start_server(
         org_id=org_id,
         job_id=job_id,
         device=device,
+        robot_id=robot_id,
     )
     write_startup_status(startup_status_file_path, status="ready")
     server.run(host, port, log_level)
@@ -245,18 +255,22 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start Neuracore Model Server")
     parser.add_argument(
         "--input-embodiment-description",
-        required=True,
+        required=False,
         help=(
             "Input embodiment description consisting of json dump of "
-            "dict mapping DataType to list of strings"
+            "dict mapping DataType to list of strings. If not provided, "
+            "the robot ID will be used to select embodiments from the model "
+            "archive or training metadata."
         ),
     )
     parser.add_argument(
         "--output-embodiment-description",
-        required=True,
+        required=False,
         help=(
             "Output embodiment description consisting of json dump of "
-            "dict mapping DataType to list of strings"
+            "dict mapping DataType to list of strings. If not provided, "
+            "the robot ID will be used to select embodiments from the model "
+            "archive or training metadata."
         ),
     )
     parser.add_argument(
@@ -278,16 +292,28 @@ if __name__ == "__main__":
         help="Optional path to write startup status for parent process.",
     )
     parser.add_argument("--device", help="Device to load model on (cpu, cuda, etc.)")
+    parser.add_argument(
+        "--robot-id",
+        required=False,
+        help=(
+            "Robot ID used to select embodiments from the model archive or "
+            "training metadata."
+        ),
+    )
 
     try:
         args = parser.parse_args()
 
-        input_embodiment_description = _parse_embodiment_description(
-            args.input_embodiment_description
-        )
-        output_embodiment_description = _parse_embodiment_description(
-            args.output_embodiment_description
-        )
+        input_embodiment_description = None
+        if args.input_embodiment_description is not None:
+            input_embodiment_description = _parse_embodiment_description(
+                args.input_embodiment_description
+            )
+        output_embodiment_description = None
+        if args.output_embodiment_description is not None:
+            output_embodiment_description = _parse_embodiment_description(
+                args.output_embodiment_description
+            )
         start_server(
             input_embodiment_description=input_embodiment_description,
             output_embodiment_description=output_embodiment_description,
@@ -300,6 +326,7 @@ if __name__ == "__main__":
             log_file_path=args.log_file_path,
             startup_status_file_path=args.startup_status_file_path,
             device=args.device,
+            robot_id=args.robot_id,
         )
     except Exception as exc:
         write_startup_status(

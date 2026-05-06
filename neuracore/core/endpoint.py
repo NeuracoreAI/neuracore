@@ -143,12 +143,13 @@ class DirectPolicy(Policy):
 
     def __init__(
         self,
-        input_embodiment_description: EmbodimentDescription,
-        output_embodiment_description: EmbodimentDescription,
         model_path: Path,
         org_id: str,
+        input_embodiment_description: EmbodimentDescription | None = None,
+        output_embodiment_description: EmbodimentDescription | None = None,
         job_id: str | None = None,
         device: str | None = None,
+        robot_id: str | None = None,
     ):
         """Initialize the direct policy with a robot instance."""
         super().__init__()
@@ -162,6 +163,7 @@ class DirectPolicy(Policy):
             job_id=job_id,
             model_file=model_path,
             device=device,
+            robot_id=robot_id,
         )
 
     def set_checkpoint(
@@ -357,15 +359,16 @@ class LocalServerPolicy(ServerPolicy):
 
     def __init__(
         self,
-        input_embodiment_description: EmbodimentDescription,
-        output_embodiment_description: EmbodimentDescription,
         org_id: str,
         model_path: Path,
+        input_embodiment_description: EmbodimentDescription | None = None,
+        output_embodiment_description: EmbodimentDescription | None = None,
         device: str | None = None,
         job_id: str | None = None,
         port: int = 8080,
         host: str = "127.0.0.1",
         endpoint_id: str | None = None,
+        robot_id: str | None = None,
     ):
         """Initialize the local server policy.
 
@@ -381,6 +384,8 @@ class LocalServerPolicy(ServerPolicy):
             port: Port to run the server on
             host: Host to bind to
             endpoint_id: Optional deployed endpoint ID used for cloud log uploads.
+            robot_id: Optional robot ID used to resolve embodiments from model
+                metadata when explicit embodiments are omitted.
         """
         super().__init__(
             f"http://{host}:{port}",
@@ -388,6 +393,7 @@ class LocalServerPolicy(ServerPolicy):
         )
         self.input_embodiment_description = input_embodiment_description
         self.output_embodiment_description = output_embodiment_description
+        self.robot_id = robot_id
         self.org_id = org_id
         self.job_id = job_id
         self.endpoint_id = endpoint_id
@@ -424,20 +430,10 @@ class LocalServerPolicy(ServerPolicy):
     def _start_server(self) -> None:
         """Start the FastAPI server in a subprocess using module execution."""
         # Start the server process using module execution
-        input_embodiment_description_str = json.dumps(
-            {k.value: v for k, v in self.input_embodiment_description.items()}
-        )
-        output_embodiment_description_str = json.dumps(
-            {k.value: v for k, v in self.output_embodiment_description.items()}
-        )
         cmd = [
             sys.executable,
             "-m",
             "neuracore.core.utils.server",
-            "--input-embodiment-description",
-            f"{input_embodiment_description_str}",
-            "--output-embodiment-description",
-            f"{output_embodiment_description_str}",
             "--model-file",
             str(self.model_path),
             "--org-id",
@@ -449,6 +445,24 @@ class LocalServerPolicy(ServerPolicy):
             "--log-level",
             "info",
         ]
+        if self.input_embodiment_description is not None:
+            input_embodiment_description_str = json.dumps(
+                {k.value: v for k, v in self.input_embodiment_description.items()}
+            )
+            cmd.extend([
+                "--input-embodiment-description",
+                f"{input_embodiment_description_str}",
+            ])
+        if self.output_embodiment_description is not None:
+            output_embodiment_description_str = json.dumps(
+                {k.value: v for k, v in self.output_embodiment_description.items()}
+            )
+            cmd.extend([
+                "--output-embodiment-description",
+                f"{output_embodiment_description_str}",
+            ])
+        if self.robot_id is not None:
+            cmd.extend(["--robot-id", self.robot_id])
         if self.device:
             cmd.extend(["--device", self.device])
         if self.job_id:
@@ -597,11 +611,12 @@ class RemoteServerPolicy(ServerPolicy):
 
 
 def policy(
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
+    robot_id: str | None = None,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process.
 
@@ -613,6 +628,8 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
         device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive
+            when embodiment descriptions are not explicitly provided.
 
     Returns:
         DirectPolicy instance for direct model inference.
@@ -634,12 +651,13 @@ def policy(
         job_id=job_id,
         model_path=model_path,
         device=device,
+        robot_id=robot_id,
     )
 
 
 def policy_local_server(
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
@@ -647,6 +665,7 @@ def policy_local_server(
     host: str = "127.0.0.1",
     job_id: str | None = None,
     endpoint_id: str | None = None,
+    robot_id: str | None = None,
 ) -> LocalServerPolicy:
     """Launch a local server policy with a FastAPI server.
 
@@ -662,6 +681,8 @@ def policy_local_server(
         host: Host to bind to.
         job_id: Optional job ID to associate with the server.
         endpoint_id: Optional endpoint ID used for endpoint log streaming.
+        robot_id: Robot ID used to select embodiments from the model archive
+            when embodiment descriptions are not explicitly provided.
 
     Returns:
         LocalServerPolicy instance managing a local FastAPI server.
@@ -684,15 +705,16 @@ def policy_local_server(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return LocalServerPolicy(
-        input_embodiment_description=input_embodiment_description,
-        output_embodiment_description=output_embodiment_description,
         org_id=org_id,
         model_path=model_path,
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
         device=device,
         job_id=job_id,
         port=port,
         host=host,
         endpoint_id=endpoint_id,
+        robot_id=robot_id,
     )
 
 

@@ -1,5 +1,6 @@
 """Tests for policy inference."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -240,3 +241,64 @@ def test_preprocess_raises_when_received_items_exceed_training_limit() -> None:
         match="Received 2 items for data type",
     ):
         policy_inference._preprocess(sync_point)
+
+
+def test_init_loads_embodiments_from_archive_when_robot_id_provided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = SimpleNamespace(
+        eval=lambda: None,
+        model_init_description=SimpleNamespace(
+            input_dataset_statistics={},
+            output_prediction_horizon=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
+        lambda model_file, device=None: (
+            fake_model,
+            {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
+            {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
+        ),
+    )
+
+    inference = PolicyInference(
+        input_embodiment_description=None,
+        output_embodiment_description=None,
+        model_file=Path("dummy.nc.zip"),
+        org_id="org",
+        robot_id="robot-1",
+    )
+
+    assert DataType.JOINT_POSITIONS in inference.input_embodiment_description
+    assert DataType.JOINT_TARGET_POSITIONS in inference.output_embodiment_description
+
+
+def test_init_raises_when_no_descriptions_and_no_robot_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_model = SimpleNamespace(
+        eval=lambda: None,
+        model_init_description=SimpleNamespace(
+            input_dataset_statistics={},
+            output_prediction_horizon=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
+        lambda model_file, device=None: (fake_model, {}, {}),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Must provide both input_embodiment_description and "
+            "output_embodiment_description"
+        ),
+    ):
+        PolicyInference(
+            input_embodiment_description=None,
+            output_embodiment_description=None,
+            model_file=Path("dummy.nc.zip"),
+            org_id="org",
+        )

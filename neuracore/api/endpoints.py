@@ -28,14 +28,30 @@ from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
 from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.robot_data_spec_utils import (
+    resolve_embodiment_descriptions_with_override,
+)
+
+
+def _resolve_robot_id(
+    robot_id: str | None, robot_name: str | None, instance: int
+) -> str | None:
+    """Resolve robot_id from explicit id or robot name."""
+    if robot_name is not None:
+        assert robot_id is None, "Specify only one of robot_id or robot_name."
+        return _get_robot(robot_name, instance).id
+    return robot_id
 
 
 def policy(
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
 ) -> DirectPolicy:
     """Launch a direct policy that runs the model in-process without any server.
 
@@ -48,6 +64,10 @@ def policy(
         train_run_name: Name of the training run to load the model from.
         model_file: Path to the model file to load.
         device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive when
+            input/output embodiments are not provided.
+        robot_name: Robot name to resolve to robot_id before model loading.
+        instance: Robot instance number used with robot_name resolution.
 
     Returns:
         DirectPolicy object that provides direct in-process model inference.
@@ -56,23 +76,29 @@ def policy(
         EndpointError: If the model download or initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
+    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+
     return _policy(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
         train_run_name=train_run_name,
         model_file=model_file,
         device=device,
+        robot_id=robot_id,
     )
 
 
 def policy_local_server(
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     train_run_name: str | None = None,
     model_file: str | None = None,
     device: str | None = None,
     port: int = 8080,
     host: str = "127.0.0.1",
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
 ) -> LocalServerPolicy:
     """Launch and connect to a local server policy.
 
@@ -86,6 +112,10 @@ def policy_local_server(
         device: Torch device to run the model on (CPU or GPU, or MPS).
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
+        robot_id: Robot ID used to select embodiments from the model archive when
+            input/output embodiments are not provided.
+        robot_name: Robot name to resolve to robot_id before model loading.
+        instance: Robot instance number used with robot_name resolution.
 
     Returns:
         LocalServerPolicy object that manages a local FastAPI server.
@@ -94,6 +124,8 @@ def policy_local_server(
         EndpointError: If the server startup or model initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
+    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+
     return _policy_local_server(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
@@ -102,6 +134,7 @@ def policy_local_server(
         device=device,
         port=port,
         host=host,
+        robot_id=robot_id,
     )
 
 
@@ -129,10 +162,13 @@ def policy_remote_server(endpoint_name: str) -> RemoteServerPolicy:
 def deploy_model(
     job_id: str,
     name: str,
-    input_embodiment_description: EmbodimentDescription,
-    output_embodiment_description: EmbodimentDescription,
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
     ttl: int | None = None,
     gpu_type: GPUType = GPUType.NVIDIA_TESLA_V100,
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
 ) -> dict:
     """Deploy a trained model to a managed endpoint.
 
@@ -151,6 +187,10 @@ def deploy_model(
         ttl: Optional time-to-live in seconds for the endpoint. If provided,
             the endpoint will be automatically deleted after this duration.
         gpu_type: Type of GPU to use for deployment.
+        robot_id: Robot ID used to select embodiments from the model archive when
+            input/output embodiments are not provided.
+        robot_name: Robot name to resolve to robot_id before model loading.
+        instance: Robot instance number used with robot_name resolution.
 
     Returns:
         Deployment response containing endpoint details and deployment status.
@@ -166,12 +206,24 @@ def deploy_model(
     """
     auth = get_auth()
     org_id = get_current_org()
+    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+
+    (
+        resolved_input_embodiment_description,
+        resolved_output_embodiment_description,
+    ) = resolve_embodiment_descriptions_with_override(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        robot_id=robot_id,
+        job_id=job_id,
+    )
+
     payload = DeploymentRequest(
         training_id=job_id,
         name=name,
         ttl=ttl,
-        input_embodiment_description=input_embodiment_description,
-        output_embodiment_description=output_embodiment_description,
+        input_embodiment_description=resolved_input_embodiment_description,
+        output_embodiment_description=resolved_output_embodiment_description,
         config=DeploymentConfig(gpu_type=gpu_type),
     ).model_dump(mode="json")
     try:
