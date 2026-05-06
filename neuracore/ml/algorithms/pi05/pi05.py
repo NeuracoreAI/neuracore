@@ -52,8 +52,8 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
-PROPRIO_NORMALIZER = QuantileNormalizer
-ACTION_NORMALIZER = QuantileNormalizer
+proprio_normalizer = QuantileNormalizer
+action_normalizer = QuantileNormalizer
 IMAGE_RESIZE_SHAPE = (224, 224)
 
 
@@ -264,11 +264,11 @@ class Pi05(NeuracoreModel):
         # Only create proprio_normalizer if there are proprioception stats
         # This allows the algorithm to work without proprioception (visual-only)
         self.proprio_normalizer = (
-            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            proprio_normalizer(name="proprioception", statistics=proprio_stats)
             if proprio_stats
             else None
         )
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
 
