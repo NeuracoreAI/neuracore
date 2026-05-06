@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -73,6 +75,7 @@ def test_disk_db_data_integrity(
 
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
+    test_wall_start = time.perf_counter()
 
     with scoped_storage_state(case, dataset_name=dataset_name):
         try:
@@ -84,4 +87,9 @@ def test_disk_db_data_integrity(
                 assert_disk_recording_properties(results)
 
         finally:
-            set_case_analysis_report(request=request, case=case, results=results)
+            set_case_analysis_report(
+                request=request,
+                case=case,
+                results=results,
+                test_wall_s=time.perf_counter() - test_wall_start,
+            )

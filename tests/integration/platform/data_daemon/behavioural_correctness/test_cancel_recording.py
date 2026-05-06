@@ -83,6 +83,7 @@ def test_cancel_recording_produces_no_data(
     specs = build_context_specs(case, dataset_name=dataset_name)
     spec = specs[0]
     robot_name = spec.robot_name
+    test_wall_start = time.perf_counter()
 
     try:
         with scoped_storage_state(case, dataset_name=dataset_name):
@@ -132,6 +133,7 @@ def test_cancel_recording_produces_no_data(
             request=request,
             case=case,
             results=[],
+            test_wall_s=time.perf_counter() - test_wall_start,
         )
 
     assert_post_test_storage_state(case.storage_state_action)
@@ -161,6 +163,7 @@ def test_cancel_then_start_new_recording(
     spec = specs[0]
     robot_name = spec.robot_name
     results: list[ContextResult] = []
+    test_wall_start = time.perf_counter()
 
     try:
         with scoped_storage_state(case, dataset_name=dataset_name):
@@ -202,6 +205,7 @@ def test_cancel_then_start_new_recording(
                     time.sleep(gap_s)
 
                 # --- valid recording ---
+                wall_started_at = time.time()
                 with Timer(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
@@ -218,6 +222,7 @@ def test_cancel_then_start_new_recording(
                     assert_limit=False,
                 ):
                     nc.stop_recording(robot_name=robot_name, wait=True)
+                wall_stopped_at = time.time()
 
                 results = [
                     ContextResult(
@@ -236,8 +241,8 @@ def test_cancel_then_start_new_recording(
                         marker_names=["marker_resume"],
                         has_video=bool(spec.case.video_count),
                         context_index=0,
-                        wall_started_at=None,
-                        wall_stopped_at=0.0,
+                        wall_started_at=wall_started_at,
+                        wall_stopped_at=wall_stopped_at,
                         timestamp_mode=case.timestamp_mode,
                     )
                 ]
@@ -247,4 +252,6 @@ def test_cancel_then_start_new_recording(
             request=request,
             case=case,
             results=results,
+            label_prefix="no_gap" if gap_s == 0 else f"{gap_s}s_gap",
+            test_wall_s=time.perf_counter() - test_wall_start,
         )

@@ -124,13 +124,13 @@ def log_run_analysis_on_teardown(
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
-    """Print a session summary at the end of the test run."""
     del exitstatus, config
     if not SESSION_RUNS:
         return
 
+    timer_stats = Timer._stats
     separator = "=" * 64
-    lines = [
+    lines: list[str] = [
         "",
         separator,
         f"Session summary  ({len(SESSION_RUNS)} test(s) completed)",
@@ -139,13 +139,23 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     all_labels = sorted({label for run in SESSION_RUNS for label in run["timer_stats"]})
     for run in SESSION_RUNS:
-        total_wall_s = sum(ctx["wall_s"] for ctx in run["context_results"])
         dataset_suffix = (
             f"  dataset={run['dataset_name']!r}" if run.get("dataset_name") else ""
         )
-        lines.append(
-            f"\n  {run['case_id']}  (wall={total_wall_s:.1f}s){dataset_suffix}"
+        ctx_parts = "  ".join(
+            f"ctx[{c['context_index']}]={c['wall_s']:.1f}s"
+            for c in sorted(run["context_results"], key=lambda c: c["context_index"])
         )
+        test_wall_s = run.get("test_wall_s")
+        if test_wall_s is not None:
+            wall_info = (
+                f"test_wall={test_wall_s:.1f}s  {ctx_parts}"
+                if ctx_parts
+                else f"test_wall={test_wall_s:.1f}s"
+            )
+        else:
+            wall_info = ctx_parts or "wall=n/a"
+        lines.append(f"\n  {run['case_id']}  ({wall_info}){dataset_suffix}")
         for label in all_labels:
             stats = run["timer_stats"].get(label)
             if stats is not None:
@@ -153,11 +163,11 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
             else:
                 lines.append(f"    {label:<42}  ---")
 
-    infra_labels = sorted(label for label in Timer._stats if label not in all_labels)
+    infra_labels = sorted(label for label in timer_stats if label not in all_labels)
     if infra_labels:
         lines.append("\n  Infrastructure timings:")
         for label in infra_labels:
-            lines.append(_format_timer_stats_line(label, Timer._stats[label]))
+            lines.append(_format_timer_stats_line(label, timer_stats[label]))
 
     lines.append(separator)
     terminalreporter.write_line("\n".join(lines))
