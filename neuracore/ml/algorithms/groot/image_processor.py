@@ -76,9 +76,9 @@ class GrootImageProcessor:
         Returns:
             GrootImageProcessor configured for the checkpoint.
         """
-        from .modules import _load_config_json
+        from .utils import load_config_json
 
-        config = _load_config_json(model_path)
+        config = load_config_json(model_path)
 
         # The image_token_index is stored in the Eagle backbone config
         # Default to the Qwen-based tokenizer's image token
