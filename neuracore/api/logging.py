@@ -188,7 +188,7 @@ def _publish_joint_data_point(
     value: float,
     robot: Robot,
     timestamp: float,
- ) -> tuple[JointStreamBinding, str | None]:
+) -> tuple[JointStreamBinding, str | None]:
     """Publish one joint sample locally and return its binding + active trace ID."""
     joint_stream_binding = _get_or_create_joint_stream(data_type, name, robot)
     joint_stream = joint_stream_binding.stream

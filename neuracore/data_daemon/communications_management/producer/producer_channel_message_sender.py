@@ -32,7 +32,9 @@ def _profile_label(envelope: MessageEnvelope) -> str:
 
     if envelope.command == CommandType.DATA_CHUNK:
         chunk = payload.get("data_chunk", payload)
-        data_type_name = chunk.get("data_type_name") or chunk.get("data_type") or "unknown"
+        data_type_name = (
+            chunk.get("data_type_name") or chunk.get("data_type") or "unknown"
+        )
         return f"{command}:{data_type_name}"
 
     return command

@@ -791,7 +791,9 @@ def test_stop_recording_wait_false_multi_camera_4k_burst(dataset_cleanup):
                 recording_id=recording_id,
                 camera_name=camera_name,
                 timeout_s=float(
-                    os.getenv("NCD_BURST_RGB_TRACE_TIMEOUT_S", timeout_for_trace_written)
+                    os.getenv(
+                        "NCD_BURST_RGB_TRACE_TIMEOUT_S", timeout_for_trace_written
+                    )
                 ),
             )
 

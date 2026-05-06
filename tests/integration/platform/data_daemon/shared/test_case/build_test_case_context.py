@@ -796,7 +796,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 marker_name="marker_synchronous",
             )
             _log_recording_timer_maxima(recording_index=recording_index)
-            log_profile_summary(prefix=f"client-recording-{recording_index}", summary_logger=logger)
+            log_profile_summary(
+                prefix=f"client-recording-{recording_index}", summary_logger=logger
+            )
             if not marker_names:
                 marker_names = current_marker_names
 

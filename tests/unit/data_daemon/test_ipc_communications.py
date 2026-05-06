@@ -9,9 +9,7 @@ import zmq
 from neuracore_types import DataType
 
 import neuracore.data_daemon.const as const_module
-from neuracore.data_daemon.communications_management.consumer.data_bridge import (
-    Daemon,
-)
+from neuracore.data_daemon.communications_management.consumer.data_bridge import Daemon
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )

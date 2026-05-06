@@ -2,25 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import queue
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timezone
-import json
 
 from neuracore_types import DataType
 
+from neuracore.data_daemon.const import SOCKET_PATH, VIDEO_SOCKET_PATH
+from neuracore.data_daemon.debug_profiling import log_summary as log_profile_summary
+from neuracore.data_daemon.debug_profiling import observe_value, record_duration
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path, utc_now
-from neuracore.data_daemon.const import SOCKET_PATH, VIDEO_SOCKET_PATH
-from neuracore.data_daemon.debug_profiling import (
-    log_summary as log_profile_summary,
-    observe_value,
-    record_duration,
-)
 from neuracore.data_daemon.models import (
     BatchedJointDataPayload,
     CommandType,
@@ -548,7 +544,9 @@ class DataBridge:
         self, channel: ChannelState, message: MessageEnvelope
     ) -> None:
         """Handle one batched joint transport message from a producer."""
-        batch_payload_dict = message.payload.get(CommandType.BATCHED_JOINT_DATA.value, {})
+        batch_payload_dict = message.payload.get(
+            CommandType.BATCHED_JOINT_DATA.value, {}
+        )
 
         batch_payload = BatchedJointDataPayload.from_dict(batch_payload_dict)
         if not batch_payload.items:

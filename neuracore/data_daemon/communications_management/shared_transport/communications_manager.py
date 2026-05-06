@@ -44,7 +44,9 @@ class CommunicationsManager:
         self._consumer_socket: zmq.Socket | None = None
 
         self._producer_socket: zmq.Socket | None = None
-        self._socket_path: Path | str = SOCKET_PATH if socket_path is None else socket_path
+        self._socket_path: Path | str = (
+            SOCKET_PATH if socket_path is None else socket_path
+        )
 
     def _endpoint(self, socket_path: Path | str) -> str:
         """Build a ZMQ endpoint from a socket path or address."""
@@ -77,10 +79,7 @@ class CommunicationsManager:
             self._consumer_socket.bind(endpoint)
         except zmq.error.ZMQError as e:
             if e.errno == zmq.EADDRINUSE:
-                if (
-                    isinstance(self._socket_path, Path)
-                    and self._socket_path.exists()
-                ):
+                if isinstance(self._socket_path, Path) and self._socket_path.exists():
                     try:
                         self._socket_path.unlink()
                         logger.warning(

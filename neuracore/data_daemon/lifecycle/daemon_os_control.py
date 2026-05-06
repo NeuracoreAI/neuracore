@@ -20,6 +20,7 @@ from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_stale_shared_slot_segments,
     shutdown,
 )
+
 # cspell:ignore WNOHANG waitpid
 
 
@@ -102,6 +103,7 @@ def cleanup_stale_client_state(
     )
     cleanup_stale_shared_slot_segments()
 
+
 def _build_daemon_launch_env(
     env_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -128,7 +130,7 @@ def _start_daemon_subprocess(
         "-m",
         "neuracore.data_daemon.runner_entry",
     ]
-    
+
     try:
         if background:
             return subprocess.Popen(

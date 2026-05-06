@@ -24,9 +24,7 @@ class SharedMemoryCapacityError(RuntimeError):
 
 def _daemon_lifecycle_error(message: str) -> RuntimeError:
     """Construct the daemon lifecycle error lazily to avoid import cycles."""
-    from neuracore.data_daemon.lifecycle.daemon_os_control import (
-        DaemonLifecycleError,
-    )
+    from neuracore.data_daemon.lifecycle.daemon_os_control import DaemonLifecycleError
 
     return DaemonLifecycleError(message)
 
