@@ -121,6 +121,7 @@ class ProducerChannel:
         shared_memory_size: int | None = None,
         transport_group: str | None = None,
         share_transport: bool | None = None,
+        shared_runtime_policy: str | None = None,
     ) -> None:
         """Initialize the producer channel."""
         if data_type is None:
@@ -154,6 +155,7 @@ class ProducerChannel:
         self._use_shared_slot_transport = data_type_uses_shared_slot_transport(
             data_type
         )
+        self._shared_runtime_policy = shared_runtime_policy
         self._share_transport = bool(
             (not self._use_shared_slot_transport) if share_transport is None else share_transport
         )
@@ -162,12 +164,16 @@ class ProducerChannel:
             socket_path=socket_path,
             send_queue_maxsize=self.send_queue_maxsize,
             share_runtime=self._share_transport,
+            binding_key=self.channel_id,
+            shared_runtime_policy=self._shared_runtime_policy,
         )
         self._control_runtime = self._acquire_sender_runtime(
             context=context,
             socket_path=str(CONTROL_SOCKET_PATH),
             send_queue_maxsize=512,
             share_runtime=True,
+            binding_key=f"control:{self.channel_id}",
+            shared_runtime_policy="shared_single",
         )
         self._shared_slot_transport = (
             SharedSlotVideoTransport(
@@ -206,11 +212,19 @@ class ProducerChannel:
         socket_path: str,
         send_queue_maxsize: int,
         share_runtime: bool,
+        binding_key: str,
+        shared_runtime_policy: str | None,
     ) -> SharedSenderHandle | _OwnedSenderHandle:
         if context is None and share_runtime:
             return SharedSenderRegistry.acquire(
                 socket_path=socket_path,
                 send_queue_maxsize=send_queue_maxsize,
+                binding_key=binding_key,
+                policy=(
+                    "shared_single"
+                    if shared_runtime_policy is None
+                    else shared_runtime_policy
+                ),
             )
 
         comm = CommunicationsManager(context=context, socket_path=socket_path)

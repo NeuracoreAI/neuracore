@@ -61,6 +61,7 @@ class DataStream(ABC):
         trace_only: bool = False,
         transport_only: bool = False,
         share_transport: bool = False,
+        transport_policy: str | None = None,
     ) -> None:
         """Initialize the data stream.
 
@@ -85,6 +86,7 @@ class DataStream(ABC):
         self._trace_only = trace_only
         self._transport_only = transport_only
         self._share_transport = share_transport
+        self._transport_policy = transport_policy
 
     @property
     def data_type(self) -> DataType:
@@ -131,6 +133,7 @@ class DataStream(ABC):
                 data_type=self._data_type,
                 transport_group=self._transport_group,
                 share_transport=self._share_transport,
+                shared_runtime_policy=self._resolve_transport_policy(),
             )
 
         self._producer_channel.start_recording_session(
@@ -138,6 +141,14 @@ class DataStream(ABC):
             trace_id=self._trace_id,
             create_trace=not self._transport_only,
         )
+
+    def _resolve_transport_policy(self) -> str | None:
+        """Resolve the producer transport policy for this stream."""
+        if self._transport_policy is not None:
+            return self._transport_policy
+        if self._transport_only:
+            return "grouped_batch"
+        return "json_message"
 
     def stop_recording(self, *, wait_for_drain: bool = True) -> None:
         """Stop recording data and tear down the active producer, if any."""
@@ -249,6 +260,8 @@ class DataStream(ABC):
         handle = SharedSenderRegistry.acquire(
             socket_path=str(CONTROL_SOCKET_PATH),
             send_queue_maxsize=512,
+            binding_key=f"trace_end:{self._producer_id}",
+            policy="shared_single",
         )
         try:
             cutoff_sequence = handle.sender.send(
@@ -282,6 +295,7 @@ class JsonDataStream(DataStream):
         trace_only: bool = False,
         transport_only: bool = False,
         share_transport: bool = True,
+        transport_policy: str | None = None,
     ):
         """Initialize the JSON data stream.
 
@@ -296,6 +310,7 @@ class JsonDataStream(DataStream):
             trace_only=trace_only,
             transport_only=transport_only,
             share_transport=share_transport,
+            transport_policy=transport_policy,
         )
 
     def log(self, data: NCData) -> None:

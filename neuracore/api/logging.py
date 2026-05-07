@@ -207,6 +207,7 @@ def _get_or_create_batched_joint_transport_stream(
             data_type_name=f"batched_{data_type.value}",
             transport_group=_batched_joint_transport_group(data_type),
             transport_only=True,
+            share_transport=True,
         )
         robot.add_data_stream(str_id, stream)
     assert isinstance(stream, JsonDataStream)
