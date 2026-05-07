@@ -34,8 +34,8 @@ from .modules import DiffusionConditionalUnet1d, DiffusionPolicyImageEncoder
 
 logger = logging.getLogger(__name__)
 
-PROPRIO_NORMALIZER = MinMaxNormalizer  # or MeanStdNormalizer
-ACTION_NORMALIZER = MinMaxNormalizer  # or MeanStdNormalizer
+proprio_normalizer = MinMaxNormalizer  # or MeanStdNormalizer
+action_normalizer = MinMaxNormalizer  # or MeanStdNormalizer
 RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
 
@@ -212,11 +212,11 @@ class DiffusionPolicy(NeuracoreModel):
         # Only create proprio_normalizer if there are proprioception stats
         # This allows the algorithm to work without proprioception (visual-only)
         self.proprio_normalizer = (
-            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            proprio_normalizer(name="proprioception", statistics=proprio_stats)
             if proprio_stats
             else None
         )
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
 

@@ -46,8 +46,8 @@ from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
 
 from .modules import ImageEncoder
 
-PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+proprio_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
+action_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
 RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
 
@@ -299,11 +299,11 @@ class CNNMLP(NeuracoreModel):
             self.proprio_dims[data_type] = (current_dim, current_dim + dim)
             current_dim += dim
 
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
         self.proprio_normalizer = (
-            PROPRIO_NORMALIZER(name="proprioception", statistics=input_stats)
+            proprio_normalizer(name="proprioception", statistics=input_stats)
             if input_stats
             else None
         )

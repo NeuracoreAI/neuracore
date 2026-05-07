@@ -46,8 +46,8 @@ from .modules import (
 
 logger = logging.getLogger(__name__)
 
-PROPRIO_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
-ACTION_NORMALIZER = MeanStdNormalizer  # or MinMaxNormalizer
+proprio_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
+action_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
 RESNET_MEAN = [0.485, 0.456, 0.406]
 RESNET_STD = [0.229, 0.224, 0.225]
 
@@ -197,11 +197,11 @@ class ACT(NeuracoreModel):
         # Only create proprio_normalizer if there are proprioception stats
         # This allows the algorithm to work without proprioception (visual-only)
         self.proprio_normalizer = (
-            PROPRIO_NORMALIZER(name="proprioception", statistics=proprio_stats)
+            proprio_normalizer(name="proprioception", statistics=proprio_stats)
             if proprio_stats
             else None
         )
-        self.action_normalizer = ACTION_NORMALIZER(
+        self.action_normalizer = action_normalizer(
             name="actions", statistics=output_stats
         )
 
