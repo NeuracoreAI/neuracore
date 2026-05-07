@@ -57,7 +57,12 @@ from neuracore.importer.core.validation import (
     validate_rgb_images,
 )
 
-from .exceptions import DataValidationError, DataValidationWarning, ImporterError
+from .exceptions import (
+    DataValidationError,
+    DataValidationWarning,
+    ImporterError,
+    ImportError,
+)
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
 
@@ -195,6 +200,149 @@ class NeuracoreDatasetImporter(ABC):
     @abstractmethod
     def _record_step(self, step: dict, timestamp: float) -> None:
         """Record a single step of the dataset."""
+
+    def _resolve_source_path(self, source: Any, source_name: str | None) -> Any:
+        """Resolve source data by dataset-specific source path semantics."""
+
+    def _compose_source_path(
+        self, import_source_path: str | None, item_source_name: str | None
+    ) -> str | None:
+        """Combine import-level and item-level source names."""
+        import_path = import_source_path or ""
+        item_path = item_source_name or ""
+        if import_path and item_path:
+            return ".".join([import_path, item_path])
+        return item_path or import_path or None
+
+    def _extract_source_data(
+        self,
+        source: Any,
+        item: Any,
+        import_source_path: str,
+        data_type: DataType,
+    ) -> Any:
+        """Extract source data and apply optional indexing/slicing rules."""
+        pose_position_source_name = getattr(item, "pose_position_source_name", None)
+        pose_orientation_source_name = getattr(
+            item, "pose_orientation_source_name", None
+        )
+        pose_position_index_range = getattr(item, "pose_position_index_range", None)
+        pose_orientation_index_range = getattr(
+            item, "pose_orientation_index_range", None
+        )
+
+        use_split_pose_sources = (
+            pose_position_source_name is not None
+            or pose_orientation_source_name is not None
+            or pose_position_index_range is not None
+            or pose_orientation_index_range is not None
+        )
+        if use_split_pose_sources:
+            item_name = getattr(item, "name", None)
+            if (
+                pose_position_source_name is None
+                or pose_orientation_source_name is None
+                or pose_position_index_range is None
+                or pose_orientation_index_range is None
+            ):
+                raise ImportError(
+                    "pose_position_source_name, pose_orientation_source_name, "
+                    "pose_position_index_range, and pose_orientation_index_range "
+                    "must be provided together for split pose extraction."
+                )
+            if getattr(item, "source_name", None) is not None:
+                raise ImportError(
+                    "source_name cannot be provided when pose_position_source_name "
+                    "and pose_orientation_source_name are used"
+                )
+            if getattr(item, "index_range", None) is not None:
+                raise ImportError(
+                    "index_range cannot be provided when pose_position_source_name "
+                    "and pose_orientation_source_name are used"
+                )
+            position_data = self._resolve_item_source_path(
+                source, import_source_path, pose_position_source_name
+            )
+            orientation_data = self._resolve_item_source_path(
+                source, import_source_path, pose_orientation_source_name
+            )
+            pos_idx = pose_position_index_range
+            ori_idx = pose_orientation_index_range
+            try:
+                position_data = position_data[pos_idx.start : pos_idx.end]
+                orientation_data = orientation_data[ori_idx.start : ori_idx.end]
+            except Exception as exc:
+                raise ImportError(
+                    f"Cannot slice split pose data for '{data_type.value}' "
+                    f"from source path '{import_source_path}'. Check your "
+                    f"pose_position_index_range and pose_orientation_index_range. {exc}"
+                ) from exc
+            return np.concatenate(
+                [
+                    np.asarray(
+                        self._convert_source_data(
+                            position_data, data_type=data_type, item_name=item_name
+                        )
+                    ),
+                    np.asarray(
+                        self._convert_source_data(
+                            orientation_data, data_type=data_type, item_name=item_name
+                        )
+                    ),
+                ],
+                axis=0,
+            )
+
+        source_data = self._resolve_item_source_path(
+            source, import_source_path, item.source_name
+        )
+
+        try:
+            if item.index_range is not None:
+                source_data = source_data[item.index_range.start : item.index_range.end]
+            elif item.index is not None:
+                source_data = source_data[item.index]
+        except Exception as exc:
+            shape_str = (
+                f" with shape {source_data.shape}"
+                if hasattr(source_data, "shape")
+                else ""
+            )
+            raise ImportError(
+                f"Cannot index or slice for '{data_type.value}'. "
+                f"Source path '{import_source_path}' resolved to a "
+                f"{type(source_data)}{shape_str}, not an indexable tensor. "
+                f"Check your dataset config. {exc}"
+            ) from exc
+
+        return source_data
+
+    def _resolve_item_source_path(
+        self, source: Any, import_source_path: str, item_source_name: str | None
+    ) -> Any:
+        """Resolve item data path, supporting both root and pre-scoped sources."""
+        combined_source_name = self._compose_source_path(
+            import_source_path, item_source_name
+        )
+        return self._resolve_source_path(source, combined_source_name)
+
+    def _convert_source_data(
+        self,
+        source_data: Any,
+        data_type: DataType,
+        item_name: str | None,
+    ) -> Any:
+        """Convert tensor-like source data to numpy-compatible values."""
+        if isinstance(source_data, (np.ndarray, list, tuple)):
+            return source_data
+        try:
+            return source_data.numpy()
+        except Exception as exc:
+            suffix = f".{item_name}" if item_name else ""
+            raise ImportError(
+                f"Failed to convert data to numpy array for "
+                f"{data_type.value}{suffix}: {exc}."
+            ) from exc
 
     def _reset_episode_state(self) -> None:
         """Reset episode-specific state at the start of each episode."""

@@ -21,6 +21,9 @@ class _FakeTensor:
     def numpy(self):
         return self._value
 
+    def __getitem__(self, key):
+        return _FakeTensor(self._value[key])
+
 
 class _FakeEpisodeRows:
     """Simple rows object matching the subset of HF Dataset API we use."""
@@ -275,6 +278,166 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
         extrinsics=None,
         intrinsics=None,
     )
+
+
+@pytest.mark.parametrize(
+    ("import_source_path", "expected"),
+    [
+        ("observation", [1.0, 2.0, 3.0]),
+        ("episode.observation", [4.0, 5.0, 6.0]),
+        ("run.episode.observation", [7.0, 8.0, 9.0]),
+    ],
+)
+def test_lerobot_resolve_source_path_supports_dot_delimited_source_depths(
+    import_source_path, expected
+):
+    """Import source path should resolve flattened 1-3 segment keys."""
+    importer = object.__new__(LeRobotDatasetImporter)
+
+    resolved = importer._resolve_source_path(
+        source={
+            "observation": _FakeTensor([1.0, 2.0, 3.0]),
+            "episode.observation": _FakeTensor([4.0, 5.0, 6.0]),
+            "run.episode.observation": _FakeTensor([7.0, 8.0, 9.0]),
+        },
+        source_name=import_source_path,
+    )
+
+    assert resolved.numpy() == expected
+
+
+@pytest.mark.parametrize(
+    ("item_source_name", "expected"),
+    [
+        ("joint_positions", [1.0, 2.0, 3.0]),
+        ("robot.joint_positions", [4.0, 5.0, 6.0]),
+        ("arm.robot.joint_positions", [7.0, 8.0, 9.0]),
+    ],
+)
+def test_lerobot_extract_source_data_supports_dot_delimited_source_name_depths(
+    item_source_name, expected
+):
+    """Mapping source_name should resolve flattened 1-3 segment keys."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    item = SimpleNamespace(
+        source_name=item_source_name,
+        index=None,
+        index_range=None,
+        name="joint_positions",
+    )
+
+    resolved = importer._extract_source_data(
+        source={
+            "joint_positions": _FakeTensor([1.0, 2.0, 3.0]),
+            "robot.joint_positions": _FakeTensor([4.0, 5.0, 6.0]),
+            "arm.robot.joint_positions": _FakeTensor([7.0, 8.0, 9.0]),
+        },
+        item=item,
+        import_source_path="",
+        data_type=DataType.JOINT_POSITIONS,
+    )
+
+    assert resolved.numpy() == expected
+
+
+def test_lerobot_record_step_resolves_mixed_dot_delimited_source_and_source_name():
+    """_record_step should combine source and source_name dot paths."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    mapping_item = SimpleNamespace(
+        source_name="robot.joint_positions",
+        index=None,
+        index_range=None,
+        name="joint_positions",
+    )
+    import_format = SimpleNamespace(
+        language_type=LanguageConfig.STRING,
+        joint_position_input_type=JointPositionInputTypeConfig.CUSTOM,
+        ee_pose_input_type=None,
+    )
+    import_config = SimpleNamespace(
+        source="episode.steps",
+        mapping=[mapping_item],
+        format=import_format,
+    )
+    importer.dataset_config = SimpleNamespace(
+        data_import_config={DataType.JOINT_POSITIONS: import_config}
+    )
+    importer.ordered_import_configs = [(DataType.JOINT_POSITIONS, import_config)]
+    importer._log_data = MagicMock()
+
+    importer._record_step(
+        {"episode.steps.robot.joint_positions": _FakeTensor([0.1, 0.2, 0.3])},
+        timestamp=1.5,
+    )
+
+    importer._log_data.assert_called_once_with(
+        DataType.JOINT_POSITIONS,
+        [0.1, 0.2, 0.3],
+        mapping_item,
+        import_format,
+        1.5,
+        extrinsics=None,
+        intrinsics=None,
+    )
+
+
+def test_lerobot_extract_source_data_uses_split_pose_sources_and_concatenates():
+    """Split pose source config should override source_name and concatenate slices."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    item = SimpleNamespace(
+        pose_position_source_name="position",
+        pose_orientation_source_name="orientation",
+        pose_position_index_range=SimpleNamespace(start=1, end=4),
+        pose_orientation_index_range=SimpleNamespace(start=0, end=4),
+    )
+
+    extracted = importer._extract_source_data(
+        source={
+            "observation.combined_pose": _FakeTensor(
+                [9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0]
+            ),
+            "observation.position": _FakeTensor([10.0, 1.0, 2.0, 3.0, 20.0]),
+            "observation.orientation": _FakeTensor([0.1, 0.2, 0.3, 0.4, 0.5]),
+        },
+        item=item,
+        import_source_path="observation",
+        data_type=DataType.POSES,
+    )
+
+    converted = importer._convert_source_data(
+        source_data=extracted,
+        data_type=DataType.POSES,
+        item_name="ee_pose",
+    )
+    assert converted.tolist() == [1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.4]
+
+
+def test_lerobot_extract_source_data_split_pose_requires_all_split_fields():
+    """Split pose extraction should reject partially specified configs."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    item = SimpleNamespace(
+        source_name="combined_pose",
+        index=None,
+        index_range=None,
+        pose_position_source_name="position",
+        pose_orientation_source_name=None,
+        pose_position_index_range=SimpleNamespace(start=0, end=3),
+        pose_orientation_index_range=SimpleNamespace(start=0, end=4),
+    )
+
+    with pytest.raises(ImportError, match="must be provided together"):
+        importer._extract_source_data(
+            source={
+                "observation.combined_pose": _FakeTensor(
+                    [9.0, 9.0, 9.0, 9.0, 9.0, 9.0, 9.0]
+                ),
+                "observation.position": _FakeTensor([1.0, 2.0, 3.0]),
+                "observation.orientation": _FakeTensor([0.1, 0.2, 0.3, 0.4]),
+            },
+            item=item,
+            import_source_path="observation",
+            data_type=DataType.POSES,
+        )
 
 
 def test_lerobot_init_forwards_ik_args_to_base(monkeypatch):

@@ -458,7 +458,6 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
     def _record_step(self, step_data: dict, timestamp: float) -> None:
         """Record a single step to Neuracore."""
         for data_type, import_config in self.ordered_import_configs:
-            source = self._resolve_source_path(step_data, import_config.source)
 
             ik_requested = (
                 data_type == DataType.JOINT_POSITIONS
@@ -482,7 +481,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                     )
                 else:
                     source_data = self._extract_source_data(
-                        source=source,
+                        source=step_data,
                         item=item,
                         import_source_path=import_config.source,
                         data_type=data_type,
@@ -511,7 +510,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                             extrinsics = item.extrinsics_transforms(
                                 self._convert_source_data(
                                     source_data=self._resolve_source_path(
-                                        source, item.extrinsics_source
+                                        step_data,
+                                        self._compose_source_path(
+                                            import_config.source, item.extrinsics_source
+                                        ),
                                     ),
                                     data_type=data_type,
                                     item_name=item.extrinsics_source,
@@ -521,7 +523,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                             intrinsics = item.intrinsics_transforms(
                                 self._convert_source_data(
                                     source_data=self._resolve_source_path(
-                                        source, item.intrinsics_source
+                                        step_data,
+                                        self._compose_source_path(
+                                            import_config.source, item.intrinsics_source
+                                        ),
                                     ),
                                     data_type=data_type,
                                     item_name=item.intrinsics_source,
@@ -537,50 +542,6 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                         extrinsics=extrinsics,
                         intrinsics=intrinsics,
                     )
-
-    def _extract_source_data(
-        self,
-        source: Any,
-        item: Any,
-        import_source_path: str,
-        data_type: DataType,
-    ) -> Any:
-        source_data = self._resolve_source_path(source, item.source_name)
-
-        try:
-            if item.index_range is not None:
-                source_data = source_data[item.index_range.start : item.index_range.end]
-            elif item.index is not None:
-                source_data = source_data[item.index]
-        except Exception as exc:
-            shape_str = (
-                f" with shape {source_data.shape}"
-                if hasattr(source_data, "shape")
-                else ""
-            )
-            raise ImportError(
-                f"Cannot index or slice for '{data_type.value}'. "
-                f"Source path '{import_source_path}' resolved to a "
-                f"{type(source_data)}{shape_str}, not an indexable tensor. "
-                f"Check your dataset config. {exc}"
-            )
-
-        return source_data
-
-    def _convert_source_data(
-        self,
-        source_data: Any,
-        data_type: DataType,
-        item_name: str | None,
-    ) -> Any:
-        try:
-            return source_data.numpy()
-        except Exception as exc:
-            suffix = f".{item_name}" if item_name else ""
-            raise ImportError(
-                f"Failed to convert data to numpy array for "
-                f"{data_type.value}{suffix}: {exc}."
-            )
 
 
 class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):

@@ -13,7 +13,11 @@ from neuracore_types.importer.config import (
 )
 
 from neuracore.importer.core.base import NeuracoreDatasetImporter
-from neuracore.importer.core.exceptions import DataValidationError, ImporterError
+from neuracore.importer.core.exceptions import (
+    DataValidationError,
+    ImporterError,
+    ImportError,
+)
 
 
 class _ConcreteImporter(NeuracoreDatasetImporter):
@@ -27,6 +31,13 @@ class _ConcreteImporter(NeuracoreDatasetImporter):
 
     def _record_step(self, step, timestamp):
         return None
+
+    def _resolve_source_path(self, source, source_name):
+        if not source_name:
+            return source
+        for key in source_name.split("."):
+            source = source[key]
+        return source
 
 
 def _make_importer_for_log_data() -> NeuracoreDatasetImporter:

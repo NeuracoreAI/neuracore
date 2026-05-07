@@ -28,6 +28,13 @@ class _CompletedItemsTestImporter(NeuracoreDatasetImporter):
     def _record_step(self, step: dict, timestamp: float) -> None:
         return None
 
+    def _resolve_source_path(self, source, source_name):
+        if not source_name:
+            return source
+        for key in source_name.split("."):
+            source = source[key]
+        return source
+
 
 def test_resolve_completed_items_file_sanitizes_dataset_name(tmp_path):
     """Resume path uses a safe filename suffix from the output dataset name."""
