@@ -41,7 +41,7 @@ T = TypeVar("T")
 logger = logging.getLogger(__name__)
 
 
-class PI05FullPolicy(nn.Module):
+class PI05Policy(nn.Module):
     """Core Pi05 model combining PaliGemma VLM with Gemma action expert.
 
     This model processes visual observations and language through PaliGemma and
@@ -527,7 +527,7 @@ class PI05FullPolicy(nn.Module):
         config: PI05Config | None = None,
         strict: bool = True,
         **kwargs: Any,
-    ) -> PI05FullPolicy:
+    ) -> PI05Policy:
         """Load a pretrained Pi05 model from HuggingFace Hub or local path.
 
         Args:
@@ -537,7 +537,7 @@ class PI05FullPolicy(nn.Module):
             **kwargs: Additional arguments (cache_dir, force_download, etc.)
 
         Returns:
-            PI05FullPolicy model with loaded weights.
+            PI05Policy model with loaded weights.
         """
         if pretrained_name_or_path is None:
             pretrained_name_or_path = "lerobot/pi05_base"
