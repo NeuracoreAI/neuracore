@@ -43,7 +43,7 @@ from neuracore.ml.algorithm_utils.normalizer import QuantileNormalizer
 
 from .modules import PI05FullPolicy
 from .utils import (
-    PI05Config,
+    PI05FullConfig,
     _load_tokenizer,
     build_lr_lambda,
     pad_vector,
@@ -280,7 +280,7 @@ class Pi05Full(NeuracoreModel):
             )
 
         # Build Pi05 config
-        self.config = PI05Config(
+        self.config = PI05FullConfig(
             paligemma_variant=paligemma_variant,
             action_expert_variant=action_expert_variant,
             dtype=dtype,
@@ -611,7 +611,7 @@ class Pi05Full(NeuracoreModel):
             model_init_description: Neuracore model initialization config.
             pretrained_name_or_path: HuggingFace repo id (e.g. "lerobot/pi05_base")
                 or local path. Defaults to "lerobot/pi05_base".
-            **kwargs: Additional arguments passed to PI05Policy.from_pretrained
+            **kwargs: Additional arguments passed to PI05FullPolicy.from_pretrained
                 (e.g. cache_dir, force_download, token, revision).
 
         Returns:

@@ -1,8 +1,8 @@
-"""Utility functions and configuration for the Pi05 algorithm.
+"""Utility functions and configuration for the Pi05Full algorithm.
 
 This module provides helper functions for flow matching, attention mask
-construction, and image preprocessing used by the Pi05 model. It also
-defines the PI05Config dataclass for model configuration.
+construction, and image preprocessing used by the Pi05Full model. It also
+defines the PI05FullConfig dataclass for model configuration.
 """
 
 # cspell:ignore OPENPI adarms
@@ -29,8 +29,8 @@ OPENPI_ATTENTION_MASK_VALUE = -1e9
 
 
 @dataclass(slots=True)
-class PI05Config:
-    """Configuration for the Pi05 model and training hyperparameters.
+class PI05FullConfig:
+    """Configuration for the Pi05Full model and training hyperparameters.
 
     Attributes:
         paligemma_variant: PaliGemma model size ("gemma_300m" or "gemma_2b").
@@ -55,6 +55,16 @@ class PI05Config:
         input_features: Mapping of input feature names to dimensions.
         output_features: Mapping of output feature names to dimensions.
         image_features: List of image feature names used as input.
+        subtask_loss_weight: Loss weight for the subtask prediction head.
+        fast_token_loss_weight: Loss weight for the FAST token prediction head.
+        flow_matching_loss_weight: Loss weight for the flow matching action head.
+        knowledge_insulation: Whether to apply knowledge insulation during training.
+        max_subtask_tokens: Maximum token length for subtask sequences.
+        max_fast_tokens: Maximum token length for FAST-encoded action sequences.
+        fast_tokenizer_name: HuggingFace repo ID for the FAST tokenizer.
+        fast_skip_tokens: Number of leading FAST tokens to skip during decoding.
+        max_decoding_steps: Maximum autoregressive steps for subtask generation.
+        subtask_temperature: Sampling temperature for subtask generation (0 = greedy).
     """
 
     paligemma_variant: str = "gemma_2b"
@@ -80,6 +90,25 @@ class PI05Config:
     output_features: dict = field(default_factory=dict)
     image_features: list[str] = field(default_factory=list)
 
+    # --- pi05_full additions ---
+    # Loss weights (defaults match the JAX paper)
+    subtask_loss_weight: float = 10.0
+    fast_token_loss_weight: float = 1.0
+    flow_matching_loss_weight: float = 1.0
+
+    # Knowledge insulation (training only)
+    knowledge_insulation: bool = True
+
+    # Subtask + FAST tokenization
+    max_subtask_tokens: int = 64
+    max_fast_tokens: int = 128
+    fast_tokenizer_name: str = "physical-intelligence/fast"
+    fast_skip_tokens: int = 128
+
+    # Subtask generation at inference
+    max_decoding_steps: int = 200
+    subtask_temperature: float = 0.0
+
     def validate_features(self) -> None:
         """Validate configuration values.
 
@@ -103,6 +132,35 @@ class PI05Config:
         # Add validation for compile_mode.
         if self.compile_mode not in ["max-autotune", "max-eager"]:
             raise ValueError(f"Invalid compile_mode: {self.compile_mode}")
+
+        for name, value in [
+            ("subtask_loss_weight", self.subtask_loss_weight),
+            ("fast_token_loss_weight", self.fast_token_loss_weight),
+            ("flow_matching_loss_weight", self.flow_matching_loss_weight),
+        ]:
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative, got {value}")
+
+        if (
+            self.subtask_loss_weight == 0.0
+            and self.fast_token_loss_weight == 0.0
+            and self.flow_matching_loss_weight == 0.0
+        ):
+            raise ValueError(
+                "At least one loss weight must be > 0. "
+                "All zero would yield an untrainable model."
+            )
+
+        if self.max_subtask_tokens <= 0:
+            raise ValueError(
+                f"max_subtask_tokens must be > 0, got {self.max_subtask_tokens}"
+            )
+        if self.max_fast_tokens <= 0:
+            raise ValueError(f"max_fast_tokens must be > 0, got {self.max_fast_tokens}")
+        if self.subtask_temperature < 0:
+            raise ValueError(
+                f"subtask_temperature must be >= 0, got {self.subtask_temperature}"
+            )
 
 
 def _get_safe_dtype(target_dtype: torch.dtype, device_type: str) -> torch.dtype:

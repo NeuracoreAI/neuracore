@@ -1,6 +1,6 @@
-"""Core PyTorch modules for the Pi05 algorithm.
+"""Core PyTorch modules for the Pi05Full algorithm.
 
-This module implements the PI05Policy model that combines a PaliGemma
+This module implements the PI05FullPolicy model that combines a PaliGemma
 vision-language model with a Gemma action expert for robot manipulation.
 The model uses flow matching to denoise action sequences conditioned on
 visual observations.
@@ -23,13 +23,10 @@ from transformers.models.paligemma.modeling_paligemma import (
 )
 from transformers.utils import cached_file
 
-from neuracore.ml.algorithms.pi05_full.gemma_pytorch import (
-    PaliGemmaWithExpertModel,
-    get_gemma_config,
-)
-from neuracore.ml.algorithms.pi05_full.utils import (
+from .gemma_pytorch import PaliGemmaWithExpertModel, get_gemma_config
+from .utils import (
     OPENPI_ATTENTION_MASK_VALUE,
-    PI05Config,
+    PI05FullConfig,
     _align_mask_length,
     _create_sinusoidal_pos_embedding,
     _make_att_2d_masks,
@@ -52,7 +49,7 @@ class PI05FullPolicy(nn.Module):
     optimization for efficient training and inference.
     """
 
-    def __init__(self, config: PI05Config):
+    def __init__(self, config: PI05FullConfig):
         """Initialize the Pi05 model.
 
         Args:
@@ -524,7 +521,7 @@ class PI05FullPolicy(nn.Module):
         cls,
         pretrained_name_or_path: str | Path | None = None,
         *,
-        config: PI05Config | None = None,
+        config: PI05FullConfig | None = None,
         strict: bool = True,
         **kwargs: Any,
     ) -> PI05FullPolicy:
@@ -532,12 +529,12 @@ class PI05FullPolicy(nn.Module):
 
         Args:
             pretrained_name_or_path: HuggingFace repo id or local path
-            config: Model configuration (default: PI05Config())
+            config: Model configuration (default: PI05FullConfig())
             strict: Whether to strictly enforce state dict loading
             **kwargs: Additional arguments (cache_dir, force_download, etc.)
 
         Returns:
-            PI05Policy model with loaded weights.
+            PI05FullPolicy model with loaded weights.
         """
         if pretrained_name_or_path is None:
             pretrained_name_or_path = "lerobot/pi05_base"
@@ -545,7 +542,7 @@ class PI05FullPolicy(nn.Module):
                 "No pretrained model path provided; using default pi05_base model"
             )
         if config is None:
-            config = PI05Config()
+            config = PI05FullConfig()
 
         model = cls(config, **kwargs)
 
