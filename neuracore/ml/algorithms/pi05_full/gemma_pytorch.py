@@ -22,6 +22,7 @@ def compute_shared_attention_layer(
     adarms_cond: list[torch.Tensor | None],
     paligemma: PaliGemmaForConditionalGeneration,
     gemma_expert: GemmaForCausalLM,
+    knowledge_insulation: bool = False,
 ) -> list[torch.Tensor]:
     """Run a single transformer layer jointly across prefix/suffix branches.
 
@@ -43,6 +44,9 @@ def compute_shared_attention_layer(
             normalization, one per branch. None values indicate no conditioning.
         paligemma: The PaliGemma vision-language model instance.
         gemma_expert: The Gemma action expert model instance.
+        knowledge_insulation: If True and both branches are present, action queries
+            attend to VLM K/V via .detach() so that gradients from the action loss
+            cannot reach VLM parameters. VLM queries still see the full K/V.
 
     Returns:
         List of two tensors containing the output hidden states for each branch
@@ -93,14 +97,55 @@ def compute_shared_attention_layer(
     )
     batch_size = query_states.shape[0]
     scaling = paligemma.language_model.layers[layer_idx].self_attn.scaling
-    att_output, _ = modeling_gemma.eager_attention_forward(
-        paligemma.language_model.layers[layer_idx].self_attn,
-        query_states,
-        key_states,
-        value_states,
-        attention_mask,
-        scaling,
+    self_attn = paligemma.language_model.layers[layer_idx].self_attn
+
+    apply_ki = (
+        knowledge_insulation
+        and inputs_embeds[1] is not None
+        and inputs_embeds[0] is not None
+        and any(inp.requires_grad for inp in inputs_embeds if inp is not None)
     )
+
+    if apply_ki:
+        prefix_len = inputs_embeds[0].shape[1]
+
+        q_vlm = query_states[:, :, :prefix_len, :]
+        q_action = query_states[:, :, prefix_len:, :]
+        k_vlm = key_states[:, :, :prefix_len, :]
+        k_action = key_states[:, :, prefix_len:, :]
+        v_vlm = value_states[:, :, :prefix_len, :]
+        v_action = value_states[:, :, prefix_len:, :]
+
+        # VLM queries see full K/V (gradients flow normally)
+        att_output_vlm, _ = modeling_gemma.eager_attention_forward(
+            self_attn,
+            q_vlm,
+            torch.cat([k_vlm, k_action], dim=2),
+            torch.cat([v_vlm, v_action], dim=2),
+            attention_mask[:, :, :prefix_len, :],
+            scaling,
+        )
+
+        # Action queries see VLM K/V detached — gradient cannot reach VLM
+        att_output_action, _ = modeling_gemma.eager_attention_forward(
+            self_attn,
+            q_action,
+            torch.cat([k_vlm.detach(), k_action], dim=2),
+            torch.cat([v_vlm.detach(), v_action], dim=2),
+            attention_mask[:, :, prefix_len:, :],
+            scaling,
+        )
+
+        att_output = torch.cat([att_output_vlm, att_output_action], dim=2)
+    else:
+        att_output, _ = modeling_gemma.eager_attention_forward(
+            self_attn,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            scaling,
+        )
     head_dim = paligemma.language_model.layers[layer_idx].self_attn.head_dim
     # For the "gemma_tiny" variant we read the actual number of attention heads
     # from the underlying language model layer.
@@ -367,6 +412,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         inputs_embeds: list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor | None] | None = None,
+        knowledge_insulation: bool = False,
     ) -> tuple[list[torch.Tensor | None], list[torch.FloatTensor] | None]:
         """Forward pass for prefix (vision/lang) and suffix (action) branches.
 
@@ -458,6 +504,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                         preserve_rng_state=False,
                         paligemma=self.paligemma,
                         gemma_expert=self.gemma_expert,
+                        knowledge_insulation=knowledge_insulation,
                     )
                 else:
                     inputs_embeds = compute_shared_attention_layer(
@@ -468,6 +515,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                         adarms,
                         paligemma=self.paligemma,
                         gemma_expert=self.gemma_expert,
+                        knowledge_insulation=knowledge_insulation,
                     )
 
             def compute_final_norms(
