@@ -26,7 +26,7 @@ def test_subtask_token_lengths_have_defaults():
 def test_fast_tokenizer_defaults():
     cfg = PI05FullConfig()
     assert cfg.fast_tokenizer_name == "physical-intelligence/fast"
-    assert cfg.fast_skip_tokens == 128
+    assert cfg.fast_skip_tokens == 2048
 
 
 def test_subtask_generation_defaults():

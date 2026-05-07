@@ -211,7 +211,7 @@ def test_subtask_token_lengths_have_defaults():
 def test_fast_tokenizer_defaults():
     cfg = PI05FullConfig()
     assert cfg.fast_tokenizer_name == "physical-intelligence/fast"
-    assert cfg.fast_skip_tokens == 128
+    assert cfg.fast_skip_tokens == 2048
 
 
 def test_subtask_generation_defaults():
@@ -264,7 +264,7 @@ Find `class PI05Config:` and rename to `class PI05FullConfig:`. Append new field
     max_subtask_tokens: int = 64
     max_fast_tokens: int = 128
     fast_tokenizer_name: str = "physical-intelligence/fast"
-    fast_skip_tokens: int = 128
+    fast_skip_tokens: int = 2048
 
     # Subtask generation at inference
     max_decoding_steps: int = 200
