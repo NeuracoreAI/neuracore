@@ -13,8 +13,9 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
+import numpy as np
 import torch
 import torch.nn.functional as F  # noqa: N812
 from huggingface_hub import snapshot_download
@@ -62,7 +63,7 @@ class PI05FullConfig:
         max_subtask_tokens: Maximum token length for subtask sequences.
         max_fast_tokens: Maximum token length for FAST-encoded action sequences.
         fast_tokenizer_name: HuggingFace repo ID for the FAST tokenizer.
-        fast_skip_tokens: Number of leading FAST tokens to skip during decoding.
+        fast_skip_tokens: PaliGemma vocab slots reserved at the tail for FAST tokens.
         max_decoding_steps: Maximum autoregressive steps for subtask generation.
         subtask_temperature: Sampling temperature for subtask generation (0 = greedy).
     """
@@ -103,7 +104,7 @@ class PI05FullConfig:
     max_subtask_tokens: int = 64
     max_fast_tokens: int = 128
     fast_tokenizer_name: str = "physical-intelligence/fast"
-    fast_skip_tokens: int = 128
+    fast_skip_tokens: int = 2048
 
     # Subtask generation at inference
     max_decoding_steps: int = 200
@@ -430,3 +431,86 @@ def _load_tokenizer(name_or_path: str) -> PreTrainedTokenizerBase:
             repo_id=name_or_path,
         )
         return AutoTokenizer.from_pretrained(local_snapshot_path, local_files_only=True)
+
+
+def load_fast_tokenizer(name_or_path: str) -> Any:
+    """Load the FAST action tokenizer.
+
+    The FAST tokenizer is a HuggingFace AutoProcessor that converts
+    continuous action chunks (T x action_dim) into discrete token sequences.
+    Loaded with trust_remote_code=True because FAST ships custom tokenization
+    logic outside the standard HF tokenizer machinery.
+
+    Args:
+        name_or_path: HF repo id (default `physical-intelligence/fast`).
+
+    Returns:
+        The loaded tokenizer object with an `__call__` interface.
+    """
+    from transformers import AutoProcessor
+
+    return AutoProcessor.from_pretrained(name_or_path, trust_remote_code=True)
+
+
+def fast_tokenize_actions(
+    actions: np.ndarray | torch.Tensor,
+    tokenizer: Any,
+    max_tokens: int,
+    skip_tokens: int,
+    vocab_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Tokenize a batch of action chunks into discrete IDs in the vocab tail.
+
+    Maps the FAST integer token IDs (which start at 0) into the last
+    `skip_tokens` slots of the PaliGemma vocab so they share the LM head.
+
+    Args:
+        actions: (B, T, action_dim) float array or tensor.
+        tokenizer: A FAST tokenizer (`physical-intelligence/fast`).
+        max_tokens: Pad/truncate the per-example token sequence to this length.
+        skip_tokens: Number of vocab slots reserved at the tail for FAST.
+        vocab_size: Total PaliGemma vocab size (used to compute the offset).
+
+    Returns:
+        Tuple of:
+        - token_ids: (B, max_tokens) int64 tensor with right-padding (pad value 0).
+        - mask: (B, max_tokens) bool tensor; True where token_ids are real tokens.
+    """
+    if isinstance(actions, torch.Tensor):
+        actions_np = actions.detach().cpu().numpy()
+    else:
+        actions_np = np.asarray(actions)
+
+    if actions_np.ndim != 3:
+        raise ValueError(
+            f"actions must have shape (B, T, action_dim); got {actions_np.shape}"
+        )
+
+    batch_size = actions_np.shape[0]
+    offset = vocab_size - skip_tokens
+
+    out_ids = torch.zeros(batch_size, max_tokens, dtype=torch.long)
+    out_mask = torch.zeros(batch_size, max_tokens, dtype=torch.bool)
+
+    for b in range(batch_size):
+        encoded = tokenizer(actions_np[b])
+        # FAST tokenizer called with a single (T, action_dim) array returns a
+        # list-of-lists; extract the inner list of integer token IDs.
+        if (
+            isinstance(encoded, list)
+            and len(encoded) > 0
+            and isinstance(encoded[0], list)
+        ):
+            ids = encoded[0]
+        elif isinstance(encoded, dict):
+            ids = list(encoded.get("input_ids", []))
+        else:
+            ids = list(encoded)
+        if len(ids) == 0:
+            continue
+        ids = ids[:max_tokens]
+        ids_t = torch.tensor(ids, dtype=torch.long) + offset
+        out_ids[b, : len(ids)] = ids_t
+        out_mask[b, : len(ids)] = True
+
+    return out_ids, out_mask
