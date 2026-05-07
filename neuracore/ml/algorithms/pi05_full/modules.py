@@ -194,22 +194,34 @@ class PI05FullPolicy(nn.Module):
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
-    ) -> tuple[Tensor, Tensor, Tensor]:
-        """Embed image and language inputs for the prefix sequence.
+        subtask_tokens: Tensor | None = None,
+        subtask_masks: Tensor | None = None,
+        fast_tokens: Tensor | None = None,
+        fast_masks: Tensor | None = None,
+    ) -> tuple[Tensor, Tensor, Tensor, dict[str, slice]]:
+        """Embed image, language, subtask, and FAST tokens into one prefix sequence.
 
         Args:
             images: List of image tensors [B, C, H, W] per camera
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
+            subtask_tokens: Optional subtask token IDs [B, L_sub]
+            subtask_masks: Optional subtask attention mask [B, L_sub]
+            fast_tokens: Optional FAST action token IDs [B, L_fast]
+            fast_masks: Optional FAST attention mask [B, L_fast]
 
         Returns:
-            Tuple of (embeddings, padding_masks, attention_masks).
+            Tuple of (embeddings, padding_masks, attention_masks, segments)
+            where segments maps each segment name to the slice it occupies in
+            the prefix sequence.
         """
-        embs = []
-        pad_masks = []
-        att_masks = []
+        embs: list[Tensor] = []
+        pad_masks: list[Tensor] = []
+        att_masks: list[int] = []
+        segments: dict[str, slice] = {}
 
+        cursor = 0
         for img, img_mask in zip(images, img_masks, strict=True):
 
             def image_embed_func(img: Tensor) -> Tensor:
@@ -221,6 +233,7 @@ class PI05FullPolicy(nn.Module):
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
+            cursor += num_img_embs
 
         def lang_embed_func(lang_tokens: Tensor) -> Tensor:
             lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
@@ -230,17 +243,39 @@ class PI05FullPolicy(nn.Module):
         lang_emb = self._apply_checkpoint(lang_embed_func, lang_tokens)
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
+        att_masks += [0] * lang_emb.shape[1]
+        cursor += lang_emb.shape[1]
 
-        num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        if subtask_tokens is not None:
+            assert subtask_masks is not None
+            subtask_emb = self._apply_checkpoint(lang_embed_func, subtask_tokens)
+            embs.append(subtask_emb)
+            pad_masks.append(subtask_masks)
+            seg_len = subtask_emb.shape[1]
+            # First subtask token starts a new causal segment (att=1), rest follow.
+            att_masks += [1] + [0] * (seg_len - 1)
+            segments["subtask"] = slice(cursor, cursor + seg_len)
+            cursor += seg_len
 
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1).to(dtype=torch.bool)
-        att_masks_t = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
-        att_masks_t = _align_mask_length(att_masks_t, pad_masks.shape[1])
-        bsize = pad_masks.shape[0]
+        if fast_tokens is not None:
+            assert fast_masks is not None
+            fast_emb = self._apply_checkpoint(lang_embed_func, fast_tokens)
+            embs.append(fast_emb)
+            pad_masks.append(fast_masks)
+            seg_len = fast_emb.shape[1]
+            att_masks += [1] + [0] * (seg_len - 1)
+            segments["fast"] = slice(cursor, cursor + seg_len)
+            cursor += seg_len
+
+        embs_t = torch.cat(embs, dim=1)
+        pad_masks_t = torch.cat(pad_masks, dim=1).to(dtype=torch.bool)
+        att_masks_t = torch.tensor(
+            att_masks, dtype=torch.bool, device=pad_masks_t.device
+        )
+        att_masks_t = _align_mask_length(att_masks_t, pad_masks_t.shape[1])
+        bsize = pad_masks_t.shape[0]
         att_masks_t = att_masks_t[None, :].expand(bsize, att_masks_t.shape[0])
-        return embs, pad_masks, att_masks_t
+        return embs_t, pad_masks_t, att_masks_t, segments
 
     def _embed_suffix(
         self, noisy_actions: Tensor, timestep: Tensor
@@ -304,23 +339,32 @@ class PI05FullPolicy(nn.Module):
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
+        subtask_tokens: Tensor,
+        subtask_masks: Tensor,
+        fast_tokens: Tensor,
+        fast_masks: Tensor,
         actions: Tensor,
         noise: Tensor | None = None,
         time: Tensor | None = None,
-    ) -> Tensor:
-        """Compute flow matching loss for training.
+    ) -> dict[str, Tensor]:
+        """Compute the three losses for pi05_full training.
 
         Args:
             images: List of image tensors [B, C, H, W] per camera
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
+            subtask_tokens: Subtask token IDs [B, L_sub]
+            subtask_masks: Subtask attention mask [B, L_sub]
+            fast_tokens: FAST action token IDs [B, L_fast]
+            fast_masks: FAST attention mask [B, L_fast]
             actions: Target action sequence [B, chunk_size, action_dim]
             noise: Optional pre-sampled noise
             time: Optional pre-sampled diffusion time
 
         Returns:
-            Per-element MSE loss [B, chunk_size, action_dim].
+            Dict with keys flow_mse_loss, subtask_ce_loss, fast_ce_loss, loss.
+            All values are scalar tensors.
         """
         if noise is None:
             noise = self._sample_noise(actions.shape, actions.device)
@@ -331,8 +375,15 @@ class PI05FullPolicy(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
+        prefix_embs, prefix_pad_masks, prefix_att_masks, segments = self._embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            subtask_tokens=subtask_tokens,
+            subtask_masks=subtask_masks,
+            fast_tokens=fast_tokens,
+            fast_masks=fast_masks,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = (
             self._embed_suffix(x_t, time)
@@ -350,7 +401,14 @@ class PI05FullPolicy(nn.Module):
         pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
         att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
 
+        # Suffix MUST NOT attend to FAST tokens. Zero out the attention from
+        # suffix positions to fast-segment positions in the 2D mask.
         att_2d_masks = _make_att_2d_masks(pad_masks, att_masks)
+        if "fast" in segments:
+            fast_slice = segments["fast"]
+            suffix_start = pad_masks.shape[1] - suffix_pad_masks.shape[1]
+            att_2d_masks[:, suffix_start:, fast_slice] = False
+
         position_ids = torch.cumsum(pad_masks, dim=1) - 1
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
 
@@ -360,18 +418,19 @@ class PI05FullPolicy(nn.Module):
             att_2d_masks_4d: Tensor,
             position_ids: Tensor,
             adarms_cond: Tensor | None,
-        ) -> Tensor:
-            (_, suffix_out), _ = self.paligemma_with_expert.forward(
+        ) -> tuple[Tensor, Tensor]:
+            outs, _ = self.paligemma_with_expert.forward(
                 attention_mask=att_2d_masks_4d,
                 position_ids=position_ids,
                 past_key_values=None,
                 inputs_embeds=[prefix_embs, suffix_embs],
                 use_cache=False,
                 adarms_cond=[None, adarms_cond],
+                knowledge_insulation=self.config.knowledge_insulation,
             )
-            return suffix_out
+            return outs[0], outs[1]
 
-        suffix_out = self._apply_checkpoint(
+        prefix_out, suffix_out = self._apply_checkpoint(
             forward_func,
             prefix_embs,
             suffix_embs,
@@ -379,14 +438,71 @@ class PI05FullPolicy(nn.Module):
             position_ids,
             adarms_cond,
         )
-        suffix_out = suffix_out[:, -self.config.chunk_size :]
-        suffix_out = suffix_out.to(dtype=torch.float32)
+        suffix_out = suffix_out[:, -self.config.chunk_size :].to(dtype=torch.float32)
 
+        # Flow matching MSE
         def action_out_proj_func(suffix_out: Tensor) -> Tensor:
             return self.action_out_proj(suffix_out)
 
         v_t = self._apply_checkpoint(action_out_proj_func, suffix_out)
-        return F.mse_loss(u_t, v_t, reduction="none")
+        flow_mse_loss = F.mse_loss(u_t, v_t, reduction="none").mean()
+
+        # Subtask CE via tied LM head
+        lm_head = self.paligemma_with_expert.paligemma.lm_head
+        subtask_slice = segments["subtask"]
+        subtask_hidden = prefix_out[:, subtask_slice, :].to(dtype=torch.float32)
+        subtask_logits = lm_head(subtask_hidden)
+        subtask_ce_loss = self._token_ce(subtask_logits, subtask_tokens, subtask_masks)
+
+        # FAST CE via tied LM head
+        fast_slice = segments["fast"]
+        fast_hidden = prefix_out[:, fast_slice, :].to(dtype=torch.float32)
+        fast_logits = lm_head(fast_hidden)
+        fast_ce_loss = self._token_ce(fast_logits, fast_tokens, fast_masks)
+
+        loss = (
+            self.config.flow_matching_loss_weight * flow_mse_loss
+            + self.config.subtask_loss_weight * subtask_ce_loss
+            + self.config.fast_token_loss_weight * fast_ce_loss
+        )
+        return {
+            "flow_mse_loss": flow_mse_loss,
+            "subtask_ce_loss": subtask_ce_loss,
+            "fast_ce_loss": fast_ce_loss,
+            "loss": loss,
+        }
+
+    @staticmethod
+    def _token_ce(logits: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
+        """Shifted cross-entropy with right-padding mask, computed in float32.
+
+        Predicts targets[:, 1:] from logits[:, :-1] (causal shift).
+
+        Args:
+            logits: Predicted logits [B, L, vocab_size]
+            targets: Target token IDs [B, L]
+            mask: Boolean mask [B, L] where True marks valid (non-pad) tokens
+
+        Returns:
+            Scalar loss averaged over the masked target positions.
+        """
+        if logits.shape[1] < 2:
+            return torch.zeros((), device=logits.device, dtype=torch.float32)
+        logits_for_pred = logits[:, :-1, :].contiguous()
+        targets_for_pred = targets[:, 1:].contiguous()
+        mask_for_pred = mask[:, 1:].contiguous().to(dtype=torch.float32)
+        per_token = (
+            F.cross_entropy(
+                logits_for_pred.view(-1, logits_for_pred.shape[-1]),
+                targets_for_pred.view(-1),
+                reduction="none",
+            )
+            .view_as(targets_for_pred)
+            .to(dtype=torch.float32)
+        )
+        weighted = per_token * mask_for_pred
+        denom = mask_for_pred.sum().clamp(min=1.0)
+        return weighted.sum() / denom
 
     @torch.no_grad()
     def sample_actions(
@@ -395,6 +511,8 @@ class PI05FullPolicy(nn.Module):
         img_masks: list[Tensor],
         lang_tokens: Tensor,
         lang_masks: Tensor,
+        subtask_tokens: Tensor | None = None,
+        subtask_masks: Tensor | None = None,
         noise: Tensor | None = None,
         num_steps: int | None = None,
     ) -> Tensor:
@@ -407,6 +525,8 @@ class PI05FullPolicy(nn.Module):
             img_masks: List of image masks [B] per camera
             lang_tokens: Language token IDs [B, L]
             lang_masks: Language attention mask [B, L]
+            subtask_tokens: Optional subtask token IDs [B, L_sub] to condition on
+            subtask_masks: Optional subtask attention mask [B, L_sub]
             noise: Optional initial noise
             num_steps: Number of Euler steps (default: config.num_inference_steps)
 
@@ -427,8 +547,13 @@ class PI05FullPolicy(nn.Module):
             )
             noise = self._sample_noise(actions_shape, device)
 
-        prefix_embs, prefix_pad_masks, prefix_att_masks = self._embed_prefix(
-            images, img_masks, lang_tokens, lang_masks
+        prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self._embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            subtask_tokens=subtask_tokens,
+            subtask_masks=subtask_masks,
         )
         prefix_att_2d_masks = _make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1

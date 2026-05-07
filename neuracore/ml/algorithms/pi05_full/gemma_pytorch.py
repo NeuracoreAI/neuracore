@@ -136,7 +136,9 @@ def compute_shared_attention_layer(
             scaling,
         )
 
-        att_output = torch.cat([att_output_vlm, att_output_action], dim=2)
+        # eager_attention_forward returns shape (B, seq_len, num_heads, head_dim)
+        # after its internal transpose; seq_len is dim=1.
+        att_output = torch.cat([att_output_vlm, att_output_action], dim=1)
     else:
         att_output, _ = modeling_gemma.eager_attention_forward(
             self_attn,

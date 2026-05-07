@@ -13,8 +13,8 @@ def tiny_pi05_full_config() -> PI05FullConfig:
     chunk sizes so a forward+backward fits comfortably in CPU memory.
     """
     return PI05FullConfig(
-        paligemma_variant="gemma_300m",
-        action_expert_variant="gemma_300m",
+        paligemma_variant="gemma_tiny",
+        action_expert_variant="gemma_tiny",
         chunk_size=8,
         max_state_dim=8,
         max_action_dim=8,
