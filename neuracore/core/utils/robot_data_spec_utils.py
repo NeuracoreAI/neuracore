@@ -24,9 +24,6 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.robot import get_robot_id_from_name
-from neuracore.ml.utils.nc_archive import (
-    load_cross_embodiment_descriptions_from_nc_archive,
-)
 
 ID_REGEX = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -272,6 +269,10 @@ def resolve_embodiment_descriptions_with_override(
                     )
 
             elif model_file is not None:
+                from neuracore.ml.utils.nc_archive import (
+                    load_cross_embodiment_descriptions_from_nc_archive,
+                )
+
                 (
                     archive_input_cross_embodiment_description,
                     archive_output_cross_embodiment_description,
