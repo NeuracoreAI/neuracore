@@ -117,7 +117,7 @@ def test_resolve_embodiments_with_override_loads_from_model_archive(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.load_cross_embodiment_descriptions_from_nc_archive",
+        "neuracore.ml.utils.nc_archive.load_cross_embodiment_descriptions_from_nc_archive",
         lambda model_file: (
             {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
             {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
