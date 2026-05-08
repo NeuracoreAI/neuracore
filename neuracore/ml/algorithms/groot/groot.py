@@ -121,7 +121,7 @@ class Groot(NeuracoreModel):
         attention_head_dim: int = 48,
         dit_output_dim: int = 1024,
         backbone_embedding_dim: int = 2048,
-        gradient_checkpointing: bool = False,
+        gradient_checkpointing: bool = True,
         use_torch_compile: bool = False,
         torch_compile_mode: str = "default",
         state_dropout_prob: float = 0.0,
