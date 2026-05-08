@@ -46,6 +46,8 @@ from .utils import (
     PI05FullConfig,
     _load_tokenizer,
     build_lr_lambda,
+    fast_tokenize_actions,
+    load_fast_tokenizer,
     pad_vector,
     resize_with_pad_torch,
 )
@@ -68,6 +70,14 @@ class Pi05Full(NeuracoreModel):
     The architecture supports flexible finetuning strategies including
     action-expert-only, vision+action, or full model training.
     """
+
+    CANONICAL_OUTPUT_DATA_TYPE_ORDER = (
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.JOINT_POSITIONS,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        DataType.SUBTASK_LANGUAGE,
+    )
 
     def __init__(
         self,
@@ -99,6 +109,16 @@ class Pi05Full(NeuracoreModel):
         finetune_action_expert_only: bool = False,
         finetune_vision_encoder_and_action_expert: bool = False,
         discrete_state_input: bool = True,
+        subtask_loss_weight: float = 10.0,
+        fast_token_loss_weight: float = 1.0,
+        flow_matching_loss_weight: float = 1.0,
+        knowledge_insulation: bool = True,
+        max_subtask_tokens: int = 64,
+        max_fast_tokens: int = 128,
+        max_decoding_steps: int = 200,
+        subtask_temperature: float = 0.0,
+        fast_tokenizer_name: str = "physical-intelligence/fast",
+        fast_skip_tokens: int = 2048,
     ):
         """Initialize the Pi05 model.
 
@@ -132,8 +152,69 @@ class Pi05Full(NeuracoreModel):
             finetune_vision_encoder_and_action_expert: Train vision encoder and action
                 expert
             discrete_state_input: Whether to encode proprio state into prompt text
+            subtask_loss_weight: Weight for subtask cross-entropy loss
+            fast_token_loss_weight: Weight for FAST action-token cross-entropy loss
+            flow_matching_loss_weight: Weight for flow-matching MSE loss
+            knowledge_insulation: If True, action losses cannot flow gradient into VLM
+            max_subtask_tokens: Max length of subtask token segment in the prefix
+            max_fast_tokens: Max length of FAST action-token segment in the prefix
+            max_decoding_steps: Max number of subtask tokens generated at inference
+            subtask_temperature: Sampling temperature for subtask generation
+                (0 = greedy)
+            fast_tokenizer_name: HF repo id for the FAST action tokenizer
+            fast_skip_tokens: Number of vocab slots reserved at the tail for FAST
         """
         super().__init__(model_init_description)
+
+        if DataType.SUBTASK_LANGUAGE not in self.input_data_types:
+            raise ValueError(
+                "Pi05Full requires SUBTASK_LANGUAGE in inputs. Use the Pi05 "
+                "algorithm if your dataset has no subtask annotations."
+            )
+        if DataType.SUBTASK_LANGUAGE not in self.output_data_types:
+            raise ValueError(
+                "Pi05Full requires SUBTASK_LANGUAGE in outputs. Add it to your "
+                "configured output data types (it is always produced by the model)."
+            )
+
+        for name, value in [
+            ("subtask_loss_weight", subtask_loss_weight),
+            ("fast_token_loss_weight", fast_token_loss_weight),
+            ("flow_matching_loss_weight", flow_matching_loss_weight),
+        ]:
+            if value < 0:
+                raise ValueError(f"{name} must be non-negative, got {value}")
+        if (
+            subtask_loss_weight == 0.0
+            and fast_token_loss_weight == 0.0
+            and flow_matching_loss_weight == 0.0
+        ):
+            raise ValueError(
+                "At least one loss weight must be > 0. All zero would yield an "
+                "untrainable model."
+            )
+
+        if finetune_action_expert_only and subtask_loss_weight > 0:
+            logger.warning(
+                "subtask CE loss has no effect when finetune_action_expert_only "
+                "is True (VLM is frozen). Set subtask_loss_weight=0 to save compute."
+            )
+        if finetune_action_expert_only and fast_token_loss_weight > 0:
+            logger.warning(
+                "fast_token CE loss has no effect when finetune_action_expert_only "
+                "is True. Set fast_token_loss_weight=0 to save compute."
+            )
+
+        self.subtask_loss_weight = subtask_loss_weight
+        self.fast_token_loss_weight = fast_token_loss_weight
+        self.flow_matching_loss_weight = flow_matching_loss_weight
+        self.knowledge_insulation = knowledge_insulation
+        self.max_subtask_tokens = max_subtask_tokens
+        self.max_fast_tokens = max_fast_tokens
+        self.max_decoding_steps = max_decoding_steps
+        self.subtask_temperature = subtask_temperature
+        self.fast_tokenizer_name = fast_tokenizer_name
+        self.fast_skip_tokens = fast_skip_tokens
 
         self.max_state_dim = self.max_action_dim = 32
         self.vlm_max_text_tokens = vlm_max_text_tokens
@@ -300,7 +381,19 @@ class Pi05Full(NeuracoreModel):
             compile_mode=self.compile_mode,
             use_adarms=(False, True),
             device=self.device,
+            subtask_loss_weight=self.subtask_loss_weight,
+            fast_token_loss_weight=self.fast_token_loss_weight,
+            flow_matching_loss_weight=self.flow_matching_loss_weight,
+            knowledge_insulation=self.knowledge_insulation,
+            max_subtask_tokens=self.max_subtask_tokens,
+            max_fast_tokens=self.max_fast_tokens,
+            max_decoding_steps=self.max_decoding_steps,
+            subtask_temperature=self.subtask_temperature,
+            fast_tokenizer_name=self.fast_tokenizer_name,
+            fast_skip_tokens=self.fast_skip_tokens,
         )
+
+        self.fast_tokenizer = load_fast_tokenizer(self.fast_tokenizer_name)
 
         # Core model from the reference implementation
         if self.use_pretrained_weights and self.pretrained_name_or_path:
@@ -595,6 +688,96 @@ class Pi05Full(NeuracoreModel):
         actions = actions[:, :, : self.action_dim]  # output pad to max action dim
         return actions
 
+    def _process_subtask_tokens(
+        self, batch: BatchedInferenceInputs
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Extract last-timestep subtask tokens, prepend BOS, pad to max_subtask_tokens.
+
+        Args:
+            batch: Inference input batch with a SUBTASK_LANGUAGE channel.
+
+        Returns:
+            tokens: (B, max_subtask_tokens) int64
+            masks: (B, max_subtask_tokens) bool
+        """
+        if DataType.SUBTASK_LANGUAGE not in batch.inputs:
+            raise ValueError(
+                "Subtask channel missing from batch.inputs. Pi05Full training "
+                "requires SUBTASK_LANGUAGE per batch."
+            )
+        items = cast(list[BatchedLanguageData], batch.inputs[DataType.SUBTASK_LANGUAGE])
+        last = items[-1]
+        ids = last.input_ids[:, -1, :]  # (B, L)
+        attn = last.attention_mask[:, -1, :].to(dtype=torch.bool)
+
+        bsize = ids.shape[0]
+        max_len = self.max_subtask_tokens
+        bos = self.prompt_tokenizer.bos_token_id
+        if bos is None:
+            bos = self.prompt_tokenizer.eos_token_id
+
+        out_ids = torch.full((bsize, max_len), 0, dtype=torch.long)
+        out_mask = torch.zeros(bsize, max_len, dtype=torch.bool)
+
+        for i in range(bsize):
+            valid = ids[i][attn[i]].detach().cpu().tolist()
+            seq = [bos] + valid
+            seq = seq[:max_len]
+            out_ids[i, : len(seq)] = torch.tensor(seq, dtype=torch.long)
+            out_mask[i, : len(seq)] = True
+
+        return out_ids.to(self.device), out_mask.to(self.device)
+
+    def _build_action_targets_and_fast_tokens(
+        self, batch: BatchedTrainingSamples
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Concatenate action targets, normalize, and FAST-tokenize.
+
+        Args:
+            batch: Training batch.
+
+        Returns:
+            target_actions: (B, T, max_action_dim) float
+            fast_tokens: (B, max_fast_tokens) int64
+            fast_masks: (B, max_fast_tokens) bool
+        """
+        action_targets: list[torch.Tensor] = []
+        for data_type in self.ordered_output_data_types:
+            if data_type == DataType.SUBTASK_LANGUAGE:
+                continue
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                joints = cast(list[BatchedJointData], batch.outputs[data_type])
+                action_targets.extend(j.value for j in joints)
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
+                grippers = cast(
+                    list[BatchedParallelGripperOpenAmountData],
+                    batch.outputs[data_type],
+                )
+                action_targets.extend(g.open_amount for g in grippers)
+            else:
+                raise ValueError(f"Unsupported output data type: {data_type}")
+
+        action_data = torch.cat(action_targets, dim=-1)
+        target_actions = self.action_normalizer.normalize(data=action_data)
+        target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
+
+        vocab_size = self.prompt_tokenizer.vocab_size
+        fast_ids, fast_mask = fast_tokenize_actions(
+            target_actions.detach(),
+            tokenizer=self.fast_tokenizer,
+            max_tokens=self.max_fast_tokens,
+            skip_tokens=self.fast_skip_tokens,
+            vocab_size=vocab_size,
+        )
+        return (
+            target_actions,
+            fast_ids.to(self.device),
+            fast_mask.to(self.device),
+        )
+
     @classmethod
     def from_pretrained(
         cls,
@@ -639,17 +822,55 @@ class Pi05Full(NeuracoreModel):
         if self.compile_model:
             self.model.compile_model_enable()
 
-        actions = self._predict_action(batch)
+        images, image_masks, lang_tokens, lang_masks = self._build_inputs_from_batch(
+            batch
+        )
+
+        bos_id = self.prompt_tokenizer.bos_token_id
+        if bos_id is None:
+            bos_id = self.prompt_tokenizer.eos_token_id
+        eos_id = self.prompt_tokenizer.eos_token_id
+        loc0_id = self.prompt_tokenizer.convert_tokens_to_ids("<loc0000>")
+        if loc0_id == self.prompt_tokenizer.unk_token_id:
+            loc0_id = None
+
+        subtask_tokens, subtask_masks = self.model.generate_subtask_tokens(
+            images,
+            image_masks,
+            lang_tokens,
+            lang_masks,
+            bos_token_id=bos_id,
+            eos_token_id=eos_id,
+            loc_token_id=loc0_id,
+        )
+
+        actions = self.model.sample_actions(
+            images,
+            image_masks,
+            lang_tokens,
+            lang_masks,
+            subtask_tokens=subtask_tokens,
+            subtask_masks=subtask_masks,
+        )
+        actions = actions[:, :, : self.action_dim]
         predictions = self.action_normalizer.unnormalize(actions)
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
         for data_type in self.ordered_output_data_types:
+            if data_type == DataType.SUBTASK_LANGUAGE:
+                # Add a singleton T dimension to match (B, T, L) shape
+                ids_3d = subtask_tokens.unsqueeze(1)
+                mask_3d = subtask_masks.unsqueeze(1).to(dtype=torch.float32)
+                output_tensors[data_type] = [
+                    BatchedLanguageData(input_ids=ids_3d, attention_mask=mask_3d)
+                ]
+                continue
             start_idx, end_idx = self.output_dims[data_type]
             output_width = end_idx - start_idx
             dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
 
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                batched_outputs = []
+                batched_outputs: list[BatchedNCData] = []
                 for i in range(output_width):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
@@ -695,44 +916,26 @@ class Pi05Full(NeuracoreModel):
                 f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
             )
 
-        # Concatenate all output actions
-        action_targets = []
-        for data_type in self.ordered_output_data_types:
-            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
-                action_targets.extend([bjd.value for bjd in batched_joints])
-            elif data_type in [
-                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
-                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
-            ]:
-                grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
-                )
-                action_targets.extend([gripper.open_amount for gripper in grippers])
-            else:
-                raise ValueError(f"Unsupported output data type: {data_type}")
-
-        action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
-
-        target_actions = self.action_normalizer.normalize(data=action_data)
-        # Pad to the max action dim after normalization to avoid padding artifacts
-        target_actions = pad_vector(target_actions, self.max_action_dim).to(self.device)
-
-        mse_losses = self.model.forward(
-            images, image_masks, lang_tokens, lang_masks, target_actions
+        subtask_tokens, subtask_masks = self._process_subtask_tokens(inference_sample)
+        target_actions, fast_tokens, fast_masks = (
+            self._build_action_targets_and_fast_tokens(batch)
         )
-        # Mask to the real action dims
-        loss = mse_losses[:, :, : self.action_dim].mean()
 
-        losses = {
-            "mse_loss": loss,
-        }
-        metrics = {
-            "mse_loss": loss,
-        }
+        loss_dict = self.model.forward(
+            images,
+            image_masks,
+            lang_tokens,
+            lang_masks,
+            subtask_tokens,
+            subtask_masks,
+            fast_tokens,
+            fast_masks,
+            target_actions,
+        )
+
         return BatchedTrainingOutputs(
-            losses=losses,
-            metrics=metrics,
+            losses={k: v for k, v in loss_dict.items()},
+            metrics={k: v.detach() for k, v in loss_dict.items()},
         )
 
     def configure_optimizers(self) -> list[torch.optim.Optimizer]:
@@ -807,6 +1010,7 @@ class Pi05Full(NeuracoreModel):
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.RGB_IMAGES,
             DataType.LANGUAGE,
+            DataType.SUBTASK_LANGUAGE,
         }
 
     @staticmethod
@@ -821,4 +1025,5 @@ class Pi05Full(NeuracoreModel):
             DataType.JOINT_TARGET_POSITIONS,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+            DataType.SUBTASK_LANGUAGE,
         }
