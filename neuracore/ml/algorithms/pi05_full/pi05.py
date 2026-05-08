@@ -433,24 +433,16 @@ class Pi05Full(NeuracoreModel):
         ]
         VISION_ENCODER_PARAM_NAMES = ["vision_tower", "multi_modal"]
 
-        # Determine which parameters to include
         if self.finetune_action_expert_only:
-            params = [
-                param
-                for name, param in self.model.named_parameters()
-                if any(param_name in name for param_name in ACTION_EXPERT_PARAM_NAMES)
-            ]
+            for name, param in self.model.named_parameters():
+                param.requires_grad = any(p in name for p in ACTION_EXPERT_PARAM_NAMES)
+            params = [p for p in self.model.parameters() if p.requires_grad]
             self.param_groups = [{"params": params, "lr": self.optimizer_lr}]
         elif self.finetune_vision_encoder_and_action_expert:
-            params = [
-                param
-                for name, param in self.model.named_parameters()
-                if any(
-                    param_name in name
-                    for param_name in ACTION_EXPERT_PARAM_NAMES
-                    + VISION_ENCODER_PARAM_NAMES
-                )
-            ]
+            allowed = ACTION_EXPERT_PARAM_NAMES + VISION_ENCODER_PARAM_NAMES
+            for name, param in self.model.named_parameters():
+                param.requires_grad = any(p in name for p in allowed)
+            params = [p for p in self.model.parameters() if p.requires_grad]
             self.param_groups = [{"params": params, "lr": self.optimizer_lr}]
         else:
             # Train all parameters
