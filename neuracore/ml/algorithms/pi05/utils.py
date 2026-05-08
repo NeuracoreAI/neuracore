@@ -59,7 +59,7 @@ class PI05Config:
 
     paligemma_variant: str = "gemma_2b"
     action_expert_variant: str = "gemma_300m"
-    dtype: Literal["bfloat16", "float32"] = "float32"
+    dtype: Literal["bfloat16", "float32"] = "bfloat16"
     chunk_size: int = 50
     max_state_dim: int = 32
     max_action_dim: int = 32
@@ -72,7 +72,7 @@ class PI05Config:
     time_sampling_offset: float = 0.001
     min_period: float = 4e-3
     max_period: float = 4.0
-    gradient_checkpointing: bool = False
+    gradient_checkpointing: bool = True
     compile_model: bool = False
     compile_mode: str = "max-autotune"
     device: str | None = None
