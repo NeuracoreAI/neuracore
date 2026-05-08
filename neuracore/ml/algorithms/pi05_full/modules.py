@@ -505,6 +505,132 @@ class PI05FullPolicy(nn.Module):
         return weighted.sum() / denom
 
     @torch.no_grad()
+    def generate_subtask_tokens(
+        self,
+        images: list[Tensor],
+        img_masks: list[Tensor],
+        lang_tokens: Tensor,
+        lang_masks: Tensor,
+        bos_token_id: int,
+        eos_token_id: int | None = None,
+        loc_token_id: int | None = None,
+    ) -> tuple[Tensor, Tensor]:
+        """Autoregressively generate subtask tokens.
+
+        Args:
+            images: List of image tensors [B, C, H, W] per camera
+            img_masks: List of image masks [B] per camera
+            lang_tokens: Language token IDs [B, L]
+            lang_masks: Language attention mask [B, L]
+            bos_token_id: PaliGemma BOS token to seed generation.
+            eos_token_id: Optional EOS to halt early per-batch-item.
+            loc_token_id: Optional first <loc####> id; all token ids >= this are
+                masked out before sampling so we never emit visual-grounding tokens.
+
+        Returns:
+            Tuple of:
+            - generated_tokens: (B, L) int64 — starts with BOS, ends at EOS or cap.
+            - masks: (B, L) bool — True for valid (non-pad) tokens.
+        """
+        bsize = lang_tokens.shape[0]
+        device = lang_tokens.device
+        max_steps = self.config.max_decoding_steps
+        temperature = self.config.subtask_temperature
+
+        # Phase A: prefill cache with [images, language, BOS]
+        bos_col = torch.full((bsize, 1), bos_token_id, dtype=torch.long, device=device)
+        bos_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
+        prefix_embs, prefix_pad_masks, prefix_att_masks, _ = self._embed_prefix(
+            images,
+            img_masks,
+            lang_tokens,
+            lang_masks,
+            subtask_tokens=bos_col,
+            subtask_masks=bos_mask,
+        )
+        att_2d_masks = _make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+        position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
+        att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
+
+        paligemma_lm_config = self.paligemma_with_expert.paligemma.language_model.config
+        paligemma_lm_config._attn_implementation = "eager"
+
+        outs, past_key_values = self.paligemma_with_expert.forward(
+            attention_mask=att_2d_masks_4d,
+            position_ids=position_ids,
+            past_key_values=None,
+            inputs_embeds=[prefix_embs, None],
+            use_cache=True,
+        )
+        prefix_out = outs[0]
+        assert prefix_out is not None
+
+        lm_head = self.paligemma_with_expert.paligemma.lm_head
+
+        def _sample(logits: Tensor) -> Tensor:
+            if loc_token_id is not None:
+                logits[:, loc_token_id:] = float("-inf")
+            if temperature == 0.0:
+                return torch.argmax(logits, dim=-1)
+            probs = torch.softmax(logits / temperature, dim=-1)
+            return torch.multinomial(probs, 1).squeeze(-1)
+
+        first_logits = lm_head(prefix_out[:, -1:, :].to(dtype=torch.float32))[:, -1]
+        next_tok = _sample(first_logits)
+
+        generated = [bos_col, next_tok[:, None]]
+        finished = torch.zeros(bsize, dtype=torch.bool, device=device)
+        if eos_token_id is not None:
+            finished |= next_tok == eos_token_id
+
+        # Phase B: autoregressive decode. Keep a running pad mask so position_ids
+        # stay correct.
+        running_pad = torch.cat([prefix_pad_masks, bos_mask], dim=1)
+        for _ in range(max_steps - 1):
+            if finished.all():
+                break
+            tok_emb = self.paligemma_with_expert.embed_language_tokens(
+                next_tok[:, None]
+            )
+            tok_emb = tok_emb * math.sqrt(tok_emb.shape[-1])
+
+            running_pad = torch.cat(
+                [
+                    running_pad,
+                    torch.ones(bsize, 1, dtype=torch.bool, device=device),
+                ],
+                dim=1,
+            )
+            position_ids = (running_pad.long().cumsum(dim=1) - 1)[:, -1:]
+            # Single-token attention mask: 2D shape (B, 1, total_len); every
+            # position is allowed (the kv_padding gating from running_pad is
+            # already implicitly true since we pass real tokens only).
+            step_pad_2d = running_pad[:, None, :].expand(bsize, 1, running_pad.shape[1])
+            step_pad_4d = self._prepare_attention_masks_4d(step_pad_2d)
+
+            outs, past_key_values = self.paligemma_with_expert.forward(
+                attention_mask=step_pad_4d,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=[tok_emb, None],
+                use_cache=True,
+            )
+            step_out = outs[0]
+            assert step_out is not None
+            step_logits = lm_head(step_out[:, -1:, :].to(dtype=torch.float32))[:, -1]
+            next_tok = _sample(step_logits)
+            # Force finished sequences to emit pad (id=0)
+            next_tok = torch.where(finished, torch.zeros_like(next_tok), next_tok)
+            if eos_token_id is not None:
+                finished |= next_tok == eos_token_id
+            generated.append(next_tok[:, None])
+
+        generated_tokens = torch.cat(generated, dim=1)
+        masks = generated_tokens != 0
+        masks[:, 0] = True  # always keep BOS valid
+        return generated_tokens, masks
+
+    @torch.no_grad()
     def sample_actions(
         self,
         images: list[Tensor],
