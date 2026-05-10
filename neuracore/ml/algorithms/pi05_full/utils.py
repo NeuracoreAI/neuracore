@@ -108,7 +108,11 @@ class PI05FullConfig:
     max_subtask_tokens: int = 64
     max_fast_tokens: int = 128
     fast_tokenizer_name: str = "physical-intelligence/fast"
-    fast_skip_tokens: int = 2048
+    # Number of reserved special tokens at the very tail of the PaliGemma vocab
+    # to skip past before placing FAST tokens. Matches the openpi/lerobot
+    # convention so that FAST-trained checkpoints from those projects can be
+    # loaded directly into our lm_head.
+    fast_skip_tokens: int = 128
 
     # Subtask generation at inference
     max_decoding_steps: int = 200
@@ -465,15 +469,23 @@ def fast_tokenize_actions(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Tokenize a batch of action chunks into discrete IDs in the vocab tail.
 
-    Maps the FAST integer token IDs (which start at 0) into the last
-    `skip_tokens` slots of the PaliGemma vocab so they share the LM head.
+    Maps the FAST integer token IDs (which start at 0) into the PaliGemma
+    vocab using the openpi / lerobot convention:
+
+        paligemma_id = vocab_size - 1 - skip_tokens - fast_id
+
+    With the default `skip_tokens=128`, FAST id 0 lands at position 257023 and
+    each subsequent FAST id descends by one. This places FAST tokens just
+    below the 128 reserved special tokens at the very tail of the vocab,
+    matching the layout that openpi-trained checkpoints expect.
 
     Args:
         actions: (B, T, action_dim) float array or tensor.
         tokenizer: A FAST tokenizer (`physical-intelligence/fast`).
         max_tokens: Pad/truncate the per-example token sequence to this length.
-        skip_tokens: Number of vocab slots reserved at the tail for FAST.
-        vocab_size: Total PaliGemma vocab size (used to compute the offset).
+        skip_tokens: Number of reserved special tokens at the very tail of the
+            vocab to skip past before placing FAST tokens.
+        vocab_size: Total PaliGemma vocab size.
 
     Returns:
         Tuple of:
@@ -491,7 +503,7 @@ def fast_tokenize_actions(
         )
 
     batch_size = actions_np.shape[0]
-    offset = vocab_size - skip_tokens
+    base = vocab_size - 1 - skip_tokens
 
     out_ids = torch.zeros(batch_size, max_tokens, dtype=torch.long)
     out_mask = torch.zeros(batch_size, max_tokens, dtype=torch.bool)
@@ -513,7 +525,7 @@ def fast_tokenize_actions(
         if len(ids) == 0:
             continue
         ids = ids[:max_tokens]
-        ids_t = torch.tensor(ids, dtype=torch.long) + offset
+        ids_t = base - torch.tensor(ids, dtype=torch.long)
         out_ids[b, : len(ids)] = ids_t
         out_mask[b, : len(ids)] = True
 

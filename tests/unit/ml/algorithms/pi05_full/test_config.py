@@ -5,7 +5,7 @@ import pytest
 from neuracore.ml.algorithms.pi05_full.utils import PI05FullConfig
 
 
-def test_default_loss_weights_match_jax_paper():
+def test_default_loss_weights():
     cfg = PI05FullConfig()
     assert cfg.subtask_loss_weight == 10.0
     assert cfg.fast_token_loss_weight == 1.0
@@ -26,7 +26,7 @@ def test_subtask_token_lengths_have_defaults():
 def test_fast_tokenizer_defaults():
     cfg = PI05FullConfig()
     assert cfg.fast_tokenizer_name == "physical-intelligence/fast"
-    assert cfg.fast_skip_tokens == 2048
+    assert cfg.fast_skip_tokens == 128
 
 
 def test_subtask_generation_defaults():

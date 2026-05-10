@@ -118,7 +118,7 @@ class Pi05Full(NeuracoreModel):
         max_decoding_steps: int = 200,
         subtask_temperature: float = 0.0,
         fast_tokenizer_name: str = "physical-intelligence/fast",
-        fast_skip_tokens: int = 2048,
+        fast_skip_tokens: int = 128,
     ):
         """Initialize the Pi05 model.
 
@@ -162,7 +162,8 @@ class Pi05Full(NeuracoreModel):
             subtask_temperature: Sampling temperature for subtask generation
                 (0 = greedy)
             fast_tokenizer_name: HF repo id for the FAST action tokenizer
-            fast_skip_tokens: Number of vocab slots reserved at the tail for FAST
+            fast_skip_tokens: Number of reserved special tokens at the very tail
+                of the PaliGemma vocab to skip past before placing FAST tokens
         """
         super().__init__(model_init_description)
 

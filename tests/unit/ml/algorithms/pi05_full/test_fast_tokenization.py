@@ -37,8 +37,15 @@ def test_fast_tokenize_returns_padded_ids_and_mask(fast_tokenizer):
     assert mask.dtype == torch.bool
 
 
-def test_fast_tokens_land_in_paligemma_tail(fast_tokenizer):
-    """FAST tokens must map into the last `fast_skip_tokens` slots of the vocab."""
+def test_fast_tokens_land_below_reserved_tail(fast_tokenizer):
+    """FAST tokens must descend from `vocab_size - 1 - fast_skip_tokens`.
+
+    With openpi/lerobot convention, FAST id 0 maps to position
+    `vocab_size - 1 - skip_tokens`, with subsequent ids descending. So:
+      - max FAST paligemma id == vocab_size - 1 - skip_tokens (== 257023 by default)
+      - all FAST ids must sit STRICTLY BELOW the reserved tail at
+        [vocab_size - skip_tokens, vocab_size).
+    """
     cfg = PI05FullConfig()
     actions = np.random.randn(1, 10, 7).astype(np.float32)
     token_ids, mask = fast_tokenize_actions(
@@ -50,8 +57,8 @@ def test_fast_tokens_land_in_paligemma_tail(fast_tokenizer):
     )
     valid_ids = token_ids[mask]
     if valid_ids.numel() > 0:
-        assert (valid_ids >= 257152 - cfg.fast_skip_tokens).all()
-        assert (valid_ids < 257152).all()
+        assert (valid_ids <= 257152 - 1 - cfg.fast_skip_tokens).all()
+        assert (valid_ids >= 0).all()
 
 
 def test_fast_tokenize_truncation_when_too_long(fast_tokenizer):
