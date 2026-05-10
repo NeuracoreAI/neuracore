@@ -252,8 +252,10 @@ class PI05FullPolicy(nn.Module):
             embs.append(subtask_emb)
             pad_masks.append(subtask_masks)
             seg_len = subtask_emb.shape[1]
-            # First subtask token starts a new causal segment (att=1), rest follow.
-            att_masks += [1] + [0] * (seg_len - 1)
+            # Each subtask token advances the cumsum so within-segment attention
+            # is causal — required for the LM-style subtask CE loss to avoid
+            # leaking the target token via bidirectional attention.
+            att_masks += [1] * seg_len
             segments["subtask"] = slice(cursor, cursor + seg_len)
             cursor += seg_len
 
@@ -263,7 +265,10 @@ class PI05FullPolicy(nn.Module):
             embs.append(fast_emb)
             pad_masks.append(fast_masks)
             seg_len = fast_emb.shape[1]
-            att_masks += [1] + [0] * (seg_len - 1)
+            # Same causal-within-segment rule for FAST: the FAST CE loss
+            # would learn a degenerate "echo" solution under bidirectional
+            # attention.
+            att_masks += [1] * seg_len
             segments["fast"] = slice(cursor, cursor + seg_len)
             cursor += seg_len
 
