@@ -92,7 +92,11 @@ class PI05FullConfig:
     image_features: list[str] = field(default_factory=list)
 
     # --- pi05_full additions ---
-    # Loss weights (defaults match the JAX paper)
+    # Default loss weights for one-stage joint training. The 10x emphasis on
+    # subtask CE compensates for the smaller natural magnitude of flow_mse vs.
+    # CE losses and pushes the VLM to learn subtask prediction first. This
+    # is a Neuracore choice, not from the openpi paper — that paper runs a
+    # two-stage curriculum (10/1/0 then 0/0/1) rather than a single hybrid.
     subtask_loss_weight: float = 10.0
     fast_token_loss_weight: float = 1.0
     flow_matching_loss_weight: float = 1.0
