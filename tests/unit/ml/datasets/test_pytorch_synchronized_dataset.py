@@ -25,6 +25,8 @@ from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
+from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 
 DATA_ITEMS = 3
 
@@ -45,6 +47,13 @@ def _full_data_spec() -> dict[DataType, dict[int, str]]:
             DataType.JOINT_TARGET_POSITIONS, 3
         ),
         DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+    }
+
+
+def _default_preprocessing_config() -> PreprocessingConfiguration:
+    return {
+        DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
+        DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
     }
 
 
@@ -236,6 +245,180 @@ def _stats_cache_path(cache_root, sync_id, input_spec, output_spec):
     return cache_root / "dataset_cache" / f"{sync_id}_statistics_{spec_hash}.json"
 
 
+@pytest.fixture
+def synchronization_point_with_depth() -> SynchronizedPoint:
+    """Create a sample SynchronizedPoint including depth data."""
+    all_data_types = [
+        DataType.JOINT_POSITIONS,
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.RGB_IMAGES,
+        DataType.DEPTH_IMAGES,
+    ]
+
+    return SynchronizedPoint(
+        robot_id=ROBOT_ID,
+        timestamp=1234567890.0,
+        data={
+            data_type: {
+                f"{data_type.value}_{i}": DATA_TYPE_TO_NC_DATA_CLASS[data_type].sample()
+                for i in range(DATA_ITEMS)
+            }
+            for data_type in all_data_types
+        },
+    )
+
+
+@pytest.fixture
+def dataset_statistics_with_depth(
+    synchronization_point_with_depth: SynchronizedPoint,
+) -> dict[str, dict[DataType, list[NCDataStats]]]:
+    """Create sample dataset statistics for tests including depth."""
+    stats = {
+        DataType.JOINT_POSITIONS: [
+            list(
+                synchronization_point_with_depth.data[DataType.JOINT_POSITIONS].values()
+            )[i].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.JOINT_TARGET_POSITIONS: [
+            list(
+                synchronization_point_with_depth.data[
+                    DataType.JOINT_TARGET_POSITIONS
+                ].values()
+            )[i].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.RGB_IMAGES: [
+            list(synchronization_point_with_depth.data[DataType.RGB_IMAGES].values())[
+                i
+            ].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+        DataType.DEPTH_IMAGES: [
+            list(synchronization_point_with_depth.data[DataType.DEPTH_IMAGES].values())[
+                i
+            ].calculate_statistics()
+            for i in range(DATA_ITEMS)
+        ],
+    }
+    for data_type_stats in stats.values():
+        for stat in data_type_stats:
+            for attr_name, attr_value in vars(stat).items():
+                if isinstance(attr_value, DataItemStats):
+                    attr_value.count[0] = NUM_EPISODES * NUM_OBSERVATIONS_PER_EPISODE
+    return {
+        "input": {
+            DataType.JOINT_POSITIONS: stats[DataType.JOINT_POSITIONS],
+            DataType.RGB_IMAGES: stats[DataType.RGB_IMAGES],
+            DataType.DEPTH_IMAGES: stats[DataType.DEPTH_IMAGES],
+        },
+        "output": {
+            DataType.JOINT_TARGET_POSITIONS: stats[DataType.JOINT_TARGET_POSITIONS],
+        },
+    }
+
+
+@pytest.fixture
+def mock_synced_recording_with_depth(
+    synchronization_point_with_depth: SynchronizedPoint,
+) -> SynchronizedRecording:
+    """Create a mock recording including depth data."""
+    sync_points = [synchronization_point_with_depth] * 10
+
+    class MockSynchronizedRecording(SynchronizedRecording):
+        def __init__(self):
+            self.sync_points = sync_points
+            self.robot_id = ROBOT_ID
+
+        def __len__(self):
+            return len(self.sync_points)
+
+        def __getitem__(self, idx):
+            if isinstance(idx, int):
+                return self.sync_points[idx]
+            elif isinstance(idx, slice):
+                start = idx.start or 0
+                stop = idx.stop or len(self.sync_points)
+                step = idx.step or 1
+                return self.sync_points[start:stop:step]
+            else:
+                raise TypeError(f"Invalid index type: {type(idx)}")
+
+        def __iter__(self):
+            return iter(self.sync_points)
+
+    return MockSynchronizedRecording()
+
+
+@pytest.fixture
+def mock_synchronized_dataset_with_depth(
+    mock_synced_recording_with_depth: SynchronizedRecording,
+    dataset_statistics_with_depth: dict[str, dict[DataType, list[NCDataStats]]],
+) -> SynchronizedDataset:
+    """Create a mock synchronized dataset including depth data."""
+
+    class MockSynchronizedDataset(SynchronizedDataset):
+        def __init__(self):
+            self.id = "mock_dataset"
+            self.dataset = MagicMock()
+            self.dataset.data_types = [
+                DataType.JOINT_POSITIONS,
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.RGB_IMAGES,
+                DataType.DEPTH_IMAGES,
+            ]
+            self.dataset.get_full_embodiment_description.side_effect = (
+                lambda robot_id: (
+                    {
+                        **_full_data_spec(),
+                        DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
+                    }
+                    if robot_id == ROBOT_ID
+                    else (_ for _ in ()).throw(
+                        ValueError(f"Input robot IDs [{robot_id}] not found")
+                    )
+                )
+            )
+            self.cross_embodiment_description = {
+                ROBOT_ID: {
+                    DataType.JOINT_POSITIONS: _indexed_names(
+                        DataType.JOINT_POSITIONS, 3
+                    ),
+                    DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                        DataType.JOINT_TARGET_POSITIONS, 3
+                    ),
+                    DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+                    DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
+                }
+            }
+
+        def calculate_statistics(
+            self,
+            input_cross_embodiment_description: CrossEmbodimentDescription,
+            output_cross_embodiment_description: CrossEmbodimentDescription,
+        ) -> SynchronizedDatasetStatistics:
+            return SynchronizedDatasetStatistics(
+                synchronized_dataset_id="mock_dataset",
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
+                dataset_statistics=dataset_statistics_with_depth,
+            )
+
+        def __len__(self):
+            return NUM_EPISODES
+
+        def __getitem__(self, idx):
+            return mock_synced_recording_with_depth
+
+        def __next__(self) -> SynchronizedRecording:
+            if self._recording_idx >= NUM_EPISODES:
+                raise StopIteration
+            self._recording_idx += 1
+            return mock_synced_recording_with_depth
+
+    return MockSynchronizedDataset()
+
+
 def test_should_initialize_with_correct_args(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
@@ -259,6 +442,8 @@ def test_should_initialize_with_correct_args(
         input_cross_embodiment_description=input_embodiment_description,
         output_cross_embodiment_description=output_embodiment_description,
         output_prediction_horizon=5,
+        input_preprocessing_config=_default_preprocessing_config(),
+        output_preprocessing_config=_default_preprocessing_config(),
     )
 
     assert dataset.synchronized_dataset == mock_synchronized_dataset
@@ -293,6 +478,8 @@ def test_should_throw_error_with_missing_robot_id(
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=5,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
 
@@ -320,6 +507,8 @@ def test_should_throw_error_with_missing_data_type(
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=5,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
 
@@ -343,6 +532,8 @@ def test_initialization_invalid_synchronized_dataset():
                 }
             },
             output_prediction_horizon=5,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
 
@@ -485,6 +676,8 @@ class TestDataLoading:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -523,6 +716,8 @@ class TestDataLoading:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -535,6 +730,93 @@ class TestDataLoading:
 
             # Memory should be checked at least once
             assert mock_monitor.check_memory.call_count >= 1
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_input_preprocessing(
+        self, mock_login, mock_synchronized_dataset_with_depth
+    ):
+        input_spec: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+                DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
+            }
+        }
+        output_spec: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+        RGB_TEST_SHAPE = (123, 456)
+        DEPTH_TEST_SHAPE = (789, 101)
+        input_preprocessing_config = {
+            DataType.RGB_IMAGES: [ResizePad(size=RGB_TEST_SHAPE)],
+            DataType.DEPTH_IMAGES: [ResizePad(size=DEPTH_TEST_SHAPE)],
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset_with_depth,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
+            output_prediction_horizon=3,
+            input_preprocessing_config=input_preprocessing_config,
+            output_preprocessing_config=_default_preprocessing_config(),
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        assert sample.inputs[DataType.RGB_IMAGES][0].frame.shape[-2:] == RGB_TEST_SHAPE
+        assert (
+            sample.inputs[DataType.DEPTH_IMAGES][0].frame.shape[-2:] == DEPTH_TEST_SHAPE
+        )
+
+    @patch("neuracore.login")
+    def test_load_sample_applies_output_preprocessing(
+        self, mock_login, mock_synchronized_dataset_with_depth
+    ):
+        input_spec: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+                DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
+            }
+        }
+        output_spec: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+                DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                ),
+            }
+        }
+        RGB_TEST_SHAPE = (160, 200)
+        DEPTH_TEST_SHAPE = (180, 220)
+        output_preprocessing_config = {
+            DataType.RGB_IMAGES: [ResizePad(size=RGB_TEST_SHAPE)],
+            DataType.DEPTH_IMAGES: [ResizePad(size=DEPTH_TEST_SHAPE)],
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset_with_depth,
+            input_cross_embodiment_description=input_spec,
+            output_cross_embodiment_description=output_spec,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=output_preprocessing_config,
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=0)
+
+        assert sample.outputs[DataType.RGB_IMAGES][0].frame.shape[-2:] == RGB_TEST_SHAPE
+        assert (
+            sample.outputs[DataType.DEPTH_IMAGES][0].frame.shape[-2:]
+            == DEPTH_TEST_SHAPE
+        )
 
 
 class TestDataTypeProcessing:
@@ -562,6 +844,8 @@ class TestDataTypeProcessing:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=2,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -610,6 +894,8 @@ class TestDatasetIntegration:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -642,6 +928,8 @@ class TestDatasetIntegration:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -671,6 +959,8 @@ class TestDatasetIntegration:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         # Test positive out of bounds
@@ -701,6 +991,8 @@ class TestDatasetIntegration:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         assert len(dataset) == 45
@@ -726,6 +1018,8 @@ class TestDatasetIntegration:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         with patch.object(dataset, "load_sample") as mock_load_sample:
@@ -759,6 +1053,8 @@ class TestPerformanceAndOptimization:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         assert dataset._memory_monitor is not None
@@ -784,6 +1080,8 @@ class TestPerformanceAndOptimization:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         # Should have episode indices for each sample (excluding last frames)
@@ -818,6 +1116,8 @@ class TestErrorRecovery:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         # Initial error count should be 0
@@ -852,6 +1152,8 @@ class TestIntegrationWithPyTorchDataLoader:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         dataloader = DataLoader(
@@ -895,6 +1197,8 @@ class TestDatasetStatistics:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         stats = dataset.dataset_statistics
@@ -942,6 +1246,8 @@ class TestDatasetStatistics:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         assert mock_synchronized_dataset.calculate_statistics.call_count == 0
@@ -982,10 +1288,14 @@ class TestDatasetStatistics:
             input_cross_embodiment_description=input_spec,
             output_cross_embodiment_description=output_spec,
             output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
         )
 
         assert mock_synchronized_dataset.calculate_statistics.call_count == 1
         cache_path = _stats_cache_path(
             tmp_path, mock_synchronized_dataset.id, input_spec, output_spec
         )
+        assert cache_path.exists()
+
         assert cache_path.exists()

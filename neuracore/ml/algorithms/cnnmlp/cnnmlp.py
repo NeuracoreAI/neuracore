@@ -203,6 +203,7 @@ class CNNMLP(NeuracoreModel):
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
             max_cameras = len(stats)
+            self.rgb_normalizers = nn.ModuleList()
             self.encoder_output_dims[DataType.RGB_IMAGES] = max_cameras * cnn_output_dim
             self.encoders[DataType.RGB_IMAGES] = nn.ModuleList()
             for i in range(max_cameras):
@@ -213,12 +214,10 @@ class CNNMLP(NeuracoreModel):
                     mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
                     mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
                     std = std_c_h_w.mean(axis=(1, 2)).tolist()
-                encoder = torch.nn.Sequential(
-                    T.Resize((224, 224)),
-                    T.Normalize(mean=mean, std=std),
-                    ImageEncoder(output_dim=cnn_output_dim, backbone=image_backbone),
+                self.rgb_normalizers.append(T.Normalize(mean=mean, std=std))
+                self.encoders[DataType.RGB_IMAGES].append(
+                    ImageEncoder(output_dim=cnn_output_dim, backbone=image_backbone)
                 )
-                self.encoders[DataType.RGB_IMAGES].append(encoder)
 
         if DataType.DEPTH_IMAGES in self.input_data_types:
             stats = cast(
@@ -231,11 +230,9 @@ class CNNMLP(NeuracoreModel):
             )
             self.encoders[DataType.DEPTH_IMAGES] = nn.ModuleList()
             for i in range(max_cameras):
-                encoder = torch.nn.Sequential(
-                    T.Resize((224, 224)),
-                    DepthImageEncoder(output_dim=cnn_output_dim),
+                self.encoders[DataType.DEPTH_IMAGES].append(
+                    DepthImageEncoder(output_dim=cnn_output_dim)
                 )
-                self.encoders[DataType.DEPTH_IMAGES].append(encoder)
 
         if DataType.POINT_CLOUDS in self.input_data_types:
             stats = cast(
@@ -392,9 +389,11 @@ class CNNMLP(NeuracoreModel):
             encoders
         ), "Number of camera inputs does not match number of encoders."
         feats = []
-        for encoder, input in zip(encoders, batched_rgb_data):
+        for normalizer, encoder, input in zip(
+            self.rgb_normalizers, encoders, batched_rgb_data
+        ):
             last_frame = input.frame[:, -1, :, :, :]  # (B, 3, H, W)
-            feats.append(encoder(last_frame))
+            feats.append(encoder(normalizer(last_frame)))
         combined_feats = torch.stack(feats, dim=1)  # (B, num_cams, feat_dim)
         combined_feats *= mask.unsqueeze(-1)
         # (B, num_cams, feat_dim) -> (B, num_cams * feat_dim)
