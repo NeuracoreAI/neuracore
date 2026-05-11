@@ -707,6 +707,7 @@ def test_shared_slot_video_worker_surfaces_background_failure() -> None:
         metadata_bytes=b"{}",
         chunk=b"x",
         packet_length=1,
+        sequence_number=1,
     )
 
     try:
@@ -767,7 +768,7 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
             )
         )
         slot_id, _offset = registry.allocate_slot()
-        sequence_id = registry.mark_in_flight(slot_id)
+        sequence_id = registry.mark_in_flight(slot_id=slot_id, sequence_id=1)
 
         time.sleep(0.03)
         with registry._condition:

@@ -9,6 +9,9 @@ import struct
 import threading
 import time
 
+from neuracore.data_daemon.communications_management.sequence_allocator import (
+    ChannelSequenceAllocator,
+)
 from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
     DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
@@ -115,6 +118,8 @@ class SharedSlotVideoWorker:
         self._active_items_lock = threading.Lock()
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
+        self._last_handed_off_sequence_number = 0
+        self._handoff_cv = threading.Condition()
         self._thread = threading.Thread(
             target=self._worker_loop,
             name="shared-slot-video-worker",
@@ -187,6 +192,39 @@ class SharedSlotVideoWorker:
         with self._active_items_lock:
             return self._queue.qsize() == 0 and self._active_items == 0
 
+    def last_handed_off_sequence_number(self) -> int:
+        """Return the latest descriptor sequence handed off to the sender."""
+        with self._handoff_cv:
+            return self._last_handed_off_sequence_number
+
+    def wait_until_handed_off_through(
+        self,
+        sequence_number: int,
+        timeout_s: float,
+    ) -> None:
+        """Wait until all packets through sequence_number are descriptor-enqueued."""
+        if sequence_number <= 0:
+            return
+
+        deadline = time.monotonic() + timeout_s
+
+        with self._handoff_cv:
+            while self._last_handed_off_sequence_number < sequence_number:
+                worker_error = self.get_error()
+                if worker_error is not None:
+                    raise RuntimeError(
+                        "Shared-slot video worker failed before payload handoff "
+                        f"completed: {worker_error}"
+                    ) from worker_error
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        "Timed out waiting for shared-slot payload handoff before stop"
+                    )
+
+                self._handoff_cv.wait(timeout=min(0.05, remaining))
+
     def get_error(self) -> Exception | None:
         """Return the worker error, if the background thread failed."""
         with self._error_lock:
@@ -215,6 +253,8 @@ class SharedSlotVideoWorker:
                 except Exception as exc:
                     with self._error_lock:
                         self._error = exc
+                    with self._handoff_cv:
+                        self._handoff_cv.notify_all()
                     logger.exception("Shared-slot video worker failed")
                     break
                 finally:
@@ -223,7 +263,11 @@ class SharedSlotVideoWorker:
             finally:
                 self._queue.task_done()
 
+        with self._handoff_cv:
+            self._handoff_cv.notify_all()
+
     def _process_item(self, item: QueuedSharedSlotPacket) -> None:
+        """Copy a queued packet into a shm and hand off descriptor."""
         slot_id, offset = self._registry.allocate_slot()
         try:
             shm_view = self._registry.shared_memory_view(offset, item.packet_length)
@@ -242,7 +286,13 @@ class SharedSlotVideoWorker:
             finally:
                 shm_view.release()
 
-            sequence_id = self._registry.mark_in_flight(slot_id)
+            sequence_id = item.sequence_number
+
+            self._registry.mark_in_flight(
+                slot_id=slot_id,
+                sequence_id=sequence_id,
+            )
+
             if self._registry.shm_name is None:
                 raise RuntimeError("Shared-slot transport is not ready")
             descriptor = SharedSlotDescriptor(
@@ -270,6 +320,14 @@ class SharedSlotVideoWorker:
             except Exception:
                 self._registry.rollback_enqueued_slot(sequence_id)
                 raise
+
+            with self._handoff_cv:
+                self._last_handed_off_sequence_number = max(
+                    self._last_handed_off_sequence_number,
+                    sequence_id,
+                )
+                self._handoff_cv.notify_all()
+
         finally:
             del item
 
@@ -279,19 +337,23 @@ class SharedSlotVideoTransport:
 
     def __init__(
         self,
-        *,
+        sequence_allocator: ChannelSequenceAllocator | None = None,
         slot_size: int = DEFAULT_VIDEO_SLOT_SIZE,
         slot_count: int = DEFAULT_VIDEO_SLOT_COUNT,
         ack_timeout_s: float = DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
         allocate_timeout_s: float = DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
     ) -> None:
-        """Initialize a producer-facing shared-slot transport.
+        """Initialize a producer-side shared-slot transport.
 
         Args:
-            slot_size: Bytes available in each daemon-owned shared-memory slot.
-            slot_count: Number of shared-memory slots to provision.
-            ack_timeout_s: Timeout for receiving slot credits after send.
-            allocate_timeout_s: Timeout while waiting for a writable slot.
+            sequence_allocator: Channel sequence allocator to use.
+            slot_size: Size of each shared-memory slot in bytes.
+            slot_count: Number of fixed slots available in the shared-memory
+                transport.
+            ack_timeout_s: Maximum time to wait for daemon acknowledgements and
+                credit-return progress before marking the transport unhealthy.
+            allocate_timeout_s: Maximum time to wait for shared-slot setup or
+                slot allocation before timing out.
         """
         self._registry = SharedSlotRegistry(
             slot_size=slot_size,
@@ -305,8 +367,15 @@ class SharedSlotVideoTransport:
                 allocate_timeout_s,
             ),
         )
+        self._sequence_allocator = (
+            sequence_allocator
+            if sequence_allocator is not None
+            else ChannelSequenceAllocator()
+        )
         self._worker = SharedSlotVideoWorker(self._registry)
         self._announced = False
+        self._payload_sequence_lock = threading.Lock()
+        self._last_payload_sequence_number = 0
 
     @property
     def slot_size(self) -> int:
@@ -332,20 +401,27 @@ class SharedSlotVideoTransport:
 
     def enqueue_packet(
         self,
-        *,
         producer_id: str,
         sender: ProducerChannelMessageSender,
         metadata: dict[str, str | int | None],
         chunk: bytes | bytearray | memoryview,
-    ) -> None:
+        stop_cutoff_sequence_number: int | None = None,
+    ) -> int | None:
         """Serialize one transport packet and hand it to the background worker.
 
-        Copy the payload bytes before queueing them to the worker thread so the
-        caller can safely reuse or mutate its source buffer immediately after
-        this method returns.
+        Returns the reserved sequence number, or None if rejected by stop cutoff.
         """
+        sequence_number = self._sequence_allocator.reserve()
+
+        if (
+            stop_cutoff_sequence_number is not None
+            and sequence_number > stop_cutoff_sequence_number
+        ):
+            return None
+
         metadata_bytes, packet_length = build_shared_frame_packet_metadata(
-            metadata, chunk
+            metadata,
+            chunk,
         )
         chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
         self._worker.enqueue_packet(
@@ -355,12 +431,30 @@ class SharedSlotVideoTransport:
                 metadata_bytes=metadata_bytes,
                 chunk=chunk_bytes,
                 packet_length=packet_length,
+                sequence_number=sequence_number,
             )
         )
 
+        with self._payload_sequence_lock:
+            self._last_payload_sequence_number = max(
+                self._last_payload_sequence_number,
+                sequence_number,
+            )
+
+        return sequence_number
+
     def next_sequence_number(self) -> int:
         """Reserve a channel-scoped sequence number for control messages."""
-        return self._registry.next_sequence_number()
+        return self._sequence_allocator.reserve()
+
+    def get_last_reserved_sequence_number(self) -> int:
+        """Return the most recently reserved shared-slot sequence number."""
+        return self._sequence_allocator.get_last_reserved_sequence_number()
+
+    def get_last_payload_sequence_number(self) -> int:
+        """Return the latest sequence number reserved for a payload packet."""
+        with self._payload_sequence_lock:
+            return self._last_payload_sequence_number
 
     def is_healthy(self) -> bool:
         """Return True while the transport can accept new video writes."""
@@ -375,8 +469,15 @@ class SharedSlotVideoTransport:
         self._registry.reset_session()
         self._announced = False
 
-    def wait_until_drained(self, timeout_s: float = 30.0) -> None:
-        """Wait until all queued packets and in-flight credits are settled."""
+        with self._payload_sequence_lock:
+            self._last_payload_sequence_number = 0
+
+    def wait_until_drained(
+        self,
+        timeout_s: float = 30.0,
+        max_sequence_number: int | None = None,
+    ) -> None:
+        """Wait until queued packets and in-flight credits are settled."""
         deadline = time.monotonic() + timeout_s
 
         while time.monotonic() < deadline:
@@ -387,7 +488,20 @@ class SharedSlotVideoTransport:
                     f"{worker_error}"
                 ) from worker_error
 
-            if self._is_drained():
+            if max_sequence_number is None:
+                drained = self._is_drained()
+            elif max_sequence_number <= 0:
+                drained = True
+            else:
+                drained = (
+                    self._worker.last_handed_off_sequence_number()
+                    >= max_sequence_number
+                    and not self._registry.has_in_flight_at_or_before(
+                        max_sequence_number
+                    )
+                )
+
+            if drained:
                 return
 
             time.sleep(0.05)
@@ -396,8 +510,19 @@ class SharedSlotVideoTransport:
             "Timed out waiting for shared-slot transport to drain before close"
         )
 
-    def wait_until_payload_handed_off(self, timeout_s: float = 30.0) -> None:
+    def wait_until_payload_handed_off(
+        self,
+        timeout_s: float = 30.0,
+        max_sequence_number: int | None = None,
+    ) -> None:
         """Wait until queued payloads have been copied and descriptor-enqueued."""
+        if max_sequence_number is not None:
+            self._worker.wait_until_handed_off_through(
+                sequence_number=max_sequence_number,
+                timeout_s=timeout_s,
+            )
+            return
+
         deadline = time.monotonic() + timeout_s
 
         while time.monotonic() < deadline:

@@ -11,6 +11,12 @@ from collections.abc import Iterator, Sequence
 
 import zmq
 
+from neuracore.data_daemon.communications_management.producer.models import (
+    QueuedEnvelope,
+)
+from neuracore.data_daemon.communications_management.sequence_allocator import (
+    ChannelSequenceAllocator,
+)
 from neuracore.data_daemon.const import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_SHARED_MEMORY_SIZE,
@@ -29,10 +35,7 @@ from neuracore.data_daemon.models import (
 
 from ..shared_transport.communications_manager import CommunicationsManager
 from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
-from .producer_channel_message_sender import (
-    ProducerChannelMessageSender,
-    QueuedEnvelope,
-)
+from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_heartbeat_service import ProducerHeartbeatService
 
 logger = logging.getLogger(__name__)
@@ -107,13 +110,15 @@ class ProducerChannel:
         self._use_shared_slot_transport = data_type_uses_shared_slot_transport(
             data_type
         )
-        self._shared_slot_transport = (
+        self._sequence_allocator = ChannelSequenceAllocator()
+        self._shared_slot_transport: SharedSlotVideoTransport | None = (
             SharedSlotVideoTransport(
+                sequence_allocator=self._sequence_allocator,
                 slot_size=int(
                     default_shared_memory_size
                     if shared_memory_size is None
                     else shared_memory_size
-                )
+                ),
             )
             if self._use_shared_slot_transport
             else None
@@ -122,16 +127,18 @@ class ProducerChannel:
             producer_id=self.channel_id,
             comm=self._comm,
             send_queue_maxsize=self.send_queue_maxsize,
+            sequence_allocator=self._sequence_allocator,
         )
         self._heartbeat_service = ProducerHeartbeatService(
             interval_s=self._heartbeat_interval,
             send_heartbeat=self.heartbeat,
         )
 
+        self._recording_send_lock = threading.RLock()
+        self._stop_cutoff_sequence_number: int | None = None
+
     @property
-    def _send_queue(
-        self,
-    ) -> queue.Queue[QueuedEnvelope | None]:
+    def _send_queue(self) -> queue.Queue[QueuedEnvelope | None]:
         """Expose the sender queue for compatibility with existing tests."""
         return self._message_sender.queue
 
@@ -152,23 +159,53 @@ class ProducerChannel:
         """Set the recording ID for the producer."""
         self.recording_id = recording_id
 
+    def get_last_accepted_sequence_number(self) -> int:
+        """Return the latest sequence accepted by either sender or shared-slot queue."""
+        last_enqueued = self.get_last_enqueued_sequence_number()
+
+        if self._shared_slot_transport is None:
+            return last_enqueued
+
+        return max(
+            last_enqueued,
+            self._shared_slot_transport.get_last_reserved_sequence_number(),
+        )
+
+    def mark_recording_stop_requested(self) -> int:
+        """Freeze recording data sends and return the last accepted sequence number."""
+        with self._recording_send_lock:
+            if self._stop_cutoff_sequence_number is None:
+                self._stop_cutoff_sequence_number = (
+                    self.get_last_accepted_sequence_number()
+                )
+            return self._stop_cutoff_sequence_number
+
+    def _recording_data_stopped(self) -> bool:
+        return self._stop_cutoff_sequence_number is not None
+
     def start_recording_session(
         self,
         recording_id: str | None = None,
         shared_memory_size: int | None = None,
     ) -> None:
         """Start a fresh recording session for this producer channel."""
-        if recording_id is not None:
-            self.set_recording_id(recording_id)
-        if not self.recording_id:
-            raise ValueError("recording_id is required; set on ProducerChannel init.")
-        if self.trace_id is not None:
-            raise RuntimeError(
-                "Cannot start a new recording session while a trace is active."
-            )
+        with self._recording_send_lock:
+            self._stop_cutoff_sequence_number = None
 
-        self.start_producer_channel()
-        self.start_new_trace()
+            if recording_id is not None:
+                self.set_recording_id(recording_id)
+            if not self.recording_id:
+                raise ValueError(
+                    "recording_id is required; set on ProducerChannel init."
+                )
+            if self.trace_id is not None:
+                raise RuntimeError(
+                    "Cannot start a new recording session while a trace is active."
+                )
+
+            self.start_producer_channel()
+            self.start_new_trace()
+
         if self._use_shared_slot_transport:
             self.open_fixed_shared_slots(slot_size=shared_memory_size)
 
@@ -203,32 +240,27 @@ class ProducerChannel:
         self,
         wait_for_slot_drain: bool = True,
     ) -> None:
-        """Stop the producer channel and release local resources.
-
-        When ``wait_for_slot_drain`` is True, this also waits for all shared-slot
-        credits to return before closing the control endpoint and registry.
-        """
+        """Stop the producer channel and release local resources."""
         self._stop_heartbeat_service()
 
-        # Ensure all descriptors were actually sent
-        cutoff_sequence = self.get_last_enqueued_sequence_number()
+        final_flush_sequence = self.get_last_enqueued_sequence_number()
         stop_failure: RuntimeError | None = None
         sender_failed = False
-        if not self.wait_until_sequence_sent(cutoff_sequence):
+        if not self.wait_until_sequence_sent(final_flush_sequence):
             sender_error = self._get_message_sender_error()
             if sender_error is not None:
                 sender_failed = True
                 logger.warning(
                     "Producer channel stopping after sender failure without "
-                    "flushing stop cutoff sequence_number=%s error=%r",
-                    cutoff_sequence,
+                    "flushing final sequence_number=%s error=%r",
+                    final_flush_sequence,
                     sender_error,
                 )
             else:
                 logger.error(
-                    "Producer channel sender stopped before flushing stop cutoff "
+                    "Producer channel sender stopped before flushing final "
                     "sequence_number=%s",
-                    cutoff_sequence,
+                    final_flush_sequence,
                 )
                 stop_failure = RuntimeError(
                     "Failed to send all enqueued messages "
@@ -256,9 +288,7 @@ class ProducerChannel:
         shared_slot_transport = (
             self._shared_slot_transport if self._use_shared_slot_transport else None
         )
-        sequence_number = None
-        if shared_slot_transport is not None:
-            sequence_number = shared_slot_transport.next_sequence_number()
+        sequence_number = self._sequence_allocator.reserve()
         return self._message_sender.send(
             command,
             payload,
@@ -293,7 +323,7 @@ class ProducerChannel:
         ):
             self._shared_slot_transport.close()
             self._shared_slot_transport = SharedSlotVideoTransport(
-                slot_size=int(slot_size)
+                sequence_allocator=self._sequence_allocator, slot_size=int(slot_size)
             )
         if self._shared_slot_transport.is_announced():
             return
@@ -311,17 +341,25 @@ class ProducerChannel:
 
     def _send_socket_data_chunk(self, payload: DataChunkPayload) -> None:
         """Send one DATA_CHUNK payload directly over the producer socket."""
-        self._send(
-            CommandType.DATA_CHUNK,
-            {"data_chunk": payload.to_dict()},
-        )
+        with self._recording_send_lock:
+            if self._recording_data_stopped():
+                return
+
+            self._send(
+                CommandType.DATA_CHUNK,
+                {"data_chunk": payload.to_dict()},
+            )
 
     def send_batched_joint_data(self, payload: BatchedJointDataPayload) -> None:
         """Send one explicit batched joint payload over the producer socket."""
-        self._send(
-            CommandType.BATCHED_JOINT_DATA,
-            {CommandType.BATCHED_JOINT_DATA.value: payload.to_dict()},
-        )
+        with self._recording_send_lock:
+            if self._recording_data_stopped():
+                return
+
+            self._send(
+                CommandType.BATCHED_JOINT_DATA,
+                {CommandType.BATCHED_JOINT_DATA.value: payload.to_dict()},
+            )
 
     def send_data(
         self,
@@ -405,6 +443,9 @@ class ProducerChannel:
         dataset_name: str | None = None,
     ) -> None:
         """Send a logical payload assembled from multiple byte-like parts."""
+        if self._recording_data_stopped():
+            return
+
         normalised_parts = self._normalise_parts(parts)
         if total_bytes is None:
             total_bytes = sum(len(view) for view in normalised_parts)
@@ -445,23 +486,23 @@ class ProducerChannel:
                 if len(normalised_parts) == 1
                 else b"".join(bytes(part) for part in normalised_parts)
             )
-            self._send_socket_data_chunk(
-                DataChunkPayload(
-                    channel_id=self.channel_id,
-                    recording_id=recording_id,
-                    trace_id=trace_id,
-                    chunk_index=0,
-                    total_chunks=1,
-                    data_type_name=data_type_name,
-                    dataset_id=dataset_id,
-                    dataset_name=dataset_name,
-                    robot_name=robot_name,
-                    robot_id=robot_id,
-                    robot_instance=robot_instance,
-                    data=payload_bytes,
-                    data_type=data_type,
-                )
+            payload = DataChunkPayload(
+                channel_id=self.channel_id,
+                recording_id=recording_id,
+                trace_id=trace_id,
+                chunk_index=0,
+                total_chunks=1,
+                data_type_name=data_type_name,
+                dataset_id=dataset_id,
+                dataset_name=dataset_name,
+                robot_name=robot_name,
+                robot_id=robot_id,
+                robot_instance=robot_instance,
+                data=payload_bytes,
+                data_type=data_type,
             )
+
+            self._send_socket_data_chunk(payload)
             return
 
         self.open_fixed_shared_slots()
@@ -470,18 +511,29 @@ class ProducerChannel:
             raise RuntimeError("Shared-slot transport is not available")
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
+            metadata = SharedMemoryChunkMetadata(
+                trace_id=trace_id,
+                chunk_index=idx,
+                total_chunks=total_chunks,
+                trace_metadata=trace_metadata if idx == 0 else None,
+            ).to_dict()
+
+            with self._recording_send_lock:
+                if self._recording_data_stopped():
+                    return
+
+                sequence_number = shared_slot_transport.enqueue_packet(
+                    producer_id=self.channel_id,
+                    sender=self._message_sender,
+                    metadata=metadata,
+                    chunk=chunk,
+                    stop_cutoff_sequence_number=self._stop_cutoff_sequence_number,
+                )
+
+            if sequence_number is None:
+                return
+
             produced_chunks += 1
-            shared_slot_transport.enqueue_packet(
-                producer_id=self.channel_id,
-                sender=self._message_sender,
-                metadata=SharedMemoryChunkMetadata(
-                    trace_id=trace_id,
-                    chunk_index=idx,
-                    total_chunks=total_chunks,
-                    trace_metadata=trace_metadata if idx == 0 else None,
-                ).to_dict(),
-                chunk=chunk,
-            )
 
         if produced_chunks != total_chunks:
             raise RuntimeError(
@@ -497,26 +549,39 @@ class ProducerChannel:
 
     def cleanup_producer_channel(
         self,
+        stop_cutoff_sequence_number: int,
         wait_for_slot_drain: bool = True,
     ) -> None:
-        """Finish one trace after all queued payload descriptors are sent.
+        """Finish one trace after queued recording data up to stop cutoff is sent."""
+        if stop_cutoff_sequence_number < 0:
+            raise ValueError("stop_cutoff_sequence_number must be non-negative")
 
-        When ``wait_for_slot_drain`` is False, this returns after the producer has
-        pushed all currently queued shared-slot descriptors and the TRACE_END
-        control message onto the socket. Slot credits may still return
-        asynchronously while the channel remains alive for later cleanup.
-        """
         if self._shared_slot_transport is not None:
-            self._shared_slot_transport.wait_until_payload_handed_off(timeout_s=30.0)
+            payload_cutoff_sequence_number = (
+                self._shared_slot_transport.get_last_payload_sequence_number()
+            )
 
-        cutoff_sequence = self.get_last_enqueued_sequence_number()
-        if not self.wait_until_sequence_sent(cutoff_sequence):
+            if payload_cutoff_sequence_number > 0:
+                self._shared_slot_transport.wait_until_payload_handed_off(
+                    timeout_s=30.0,
+                    max_sequence_number=payload_cutoff_sequence_number,
+                )
+
+        if not self.wait_until_sequence_sent(stop_cutoff_sequence_number):
             raise RuntimeError(
-                "Failed to send all queued payload descriptors before cleanup"
+                "Failed to send queued recording data up to stop cutoff before cleanup"
             )
 
         if wait_for_slot_drain and self._shared_slot_transport is not None:
-            self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
+            payload_cutoff_sequence_number = (
+                self._shared_slot_transport.get_last_payload_sequence_number()
+            )
+
+            if payload_cutoff_sequence_number > 0:
+                self._shared_slot_transport.wait_until_drained(
+                    timeout_s=30.0,
+                    max_sequence_number=payload_cutoff_sequence_number,
+                )
 
         self.end_trace()
 

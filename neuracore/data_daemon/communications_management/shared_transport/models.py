@@ -32,15 +32,16 @@ class SharedSlotReservation:
     allocated_bytes: int
 
 
-@dataclass(frozen=True)
+@dataclass
 class QueuedSharedSlotPacket:
-    """One shared-slot payload waiting to be written and announced."""
+    """Transport packet queued for background worker."""
 
     producer_id: str
     sender: ProducerChannelMessageSender
     metadata_bytes: bytes
-    chunk: bytes | bytearray | memoryview
+    chunk: bytes
     packet_length: int
+    sequence_number: int
 
 
 @dataclass(frozen=True)

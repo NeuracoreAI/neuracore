@@ -194,7 +194,6 @@ def launch_daemon_subprocess(
         stdout=stdout,
         stderr=stderr,
     )
-
     socket_poll_interval_s = 0.05
     daemon_startup_timeout_s = time.monotonic() + timeout_s
 

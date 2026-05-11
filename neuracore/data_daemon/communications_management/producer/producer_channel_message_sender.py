@@ -7,13 +7,15 @@ import queue
 import threading
 from collections.abc import Callable
 
-from neuracore.data_daemon.models import CommandType
-
-from ..shared_transport.communications_manager import (
-    CommunicationsManager,
-    MessageEnvelope,
+from neuracore.data_daemon.communications_management.producer.models import (
+    QueuedEnvelope,
 )
-from .models import QueuedEnvelope
+from neuracore.data_daemon.communications_management.sequence_allocator import (
+    ChannelSequenceAllocator,
+)
+from neuracore.data_daemon.models import CommandType, MessageEnvelope
+
+from ..shared_transport.communications_manager import CommunicationsManager
 
 logger = logging.getLogger(__name__)
 
@@ -23,14 +25,15 @@ class ProducerChannelMessageSender:
 
     def __init__(
         self,
-        *,
         producer_id: str,
         comm: CommunicationsManager,
         send_queue_maxsize: int,
+        sequence_allocator: ChannelSequenceAllocator,
     ) -> None:
         """Initialize ordered dispatch state for socket messages."""
         self._producer_id = producer_id
         self._comm = comm
+        self._sequence_allocator = sequence_allocator
         self._send_queue: queue.Queue[QueuedEnvelope | None] = queue.Queue(
             maxsize=send_queue_maxsize
         )
@@ -39,7 +42,6 @@ class ProducerChannelMessageSender:
             name="producer-channel-sender",
             daemon=True,
         )
-        self._next_sequence_number = 1
         self._last_enqueued_sequence_number = 0
         self._last_socket_sent_sequence_number = 0
         self._sender_error: Exception | None = None
@@ -66,11 +68,18 @@ class ProducerChannelMessageSender:
         with self._sequence_cv:
             self._sequence_cv.notify_all()
 
+    def reserve_sequence_number(self) -> int:
+        """Reserve and return the next sender sequence number without enqueueing.
+
+        Use this when another transport layer needs to attach a sender-compatible
+        sequence number before it can enqueue a prebuilt envelope later.
+        """
+        return self._sequence_allocator.reserve()
+
     def send(
         self,
         command: CommandType,
         payload: dict | None = None,
-        *,
         sequence_number: int | None = None,
         on_sent: Callable[[], None] | None = None,
         on_failed_send: Callable[[], None] | None = None,
@@ -96,8 +105,24 @@ class ProducerChannelMessageSender:
         on_sent: Callable[[], None] | None = None,
         on_failed_send: Callable[[], None] | None = None,
     ) -> None:
-        """Enqueue a prebuilt envelope for ordered socket delivery."""
+        """Enqueue a prebuilt envelope for ordered socket delivery.
+
+        Prebuilt envelopes are used by shared-slot transport. They must still
+        update sender sequence progress so stop cutoffs and flush waits observe
+        them correctly.
+        """
         with self._enqueue_lock:
+            if envelope.sequence_number is None:
+                sequence_number = self.reserve_sequence_number()
+                envelope = MessageEnvelope(
+                    producer_id=envelope.producer_id,
+                    command=envelope.command,
+                    payload=envelope.payload,
+                    sequence_number=sequence_number,
+                )
+            if envelope.sequence_number is not None:
+                self._note_enqueued_sequence_number(envelope.sequence_number)
+
             self._enqueue_envelope_locked(
                 envelope,
                 on_sent=on_sent,
@@ -141,22 +166,29 @@ class ProducerChannelMessageSender:
         sequence_number: int | None = None,
     ) -> MessageEnvelope:
         """Reserve a sequence number and build a transport envelope."""
-        with self._sequence_cv:
-            if sequence_number is None:
-                sequence_number = self._next_sequence_number
-                self._next_sequence_number += 1
-            else:
-                sequence_number = int(sequence_number)
-                if sequence_number >= self._next_sequence_number:
-                    self._next_sequence_number = sequence_number + 1
-            if sequence_number > self._last_enqueued_sequence_number:
-                self._last_enqueued_sequence_number = sequence_number
+        if sequence_number is None:
+            sequence_number = self.reserve_sequence_number()
+        else:
+            sequence_number = sequence_number
+
+        self._note_enqueued_sequence_number(sequence_number)
+
         return MessageEnvelope(
             producer_id=self._producer_id,
             command=command,
             payload=payload or {},
             sequence_number=sequence_number,
         )
+
+    def _note_enqueued_sequence_number(self, sequence_number: int) -> None:
+        """Record that a sequence number has entered the sender queue."""
+        with self._sequence_cv:
+            self._last_enqueued_sequence_number = max(
+                self._last_enqueued_sequence_number,
+                sequence_number,
+            )
+
+            self._sequence_cv.notify_all()
 
     def _enqueue_envelope_locked(
         self,
@@ -165,6 +197,10 @@ class ProducerChannelMessageSender:
         on_sent: Callable[[], None] | None = None,
         on_failed_send: Callable[[], None] | None = None,
     ) -> None:
+        """Enqueue an envelope.
+
+        Caller must hold self._enqueue_lock.
+        """
         with self._sequence_cv:
             if self._sender_error is not None:
                 raise RuntimeError("Sender thread is no longer healthy")
@@ -193,13 +229,9 @@ class ProducerChannelMessageSender:
                             logger.exception("Sender success callback crashed")
                     if item.envelope.sequence_number is not None:
                         with self._sequence_cv:
-                            if (
-                                item.envelope.sequence_number
-                                > self._last_socket_sent_sequence_number
-                            ):
-                                self._last_socket_sent_sequence_number = (
-                                    item.envelope.sequence_number
-                                )
+                            sequence_number = int(item.envelope.sequence_number)
+                            if sequence_number > self._last_socket_sent_sequence_number:
+                                self._last_socket_sent_sequence_number = sequence_number
                             self._sequence_cv.notify_all()
                 except Exception as exc:
                     if item.on_failed_send is not None:
@@ -212,6 +244,7 @@ class ProducerChannelMessageSender:
                         self._sequence_cv.notify_all()
                     logger.exception("Send failed")
                     break
+
             finally:
                 self._send_queue.task_done()
 

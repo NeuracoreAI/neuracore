@@ -16,9 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    ProducerChannel,
-)
+from neuracore.data_daemon.communications_management.producer import ProducerChannel
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +82,11 @@ class DataStream(ABC):
             None
         """
         if self.is_recording():
-            self.stop_recording()
+            _, stop_cutoff_sequence_number = self.prepare_recording_stopped()
+            self.stop_recording(
+                wait_for_producer_drain=False,
+                stop_cutoff_sequence_number=stop_cutoff_sequence_number,
+            )
         self._recording = True
         self._context = context
         self._handle_ensure_producer_channel(context)
@@ -113,7 +115,22 @@ class DataStream(ABC):
             recording_id=context.recording_id
         )
 
-    def stop_recording(self, wait_for_producer_drain: bool = True) -> None:
+    def prepare_recording_stopped(self) -> tuple[ProducerChannel, int]:
+        """Mark the producer channel as stopping and return it."""
+        producer_channel = self.get_producer_channel()
+
+        if not isinstance(producer_channel, ProducerChannel):
+            raise RuntimeError(f"Stream {self._stream_name} has no ProducerChannel")
+
+        stop_cutoff_sequence_number = producer_channel.mark_recording_stop_requested()
+
+        return producer_channel, stop_cutoff_sequence_number
+
+    def stop_recording(
+        self,
+        stop_cutoff_sequence_number: int,
+        wait_for_producer_drain: bool = True,
+    ) -> None:
         """Stop recording data and tear down the active producer, if any."""
         self._recording = False
         self._context = None
@@ -121,16 +138,17 @@ class DataStream(ABC):
         self._producer_channel = None
 
         if not isinstance(producer_channel, ProducerChannel):
-            return
+            raise RuntimeError("Stream has no ProducerChannel")
 
         try:
             if producer_channel.trace_id:
                 producer_channel.cleanup_producer_channel(
-                    wait_for_slot_drain=wait_for_producer_drain
+                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
+                    wait_for_slot_drain=wait_for_producer_drain,
                 )
         finally:
             producer_channel.stop_producer_channel(
-                wait_for_slot_drain=wait_for_producer_drain
+                wait_for_slot_drain=wait_for_producer_drain,
             )
 
     def is_recording(self) -> bool:

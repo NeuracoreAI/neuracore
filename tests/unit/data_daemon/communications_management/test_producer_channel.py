@@ -10,12 +10,30 @@ class _FakeSharedSlotTransport:
         self.wait_until_payload_handed_off_calls: list[float] = []
         self.wait_until_drained_calls: list[float] = []
         self.finish_recording_session_calls = 0
+        self.last_payload_sequence_number = 0
 
-    def wait_until_payload_handed_off(self, timeout_s: float = 30.0) -> None:
+    def get_last_payload_sequence_number(self) -> int:
+        return self.last_payload_sequence_number
+
+    def wait_until_payload_handed_off(
+        self,
+        timeout_s: float = 30.0,
+        max_sequence_number: int | None = None,
+    ) -> None:
         self.wait_until_payload_handed_off_calls.append(timeout_s)
+        self.last_payload_sequence_number = (
+            0 if max_sequence_number is None else max_sequence_number
+        )
 
-    def wait_until_drained(self, timeout_s: float = 30.0) -> None:
+    def wait_until_drained(
+        self,
+        timeout_s: float = 30.0,
+        max_sequence_number: int | None = None,
+    ) -> None:
         self.wait_until_drained_calls.append(timeout_s)
+        self.last_payload_sequence_number = (
+            0 if max_sequence_number is None else max_sequence_number
+        )
 
     def finish_recording_session(self) -> None:
         self.finish_recording_session_calls += 1
@@ -33,8 +51,13 @@ def test_cleanup_producer_channel_wait_false_skips_slot_drain() -> None:
         lambda sequence_number: wait_calls.append(sequence_number) or True
     )
     channel.end_trace = lambda: end_trace_calls.append("end")
+    transport.last_payload_sequence_number = 41
 
-    ProducerChannel.cleanup_producer_channel(channel, wait_for_slot_drain=False)
+    ProducerChannel.cleanup_producer_channel(
+        channel,
+        stop_cutoff_sequence_number=41,
+        wait_for_slot_drain=False,
+    )
 
     assert transport.wait_until_payload_handed_off_calls == [30.0]
     assert transport.wait_until_drained_calls == []
@@ -53,8 +76,13 @@ def test_cleanup_producer_channel_wait_true_drains_shared_slots() -> None:
         lambda sequence_number: wait_calls.append(sequence_number) or True
     )
     channel.end_trace = lambda: None
+    transport.last_payload_sequence_number = 99
 
-    ProducerChannel.cleanup_producer_channel(channel, wait_for_slot_drain=True)
+    ProducerChannel.cleanup_producer_channel(
+        channel,
+        stop_cutoff_sequence_number=99,
+        wait_for_slot_drain=True,
+    )
 
     assert transport.wait_until_payload_handed_off_calls == [30.0]
     assert transport.wait_until_drained_calls == [30.0]
@@ -71,12 +99,17 @@ def test_cleanup_producer_channel_raises_when_descriptor_cutoff_not_sent() -> No
     channel.get_last_enqueued_sequence_number = lambda: 44
     channel.wait_until_sequence_sent = lambda sequence_number: False
     channel.end_trace = lambda: end_trace_calls.append("end")
+    transport.last_payload_sequence_number = 44
 
     with pytest.raises(
         RuntimeError,
-        match="Failed to send all queued payload descriptors before cleanup",
+        match="Failed to send queued recording data up to stop cutoff before cleanup",
     ):
-        ProducerChannel.cleanup_producer_channel(channel, wait_for_slot_drain=True)
+        ProducerChannel.cleanup_producer_channel(
+            channel,
+            stop_cutoff_sequence_number=44,
+            wait_for_slot_drain=True,
+        )
 
     assert transport.wait_until_payload_handed_off_calls == [30.0]
     assert transport.wait_until_drained_calls == []

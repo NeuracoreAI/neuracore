@@ -105,8 +105,10 @@ class _FakeProducerChannel:
     def cleanup_producer_channel(
         self,
         *,
+        stop_cutoff_sequence_number: int | None = None,
         wait_for_slot_drain: bool = True,
     ) -> None:
+        del stop_cutoff_sequence_number
         self.cleanup_wait_for_slot_drain_calls.append(wait_for_slot_drain)
         return
 
@@ -210,7 +212,10 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
     stream.start_recording(_context())
 
     producer = _FakeProducerChannel.instances[0]
-    stream.stop_recording(wait_for_producer_drain=False)
+    stream.stop_recording(
+        stop_cutoff_sequence_number=0,
+        wait_for_producer_drain=False,
+    )
 
     assert producer.cleanup_wait_for_slot_drain_calls == [False]
     assert producer.stop_wait_for_slot_drain_calls == [False]
