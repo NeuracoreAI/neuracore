@@ -34,10 +34,7 @@ from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
-    serialize_preprocessing_config,
-)
+from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 
 from .auth import get_auth
 from .const import API_URL, PING_ENDPOINT, PREDICT_ENDPOINT, SET_CHECKPOINT_ENDPOINT
@@ -472,9 +469,10 @@ class LocalServerPolicy(ServerPolicy):
                 f"{output_embodiment_description_str}",
             ])
         if self.input_preprocessing_config is not None:
-            input_preprocessing_config_serialized = serialize_preprocessing_config(
-                self.input_preprocessing_config
-            )
+            input_preprocessing_config_serialized = {
+                data_type.value: [m.to_dict() for m in methods]
+                for data_type, methods in self.input_preprocessing_config.items()
+            }
             cmd.extend([
                 "--input-preprocessing-config",
                 json.dumps(input_preprocessing_config_serialized),

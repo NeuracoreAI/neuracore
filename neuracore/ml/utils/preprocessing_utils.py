@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from neuracore_types import BatchedNCData, DataType
 from omegaconf import DictConfig
 
@@ -59,18 +57,6 @@ def resolve_preprocessing_config(
         resolved[data_type] = methods
     validate_preprocessing_configuration(preprocessing_config=resolved)
     return resolved
-
-
-def serialize_preprocessing_config(
-    preprocessing_config: PreprocessingConfiguration,
-) -> dict[str, list[dict[str, Any]]]:
-    """Serialize a preprocessing configuration to a dictionary."""
-    serialized = {}
-    for data_type, methods in preprocessing_config.items():
-        serialized[str(data_type)] = [
-            m if isinstance(m, dict) else m.to_dict() for m in methods
-        ]
-    return serialized
 
 
 def apply_preprocessing_methods(

@@ -24,7 +24,6 @@ from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.preprocessing_utils import (
     PreprocessingConfiguration,
     resolve_preprocessing_config,
-    serialize_preprocessing_config,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,15 +111,23 @@ def create_nc_archive(
         with open(temp_path / "output_cross_embodiment_description.json", "w") as f:
             json.dump(output_cross_embodiment_description, f, indent=2)
         with open(temp_path / "input_preprocessing_config.json", "w") as f:
-            input_preprocessing_config_serialized = serialize_preprocessing_config(
-                input_preprocessing_config
+            json.dump(
+                {
+                    data_type.value: [m.to_dict() for m in methods]
+                    for data_type, methods in input_preprocessing_config.items()
+                },
+                f,
+                indent=2,
             )
-            json.dump(input_preprocessing_config_serialized, f, indent=2)
         with open(temp_path / "output_preprocessing_config.json", "w") as f:
-            output_preprocessing_config_serialized = serialize_preprocessing_config(
-                output_preprocessing_config
+            json.dump(
+                {
+                    data_type.value: [m.to_dict() for m in methods]
+                    for data_type, methods in output_preprocessing_config.items()
+                },
+                f,
+                indent=2,
             )
-            json.dump(output_preprocessing_config_serialized, f, indent=2)
 
         # Save archive metadata
         with open(temp_path / "metadata", "w") as f:
