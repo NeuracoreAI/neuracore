@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import pathlib
 from dataclasses import dataclass
+from typing import Any
 
 from neuracore_types import DataType
 
 
 @dataclass(frozen=True, slots=True, repr=True)
-class _TraceKey:
+class TraceKey:
     """Unique key for a trace within a recording.
 
     Args:
@@ -24,7 +25,7 @@ class _TraceKey:
 
 
 @dataclass(slots=True, repr=True)
-class _WriteState:
+class WriteState:
     """In-memory write state for a trace.
 
     Args:
@@ -35,7 +36,7 @@ class _WriteState:
         trace_done: Whether the trace has received its final chunk.
     """
 
-    trace_key: _TraceKey
+    trace_key: TraceKey
     trace_dir: pathlib.Path
     batch_index: int
     buffer: bytearray
@@ -43,7 +44,7 @@ class _WriteState:
 
 
 @dataclass(slots=True, repr=True)
-class _BatchJob:
+class BatchJob:
     """Work item for the encoder thread.
 
     Args:
@@ -52,6 +53,66 @@ class _BatchJob:
         trace_done: Whether this batch ends the trace.
     """
 
-    trace_key: _TraceKey
+    trace_key: TraceKey
     batch_path: pathlib.Path
+    trace_done: bool
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class RGBFrameRef:
+    """Reference to one raw RGB frame stored in a per-trace spool file."""
+
+    spool_path: pathlib.Path
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class RGBIndexedFrame:
+    """One RGB frame's metadata plus its raw-byte reference."""
+
+    metadata: dict[str, Any]
+    frame_ref: RGBFrameRef
+    sequence_number: int | None = None
+
+
+@dataclass(slots=True, repr=True)
+class RGBWriteState:
+    """In-memory write state for one RGB trace."""
+
+    trace_key: TraceKey
+    trace_dir: pathlib.Path
+    frames: list[RGBIndexedFrame]
+    trace_done: bool
+    data_type_name: str
+    robot_instance: int
+    dataset_id: str | None
+    dataset_name: str | None
+    robot_name: str | None
+    robot_id: str | None
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class RGBTraceMessage:
+    """RGB trace ingress item that stores frame metadata and a spool ref."""
+
+    trace_key: TraceKey
+    data_type_name: str
+    robot_instance: int
+    dataset_id: str | None
+    dataset_name: str | None
+    robot_name: str | None
+    robot_id: str | None
+    sequence_number: int | None
+    frame_metadata: dict[str, Any] | None
+    frame_ref: RGBFrameRef | None
+    final_chunk: bool
+
+
+@dataclass(frozen=True, slots=True, repr=True)
+class RGBSpoolJob:
+    """Encoder work item for one RGB trace backed by raw frame refs."""
+
+    trace_key: TraceKey
+    frames: list[RGBIndexedFrame]
     trace_done: bool

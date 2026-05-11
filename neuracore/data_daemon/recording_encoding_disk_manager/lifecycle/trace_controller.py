@@ -14,7 +14,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
-from ..core.types import _TraceKey
+from ..core.types import TraceKey
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class _TraceController:
 
         self._emitter = emitter
 
-    def abort_trace_due_to_storage(self, trace_key: _TraceKey) -> None:
+    def abort_trace_due_to_storage(self, trace_key: TraceKey) -> None:
         """Abort a trace due to storage constraints and emit TRACE_WRITTEN(trace_id, 0).
 
         Args:
@@ -99,7 +99,7 @@ class _TraceController:
         Returns:
             None
         """
-        trace_key = _TraceKey(
+        trace_key = TraceKey(
             recording_id=str(recording_id),
             trace_id=str(trace_id),
             data_type=data_type,
@@ -143,7 +143,7 @@ class _TraceController:
         shutil.rmtree(path, ignore_errors=True)
         self._storage_budget.refresh_if_stale()
 
-    def _remove_empty_trace_parents(self, trace_key: _TraceKey) -> None:
+    def _remove_empty_trace_parents(self, trace_key: TraceKey) -> None:
         """Remove empty data_type and recording directories for a trace.
 
         Removes only if directories are empty; leaves them in place otherwise.

@@ -8,7 +8,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget i
     scan_dir_bytes,
 )
 
-from .types import _TraceKey
+from .types import TraceKey
 
 
 class _TraceFilesystem:
@@ -22,7 +22,7 @@ class _TraceFilesystem:
         """
         self.recordings_root = recordings_root
 
-    def trace_dir_for(self, trace_key: _TraceKey) -> pathlib.Path:
+    def trace_dir_for(self, trace_key: TraceKey) -> pathlib.Path:
         """Resolve the on-disk directory for a trace.
 
         Args:
@@ -38,7 +38,7 @@ class _TraceFilesystem:
             / trace_key.trace_id
         )
 
-    def trace_bytes_on_disk(self, trace_key: _TraceKey) -> int:
+    def trace_bytes_on_disk(self, trace_key: TraceKey) -> int:
         """Compute total bytes on disk for a single trace directory.
 
         Args:

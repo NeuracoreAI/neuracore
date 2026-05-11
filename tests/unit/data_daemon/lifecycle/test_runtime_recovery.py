@@ -6,14 +6,21 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
+from neuracore.data_daemon.const import DEFAULT_SHARED_MEMORY_SIZE
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
     pid_is_running,
     read_pid_from_file,
 )
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
+    SharedMemoryCapacityError,
     cleanup_socket_files,
+    cleanup_stale_shared_memory_buffers,
+    ensure_shared_memory_capacity,
     reconcile_state_with_filesystem,
+    shared_memory_required_bytes,
     shutdown,
     validate_or_recover_sqlite,
 )
@@ -79,6 +86,53 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert ok is False
     assert not db_path.exists()
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
+
+
+def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
+    tmp_path: Path,
+) -> None:
+    shm_dir = tmp_path / "dev-shm"
+    shm_dir.mkdir()
+
+    stale_names = (
+        "neuracore-slots-stale-1",
+        "neuracore-slots-stale-2",
+    )
+    for buffer_name in stale_names:
+        (shm_dir / buffer_name).write_bytes(b"shm")
+
+    live_name = "neuracore-keep-live"
+    (shm_dir / live_name).write_bytes(b"shm")
+
+    cleaned = cleanup_stale_shared_memory_buffers(shm_dir=shm_dir)
+
+    assert cleaned == len(stale_names)
+    for stale_name in stale_names:
+        assert not (shm_dir / stale_name).exists()
+    assert (shm_dir / live_name).exists()
+
+
+def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    shm_dir = tmp_path / "dev-shm"
+    shm_dir.mkdir()
+
+    monkeypatch.setattr(
+        "neuracore.data_daemon.lifecycle.runtime_recovery.shared_memory_free_bytes",
+        lambda _shm_dir=shm_dir: 1024,
+    )
+
+    with pytest.raises(SharedMemoryCapacityError, match="Insufficient shared memory"):
+        ensure_shared_memory_capacity(2048, shm_dir=shm_dir)
+
+
+def test_shared_memory_required_bytes_matches_default_allocation() -> None:
+    assert (
+        shared_memory_required_bytes(DEFAULT_SHARED_MEMORY_SIZE, metadata_size=4096)
+        == DEFAULT_SHARED_MEMORY_SIZE + 4096
+    )
 
 
 def test_runtime_recovery_primitives_reconcile_missing_and_orphaned_traces(

@@ -6,12 +6,11 @@ from unittest.mock import MagicMock
 import pytest
 import zmq
 
-from neuracore.data_daemon.communications_management import (
+from neuracore.data_daemon.communications_management.shared_transport import (
     communications_manager as comms_module,
 )
-from neuracore.data_daemon.communications_management.communications_manager import (
-    CommunicationsManager,
-)
+
+CommunicationsManager = comms_module.CommunicationsManager
 
 
 class FakeContext:

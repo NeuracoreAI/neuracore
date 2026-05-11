@@ -24,7 +24,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace 
 )
 
 from ..core.trace_filesystem import _TraceFilesystem
-from ..core.types import _BatchJob, _TraceKey
+from ..core.types import BatchJob, RGBSpoolJob, TraceKey
 from ..lifecycle.encoder_manager import _EncoderManager
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ class _BatchEncoderWorker:
         filesystem: _TraceFilesystem,
         encoder_manager: _EncoderManager,
         storage_budget: StorageBudget,
-        abort_trace: Callable[[_TraceKey], None],
+        abort_trace: Callable[[TraceKey], None],
         emitter: Emitter,
         loop: asyncio.AbstractEventLoop,
     ) -> None:
@@ -74,18 +74,18 @@ class _BatchEncoderWorker:
 
         self._emitter = emitter
 
-        self._aborted_traces: set[_TraceKey] = set()
-        self._finalised_traces: set[_TraceKey] = set()
-        self._trace_done_seen: set[_TraceKey] = set()
+        self._aborted_traces: set[TraceKey] = set()
+        self._finalised_traces: set[TraceKey] = set()
+        self._trace_done_seen: set[TraceKey] = set()
 
-        self._trace_locks: dict[_TraceKey, asyncio.Lock] = {}
-        self._trace_buffers: dict[_TraceKey, dict[int, _BatchJob]] = {}
-        self._trace_next_index: dict[_TraceKey, int] = {}
-        self._trace_out_of_order_arrivals: dict[_TraceKey, int] = {}
-        self._trace_max_buffered_batches: dict[_TraceKey, int] = {}
-        self._trace_last_progress_bytes: dict[_TraceKey, int] = {}
+        self._trace_locks: dict[TraceKey, asyncio.Lock] = {}
+        self._trace_buffers: dict[TraceKey, dict[int, BatchJob]] = {}
+        self._trace_next_index: dict[TraceKey, int] = {}
+        self._trace_out_of_order_arrivals: dict[TraceKey, int] = {}
+        self._trace_max_buffered_batches: dict[TraceKey, int] = {}
+        self._trace_last_progress_bytes: dict[TraceKey, int] = {}
 
-        self._trace_pending: dict[_TraceKey, int] = {}
+        self._trace_pending: dict[TraceKey, int] = {}
 
         self._in_flight_count: int = 0
 
@@ -97,7 +97,7 @@ class _BatchEncoderWorker:
         """Return the number of batch jobs currently being processed."""
         return self._in_flight_count
 
-    def _on_trace_aborted(self, trace_key: _TraceKey) -> None:
+    def _on_trace_aborted(self, trace_key: TraceKey) -> None:
         """Handle TRACE_ABORTED event.
 
         Args:
@@ -113,7 +113,7 @@ class _BatchEncoderWorker:
         self._finalised_traces.add(trace_key)
         self._trace_last_progress_bytes.pop(trace_key, None)
 
-    async def _on_batch_ready(self, batch_job: _BatchJob) -> None:
+    async def _on_batch_ready(self, batch_job: BatchJob | RGBSpoolJob) -> None:
         """Handle BATCH_READY event.
 
         Args:
@@ -131,13 +131,17 @@ class _BatchEncoderWorker:
             self._in_flight_count -= 1
 
     async def _queue_and_process_trace_batches_locked(
-        self, batch_job: _BatchJob
+        self, batch_job: BatchJob | RGBSpoolJob
     ) -> None:
         """Queue a batch and process all contiguous batches for the trace in order.
 
         Must be called while holding the trace lock for `batch_job.trace_key`.
         """
         key = batch_job.trace_key
+        if isinstance(batch_job, RGBSpoolJob):
+            await self._process_rgb_spool_job_locked(batch_job)
+            return
+
         batch_index = self._batch_index(batch_job.batch_path)
 
         if key in self._aborted_traces or key in self._finalised_traces:
@@ -220,14 +224,53 @@ class _BatchEncoderWorker:
 
         self._try_finalize_trace_after_ordered_batches(key)
 
-    def _decrement_trace_pending(self, key: _TraceKey) -> None:
+    async def _process_rgb_spool_job_locked(self, batch_job: RGBSpoolJob) -> None:
+        """Process one finalized RGB spool job into the trace encoder."""
+        key = batch_job.trace_key
+
+        if key in self._aborted_traces or key in self._finalised_traces:
+            await self._remove_rgb_spool_file(batch_job)
+            return
+
+        encoder = self._encoder_manager.safe_get_encoder(key)
+        if encoder is None:
+            await self._remove_rgb_spool_file(batch_job)
+            self._aborted_traces.add(key)
+            return
+
+        is_processed = await self._process_rgb_spool_into_encoder(batch_job, encoder)
+        await self._remove_rgb_spool_file(batch_job)
+
+        if not is_processed:
+            self._aborted_traces.add(key)
+            return
+
+        self._emit_trace_write_progress(key)
+
+        if batch_job.trace_done:
+            self._trace_done_seen.add(key)
+            enc = self._encoder_manager.pop_encoder(key)
+            if enc is not None:
+                self._finalise_trace_encoder(key, enc)
+            self._finalised_traces.add(key)
+            self._trace_done_seen.discard(key)
+            self._trace_last_progress_bytes.pop(key, None)
+
+    @staticmethod
+    async def _remove_rgb_spool_file(batch_job: RGBSpoolJob) -> None:
+        """Remove the RGB spool file after encoder ingestion completes."""
+        if not batch_job.frames:
+            return
+        await _BatchEncoderWorker._remove_file(batch_job.frames[0].frame_ref.spool_path)
+
+    def _decrement_trace_pending(self, key: TraceKey) -> None:
         pending = self._trace_pending.get(key, 0) - 1
         if pending <= 0:
             self._trace_pending.pop(key, None)
         else:
             self._trace_pending[key] = pending
 
-    def _emit_trace_write_progress(self, trace_key: _TraceKey) -> None:
+    def _emit_trace_write_progress(self, trace_key: TraceKey) -> None:
         bytes_written = self._filesystem.trace_bytes_on_disk(trace_key)
         bytes_written = max(
             bytes_written,
@@ -241,7 +284,7 @@ class _BatchEncoderWorker:
             bytes_written,
         )
 
-    def _try_finalize_trace_after_ordered_batches(self, key: _TraceKey) -> None:
+    def _try_finalize_trace_after_ordered_batches(self, key: TraceKey) -> None:
         """Finalize trace if the terminal batch has been processed and none remain."""
         if key in self._finalised_traces or key in self._aborted_traces:
             return
@@ -336,7 +379,7 @@ class _BatchEncoderWorker:
 
     async def _process_batch_into_encoder(
         self,
-        batch_job: _BatchJob,
+        batch_job: BatchJob,
         encoder: JsonTrace | VideoTrace,
     ) -> bool:
         """Decode one raw batch file and feed its payloads into the provided encoder.
@@ -354,7 +397,18 @@ class _BatchEncoderWorker:
                 raw_bytes = await f.read()
 
             def encoding_work(raw_bytes: bytes) -> None:
-                for message in CompleteMessage.iter_batch_records(raw_bytes):
+                messages = CompleteMessage.iter_batch_records(raw_bytes)
+                messages.sort(
+                    key=lambda message: (
+                        message.sequence_number is None,
+                        (
+                            message.sequence_number
+                            if message.sequence_number is not None
+                            else 0
+                        ),
+                    )
+                )
+                for message in messages:
                     payload = message.data
 
                     if not payload:
@@ -390,9 +444,70 @@ class _BatchEncoderWorker:
             self._abort_trace(batch_job.trace_key)
             return False
 
+    async def _process_rgb_spool_into_encoder(
+        self,
+        batch_job: RGBSpoolJob,
+        encoder: JsonTrace | VideoTrace,
+    ) -> bool:
+        """Read ordered RGB frame refs from disk and feed them into `VideoTrace`."""
+        if not isinstance(encoder, VideoTrace):
+            logger.error(
+                "RGB spool job received non-video encoder for trace %s",
+                batch_job.trace_key,
+            )
+            self._encoder_manager.pop_encoder(batch_job.trace_key)
+            self._abort_trace(batch_job.trace_key)
+            return False
+
+        if not batch_job.frames:
+            return True
+
+        try:
+
+            def encoding_work() -> None:
+                ordered_frames = sorted(
+                    batch_job.frames,
+                    key=lambda frame: (
+                        frame.sequence_number is None,
+                        (
+                            frame.sequence_number
+                            if frame.sequence_number is not None
+                            else 0
+                        ),
+                    ),
+                )
+                with ordered_frames[0].frame_ref.spool_path.open("rb") as handle:
+                    for frame in ordered_frames:
+                        handle.seek(frame.frame_ref.offset)
+                        payload = handle.read(frame.frame_ref.length)
+                        if len(payload) != frame.frame_ref.length:
+                            raise RuntimeError(
+                                "Failed to read full RGB frame from spool"
+                            )
+                        encoder.add_frame_record(frame.metadata, payload)
+
+            await self._loop.run_in_executor(None, encoding_work)
+            return True
+        except Exception as exc:
+            if _is_executor_shutdown_runtime_error(exc):
+                logger.debug(
+                    "RGB spool processing interrupted by executor shutdown "
+                    "for trace %s",
+                    batch_job.trace_key,
+                )
+                self._encoder_manager.pop_encoder(batch_job.trace_key)
+                self._abort_trace(batch_job.trace_key)
+                return False
+            logger.exception(
+                "Failed to process RGB spool for trace %s", batch_job.trace_key
+            )
+            self._encoder_manager.pop_encoder(batch_job.trace_key)
+            self._abort_trace(batch_job.trace_key)
+            return False
+
     def _finalise_trace_encoder(
         self,
-        trace_key: _TraceKey,
+        trace_key: TraceKey,
         encoder: JsonTrace | VideoTrace,
     ) -> None:
         """Finish a trace encoder, enforce storage limits, and emit TRACE_WRITTEN.

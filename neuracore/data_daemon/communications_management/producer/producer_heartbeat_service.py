@@ -44,15 +44,6 @@ class ProducerHeartbeatService:
             self._thread.join(timeout=join_timeout_s)
             self._thread = None
 
-    def get_stats(self) -> dict[str, bool]:
-        """Return a lightweight snapshot of heartbeat state."""
-        thread = self._thread
-        return {
-            "heartbeat_thread_alive": (
-                thread.is_alive() if thread is not None else False
-            )
-        }
-
     @property
     def stop_event(self) -> threading.Event:
         """Expose the stop event for compatibility and test control."""

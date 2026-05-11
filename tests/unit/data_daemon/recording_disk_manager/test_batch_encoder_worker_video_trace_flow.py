@@ -125,7 +125,7 @@ def _write_batch_file(
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as f:
-        for payload in payloads:
+        for seq, payload in enumerate(payloads):
             message = CompleteMessage.from_bytes(
                 producer_id=producer_id,
                 trace_id=trace_key.trace_id,
@@ -134,6 +134,7 @@ def _write_batch_file(
                 data_type=trace_key.data_type,
                 data_type_name=data_type_name,
                 robot_instance=robot_instance,
+                sequence_number=seq,
                 data=payload,
                 dataset_id=dataset_id,
                 dataset_name=dataset_name,

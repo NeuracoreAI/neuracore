@@ -144,6 +144,12 @@ class DaemonServices:
             logger.exception("Error shutting down UploadManager")
 
         try:
+            await self.trace_status_updater.shutdown()
+            logger.debug("TraceStatusUpdater shutdown")
+        except Exception:
+            logger.exception("Error shutting down TraceStatusUpdater")
+
+        try:
             await self.state_store.reset_retrying_to_written()
             await self.state_store.close()
             logger.debug("SqliteStateStore closed")
