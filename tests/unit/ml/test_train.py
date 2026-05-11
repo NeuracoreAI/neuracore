@@ -35,8 +35,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
-    _resolve_algorithm_name_and_supported_data_types,
-    _resolve_cross_embodiment_description,
     _resolve_output_dir,
     _resolve_recording_cache_dir,
     assert_valid_batch_size,
@@ -47,6 +45,13 @@ from neuracore.ml.train import (
     setup_logging,
 )
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
+from neuracore.ml.utils.training_config import (
+    _resolve_algorithm_name_and_supported_data_types,
+    _resolve_algorithm_name_config,
+    _resolve_cross_embodiment_description,
+    resolve_to_complete_config,
+    resolve_user_input_config,
+)
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
@@ -97,6 +102,8 @@ class MainTestSetup:
         self.cuda_device_count = cuda_device_count
 
         self.mock_dataset = Mock()
+        self.mock_dataset.id = "test-dataset-id"
+        self.mock_dataset.name = "test-dataset-name"
         # Provide realistic robot metadata for code paths that resolve robot keys.
         # Many tests use cross-embodiment specs.
         self.mock_dataset.robot_ids = ["robot-id-1", "robot-id-2"]
@@ -147,13 +154,15 @@ class MainTestSetup:
         self.monkeypatch.setattr("neuracore.login", self.mock_login)
         self.monkeypatch.setattr("neuracore.get_dataset", self.mock_get_dataset)
         self.monkeypatch.setattr(
-            "neuracore.ml.train._get_algorithms", self.mock_get_algorithms
+            "neuracore.ml.utils.training_config._get_algorithms",
+            self.mock_get_algorithms,
         )
         self.monkeypatch.setattr(
-            "neuracore.ml.train.get_algorithm_name", self.mock_get_algorithm_name
+            "neuracore.ml.utils.training_config.get_algorithm_name",
+            self.mock_get_algorithm_name,
         )
         self.monkeypatch.setattr(
-            "neuracore.ml.train.validate_training_params",
+            "neuracore.ml.utils.training_config.validate_training_params",
             self.mock_validate_training_params,
         )
         self.monkeypatch.setattr(
@@ -183,6 +192,10 @@ class MainTestSetup:
         )
         self.monkeypatch.setattr(
             "neuracore.ml.train.convert_cross_embodiment_description_names_to_ids",
+            Mock(side_effect=lambda x: x),
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.convert_cross_embodiment_description_names_to_ids",
             Mock(side_effect=lambda x: x),
         )
 
@@ -463,62 +476,64 @@ class TestSetupLogging:
 class TestResolveOutputDir:
     """Tests for local output directory resolver behavior."""
 
-    def test_resolve_output_dir_fails_when_run_exists_and_auto_increment_false(
+    def test_resolve_output_dir_fails_when_training_exists_and_auto_increment_false(
         self, monkeypatch, tmp_path
     ):
-        """Strict default: fail if run name already exists."""
-        run_name = "duplicate-run"
+        """Strict default: fail if training name already exists."""
+        training_name = "duplicate-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / run_name).mkdir()
+        (base_dir / training_name).mkdir()
 
         monkeypatch.setattr(
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        with pytest.raises(FileExistsError, match=r"A run named .* already exists"):
-            _resolve_output_dir(run_name, run_name_auto_increment=False)
+        with pytest.raises(
+            FileExistsError, match=r"A training named .* already exists"
+        ):
+            _resolve_output_dir(training_name, training_name_auto_increment=False)
 
     def test_resolve_output_dir_uses_suffix_when_auto_increment_true(
         self, monkeypatch, tmp_path
     ):
-        """Opt-in auto-increment: use run_name_1 when run_name exists."""
-        run_name = "duplicate-run"
+        """Opt-in auto-increment: use training_name_1 when training_name exists."""
+        training_name = "duplicate-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / run_name).mkdir()
+        (base_dir / training_name).mkdir()
 
         monkeypatch.setattr(
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        path = _resolve_output_dir(run_name, run_name_auto_increment=True)
-        assert path == str(base_dir / f"{run_name}_1")
+        path = _resolve_output_dir(training_name, training_name_auto_increment=True)
+        assert path == str(base_dir / f"{training_name}_1")
         assert not Path(path).exists()
 
-    def test_resolve_output_dir_uses_next_suffix_when_named_run_prefix_exists(
+    def test_resolve_output_dir_uses_next_suffix_when_named_training_prefix_exists(
         self, monkeypatch, tmp_path
     ):
-        """Auto-increment finds next free suffix (run_name_2 when _1 exists)."""
-        run_name = "duplicate-run"
+        """Auto-increment finds next free suffix (training_name_2 when _1 exists)."""
+        training_name = "duplicate-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / run_name).mkdir()
-        (base_dir / f"{run_name}_1").mkdir()
+        (base_dir / training_name).mkdir()
+        (base_dir / f"{training_name}_1").mkdir()
 
         monkeypatch.setattr(
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        path = _resolve_output_dir(run_name, run_name_auto_increment=True)
-        assert path == str(base_dir / f"{run_name}_2")
+        path = _resolve_output_dir(training_name, training_name_auto_increment=True)
+        assert path == str(base_dir / f"{training_name}_2")
         assert not Path(path).exists()
 
-    def test_resolve_output_dir_no_suffix_when_run_does_not_exist(
+    def test_resolve_output_dir_no_suffix_when_training_does_not_exist(
         self, monkeypatch, tmp_path
     ):
-        """When run name does not exist, use it as-is (strict or auto-increment)."""
-        run_name = "unique-run"
+        """When training name does not exist, use it as-is."""
+        training_name = "unique-run"
         base_dir = tmp_path / ".neuracore" / "training" / "runs"
         base_dir.mkdir(parents=True, exist_ok=True)
 
@@ -526,9 +541,187 @@ class TestResolveOutputDir:
             "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
         )
 
-        path_strict = _resolve_output_dir(run_name, run_name_auto_increment=False)
-        path_auto = _resolve_output_dir(run_name, run_name_auto_increment=True)
-        assert path_strict == path_auto == str(base_dir / run_name)
+        path_strict = _resolve_output_dir(
+            training_name, training_name_auto_increment=False
+        )
+        path_auto = _resolve_output_dir(
+            training_name, training_name_auto_increment=True
+        )
+        assert path_strict == path_auto == str(base_dir / training_name)
+
+
+class TestTrainingConfigMerge:
+    """Tests for native Hydra user config composition."""
+
+    def test_main_passes_cfg_through_to_hydra_composed_config(self, monkeypatch):
+        captured_configs: list[DictConfig] = []
+
+        def capture_main(cfg):
+            captured_configs.append(cfg)
+
+        monkeypatch.setattr("sys.argv", ["python", "-m", "neuracore.ml.train"])
+        monkeypatch.setattr("neuracore.ml.train._main", capture_main)
+
+        cfg = OmegaConf.create({
+            "epochs": 3,
+            "dataset_id": "dataset-id",
+            "input_data_types": ["JOINT_VELOCITIES"],
+            "algorithm_params": {"learning_rate": 0.001},
+        })
+        main(cfg)
+
+        assert len(captured_configs) == 1
+        assert captured_configs[0].epochs == 3
+        assert captured_configs[0].dataset_id == "dataset-id"
+        assert "seed" not in captured_configs[0]
+
+    @pytest.mark.parametrize(
+        "cfg",
+        [
+            {"algorithm_name": "CNNMLP", "epochs": 3},
+            {"algorithm": None, "algorithm_name": "CNNMLP", "epochs": 3},
+        ],
+    )
+    def test_resolves_algorithm_name_string_to_packaged_config(self, cfg):
+        cfg = OmegaConf.create(cfg)
+
+        resolved_cfg = _resolve_algorithm_name_config(cfg)
+
+        assert resolved_cfg.algorithm._target_.endswith(".CNNMLP")
+        assert resolved_cfg.epochs == 3
+        assert resolved_cfg.algorithm.hidden_dim == 512
+        assert "algorithm_name" not in resolved_cfg
+
+    def test_algorithm_string_is_rejected(self):
+        cfg = OmegaConf.create({"algorithm": "CNNMLP"})
+
+        with pytest.raises(ValueError, match="'algorithm' as a string"):
+            _resolve_algorithm_name_config(cfg)
+
+    def test_invalid_algorithm_name_string_has_clear_error(self):
+        cfg = OmegaConf.create({"algorithm_name": "MissingAlgorithm"})
+
+        with pytest.raises(ValueError, match="Unknown algorithm 'MissingAlgorithm'"):
+            _resolve_algorithm_name_config(cfg)
+
+    def test_algorithm_name_and_algorithm_id_are_rejected_together(self):
+        cfg = OmegaConf.create({
+            "algorithm_name": "CNNMLP",
+            "algorithm_id": "custom-algorithm-id",
+        })
+
+        with pytest.raises(
+            ValueError, match="Both 'algorithm_name' and 'algorithm_id'"
+        ):
+            _resolve_algorithm_name_config(cfg)
+
+    def test_complete_config_uses_training_name_for_output_dir(
+        self, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr(
+            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+        )
+
+        cfg = resolve_user_input_config(
+            OmegaConf.create({
+                "training_name": "named-training",
+                "algorithm_id": "test-algorithm-id",
+                "dataset_id": "test-dataset-id",
+            })
+        )
+
+        assert cfg.local_output_dir == str(
+            tmp_path / ".neuracore" / "training" / "runs" / "named-training"
+        )
+
+    def test_complete_config_populates_dataset_id_from_dataset_name(self, monkeypatch):
+        dataset = Mock(id="resolved-dataset-id")
+        mock_get_dataset = Mock(return_value=dataset)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.nc.get_dataset", mock_get_dataset
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config._get_algorithms",
+            Mock(return_value=[{"id": "test-algorithm-id", "name": "TestAlgorithm"}]),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.get_algorithm_name",
+            Mock(return_value="TestAlgorithm"),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.validate_training_params",
+            Mock(),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.convert_cross_embodiment_description_names_to_ids",
+            Mock(side_effect=lambda x: x),
+        )
+
+        cfg = resolve_to_complete_config(
+            OmegaConf.create({
+                "algorithm_id": "test-algorithm-id",
+                "dataset_name": "test-dataset",
+                "input_cross_embodiment_description": INPUT_CROSS_EMBODIMENT_SPEC,
+                "output_cross_embodiment_description": OUTPUT_CROSS_EMBODIMENT_SPEC,
+            })
+        )
+
+        assert cfg.dataset_id == "resolved-dataset-id"
+        mock_get_dataset.assert_called_once_with(name="test-dataset")
+
+    def test_complete_config_populates_cross_embodiment_from_data_types(
+        self, monkeypatch
+    ):
+        dataset = Mock(id="dataset-id")
+        dataset.name = "test-dataset"
+        dataset.robot_ids = ["robot-id-1"]
+        dataset.get_full_embodiment_description.return_value = {
+            DataType.JOINT_POSITIONS: {0: "joint_1", 1: "joint_2"},
+            DataType.RGB_IMAGES: {0: "front"},
+            DataType.JOINT_TARGET_POSITIONS: {0: "target_1"},
+        }
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config._get_algorithms",
+            Mock(return_value=[{"id": "test-algorithm-id", "name": "TestAlgorithm"}]),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.get_algorithm_name",
+            Mock(return_value="TestAlgorithm"),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.get_robot_name_from_id",
+            Mock(return_value="robot-id-1"),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.validate_training_params",
+            Mock(),
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.convert_cross_embodiment_description_names_to_ids",
+            Mock(side_effect=lambda x: x),
+        )
+
+        cfg = resolve_to_complete_config(
+            OmegaConf.create({
+                "algorithm_id": "test-algorithm-id",
+                "dataset_id": "dataset-id",
+                "input_data_types": ["JOINT_POSITIONS", "RGB_IMAGES"],
+                "output_data_types": ["JOINT_TARGET_POSITIONS"],
+            }),
+            dataset=dataset,
+        )
+
+        assert OmegaConf.to_container(cfg.input_cross_embodiment_description) == {
+            "robot-id-1": {
+                "JOINT_POSITIONS": {0: "joint_1", 1: "joint_2"},
+                "RGB_IMAGES": {0: "front"},
+            }
+        }
+        assert OmegaConf.to_container(cfg.output_cross_embodiment_description) == {
+            "robot-id-1": {
+                "JOINT_TARGET_POSITIONS": {0: "target_1"},
+            }
+        }
 
 
 class TestResolveRecordingCacheDir:
@@ -1808,10 +2001,12 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             return_value=(expected_input_types, expected_output_types)
         )
         monkeypatch.setattr(
-            "neuracore.ml.train.get_algorithm_name", mock_get_algorithm_name
+            "neuracore.ml.utils.training_config.get_algorithm_name",
+            mock_get_algorithm_name,
         )
         monkeypatch.setattr(
-            "neuracore.ml.train._get_data_types_for_algorithms", mock_get_data_types
+            "neuracore.ml.utils.training_config._get_data_types_for_algorithms",
+            mock_get_data_types,
         )
 
         (
@@ -1843,7 +2038,7 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
 
         # Ensure hydra.utils.get_object returns our local validation class.
         monkeypatch.setattr(
-            "neuracore.ml.train.hydra.utils.get_object",
+            "neuracore.ml.utils.training_config.hydra.utils.get_object",
             lambda target: LocalValidationAlgorithm,
         )
 
@@ -2177,8 +2372,10 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
             assert call_args[1]["join"] is True
             args_tuple = call_args[1]["args"]
             assert args_tuple[0] == world_size
-            # Compare OmegaConf objects using to_container for proper comparison
-            assert OmegaConf.to_container(args_tuple[1]) == OmegaConf.to_container(cfg)
+            spawned_cfg = args_tuple[1]
+            assert spawned_cfg.dataset_id == "test-dataset-id"
+            assert spawned_cfg.dataset_name == "test-dataset-name"
+            assert spawned_cfg.algorithm_id == "test-algorithm-id"
             assert args_tuple[2] == 8  # batch_size
             setup.mock_run_training.assert_not_called()
         else:
@@ -2452,7 +2649,8 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         setup.mock_determine_optimal_batch_size.assert_called_once()
         det_kwargs = setup.mock_determine_optimal_batch_size.call_args.kwargs
         assert det_kwargs["dataset"] is setup.mock_pytorch_dataset
-        assert det_kwargs["cfg"] is cfg
+        assert det_kwargs["cfg"].dataset_id == "test-dataset-id"
+        assert det_kwargs["cfg"].batch_size == "auto"
         # Verify run_training was called with the optimal batch size
         assert setup.mock_run_training.call_args[0][3] == 16
 

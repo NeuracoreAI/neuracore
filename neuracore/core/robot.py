@@ -928,3 +928,37 @@ def get_robot_id_from_name(robot_name: str, org_id: str | None = None) -> str:
         f"Robot with name '{robot_name}' not found in organization '{org_id}' "
         "or shared robots."
     )
+
+
+def get_robot_name_from_id(robot_id: str, org_id: str | None = None) -> str:
+    """Get the robot name corresponding to a given robot ID.
+
+    This is for any robot in the org, not a specific robot instance.
+
+    Will search through list of robots in given org and shared robots.
+
+    Args:
+        robot_id: The ID of the robot to look up.
+        org_id: Optional organization ID. Defaults to the current org.
+
+    Returns:
+        The robot name.
+
+    Raises:
+        RobotError: If the robot ID is not found in the registry.
+    """
+    if org_id is None:
+        org_id = get_current_org()
+
+    robots = list_organization_robots(
+        org_id, is_shared=False
+    ) + list_organization_robots(org_id, is_shared=True)
+
+    for robot in robots:
+        if robot["id"] == robot_id:
+            return robot["name"]
+
+    raise RobotError(
+        f"Robot with ID '{robot_id}' not found in organization '{org_id}' "
+        "or shared robots."
+    )

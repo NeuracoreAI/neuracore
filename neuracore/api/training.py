@@ -60,18 +60,7 @@ def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
 
 
 def _get_algorithms() -> list[dict]:
-    """Retrieve all available algorithms from the API.
-
-    Fetches both organization-specific and shared algorithms concurrently.
-
-    Returns:
-        list[dict]: List of algorithm dictionaries containing algorithm metadata
-
-    Raises:
-        requests.exceptions.HTTPError: If the API request fails
-        requests.exceptions.RequestException: If there is a network problem
-        ConfigError: If there is an error trying to get the current org
-    """
+    """Retrieve all available algorithms from the API."""
     auth = get_auth()
     org_id = get_current_org()
     with concurrent.futures.ThreadPoolExecutor() as executor:

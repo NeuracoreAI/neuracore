@@ -23,23 +23,15 @@ from neuracore_types import (
     CrossEmbodimentUnion,
     ModelInitDescription,
 )
-from neuracore_types.nc_data import DataType
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
-from neuracore.api.training import _get_algorithms
 from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_cross_embodiment_description_names_to_ids,
-    convert_omegaconf_to_cross_embodiment_description,
     extract_data_types,
     merge_cross_embodiment_description,
-)
-from neuracore.core.utils.training_input_args_validation import (
-    _get_data_types_for_algorithms,
-    get_algorithm_name,
-    validate_training_params,
 )
 from neuracore.ml import BatchedTrainingSamples, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
@@ -61,6 +53,11 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
+from neuracore.ml.utils.training_config import (
+    resolve_to_complete_config,
+    resolve_user_input_config,
+    validate_complete_config,
+)
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 # Environment setup
@@ -81,77 +78,80 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
 
 
 def _resolve_output_dir(
-    run_name: str | None = None,
-    run_name_auto_increment: bool | str = False,
+    training_name: str | None = None,
+    training_name_auto_increment: bool | str = False,
 ) -> str:
     """Hydra resolver to generate the output directory path.
 
-    This resolver generates a unique output directory based on run_name.
+    This resolver generates a unique output directory based on training_name.
     It's called during Hydra initialization, so the directory is available before
     the main function runs.
 
-    When run_name_auto_increment is False (default), if a directory for the given
+    When training_name_auto_increment is False (default), if a directory for the given
     run name already exists, resolution fails with FileExistsError. Set
-    run_name_auto_increment=true to automatically use run_name_1, run_name_2, etc.
+    training_name_auto_increment=true to automatically use name_1, name_2, etc.
 
     Args:
-        run_name: Optional run name. If None or "null", a random name will be generated.
-        run_name_auto_increment: If True (or "true"), append _1, _2, ... when the
-            name already exists. If False (default), fail when the name exists.
+        training_name: Optional training name. If None or "null", a random name
+            will be generated.
+        training_name_auto_increment: If True (or "true"), append _1, _2, ...
+            when the name already exists. If False (default), fail when the name
+            exists.
 
     Returns:
         Full path to the output directory.
 
     Raises:
-        FileExistsError: When run_name_auto_increment is False and a directory
-            for run_name (or run_name_N) already exists.
+        FileExistsError: When training_name_auto_increment is False and a
+            directory for training_name (or training_name_N) already exists.
     """
     # Handle None, empty string, or string "null"
     if (
-        not run_name
-        or run_name == "null"
-        or (isinstance(run_name, str) and run_name.strip() == "")
+        not training_name
+        or training_name == "null"
+        or (isinstance(training_name, str) and training_name.strip() == "")
     ):
         # Generate name with hyphens instead of underscores
-        run_name = generate_name(style="underscore").replace("_", "-")
+        training_name = generate_name(style="underscore").replace("_", "-")
     else:
-        run_name = _sanitize_run_name(str(run_name))
+        training_name = _sanitize_run_name(str(training_name))
 
     auto_increment = (
-        str(run_name_auto_increment).lower() == "true"
-        if not isinstance(run_name_auto_increment, bool)
-        else run_name_auto_increment
+        str(training_name_auto_increment).lower() == "true"
+        if not isinstance(training_name_auto_increment, bool)
+        else training_name_auto_increment
     )
 
     base_dir = DEFAULT_CACHE_DIR / "runs"
 
-    final_run_name = run_name
+    final_training_name = training_name
     if base_dir.exists():
         taken = {
             p.name
             for p in base_dir.iterdir()
-            if p.is_dir() and (p.name == run_name or p.name.startswith(f"{run_name}_"))
+            if p.is_dir()
+            and (p.name == training_name or p.name.startswith(f"{training_name}_"))
         }
-        if run_name in taken:
+        if training_name in taken:
             if not auto_increment:
-                existing = base_dir / run_name
+                existing = base_dir / training_name
                 raise FileExistsError(
-                    f"A run named {run_name!r} already exists at {existing}. "
-                    "Either use a different run_name, "
-                    "or set run_name_auto_increment=true "
-                    "to use an incremented name (e.g. run_name_1)."
+                    f"A training named {training_name!r} already exists at "
+                    f"{existing}. Either use a different training_name, or set "
+                    "training_name_auto_increment=true to use an incremented "
+                    "name (e.g. training_name_1)."
                 )
             suffix = 1
-            while f"{run_name}_{suffix}" in taken:
+            while f"{training_name}_{suffix}" in taken:
                 suffix += 1
-            final_run_name = f"{run_name}_{suffix}"
+            final_training_name = f"{training_name}_{suffix}"
             logger.warning(
-                f"A run named {run_name} already exists. "
-                f"Using {final_run_name} for this run."
+                f"A training named {training_name} already exists. "
+                f"Using {final_training_name} for this run."
             )
 
     # Build full path
-    return str(base_dir / final_run_name)
+    return str(base_dir / final_training_name)
 
 
 def _sanitize_run_name(name: str) -> str:
@@ -220,60 +220,6 @@ def _serialize_cross_embodiment_union(
             key = data_type.name if hasattr(data_type, "name") else str(data_type)
             serializable[robot_id][key] = list(names)
     return serializable
-
-
-def _resolve_cross_embodiment_description(
-    cross_embodiment_description_cfg: DictConfig | None,
-    data_types_cfg: list[str],
-    dataset: Any,
-    field_name: str,
-) -> CrossEmbodimentDescription:
-    """Resolve a cross-embodiment description from config or dataset.
-
-    Args:
-        cross_embodiment_description_cfg: Optional configuration for the
-            cross-embodiment description.
-        data_types_cfg: Data types to include if
-            ``cross_embodiment_description_cfg`` is not provided.
-        dataset: The dataset to extract data specifications from if needed.
-        field_name: Name of the field being resolved, used in errors.
-
-    Returns:
-        A cross-embodiment description resolved from configuration or
-        constructed from the dataset.
-
-    Raises:
-        ValueError: If ``cross_embodiment_description_cfg`` is invalid.
-    """
-    # if cross_embodiment_description is provided
-    if cross_embodiment_description_cfg is not None and len(
-        cross_embodiment_description_cfg
-    ):
-        if not isinstance(cross_embodiment_description_cfg, DictConfig):
-            raise ValueError(
-                f"'{field_name}' must either be None or a dictionary mapping robot "
-                "names to dictionaries of data types to lists of data names."
-            )
-        return convert_omegaconf_to_cross_embodiment_description(
-            cross_embodiment_description_cfg
-        )
-
-    if data_types_cfg is not None:
-        data_types = [DataType(data_type) for data_type in data_types_cfg]
-        cross_embodiment_description: CrossEmbodimentDescription = {}
-
-        for robot_id in dataset.robot_ids:
-            robot_full_spec = dataset.get_full_embodiment_description(robot_id)
-            cross_embodiment_description[robot_id] = {
-                data_type: dict(robot_full_spec.get(data_type, {}))
-                for data_type in data_types
-            }
-        return cross_embodiment_description
-
-    raise ValueError(
-        f"Either '{field_name}' or the corresponding data_types "
-        "configuration must be provided."
-    )
 
 
 def _save_local_training_metadata(
@@ -657,9 +603,10 @@ def run_training(
             cfg, model_init_description
         )
 
+        training_id = getattr(cfg, "training_id", None)
         training_storage_handler = TrainingStorageHandler(
             local_dir=cfg.local_output_dir,
-            training_job_id=cfg.training_id,
+            training_job_id=training_id,
             algorithm_config=algorithm_config,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
@@ -671,13 +618,13 @@ def run_training(
         )
 
         training_logger: TensorboardTrainingLogger | CloudTrainingLogger
-        if cfg.training_id is None:
+        if training_id is None:
             training_logger = TensorboardTrainingLogger(
                 log_dir=Path(cfg.local_output_dir) / "tensorboard",
             )
         else:
             training_logger = CloudTrainingLogger(
-                training_id=cfg.training_id,
+                training_id=training_id,
             )
 
         trainer = DistributedTrainer(
@@ -758,64 +705,6 @@ def _try_report_error_to_cloud(cfg: DictConfig, error_msg: str) -> None:
         logger.error("Failed to report training error to cloud.", exc_info=True)
 
 
-def _resolve_algorithm_name_and_supported_data_types(
-    cfg: DictConfig, algorithms_jsons: list[dict]
-) -> tuple[str, set[DataType], set[DataType]]:
-    """Resolve algorithm name and supported input and output data types.
-
-    If ``algorithm_id`` is provided (cloud case), use the algorithm ID to get
-    the algorithm name and supported data types. If ``algorithm_id`` is not
-    provided (local case), use the algorithm class to get the supported data
-    types.
-
-    Args:
-        cfg: Hydra configuration.
-        algorithms_jsons: List of algorithm metadata dictionaries.
-
-    Returns:
-        A tuple containing:
-          - Algorithm name.
-          - Supported input data types.
-          - Supported output data types.
-
-    Raises:
-        ValueError: If the algorithm does not have supported input or output data types.
-    """
-    if cfg.algorithm_id is not None:
-        algorithm_name = get_algorithm_name(
-            algorithm_id=cfg.algorithm_id,
-            algorithm_jsons=algorithms_jsons,
-        )
-        (
-            supported_input_data_types,
-            supported_output_data_types,
-        ) = _get_data_types_for_algorithms(
-            algorithm_name=algorithm_name,
-            algorithm_jsons=algorithms_jsons,
-        )
-        return (
-            algorithm_name,
-            supported_input_data_types,
-            supported_output_data_types,
-        )
-
-    # Local case: use the algorithm class to get the supported data types.
-    algorithm_name = cfg.algorithm._target_.rsplit(".", 1)[-1]
-    algorithm_cls = hydra.utils.get_object(cfg.algorithm._target_)
-    supported_input_data_types = algorithm_cls.get_supported_input_data_types()
-    supported_output_data_types = algorithm_cls.get_supported_output_data_types()
-    if (
-        supported_input_data_types is not None
-        and supported_output_data_types is not None
-    ):
-        return algorithm_name, supported_input_data_types, supported_output_data_types
-
-    raise ValueError(
-        f"Algorithm {algorithm_name} does not have supported input or output "
-        "data types, please check the algorithm class."
-    )
-
-
 def _main(cfg: DictConfig) -> None:
     """Inner implementation of main.
 
@@ -825,40 +714,13 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
-    # Resolve the configuration
-    OmegaConf.resolve(cfg)
+    cfg = resolve_user_input_config(cfg)
     setup_logging(cfg.local_output_dir)
 
     log_streamer: CloudLogStreamer | None = None
 
     try:
-        logger.info(f"Training run directory: {cfg.local_output_dir}")
-
-        # Print configuration
-        logger.info("Training configuration:")
-        logger.info(OmegaConf.to_yaml(cfg, resolve=True))
-
-        # Validate algorithm
-        if "algorithm" in cfg and cfg.algorithm_id is not None:
-            raise ValueError(
-                "Both 'algorithm' and 'algorithm_id' are provided. "
-                "Please specify only one."
-            )
-        if "algorithm" not in cfg and cfg.algorithm_id is None:
-            raise ValueError(
-                "Neither 'algorithm' nor 'algorithm_id' is provided. "
-                "Please specify one."
-            )
-
-        # Validate dataset specification
-        if cfg.dataset_id is None and cfg.dataset_name is None:
-            raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
-        if cfg.dataset_id is not None and cfg.dataset_name is not None:
-            raise ValueError(
-                "Both 'dataset_id' and 'dataset_name' are provided. "
-                "Please specify only one."
-            )
-
+        validate_complete_config(cfg)
         # Login before constructing cloud storage so org/auth state is available.
         nc.login()
         if cfg.org_id is not None:
@@ -878,38 +740,27 @@ def _main(cfg: DictConfig) -> None:
             )
             log_streamer.start()
 
-        # Dataset retrieval and preparation
-        if cfg.dataset_id is not None:
-            dataset = nc.get_dataset(id=cfg.dataset_id)
-        elif cfg.dataset_name is not None:
+        if cfg.dataset_name is not None:
             dataset = nc.get_dataset(name=cfg.dataset_name)
         else:
-            raise ValueError("Either 'dataset_id' or 'dataset_name' must be provided.")
+            dataset = nc.get_dataset(id=cfg.dataset_id)
+
+        cfg = resolve_to_complete_config(cfg, dataset=dataset)
+        logger.info("Training configuration:")
+        logger.info(OmegaConf.to_yaml(cfg, resolve=False))
+        logger.info(f"Training run directory: {cfg.local_output_dir}")
+
         dataset.cache_dir = _resolve_recording_cache_dir(cfg)
         dataset.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Convert data_types to the final cross_embodiment_description
-        input_cross_embodiment_description = _resolve_cross_embodiment_description(
-            cross_embodiment_description_cfg=cfg.input_cross_embodiment_description,
-            data_types_cfg=cfg.input_data_types,
-            dataset=dataset,
-            field_name="input_cross_embodiment_description",
-        )
-        output_cross_embodiment_description = _resolve_cross_embodiment_description(
-            cross_embodiment_description_cfg=cfg.output_cross_embodiment_description,
-            data_types_cfg=cfg.output_data_types,
-            dataset=dataset,
-            field_name="output_cross_embodiment_description",
-        )
-
         input_cross_embodiment_description = (
             convert_cross_embodiment_description_names_to_ids(
-                input_cross_embodiment_description
+                cfg.input_cross_embodiment_description
             )
         )
         output_cross_embodiment_description = (
             convert_cross_embodiment_description_names_to_ids(
-                output_cross_embodiment_description
+                cfg.output_cross_embodiment_description
             )
         )
 
@@ -919,22 +770,7 @@ def _main(cfg: DictConfig) -> None:
 
         batch_size = cfg.batch_size
 
-        # Get algorithm JSONs parameters
-        algorithms_jsons = _get_algorithms()
-        algorithm_name, supported_input_data_types, supported_output_data_types = (
-            _resolve_algorithm_name_and_supported_data_types(cfg, algorithms_jsons)
-        )
-
         # Validate that the provided parameters are consistent and sufficient
-        validate_training_params(
-            dataset,
-            dataset_name=cfg.dataset_name if cfg.dataset_name is not None else "",
-            algorithm_name=algorithm_name,
-            input_cross_embodiment_description=input_cross_embodiment_description,
-            output_cross_embodiment_description=output_cross_embodiment_description,
-            supported_input_data_types=supported_input_data_types,
-            supported_output_data_types=supported_output_data_types,
-        )
 
         # Prepare data types for synchronization
         cross_embodiment_union: CrossEmbodimentUnion = (
@@ -946,7 +782,7 @@ def _main(cfg: DictConfig) -> None:
         # Save local metadata so CLI can inspect local runs without cloud access
         _save_local_training_metadata(
             cfg,
-            algorithm_name=algorithm_name,
+            algorithm_name=cfg.algorithm_name,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             cross_embodiment_union=cross_embodiment_union,
