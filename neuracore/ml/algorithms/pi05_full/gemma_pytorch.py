@@ -335,6 +335,15 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.gemma_expert.model.embed_tokens = None
         self.to_bfloat16_for_selected_params(precision)
 
+        # Force eager attention everywhere. Pi05 builds its own 2D causal masks
+        # (with custom segment boundaries between images / language / subtask /
+        # FAST / suffix), and the SDPA / FlashAttention paths assume the masks
+        # they receive look like standard padding masks. Setting this once at
+        # construction avoids per-call mutation of the HF config from inference
+        # call sites.
+        self.paligemma.language_model.config._attn_implementation = "eager"
+        self.gemma_expert.model.config._attn_implementation = "eager"
+
     def to_bfloat16_for_selected_params(
         self, precision: Literal["bfloat16", "float32"] = "bfloat16"
     ) -> None:

@@ -31,6 +31,7 @@ from .utils import (
     _create_sinusoidal_pos_embedding,
     _make_att_2d_masks,
     _sample_beta,
+    shifted_token_ce,
 )
 
 T = TypeVar("T")
@@ -457,13 +458,15 @@ class PI05FullPolicy(nn.Module):
         subtask_slice = segments["subtask"]
         subtask_hidden = prefix_out[:, subtask_slice, :].to(dtype=torch.float32)
         subtask_logits = lm_head(subtask_hidden)
-        subtask_ce_loss = self._token_ce(subtask_logits, subtask_tokens, subtask_masks)
+        subtask_ce_loss = shifted_token_ce(
+            subtask_logits, subtask_tokens, subtask_masks
+        )
 
         # FAST CE via tied LM head
         fast_slice = segments["fast"]
         fast_hidden = prefix_out[:, fast_slice, :].to(dtype=torch.float32)
         fast_logits = lm_head(fast_hidden)
-        fast_ce_loss = self._token_ce(fast_logits, fast_tokens, fast_masks)
+        fast_ce_loss = shifted_token_ce(fast_logits, fast_tokens, fast_masks)
 
         loss = (
             self.config.flow_matching_loss_weight * flow_mse_loss
@@ -476,38 +479,6 @@ class PI05FullPolicy(nn.Module):
             "fast_ce_loss": fast_ce_loss,
             "loss": loss,
         }
-
-    @staticmethod
-    def _token_ce(logits: Tensor, targets: Tensor, mask: Tensor) -> Tensor:
-        """Shifted cross-entropy with right-padding mask, computed in float32.
-
-        Predicts targets[:, 1:] from logits[:, :-1] (causal shift).
-
-        Args:
-            logits: Predicted logits [B, L, vocab_size]
-            targets: Target token IDs [B, L]
-            mask: Boolean mask [B, L] where True marks valid (non-pad) tokens
-
-        Returns:
-            Scalar loss averaged over the masked target positions.
-        """
-        if logits.shape[1] < 2:
-            return torch.zeros((), device=logits.device, dtype=torch.float32)
-        logits_for_pred = logits[:, :-1, :].contiguous()
-        targets_for_pred = targets[:, 1:].contiguous()
-        mask_for_pred = mask[:, 1:].contiguous().to(dtype=torch.float32)
-        per_token = (
-            F.cross_entropy(
-                logits_for_pred.view(-1, logits_for_pred.shape[-1]),
-                targets_for_pred.view(-1),
-                reduction="none",
-            )
-            .view_as(targets_for_pred)
-            .to(dtype=torch.float32)
-        )
-        weighted = per_token * mask_for_pred
-        denom = mask_for_pred.sum().clamp(min=1.0)
-        return weighted.sum() / denom
 
     @torch.no_grad()
     def generate_subtask_tokens(
@@ -556,9 +527,6 @@ class PI05FullPolicy(nn.Module):
         att_2d_masks = _make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
-
-        paligemma_lm_config = self.paligemma_with_expert.paligemma.language_model.config
-        paligemma_lm_config._attn_implementation = "eager"
 
         outs, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=att_2d_masks_4d,
@@ -689,8 +657,6 @@ class PI05FullPolicy(nn.Module):
         prefix_att_2d_masks = _make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
-        paligemma_lm_config = self.paligemma_with_expert.paligemma.language_model.config
-        paligemma_lm_config._attn_implementation = "eager"
 
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
@@ -754,8 +720,6 @@ class PI05FullPolicy(nn.Module):
         position_ids = prefix_offsets + torch.cumsum(suffix_pad_masks, dim=1) - 1
 
         full_att_2d_masks_4d = self._prepare_attention_masks_4d(full_att_2d_masks)
-        gemma_config = self.paligemma_with_expert.gemma_expert.model.config
-        gemma_config._attn_implementation = "eager"
 
         outputs_embeds, _ = self.paligemma_with_expert.forward(
             attention_mask=full_att_2d_masks_4d,

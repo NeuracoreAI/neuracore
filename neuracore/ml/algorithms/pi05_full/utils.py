@@ -530,3 +530,38 @@ def fast_tokenize_actions(
         out_mask[b, : len(ids)] = True
 
     return out_ids, out_mask
+
+
+def shifted_token_ce(
+    logits: torch.Tensor, targets: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
+    """Causal-shifted cross-entropy with right-padding mask, in float32.
+
+    Predicts ``targets[:, 1:]`` from ``logits[:, :-1]``. Used by the subtask
+    and FAST CE losses in pi05_full.
+
+    Args:
+        logits: Predicted logits ``[B, L, vocab_size]``.
+        targets: Target token IDs ``[B, L]``.
+        mask: Boolean mask ``[B, L]`` where True marks valid (non-pad) tokens.
+
+    Returns:
+        Scalar loss averaged over the masked target positions.
+    """
+    if logits.shape[1] < 2:
+        return torch.zeros((), device=logits.device, dtype=torch.float32)
+    logits_for_pred = logits[:, :-1, :].contiguous()
+    targets_for_pred = targets[:, 1:].contiguous()
+    mask_for_pred = mask[:, 1:].contiguous().to(dtype=torch.float32)
+    per_token = (
+        F.cross_entropy(
+            logits_for_pred.view(-1, logits_for_pred.shape[-1]),
+            targets_for_pred.view(-1),
+            reduction="none",
+        )
+        .view_as(targets_for_pred)
+        .to(dtype=torch.float32)
+    )
+    weighted = per_token * mask_for_pred
+    denom = mask_for_pred.sum().clamp(min=1.0)
+    return weighted.sum() / denom
