@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from neuracore_types import BatchedNCData, DataType
+from neuracore_types import DataType
+
+if TYPE_CHECKING:
+    from neuracore_types import BatchedNCData
 
 
 class PreprocessingMethod(ABC):
