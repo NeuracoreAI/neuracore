@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
-from neuracore_types import BatchedNCData, DataType
+from typing import TYPE_CHECKING
+
+from neuracore_types import DataType
 from omegaconf import DictConfig
+
+if TYPE_CHECKING:
+    from neuracore_types import BatchedNCData
 
 from neuracore.ml.preprocessing.base import PreprocessingMethod
 
