@@ -26,6 +26,7 @@ from ..core.robot import init as _init_robot
 from ..core.robot import register_existing_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
+from .robot_utils import get_existing_robot_for_create
 
 logger = logging.getLogger(__name__)
 
@@ -171,29 +172,14 @@ def create_robot(
     """
     validate_version()
 
-    try:
-        robot = get_robot(robot_name, instance)
-    except RobotError:
-        pass
-    else:
+    existing_robot, existing_error = get_existing_robot_for_create(
+        robot_name, instance, shared, exist_ok
+    )
+    if existing_error is not None:
         if exist_ok:
-            return robot
-        raise RobotError(
-            f"Robot '{robot_name}' with instance '{instance}' already exists. "
-            "Call connect_robot() to connect to the existing robot."
-        )
-
-    try:
-        robot_id = get_robot_id_from_name(robot_name)
-    except RobotError:
-        pass
-    else:
-        if exist_ok:
-            return register_existing_robot(robot_name, robot_id, instance, shared)
-        raise RobotError(
-            f"Robot '{robot_name}' already exists in Neuracore. "
-            "Call connect_robot() to connect to the existing robot."
-        )
+            assert existing_robot is not None
+            return existing_robot
+        raise RobotError(existing_error)
 
     robot = _init_robot(
         robot_name,
