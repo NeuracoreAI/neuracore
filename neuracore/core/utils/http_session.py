@@ -1,13 +1,17 @@
-"""Shared HTTP session with retry on connection/SSL failures.
+"""HTTP session with keep-alive disabled.
 
-All Neuracore API calls should use ``get_session()`` rather than the bare
-``requests.*`` module-level functions so that stale keep-alive connections
-are retried transparently instead of raising SSLError.
+All Neuracore API calls should use ``Session()`` as a context manager rather than
+the bare ``requests.*`` module-level functions to ensure keep-alive is disabled and
+avoid stale connection issues in multi-threaded contexts.
+
+Example:
+    with Session() as session:
+        response = session.get(url)
 """
 
 import requests
 from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+from urllib3 import Retry
 
 _RETRY = Retry(
     total=3,  # cap total retry attempts across all categories
@@ -19,21 +23,13 @@ _RETRY = Retry(
 )
 
 
-def _build_session() -> requests.Session:
-    """Build a new requests Session with retry on connection/SSL failures."""
-    session = requests.Session()
-    adapter = HTTPAdapter(max_retries=_RETRY)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
+class Session(requests.Session):
+    """A requests Session with keep-alive disabled."""
 
-
-_session: requests.Session | None = None
-
-
-def get_session() -> requests.Session:
-    """Return the shared, retry-configured requests Session."""
-    global _session
-    if _session is None or _session.adapters == {}:
-        _session = _build_session()
-    return _session
+    def __init__(self, *, keep_alive: bool = False) -> None:
+        """Initialize the session and configure retry-enabled HTTP adapters."""
+        super().__init__()
+        adapter = HTTPAdapter(max_retries=_RETRY)
+        self.mount("https://", adapter)
+        self.mount("http://", adapter)
+        self.keep_alive = keep_alive

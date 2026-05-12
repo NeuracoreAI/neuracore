@@ -16,7 +16,7 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 from neuracore.core.utils.robot_data_spec_utils import (
     merge_cross_embodiment_description,
 )
@@ -74,15 +74,15 @@ def _get_algorithms() -> list[dict]:
     """
     auth = get_auth()
     org_id = get_current_org()
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    with Session() as session, concurrent.futures.ThreadPoolExecutor() as executor:
         org_alg_req = executor.submit(
-            get_session().get,
+            session.get,
             f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": False},
         )
         shared_alg_req = executor.submit(
-            get_session().get,
+            session.get,
             f"{API_URL}/org/{org_id}/algorithms",
             headers=auth.get_headers(),
             params={"shared": True},
@@ -186,11 +186,12 @@ def start_training_run(
 
     auth = get_auth()
     org_id = get_current_org()
-    response = get_session().post(
-        f"{API_URL}/org/{org_id}/training/jobs",
-        headers=auth.get_headers(),
-        json=data.model_dump(mode="json"),
-    )
+    with Session() as session:
+        response = session.post(
+            f"{API_URL}/org/{org_id}/training/jobs",
+            headers=auth.get_headers(),
+            json=data.model_dump(mode="json"),
+        )
 
     response.raise_for_status()
 
@@ -216,10 +217,11 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = get_session().post(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.post(
+                f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -238,10 +240,11 @@ def get_training_jobs() -> list[dict]:
     """
     auth = get_auth()
     org_id = get_current_org()
-    response = get_session().get(
-        f"{API_URL}/org/{org_id}/training/jobs",
-        headers=auth.get_headers(),
-    )
+    with Session() as session:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/training/jobs",
+            headers=auth.get_headers(),
+        )
     response.raise_for_status()
     return response.json()
 
@@ -320,11 +323,12 @@ def get_training_job_logs(
         params["severity_filter"] = severity_filter
 
     try:
-        response = get_session().get(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/logs",
-            headers=auth.get_headers(),
-            params=params,
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/training/jobs/{job_id}/logs",
+                headers=auth.get_headers(),
+                params=params,
+            )
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -346,10 +350,11 @@ def delete_training_job(job_id: str) -> None:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        response = get_session().delete(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.delete(
+                f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
     except Exception as e:
         raise ValueError(f"Error deleting training job: {e}")

@@ -172,4 +172,7 @@ def reset_neuracore():
 
 @pytest.fixture
 def mock_session():
-    return MagicMock()
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.__exit__.return_value = None
+    return session

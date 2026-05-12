@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError
 from neuracore.core.cli.get_user_confirmation import get_user_confirmation
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.exceptions import AuthenticationError, InputError
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 
 from ..const import API_URL, MAX_INPUT_ATTEMPTS
 
@@ -63,11 +63,12 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
             if not password:
                 password = getpass("Enter your password: ")
 
-            auth_response = get_session().post(
-                f"{API_URL}/auth/token",
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-                data={"username": email, "password": password},
-            )
+            with Session() as session:
+                auth_response = session.post(
+                    f"{API_URL}/auth/token",
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    data={"username": email, "password": password},
+                )
 
             # Handle 401 *before* raise_for_status so it doesn't become HTTPError
             if auth_response.status_code == 401:
@@ -104,10 +105,11 @@ def generate_api_key(email: str | None = None, password: str | None = None) -> s
     # Use the access token to request an API key
     try:
         headers = {"Authorization": f"Bearer {access_token}"}
-        api_key_response = get_session().get(
-            f"{API_URL}/auth/api-key",
-            headers=headers,
-        )
+        with Session() as session:
+            api_key_response = session.get(
+                f"{API_URL}/auth/api-key",
+                headers=headers,
+            )
         api_key_response.raise_for_status()
         api_key = APIKey.model_validate(api_key_response.json()).key
         print(f"Your API key is: {api_key}")

@@ -328,7 +328,7 @@ class TestLibraryFunctions:
 
         mock_session.get.side_effect = requests.exceptions.ConnectionError()
         with patch(
-            "neuracore.ml.cli.training_runs_cloud.get_session",
+            "neuracore.ml.cli.training_runs_cloud.Session",
             return_value=mock_session,
         ):
             with pytest.raises(TrainingRunError, match="connect"):

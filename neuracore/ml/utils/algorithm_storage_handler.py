@@ -11,7 +11,7 @@ import wget
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 from neuracore.ml.utils.validate import AlgorithmCheck
 
@@ -32,10 +32,11 @@ class AlgorithmStorageHandler(UploadStorageMixin):
         self.log_to_cloud = self.algorithm_id is not None
         self.org_id = get_current_org()
         if self.log_to_cloud:
-            response = get_session().get(
-                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}",
-                headers=get_auth().get_headers(),
-            )
+            with Session() as session:
+                response = session.get(
+                    f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}",
+                    headers=get_auth().get_headers(),
+                )
             if response.status_code != 200:
                 raise ValueError(
                     f"Algorithm {self.algorithm_id} not found or access denied."
@@ -48,11 +49,12 @@ class AlgorithmStorageHandler(UploadStorageMixin):
             error_message: Error message to save.
         """
         if self.log_to_cloud:
-            response = get_session().post(
-                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/validation-error",
-                headers=get_auth().get_headers(),
-                json={"error_message": error_message},
-            )
+            with Session() as session:
+                response = session.post(
+                    f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/validation-error",
+                    headers=get_auth().get_headers(),
+                    json={"error_message": error_message},
+                )
             if response.status_code != 200:
                 logger.error(
                     f"Failed to save algorithm validation error: {response.text}"
@@ -64,10 +66,11 @@ class AlgorithmStorageHandler(UploadStorageMixin):
         Args:
             extract_dir: Directory to extract algorithm code to.
         """
-        response = get_session().get(
-            f"{API_URL}/org/{self.org_id}/algorithms/download_url/{self.algorithm_id}",
-            headers=get_auth().get_headers(),
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/algorithms/download_url/{self.algorithm_id}",
+                headers=get_auth().get_headers(),
+            )
         if response.status_code != 200:
             raise ValueError(
                 f"Failed to get download URL for algorithm {self.algorithm_id}: "
@@ -106,11 +109,12 @@ class AlgorithmStorageHandler(UploadStorageMixin):
         else:
             dict_to_save["validation_status"] = "validation_failed"
             dict_to_save["validation_message"] = error_message
-        response = get_session().put(
-            f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/update-algorithm-validation",
-            headers=get_auth().get_headers(),
-            json=dict_to_save,
-        )
+        with Session() as session:
+            response = session.put(
+                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/update-algorithm-validation",
+                headers=get_auth().get_headers(),
+                json=dict_to_save,
+            )
         if response.status_code != 200:
             logger.error(f"Failed to save algorithm validation check: {response.text}")
         else:
@@ -119,14 +123,15 @@ class AlgorithmStorageHandler(UploadStorageMixin):
     def _get_upload_url(self, filepath: str, content_type: str) -> str:
         """Get a signed upload URL for algorithm artifacts/logs."""
         assert self.algorithm_id is not None, "Algorithm ID not provided"
-        response = get_session().get(
-            f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/upload-url",
-            headers=get_auth().get_headers(),
-            params={
-                "filepath": filepath,
-                "content_type": content_type,
-            },
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/algorithms/{self.algorithm_id}/upload-url",
+                headers=get_auth().get_headers(),
+                params={
+                    "filepath": filepath,
+                    "content_type": content_type,
+                },
+            )
         if response.status_code != 200:
             raise ValueError(
                 f"Failed to get upload URL for {filepath}: {response.text}"
@@ -139,8 +144,9 @@ class AlgorithmStorageHandler(UploadStorageMixin):
         data: bytes | IO[bytes],
         content_type: str,
     ) -> requests.Response:
-        return get_session().put(
-            upload_url,
-            data=data,
-            headers={"Content-Type": content_type},
-        )
+        with Session() as session:
+            return session.put(
+                upload_url,
+                data=data,
+                headers={"Content-Type": content_type},
+            )

@@ -18,7 +18,7 @@ from neuracore_types import (
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 from neuracore.core.utils.robot_data_spec_utils import (
     resolve_embodiment_descriptions_with_override,
 )
@@ -200,11 +200,12 @@ class PolicyInference:
             )
             if not checkpoint_path.exists():
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                response = get_session().get(
-                    f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}/checkpoint_url/{checkpoint_name}",
-                    headers=get_auth().get_headers(),
-                    timeout=30,
-                )
+                with Session() as session:
+                    response = session.get(
+                        f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}/checkpoint_url/{checkpoint_name}",
+                        headers=get_auth().get_headers(),
+                        timeout=30,
+                    )
                 if response.status_code == 404:
                     raise ValueError(f"Checkpoint {checkpoint_name} does not exist.")
                 checkpoint_path = download_with_progress(

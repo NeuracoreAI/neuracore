@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING
 import requests
 from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
 
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
@@ -259,12 +259,13 @@ class ServerPolicy(Policy):
         if epoch < -1:
             raise ValueError("Epoch must be -1 (last) or a non-negative integer.")
         try:
-            response = get_session().post(
-                f"{self._base_url}{SET_CHECKPOINT_ENDPOINT}",
-                headers=self._headers,
-                json={"epoch": epoch},
-                timeout=30,
-            )
+            with Session() as session:
+                response = session.post(
+                    f"{self._base_url}{SET_CHECKPOINT_ENDPOINT}",
+                    headers=self._headers,
+                    json={"epoch": epoch},
+                    timeout=30,
+                )
             if response.status_code != 200:
                 raise EndpointError(
                     "Failed to set checkpoint: "
@@ -315,12 +316,13 @@ class ServerPolicy(Policy):
             sync_point.data = filtered_data
         response = None
         try:
-            response = get_session().post(
-                f"{self._base_url}{PREDICT_ENDPOINT}",
-                headers=self._headers,
-                json=sync_point.model_dump(mode="json"),
-                timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
-            )
+            with Session() as session:
+                response = session.post(
+                    f"{self._base_url}{PREDICT_ENDPOINT}",
+                    headers=self._headers,
+                    json=sync_point.model_dump(mode="json"),
+                    timeout=int(os.getenv("NEURACORE_ENDPOINT_TIMEOUT", 10)),
+                )
             response.raise_for_status()
             result = response.json()
             sync_point_preds = {
@@ -534,9 +536,10 @@ class LocalServerPolicy(ServerPolicy):
             if self.server_process and self.server_process.poll() is not None:
                 raise EndpointError("Local server process terminated unexpectedly.")
             try:
-                response = get_session().get(
-                    f"http://{self.host}:{self.port}{PING_ENDPOINT}", timeout=1
-                )
+                with Session() as session:
+                    response = session.get(
+                        f"http://{self.host}:{self.port}{PING_ENDPOINT}", timeout=1
+                    )
                 if response.status_code == 200:
                     logger.info(
                         f"Local server started successfully on {self.host}:{self.port}"
@@ -756,9 +759,10 @@ def policy_remote_server(
 
     try:
         # Find endpoint by name
-        response = get_session().get(
-            f"{API_URL}/org/{org_id}/models/endpoints", headers=auth.get_headers()
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/models/endpoints", headers=auth.get_headers()
+            )
         response.raise_for_status()
 
         endpoints = response.json()
@@ -805,11 +809,12 @@ def _download_model(job_id: str, org_id: str) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
 
     print("Downloading model from training run...")
-    response = get_session().get(
-        f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
-        headers=auth.get_headers(),
-        timeout=30,
-    )
+    with Session() as session:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
+            headers=auth.get_headers(),
+            timeout=30,
+        )
     response.raise_for_status()
 
     model_url_response = response.json()
@@ -825,9 +830,10 @@ def _download_model(job_id: str, org_id: str) -> Path:
 def _get_job_id(train_run_name: str, org_id: str) -> str:
     """Get job ID from training run name."""
     auth = get_auth()
-    response = get_session().get(
-        f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
-    )
+    with Session() as session:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/training/jobs", headers=auth.get_headers()
+        )
     response.raise_for_status()
     jobs = response.json()
 
