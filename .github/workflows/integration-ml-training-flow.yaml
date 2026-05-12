@@ -58,7 +58,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ matrix.environment == 'production' &&
-            steps.release-tag.outputs.latest_release_tag || 'main' }}
+            steps.release-tag.outputs.latest_release_tag || github.ref_name }}
           fetch-depth: 0
       - name: Pull LFS objects
         run: git lfs pull
@@ -87,7 +87,7 @@ jobs:
       - name: Resolve test harness
         run: |
           echo "Test harness environment: ${{ matrix.environment }}"
-          echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || 'main' }}"
+          echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}"
           echo "Test harness commit: $(git rev-parse HEAD)"
           echo "Test harness path: tests/integration/ml/test_training_flow.py"
           python - << 'EOF'

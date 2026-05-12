@@ -34,7 +34,7 @@ jobs:
     - name: Checkout test harness
       uses: actions/checkout@v4
       with:
-        ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || 'main' }}
+        ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}
         fetch-depth: 0
 
     - name: Verify production test harness ref
@@ -61,7 +61,7 @@ jobs:
     - name: Resolve test harness
       run: |
         echo "Test harness environment: ${{ matrix.environment }}"
-        echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || 'main' }}"
+        echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness path: tests/integration/ml/test_algorithm_validation.py"
         python - << 'EOF'
