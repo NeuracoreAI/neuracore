@@ -19,7 +19,7 @@ from neuracore.core.cli.training_display import RunDisplayRow, print_run_table
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 
 TRAINING_JOB_LIST_ADAPTER = TypeAdapter(list[TrainingJob])
 console = Console()
@@ -128,10 +128,11 @@ def _fetch_training_jobs(auth: Any, org_id: str) -> list[TrainingJob]:
         TrainingRunError: If the API request fails.
     """
     try:
-        response = get_session().get(
-            f"{API_URL}/org/{org_id}/training/jobs",
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/training/jobs",
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         jobs = response.json()
         return TRAINING_JOB_LIST_ADAPTER.validate_python(jobs)
@@ -165,10 +166,11 @@ def _fetch_training_job(auth: Any, org_id: str, job_id: str) -> TrainingJob:
         TrainingRunError: If the job is not found or API request fails.
     """
     try:
-        response = get_session().get(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         job = response.json()
         return TrainingJob.model_validate(job)

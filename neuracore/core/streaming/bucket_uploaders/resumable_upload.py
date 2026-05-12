@@ -12,7 +12,7 @@ import time
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +59,12 @@ class ResumableUpload:
             "content_type": self.content_type,
         }
         org_id = get_current_org()
-        response = get_session().get(
-            f"{API_URL}/org/{org_id}/recording/{self.recording_id}/resumable_upload_url",
-            params=params,
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/resumable_upload_url",
+                params=params,
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         return response.json()["url"]
 
@@ -111,9 +112,8 @@ class ResumableUpload:
 
         for attempt in range(self.max_retries):
             try:
-                response = get_session().put(
-                    self.session_uri, headers=headers, data=data
-                )
+                with Session() as session:
+                    response = session.put(self.session_uri, headers=headers, data=data)
                 status_code = response.status_code
 
                 if status_code == 200 or status_code == 201:
@@ -150,7 +150,8 @@ class ResumableUpload:
         """
         headers = {"Content-Length": "0", "Content-Range": "bytes */*"}
 
-        response = get_session().put(self.session_uri, headers=headers)
+        with Session() as session:
+            response = session.put(self.session_uri, headers=headers)
         if response.status_code == 200 or response.status_code == 201:
             logger.debug("Upload complete")
             return self.total_bytes_uploaded

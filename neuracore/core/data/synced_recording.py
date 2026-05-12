@@ -24,7 +24,7 @@ from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 
 from ..auth import get_auth
 from ..const import API_URL
@@ -104,19 +104,20 @@ class SynchronizedRecording:
             requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
-        response = get_session().post(
-            f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
-            json=SynchronizeRecordingRequest(
-                recording_id=self.id,
-                synchronization_details=SynchronizationDetails(
-                    frequency=self.frequency,
-                    cross_embodiment_union=self.cross_embodiment_union,
-                    max_delay_s=sys.float_info.max,
-                    allow_duplicates=True,
-                ),
-            ).model_dump(mode="json"),
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.post(
+                f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
+                json=SynchronizeRecordingRequest(
+                    recording_id=self.id,
+                    synchronization_details=SynchronizationDetails(
+                        frequency=self.frequency,
+                        cross_embodiment_union=self.cross_embodiment_union,
+                        max_delay_s=sys.float_info.max,
+                        allow_duplicates=True,
+                    ),
+                ).model_dump(mode="json"),
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         return SynchronizedEpisodeModel.model_validate(response.json())
 
@@ -134,11 +135,12 @@ class SynchronizedRecording:
             requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
-        response = get_session().get(
-            f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
-            params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
-            headers=auth.get_headers(),
-        )
+        with Session() as session:
+            response = session.get(
+                f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
+                params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
+                headers=auth.get_headers(),
+            )
         response.raise_for_status()
         return response.json()["url"]
 

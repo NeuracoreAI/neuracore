@@ -11,7 +11,7 @@ import torch
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.utils.http_session import get_session
+from neuracore.core.utils.http_session import Session
 from neuracore.ml.logging.training_logger import TrainingLogger
 
 logger = logging.getLogger(__name__)
@@ -177,11 +177,12 @@ class CloudTrainingLogger(TrainingLogger):
                 for name, step_map in self._store.items()
             }
         }
-        response = get_session().put(
-            f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
-            headers=get_auth().get_headers(),
-            json=metricsData,
-        )
+        with Session() as session:
+            response = session.put(
+                f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
+                headers=get_auth().get_headers(),
+                json=metricsData,
+            )
         response.raise_for_status()
         self._store.clear()  # Clear local store after successful sync
 
