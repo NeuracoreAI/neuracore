@@ -29,6 +29,7 @@ jobs:
       id: list
       env:
         LATEST_RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
+        STAGING_BRANCH: ${{ github.ref_name }}
       run: |
         pip install pyyaml -q
         python3 << 'EOF' >> $GITHUB_OUTPUT
@@ -39,6 +40,7 @@ jobs:
         import yaml
 
         latest_release_tag = os.environ["LATEST_RELEASE_TAG"]
+        staging_branch = os.environ["STAGING_BRANCH"]
 
         with open("tests/integration/ml/algorithm_configs.yaml") as f:
             staging_config = yaml.safe_load(f)
@@ -59,7 +61,7 @@ jobs:
                 "algorithm": algorithm["name"],
                 "environment": "staging",
                 "python-version": "3.11",
-                "test-harness-ref": "main",
+                "test-harness-ref": staging_branch,
             }
             for algorithm in staging_config["algorithms"]
         ]
@@ -89,7 +91,7 @@ jobs:
       if: ${{ matrix.environment != 'production' }}
       uses: actions/checkout@v4
       with:
-        ref: main
+        ref: ${{ matrix.test-harness-ref }}
     - name: Checkout production test harness
       if: ${{ matrix.environment == 'production' }}
       uses: actions/checkout@v4
