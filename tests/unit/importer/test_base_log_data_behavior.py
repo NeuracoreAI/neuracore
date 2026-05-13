@@ -50,6 +50,7 @@ def _make_importer_for_log_data() -> NeuracoreDatasetImporter:
     importer.curr_joint_positions = {}
     importer.prev_ik_solution = [0.1, 0.2]
     importer.joint_info = {}
+    importer.debug_target_ee_frame = None
     importer._validate_input_data = MagicMock()
     importer._validate_joint_data = MagicMock()
     importer._log_transformed_data = MagicMock()

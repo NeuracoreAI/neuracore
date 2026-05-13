@@ -53,6 +53,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
+        debug_target_ee_frame: str | None = None,
     ) -> None:
         """Initialize the MCAP dataset importer."""
         super().__init__(
@@ -69,6 +70,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             storage_limit=storage_limit,
             random_sample=random_sample,
             shared=shared,
+            debug_target_ee_frame=debug_target_ee_frame,
         )
         if max_workers is not None and max_workers > 1:
             self.logger.warning(

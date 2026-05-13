@@ -155,6 +155,7 @@ def _run_import(
     max_workers: int | None = 1,
     storage_limit: int = 5 * 1024**3,
     random_sample: int | None = None,
+    debug_target_ee_frame: str | None = None,
 ) -> None:
     """Execute the dataset import workflow."""
     args = SimpleNamespace(
@@ -169,6 +170,7 @@ def _run_import(
         max_workers=max_workers,
         random_sample=random_sample,
         storage_limit=storage_limit,
+        debug_target_ee_frame=debug_target_ee_frame,
     )
 
     cli_args_validation(args)
@@ -320,6 +322,7 @@ def _run_import(
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
             shared=args.shared,
+            debug_target_ee_frame=args.debug_target_ee_frame,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.MCAP:
@@ -339,6 +342,7 @@ def _run_import(
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
             shared=args.shared,
+            debug_target_ee_frame=args.debug_target_ee_frame,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -358,6 +362,7 @@ def _run_import(
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
             shared=args.shared,
+            debug_target_ee_frame=args.debug_target_ee_frame,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -377,6 +382,7 @@ def _run_import(
             random_sample=args.random_sample,
             storage_limit=args.storage_limit,
             shared=args.shared,
+            debug_target_ee_frame=args.debug_target_ee_frame,
         )
         importer.import_all()
     else:

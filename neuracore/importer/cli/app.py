@@ -104,6 +104,14 @@ def import_dataset(
             "[default: 5gb]"
         ),
     ),
+    debug_target_ee_frame: str | None = typer.Option(
+        None,
+        "--debug-target-ee-frame",
+        help=(
+            "If provided, log JOINT_TARGET_POSITIONS as END_EFFECTOR_POSES "
+            "using this end-effector frame name."
+        ),
+    ),
 ) -> None:
     """Import a dataset into Neuracore using the provided configuration."""
     try:
@@ -123,6 +131,7 @@ def import_dataset(
             max_workers=max_workers,
             random_sample=random_sample,
             storage_limit=storage_limit_bytes,
+            debug_target_ee_frame=debug_target_ee_frame,
         )
     except (
         CLIError,
