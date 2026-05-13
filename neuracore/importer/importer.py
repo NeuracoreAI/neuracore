@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,6 +19,7 @@ from rich.logging import RichHandler
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from neuracore.core.exceptions import DatasetError
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -42,6 +44,8 @@ from neuracore.importer.rlds_tfds_importer import (
 )
 
 logger = logging.getLogger(__name__)
+DATASET_DELETE_TIMEOUT_S = 300.0
+DATASET_DELETE_POLL_INTERVAL_S = 30.0
 
 # Setup rich handler for colorful logging output in the importer module
 importer_logger = logging.getLogger("neuracore.importer")
@@ -201,19 +205,24 @@ def _run_import(
                 raise DatasetOperationError(
                     f"Failed to delete dataset '{dataset_name}': {exc}"
                 ) from exc
-            logger.info("Deleted existing dataset '%s'.", dataset_name)
+            logger.info("Deleting existing dataset '%s'.", dataset_name)
+            deleted_dataset_id = dataset.id
             dataset = None
         else:
             logger.warning(
                 "Dataset '%s' already exists; new data will be appended.",
                 dataset_name,
             )
+            deleted_dataset_id = None
+    else:
+        deleted_dataset_id = None
     if dataset is None:
-        dataset = nc.create_dataset(
-            name=dataset_name,
+        dataset = _create_dataset_with_overwrite_guard(
+            dataset_name=dataset_name,
             description=dataconfig.output_dataset.description,
             tags=dataconfig.output_dataset.tags,
             shared=args.shared,
+            deleted_dataset_id=deleted_dataset_id,
         )
     logger.info(
         "Output dataset ready: %s (id=%s), shared=%s",
@@ -374,6 +383,59 @@ def _run_import(
         raise DatasetOperationError(f"Unsupported dataset type: {dataset_type}")
 
     logger.info("Finished importing dataset.")
+
+
+def _create_dataset_with_overwrite_guard(
+    dataset_name: str,
+    description: str | None,
+    tags: list[str] | None,
+    shared: bool,
+    deleted_dataset_id: str | None,
+    timeout_s: float = DATASET_DELETE_TIMEOUT_S,
+    poll_interval_s: float = DATASET_DELETE_POLL_INTERVAL_S,
+) -> Dataset:
+    """Create dataset, ensuring overwrite does not reuse the deleted dataset id."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            dataset = nc.create_dataset(
+                name=dataset_name,
+                description=description,
+                tags=tags,
+                shared=shared,
+            )
+        except DatasetError as exc:
+            retryable_soft_delete_error = (
+                deleted_dataset_id is not None and "already exists" in str(exc).lower()
+            )
+            if not retryable_soft_delete_error:
+                raise DatasetOperationError(
+                    f"Failed to create dataset '{dataset_name}': {exc}"
+                ) from exc
+            if time.monotonic() >= deadline:
+                raise DatasetOperationError(
+                    f"Timed out waiting to create replacement dataset '{dataset_name}'."
+                ) from exc
+            logger.info(
+                "Dataset '%s' creation still blocked by pending delete; "
+                "retrying in %.1fs.",
+                dataset_name,
+                poll_interval_s,
+            )
+            time.sleep(poll_interval_s)
+            continue
+        if deleted_dataset_id is None or dataset.id != deleted_dataset_id:
+            return dataset
+        if time.monotonic() >= deadline:
+            raise DatasetOperationError(
+                f"Timed out waiting to create replacement dataset '{dataset_name}'."
+            )
+        logger.info(
+            "Dataset '%s' still resolves to previous id; retrying in %.1fs.",
+            dataset_name,
+            poll_interval_s,
+        )
+        time.sleep(poll_interval_s)
 
 
 def main() -> None:
