@@ -55,13 +55,13 @@ def resolve_preprocessing_config(
     """
     from hydra.utils import instantiate
 
-    resolved = {}
-    for data_type_key, methods_list in config_dict.items():
-        data_type = DataType(data_type_key)
-        methods = [instantiate(m) for m in methods_list]
-        resolved[data_type] = methods
-    validate_preprocessing_configuration(preprocessing_config=resolved)
-    return resolved
+    preprocessing_methods = instantiate(config_dict, _convert_="all")
+    resolved_config = {
+        DataType(data_type): methods
+        for data_type, methods in preprocessing_methods.items()
+    }
+    validate_preprocessing_configuration(preprocessing_config=resolved_config)
+    return resolved_config
 
 
 def apply_preprocessing_methods(
