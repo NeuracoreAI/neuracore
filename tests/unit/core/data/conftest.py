@@ -298,6 +298,14 @@ def mock_data_requests(
         json=[recording["robot_id"] for recording in recordings_list],
         status_code=200,
     )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/robots",
+        json=[
+            {"id": recording["robot_id"], "name": f"robot-{index + 1}"}
+            for index, recording in enumerate(recordings_list)
+        ],
+        status_code=200,
+    )
 
     # Mock dataset creation endpoint
     mock_auth_requests.post(

@@ -18,12 +18,12 @@ from omegaconf import OmegaConf
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.utils.robot_data_spec_utils import (
-    convert_omegaconf_to_cross_embodiment_description,
     merge_cross_embodiment_description,
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
+    _cacheable_cross_embodiment_description,
 )
 from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
 from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
@@ -34,6 +34,16 @@ NUM_EPISODES = 5
 NUM_OBSERVATIONS_PER_EPISODE = 10
 ROBOT_ID = "11111111-1111-1111-1111-111111111111"
 MISSING_ROBOT_ID = "22222222-2222-2222-2222-222222222222"
+
+
+class ModelDumpCrossEmbodimentDescription:
+    def model_dump(self, mode):
+        assert mode == "json"
+        return {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: OmegaConf.create({0: "joint_positions_0"})
+            }
+        }
 
 
 def _indexed_names(data_type: DataType, count: int) -> dict[int, str]:
@@ -218,14 +228,6 @@ def mock_synchronized_dataset(
             return mock_synced_recording
 
     return MockSynchronizedDataset()
-
-
-def _cacheable_cross_embodiment_description(
-    cross_embodiment_description: CrossEmbodimentDescription,
-):
-    if hasattr(cross_embodiment_description, "model_dump"):
-        return cross_embodiment_description.model_dump(mode="json")
-    return cross_embodiment_description
 
 
 def _stats_cache_path(cache_root, sync_id, input_spec, output_spec):
@@ -417,6 +419,41 @@ def mock_synchronized_dataset_with_depth(
             return mock_synced_recording_with_depth
 
     return MockSynchronizedDataset()
+
+
+def test_cacheable_cross_embodiment_description_handles_nested_omegaconf():
+    """Test OmegaConf descriptions can be used in statistics cache keys."""
+    spec = OmegaConf.create({
+        ROBOT_ID: {
+            DataType.JOINT_POSITIONS: {
+                0: "joint_positions_0",
+                1: "joint_positions_1",
+            }
+        }
+    })
+
+    cacheable_spec = _cacheable_cross_embodiment_description(spec)
+
+    json.dumps(cacheable_spec, sort_keys=True, separators=(",", ":"))
+    assert cacheable_spec == {
+        ROBOT_ID: {
+            DataType.JOINT_POSITIONS: {
+                0: "joint_positions_0",
+                1: "joint_positions_1",
+            }
+        }
+    }
+
+
+def test_cacheable_cross_embodiment_description_recurses_after_model_dump():
+    cacheable_spec = _cacheable_cross_embodiment_description(
+        ModelDumpCrossEmbodimentDescription()
+    )
+
+    json.dumps(cacheable_spec, sort_keys=True, separators=(",", ":"))
+    assert cacheable_spec == {
+        ROBOT_ID: {DataType.JOINT_POSITIONS: {0: "joint_positions_0"}}
+    }
 
 
 def test_should_initialize_with_correct_args(
@@ -617,29 +654,26 @@ def test_merge_cross_embodiment_description_preserves_robot_order():
     ]
 
 
-def test_merge_cross_embodiment_description_handles_omegaconf_dict_values():
-    input_cfg = OmegaConf.create({
+def test_merge_cross_embodiment_description_handles_config_dict_values():
+    input_spec: CrossEmbodimentDescription = {
         ROBOT_ID: {
-            "JOINT_POSITIONS": {
+            DataType.JOINT_POSITIONS: {
                 0: "vx300s_right/wrist_angle",
                 1: "vx300s_left/waist",
             },
-            "RGB_IMAGES": {
+            DataType.RGB_IMAGES: {
                 0: "rgb_angle",
             },
         }
-    })
-    output_cfg = OmegaConf.create({
+    }
+    output_spec: CrossEmbodimentDescription = {
         ROBOT_ID: {
-            "JOINT_POSITIONS": {
+            DataType.JOINT_POSITIONS: {
                 0: "vx300s_right/wrist_angle",
                 1: "vx300s_left/waist",
             }
         }
-    })
-
-    input_spec = convert_omegaconf_to_cross_embodiment_description(input_cfg)
-    output_spec = convert_omegaconf_to_cross_embodiment_description(output_cfg)
+    }
 
     assert merge_cross_embodiment_description(input_spec, output_spec) == {
         ROBOT_ID: {

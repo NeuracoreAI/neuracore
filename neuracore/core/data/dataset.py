@@ -92,6 +92,7 @@ class Dataset:
         self._num_recordings: int | None = len(recordings) if recordings else None
         self._start_after: dict | None = None
         self._robot_ids: list[str] | None = None
+        self._robot_names: dict[str, str] | None = None
 
     def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
@@ -625,8 +626,21 @@ class Dataset:
                 )
             response.raise_for_status()
             self._robot_ids = response.json()
-            # Populate names to keep order consistent with IDs
         return self._robot_ids
+
+    def get_robot_names(self) -> dict[str, str]:
+        """Get robot names keyed by robot ID for this dataset."""
+        if self._robot_names is None:
+            with Session() as session:
+                response = session.get(
+                    f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robots",
+                    headers=get_auth().get_headers(),
+                )
+            response.raise_for_status()
+            robots = response.json()
+            self._robot_names = {robot["id"]: robot["name"] for robot in robots}
+            self._robot_ids = list(self._robot_names)
+        return self._robot_names
 
     def __iter__(self) -> Iterator[Recording]:
         """Yield recordings one by one, fetching pages lazily."""

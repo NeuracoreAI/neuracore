@@ -4,7 +4,7 @@ This module provides functions for starting and monitoring training jobs,
 including algorithm discovery, dataset resolution, and job status tracking.
 """
 
-import concurrent
+import concurrent.futures
 import sys
 from typing import Any, cast
 
@@ -60,37 +60,39 @@ def _resolve_next_name(base_name: str, existing_names: set[str]) -> str:
 
 
 def _get_algorithms() -> list[dict]:
-    """Retrieve all available algorithms from the API.
-
-    Fetches both organization-specific and shared algorithms concurrently.
-
-    Returns:
-        list[dict]: List of algorithm dictionaries containing algorithm metadata
-
-    Raises:
-        requests.exceptions.HTTPError: If the API request fails
-        requests.exceptions.RequestException: If there is a network problem
-        ConfigError: If there is an error trying to get the current org
-    """
+    """Retrieve all available algorithms from the API."""
     auth = get_auth()
     org_id = get_current_org()
-    with Session() as session, concurrent.futures.ThreadPoolExecutor() as executor:
-        org_alg_req = executor.submit(
-            session.get,
-            f"{API_URL}/org/{org_id}/algorithms",
+
+    with Session() as session:
+
+        def fetch_algorithms(shared: bool) -> list[dict]:
+            response = session.get(
+                f"{API_URL}/org/{org_id}/algorithms",
+                headers=auth.get_headers(),
+                params={"shared": shared},
+            )
+            response.raise_for_status()
+            return response.json()
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            org_algorithms, shared_algorithms = executor.map(
+                fetch_algorithms, (False, True)
+            )
+    return org_algorithms + shared_algorithms
+
+
+def get_algorithm(algorithm_id: str) -> dict:
+    """Retrieve a single algorithm by ID from the API."""
+    auth = get_auth()
+    org_id = get_current_org()
+    with Session() as session:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/algorithms/{algorithm_id}",
             headers=auth.get_headers(),
-            params={"shared": False},
         )
-        shared_alg_req = executor.submit(
-            session.get,
-            f"{API_URL}/org/{org_id}/algorithms",
-            headers=auth.get_headers(),
-            params={"shared": True},
-        )
-        org_alg, shared_alg = org_alg_req.result(), shared_alg_req.result()
-    org_alg.raise_for_status()
-    shared_alg.raise_for_status()
-    return org_alg.json() + shared_alg.json()
+    response.raise_for_status()
+    return response.json()
 
 
 def start_training_run(

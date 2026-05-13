@@ -847,6 +847,21 @@ class TestDatasetIteration:
 class TestDatasetSynchronization:
     """Tests for dataset synchronization."""
 
+    def test_get_robot_names_returns_names_by_id(
+        self, mock_data_requests, dataset_dict
+    ):
+        nc.login("test_api_key")
+        dataset = Dataset(**dataset_dict)
+
+        assert dataset.get_robot_names() == {
+            "20a621b7-2f9b-4699-a08e-7d080488a5a3": "robot-1",
+            "30b731c8-3f9c-5799-b19e-8d190599b6b4": "robot-2",
+        }
+        assert dataset.robot_ids == [
+            "20a621b7-2f9b-4699-a08e-7d080488a5a3",
+            "30b731c8-3f9c-5799-b19e-8d190599b6b4",
+        ]
+
     def test_synchronize_with_no_data_types(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
