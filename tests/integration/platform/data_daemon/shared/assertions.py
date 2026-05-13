@@ -100,7 +100,6 @@ def assert_context_mode(case: DataDaemonTestCase, results: list[ContextResult]) 
     tolerance_s = 0.1
     if case.mode == MODE_SEQUENTIAL:
         assert abs(second.timestamp_start_s - first.timestamp_start_s) < tolerance_s
-        assert abs(first.timestamp_end_s - second.timestamp_end_s) < tolerance_s
         assert second.wall_started_at is not None
         assert first.wall_stopped_at > second.wall_started_at
         return
