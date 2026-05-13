@@ -53,19 +53,21 @@ class SharedSlotRegistry:
 
     def __init__(
         self,
-        *,
         slot_size: int,
         slot_count: int,
         ack_timeout_s: float,
         allocate_timeout_s: float,
     ) -> None:
-        """Initialize producer-side shared-slot state.
+        """Initialize a producer-side shared-slot registry.
 
         Args:
-            slot_size: Bytes available in each fixed shared-memory slot.
-            slot_count: Number of slots available in the shared segment.
-            ack_timeout_s: Timeout for returned slot credits after send.
-            allocate_timeout_s: Timeout while waiting for a free writable slot.
+            slot_size: Size of each shared-memory slot in bytes.
+            slot_count: Number of fixed slots available in the shared-memory
+                transport.
+            ack_timeout_s: Maximum time to wait for daemon acknowledgements and
+                credit-return progress before marking the transport unhealthy.
+            allocate_timeout_s: Maximum time to wait for shared-slot setup or
+                slot allocation before timing out.
         """
         self._config = SharedSlotRegistryConfig(
             slot_size=int(slot_size),
@@ -172,13 +174,18 @@ class SharedSlotRegistry:
                     raise SharedSlotTimeout("Timed out waiting for a free shared slot")
                 self._condition.wait(timeout=min(0.1, remaining))
 
-    def mark_in_flight(self, slot_id: int) -> int:
+    def mark_in_flight(self, slot_id: int, sequence_id: int) -> int:
         """Record that the slot now backs one sent descriptor."""
         with self._condition:
             self._check_for_timeouts_locked()
+
             if not self._is_healthy_locked():
                 raise self._build_unhealthy_error_locked()
-            return self._reserve_slot_for_descriptor_locked(slot_id)
+            self._reserve_slot_for_descriptor_locked(
+                slot_id=slot_id,
+                sequence_id=sequence_id,
+            )
+            return sequence_id
 
     def mark_sent(self, sequence_id: int) -> None:
         """Start the credit-return timeout clock after socket send."""
@@ -190,7 +197,18 @@ class SharedSlotRegistry:
         with self._condition:
             sequence_id = self._state.sequence_id
             self._state.sequence_id += 1
+            self._condition.notify_all()
             return sequence_id
+
+    def get_last_reserved_sequence_number(self) -> int:
+        """Return the most recently reserved shared-slot sequence number."""
+        with self._condition:
+            return self._state.sequence_id - 1
+
+    def has_in_flight_at_or_before(self, sequence_number: int) -> bool:
+        """Return True if any in-flight descriptor at or before sequence remains."""
+        with self._condition:
+            return any(seq <= sequence_number for seq in self._state.in_flight)
 
     def release_slot(self, shm_name: str, slot_id: int, sequence_id: int) -> bool:
         """Release one in-flight slot after a matching credit return arrives."""
@@ -328,8 +346,6 @@ class SharedSlotRegistry:
     def _apply_ready_message(self, ready: SharedSlotReadyModel) -> None:
         try:
             shm = SharedMemory(name=ready.shm_name, create=False)
-            # The daemon owns unlink() for this segment. This process only closes
-            # its local attachment, so opt out of resource_tracker cleanup here.
             try:
                 resource_tracker.unregister(
                     getattr(shm, "_name", shm.name), "shared_memory"
@@ -375,7 +391,7 @@ class SharedSlotRegistry:
         shm: SharedMemory,
         ready: SharedSlotReadyModel,
     ) -> None:
-        """Swap in a newly attached shared-memory region and mark the registry ready."""
+        """Swap in a newly attached shared-memory region and mark registry ready."""
         if self._state.shm is not None:
             self._state.shm.close()
         self._config = SharedSlotRegistryConfig(
@@ -455,13 +471,22 @@ class SharedSlotRegistry:
         self._state.free_slots.append(entry.slot_id)
         self._condition.notify_all()
 
-    def _reserve_slot_for_descriptor_locked(self, slot_id: int) -> int:
-        """Create in-flight tracking for a reserved slot."""
+    def _reserve_slot_for_descriptor_locked(
+        self,
+        slot_id: int,
+        sequence_id: int,
+    ) -> None:
+        """Create in-flight tracking for a reserved slot and sequence."""
         shm_name = self._state.shm_name
         if shm_name is None:
             raise RuntimeError("Shared-slot transport is not ready")
-        sequence_id = self._state.sequence_id
-        self._state.sequence_id += 1
+
+        if sequence_id < 0:
+            raise ValueError("sequence_id must be non-negative")
+
+        if sequence_id in self._state.in_flight:
+            raise RuntimeError(f"Shared-slot sequence already in flight: {sequence_id}")
+
         self._state.in_flight[sequence_id] = InFlightSlot(
             shm_name=shm_name,
             slot_id=int(slot_id),
@@ -472,13 +497,14 @@ class SharedSlotRegistry:
             self._state.max_in_flight_count,
             len(self._state.in_flight),
         )
-        return sequence_id
+        self._condition.notify_all()
 
     def _mark_descriptor_sent_locked(self, sequence_id: int) -> None:
         """Start the credit timeout clock for one in-flight descriptor."""
         entry = self._state.in_flight.get(sequence_id)
         if entry is None or entry.socket_sent_at is not None:
             return
+
         self._state.in_flight[sequence_id] = InFlightSlot(
             shm_name=entry.shm_name,
             slot_id=entry.slot_id,
@@ -486,10 +512,10 @@ class SharedSlotRegistry:
             reserved_at=entry.reserved_at,
             socket_sent_at=time.monotonic(),
         )
+        self._condition.notify_all()
 
     def _apply_slot_credit_locked(
         self,
-        *,
         shm_name: str,
         slot_id: int,
         sequence_id: int,
@@ -514,10 +540,12 @@ class SharedSlotRegistry:
                 self._state.max_ack_latency_s,
                 ack_latency_s,
             )
+
         self._state.last_acked_sequence_id = sequence_id
         self._state.acked_sequence_count += 1
         self._release_sequence_locked(sequence_id)
         self._state.last_credit_return_at = now
+        self._condition.notify_all()
         return True
 
     def _process_slot_credit_return(self, credit: SharedSlotCreditReturn) -> None:

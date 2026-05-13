@@ -24,9 +24,6 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.http_session import Session
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    ProducerChannel,
-)
 from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context,
 )
@@ -371,17 +368,19 @@ class Robot:
 
         for stream_id, stream in self._data_streams.items():
             try:
-                producer_channel = stream.get_producer_channel()
-                stream.stop_recording(wait_for_producer_drain=wait_for_producer_drain)
 
-                if isinstance(producer_channel, ProducerChannel):
-                    cutoff_sequence_number = (
-                        producer_channel.get_last_enqueued_sequence_number()
-                    )
+                (producer_channel, stop_cutoff_sequence_number) = (
+                    stream.prepare_recording_stopped()
+                )
 
-                    producer_stop_sequence_numbers[producer_channel.channel_id] = (
-                        cutoff_sequence_number
-                    )
+                producer_stop_sequence_numbers[producer_channel.channel_id] = (
+                    stop_cutoff_sequence_number
+                )
+
+                stream.stop_recording(
+                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
+                    wait_for_producer_drain=wait_for_producer_drain,
+                )
 
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)

@@ -12,7 +12,7 @@ from neuracore.data_daemon.communications_management.consumer.data_bridge import
     DataBridge,
 )
 from neuracore.data_daemon.communications_management.shared_transport import (
-    communications_manager,
+    CommunicationsManager,
 )
 from neuracore.data_daemon.config_manager.config import ConfigManager
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
@@ -46,7 +46,6 @@ from neuracore.data_daemon.services import DaemonServices
 from neuracore.data_daemon.tools.event_logger import EventLogger
 
 logger = logging.getLogger(__name__)
-CommunicationsManager = communications_manager.CommunicationsManager
 
 
 @dataclass
