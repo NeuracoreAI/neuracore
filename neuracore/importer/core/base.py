@@ -128,6 +128,7 @@ class NeuracoreDatasetImporter(ABC):
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
+        debug_target_ee_frame: str | None = None,
     ) -> None:
         """Initialize the base dataset importer.
 
@@ -149,6 +150,8 @@ class NeuracoreDatasetImporter(ABC):
                 on the recording filesystem reaches this value (bytes).
             random_sample: If set, import only this many items chosen at random.
             shared: Whether the dataset should be shared/open-source.
+            debug_target_ee_frame: Optional end-effector frame name used
+                to log target joint actions as end-effector poses for debugging.
         """
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
@@ -179,6 +182,7 @@ class NeuracoreDatasetImporter(ABC):
         self.suppress_warnings = suppress_warnings
         self.storage_limit = storage_limit
         self.random_sample = random_sample
+        self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
@@ -684,6 +688,28 @@ class NeuracoreDatasetImporter(ABC):
                         name,
                         timestamp,
                     )
+            elif (
+                relative_action_requested
+                and data_type == DataType.JOINT_TARGET_POSITIONS
+                and self.debug_target_ee_frame
+            ):
+                if self.robot_utils is None:
+                    raise ImporterError(
+                        "Failed to convert joint target positions to "
+                        "end effector pose: Robot utilities are not "
+                        "initialized"
+                    )
+                joint_target_end_effector_pose = (
+                    self.robot_utils.joint_positions_to_end_effector_pose(
+                        transformed_data, self.debug_target_ee_frame
+                    )
+                )
+                self._log_transformed_data(
+                    DataType.END_EFFECTOR_POSES,
+                    joint_target_end_effector_pose,
+                    "joint_target_end_effector_pose",
+                    timestamp,
+                )
             elif format.action_space == ActionSpaceConfig.END_EFFECTOR and (
                 absolute_action_requested or relative_action_requested
             ):

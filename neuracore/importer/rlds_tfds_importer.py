@@ -71,6 +71,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
+        debug_target_ee_frame: str | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -90,6 +91,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             random_sample: If set, import only this many episodes chosen at random.
             storage_limit: If set, pause when disk usage reaches this (bytes).
             shared: Whether the dataset should be shared/open-source.
+            debug_target_ee_frame: Optional end-effector frame name used
+                to log target joint actions as end-effector poses for debugging.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -105,6 +108,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             random_sample=random_sample,
             storage_limit=storage_limit,
             shared=shared,
+            debug_target_ee_frame=debug_target_ee_frame,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -565,6 +569,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         storage_limit: int = 5 * 1024**3,
         random_sample: int | None = None,
         shared: bool = False,
+        debug_target_ee_frame: str | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -584,6 +589,8 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             random_sample: If set, import only this many episodes chosen at random.
             storage_limit: If set, pause when disk usage reaches this (bytes).
             shared: Whether the dataset should be shared/open-source.
+            debug_target_ee_frame: Optional end-effector frame name used
+                to log target joint actions as end-effector poses for debugging.
         """
         super().__init__(
             input_dataset_name=input_dataset_name,
@@ -600,6 +607,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             random_sample=random_sample,
             storage_limit=storage_limit,
             shared=shared,
+            debug_target_ee_frame=debug_target_ee_frame,
         )
 
 
