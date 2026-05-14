@@ -12,7 +12,6 @@ import tempfile
 import zipfile
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
 
 import torch
 from neuracore_types import CrossEmbodimentDescription, ModelInitDescription
@@ -21,12 +20,23 @@ from omegaconf import OmegaConf
 from neuracore.ml.core.neuracore_model import NeuracoreModel
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.json_serialization import to_json_serializable
 from neuracore.ml.utils.preprocessing_utils import (
     PreprocessingConfiguration,
     resolve_preprocessing_config,
 )
 
 logger = logging.getLogger(__name__)
+
+ArchiveEntry = Path | list[Path]
+
+
+def _archive_path(extracted_files: dict[str, ArchiveEntry], key: str) -> Path:
+    """Return a single extracted file path by key."""
+    value = extracted_files[key]
+    if isinstance(value, list):
+        raise ValueError(f"Archive entry {key!r} contains multiple files.")
+    return value
 
 
 def _build_archive_metadata() -> dict[str, str | None]:
@@ -54,11 +64,11 @@ def _build_archive_metadata() -> dict[str, str | None]:
 def create_nc_archive(
     model: NeuracoreModel,
     output_dir: Path,
-    algorithm_config: dict = {},
-    input_cross_embodiment_description: dict[str, Any] = {},
-    output_cross_embodiment_description: dict[str, Any] = {},
-    input_preprocessing_config: PreprocessingConfiguration = {},
-    output_preprocessing_config: PreprocessingConfiguration = {},
+    algorithm_config: object | None = None,
+    input_cross_embodiment_description: object | None = None,
+    output_cross_embodiment_description: object | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
+    output_preprocessing_config: PreprocessingConfiguration | None = None,
 ) -> Path:
     """Create a Neuracore model archive (NC.ZIP) file from a Neuracore model.
 
@@ -99,22 +109,30 @@ def create_nc_archive(
 
         # Save model initialization description
         with open(temp_path / "model_init_description.json", "w") as f:
-            json.dump(model.model_init_description.model_dump(mode="json"), f, indent=2)
+            json.dump(to_json_serializable(model.model_init_description), f, indent=2)
 
         # Save algorithm config (always create file, even if empty)
         with open(temp_path / "algorithm_config.json", "w") as f:
-            json.dump(algorithm_config, f, indent=2)
+            json.dump(to_json_serializable(algorithm_config or {}), f, indent=2)
 
         # Save cross-embodiment descriptions
         with open(temp_path / "input_cross_embodiment_description.json", "w") as f:
-            json.dump(input_cross_embodiment_description, f, indent=2)
+            json.dump(
+                to_json_serializable(input_cross_embodiment_description or {}),
+                f,
+                indent=2,
+            )
         with open(temp_path / "output_cross_embodiment_description.json", "w") as f:
-            json.dump(output_cross_embodiment_description, f, indent=2)
+            json.dump(
+                to_json_serializable(output_cross_embodiment_description or {}),
+                f,
+                indent=2,
+            )
         with open(temp_path / "input_preprocessing_config.json", "w") as f:
             json.dump(
                 {
                     data_type.value: [m.to_dict() for m in methods]
-                    for data_type, methods in input_preprocessing_config.items()
+                    for data_type, methods in (input_preprocessing_config or {}).items()
                 },
                 f,
                 indent=2,
@@ -123,7 +141,9 @@ def create_nc_archive(
             json.dump(
                 {
                     data_type.value: [m.to_dict() for m in methods]
-                    for data_type, methods in output_preprocessing_config.items()
+                    for data_type, methods in (
+                        output_preprocessing_config or {}
+                    ).items()
                 },
                 f,
                 indent=2,
@@ -185,7 +205,7 @@ def create_nc_archive(
     return archive_path
 
 
-def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
+def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, ArchiveEntry]:
     """Extract all contents from a Neuracore model archive (NC.ZIP) file.
 
     Extracts all files from a NC.ZIP archive including model weights, algorithm code,
@@ -206,7 +226,7 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
         raise FileNotFoundError(f"Archive file not found: {archive_file}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    extracted_files: dict[str, Any] = {}
+    extracted_files: dict[str, ArchiveEntry] = {}
 
     with zipfile.ZipFile(archive_file, "r") as zip_ref:
         # Extract all files
@@ -236,9 +256,13 @@ def extract_nc_archive(archive_file: Path, output_dir: Path) -> dict[str, Path]:
             elif file_info.filename == "algorithm/requirements.txt":
                 extracted_files["algorithm_requirements"] = file_path
             elif file_info.filename.startswith("algorithm/"):
-                extracted_files.setdefault("algorithm_files", []).append(file_path)
+                algorithm_files = extracted_files.setdefault("algorithm_files", [])
+                if isinstance(algorithm_files, list):
+                    algorithm_files.append(file_path)
             else:
-                extracted_files.setdefault("other_files", []).append(file_path)
+                other_files = extracted_files.setdefault("other_files", [])
+                if isinstance(other_files, list):
+                    other_files.append(file_path)
 
     return extracted_files
 
@@ -278,9 +302,13 @@ def load_cross_embodiment_descriptions_from_nc_archive(
                 "output_cross_embodiment_description.json not found in archive"
             )
 
-        with open(extracted_files["input_cross_embodiment_description"]) as f:
+        with open(
+            _archive_path(extracted_files, "input_cross_embodiment_description")
+        ) as f:
             input_cross_embodiment_description = json.load(f)
-        with open(extracted_files["output_cross_embodiment_description"]) as f:
+        with open(
+            _archive_path(extracted_files, "output_cross_embodiment_description")
+        ) as f:
             output_cross_embodiment_description = json.load(f)
         return input_cross_embodiment_description, output_cross_embodiment_description
     finally:
@@ -334,7 +362,7 @@ def load_model_from_nc_archive(
         if "model_init_description" not in extracted_files:
             raise FileNotFoundError("model_init_description.json not found in archive")
 
-        with open(extracted_files["model_init_description"]) as f:
+        with open(_archive_path(extracted_files, "model_init_description")) as f:
             model_init_description = json.load(f)
         model_init_description = ModelInitDescription.model_validate(
             model_init_description
@@ -343,21 +371,27 @@ def load_model_from_nc_archive(
         # Load algorithm config if present
         algorithm_config = {}
         if "algorithm_config" in extracted_files:
-            with open(extracted_files["algorithm_config"]) as f:
+            with open(_archive_path(extracted_files, "algorithm_config")) as f:
                 algorithm_config = json.load(f)
 
         # Load cross-embodiment descriptions if present
         input_cross_embodiment_description = {}
         if "input_cross_embodiment_description" in extracted_files:
-            with open(extracted_files["input_cross_embodiment_description"]) as f:
+            with open(
+                _archive_path(extracted_files, "input_cross_embodiment_description")
+            ) as f:
                 input_cross_embodiment_description = json.load(f)
         output_cross_embodiment_description = {}
         if "output_cross_embodiment_description" in extracted_files:
-            with open(extracted_files["output_cross_embodiment_description"]) as f:
+            with open(
+                _archive_path(extracted_files, "output_cross_embodiment_description")
+            ) as f:
                 output_cross_embodiment_description = json.load(f)
         input_preprocessing_config: PreprocessingConfiguration = {}
         if "input_preprocessing_config" in extracted_files:
-            with open(extracted_files["input_preprocessing_config"]) as f:
+            with open(
+                _archive_path(extracted_files, "input_preprocessing_config")
+            ) as f:
                 input_preprocessing_config_serialized = json.load(f)
                 if input_preprocessing_config_serialized:
                     input_preprocessing_config = resolve_preprocessing_config(
@@ -369,7 +403,9 @@ def load_model_from_nc_archive(
                     )
         output_preprocessing_config: PreprocessingConfiguration = {}
         if "output_preprocessing_config" in extracted_files:
-            with open(extracted_files["output_preprocessing_config"]) as f:
+            with open(
+                _archive_path(extracted_files, "output_preprocessing_config")
+            ) as f:
                 output_preprocessing_config_serialized = json.load(f)
                 if output_preprocessing_config_serialized:
                     output_preprocessing_config = resolve_preprocessing_config(

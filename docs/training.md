@@ -99,23 +99,75 @@ neuracore/
 ```
 
 ## Training Command Examples
-**Note**: Passing `run_name` is optional. If you don't pass the `run_name`, the system will generate a random name. To better track the training experiment, we highly recommend you to pass a `run_name`. If a run with the same name already exists, training fails by default; set `run_name_auto_increment=true` to use an incremented name (e.g. `my_experiment_1`) instead.
+**Note**: Passing `training_name` is optional. If you don't pass the `training_name`, the system will generate a random name. To better track the training experiment, we highly recommend you to pass a `training_name`. If a training with the same name already exists, training fails by default; set `training_name_auto_increment=true` to use an incremented name (e.g. `my_experiment_1`) instead.
 ```bash
 # Basic training with Diffusion Policy
-python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset" run_name="my_experiment"
+python -m neuracore.ml.train algorithm=diffusion_policy dataset_name="my_dataset" training_name="my_experiment"
 
 # Train ACT with custom algorithm hyperparameters
-python -m neuracore.ml.train algorithm=act algorithm.lr=5e-4 algorithm.hidden_dim=1024 dataset_name="my_dataset" run_name="my_experiment"
+python -m neuracore.ml.train algorithm=act algorithm.lr=5e-4 algorithm.hidden_dim=1024 dataset_name="my_dataset" training_name="my_experiment"
 
 # Auto-tune batch size
-python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_name="my_dataset" run_name="my_experiment"
+python -m neuracore.ml.train algorithm=diffusion_policy batch_size=auto dataset_name="my_dataset" training_name="my_experiment"
 
 # Hyperparameter sweeps
-python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" run_name="my_experiment"
+python -m neuracore.ml.train --multirun algorithm=cnnmlp algorithm.lr=1e-4,5e-4,1e-3 algorithm.hidden_dim=256,512,1024 dataset_name="my_dataset" training_name="my_experiment"
 
 # Training with specified modalities
 python -m neuracore.ml.train algorithm=pi0 dataset_name="my_multimodal_dataset" input_cross_embodiment_description={"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...], "RGB_IMAGES": ["wrist_camera"], "LANGUAGE": ["task_instruction"]}}
-output_cross_embodiment_description={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} run_name="my_experiment"
+output_cross_embodiment_description={"my_robot": {"JOINT_TARGET_POSITIONS": ["joint_1", "joint_2", ...]}} training_name="my_experiment"
+```
+
+### Using a config file for training arguments
+
+Instead of passing every option on the command line, you can put your run arguments in a YAML file and ask Hydra to compose it with the default Neuracore training config.
+
+Create a config file in the `user` config group, for example `neuracore/ml/config/user/my_experiment.yaml`:
+
+```yaml
+# @package _global_
+
+training_name: my_experiment
+training_name_auto_increment: true
+
+dataset_name: my_dataset
+algorithm_name: diffusion_policy
+
+epochs: 100
+batch_size: auto
+frequency: 10
+validation_split: 0.2
+
+input_data_types:
+  - JOINT_POSITIONS
+  - RGB_IMAGES
+
+output_data_types:
+  - JOINT_TARGET_POSITIONS
+
+algorithm:
+  lr: 0.0005
+  hidden_dim: 1024
+```
+
+Then run training with:
+
+```bash
+python -m neuracore.ml.train user=my_experiment
+```
+
+You can still override any value from the command line. Command-line overrides take precedence over values in the YAML file:
+
+```bash
+python -m neuracore.ml.train user=my_experiment epochs=50 batch_size=32
+```
+
+If you want to keep config files outside the package directory, add the directory to Hydra's search path. The directory should contain a `user/` subdirectory:
+
+```bash
+mkdir -p configs/user
+# write configs/user/my_experiment.yaml
+python -m neuracore.ml.train --config-dir configs user=my_experiment
 ```
 
 ### Configuration management

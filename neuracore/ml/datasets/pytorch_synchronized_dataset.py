@@ -29,6 +29,7 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.utils.json_serialization import JsonValue, to_json_serializable
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
 from neuracore.ml.utils.preprocessing_utils import (
     PreprocessingConfiguration,
@@ -42,12 +43,10 @@ CHECK_MEMORY_INTERVAL = 100
 
 
 def _cacheable_cross_embodiment_description(
-    description: CrossEmbodimentDescription,
-) -> CrossEmbodimentDescription:
+    description: object,
+) -> JsonValue:
     """Return a JSON-serializable cross-embodiment description."""
-    if hasattr(description, "model_dump"):
-        return description.model_dump(mode="json")
-    return description
+    return to_json_serializable(description)
 
 
 class PytorchSynchronizedDataset(PytorchNeuracoreDataset):

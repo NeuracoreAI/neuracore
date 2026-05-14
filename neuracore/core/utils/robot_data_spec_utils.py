@@ -17,7 +17,6 @@ from neuracore_types import (
     DataType,
     EmbodimentDescription,
 )
-from omegaconf import DictConfig
 from ordered_set import OrderedSet
 
 from neuracore.core.auth import get_auth
@@ -37,39 +36,6 @@ def is_robot_id(string: str) -> bool:
         True if the identifier matches UUID format, False otherwise.
     """
     return bool(ID_REGEX.match(string))
-
-
-def convert_omegaconf_to_cross_embodiment_description(
-    cross_embodiment_cfg: DictConfig,
-) -> CrossEmbodimentDescription:
-    """Converts string representations of data types to DataType enums.
-
-    Takes a dictionary mapping robot names to dictionaries of
-    data type strings and their associated item names,
-    and converts the data type strings to DataType enums.
-
-    Args:
-        cross_embodiment_cfg: A dictionary where keys are robot names and
-            values are dictionaries mapping data type strings to lists of item names.
-
-    Returns:
-        A dictionary where keys are robot ids/name and values are dictionaries
-            mapping DataType
-        to a dict of index to item name.
-    """
-    result: CrossEmbodimentDescription = {}
-    for embodiment, embodiment_values in cross_embodiment_cfg.items():
-        result[embodiment] = {}
-        for data_type_str, item_names in embodiment_values.items():
-            try:
-                data_type_enum = DataType(data_type_str)
-            except ValueError:
-                raise ValueError(
-                    f"Invalid data type '{data_type_str}' for robot '{embodiment}'. "
-                    f"Expected one of {[data_type.value for data_type in DataType]}."
-                )
-            result[embodiment][data_type_enum] = dict(item_names)
-    return result
 
 
 def convert_cross_embodiment_description_names_to_ids(

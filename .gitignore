@@ -114,6 +114,7 @@ MUJOCO_LOG.TXT
 *.nc.zip
 
 logs/
+outputs/
 examples/logs/
 *.log
 *.log.gz

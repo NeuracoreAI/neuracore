@@ -1,17 +1,49 @@
 defaults:
   - _self_
+  - optional user: null
   - algorithm: null
   - override hydra/launcher: basic
-  
+
+training_name:
+training_name_auto_increment: false
+training_id: null
+
+org_id: null
+
+# Only one of the below needs to be provided.
+dataset_name:
+dataset_id:
+
+# Only one of the below needs to be provided.
+algorithm_name:
+algorithm_id:
+
+algorithm_params: null
 
 # Core training parameters
 seed: 42
 epochs: 100
 output_prediction_horizon: 100
 validation_split: 0.2
+frequency: 10
+allow_duplicates: true
+
+# Resume training
+resume_checkpoint_path: null  # Path to checkpoint to resume from
+
 logging_frequency: 50
-keep_last_n_checkpoints: 2 
+keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
+
+input_data_types:
+output_data_types:
+
+input_cross_embodiment_description: {
+
+}
+output_cross_embodiment_description: {
+
+}
 
 # Batch size (can be "auto" for automatic tuning or an integer)
 batch_size: "auto"
@@ -22,31 +54,8 @@ num_val_workers: 1
 # Maximum number of workers to use for prefetching recordings
 max_prefetch_workers: 4
 
-# Dataset synchronization
-dataset_name: null
-dataset_id: null
-frequency: 10
-allow_duplicates: true
 max_delay_s: null
 trim_start_end: true
-
-# You can either specify input_data_types/output_data_types or
-# input_cross_embodiment_description/output_cross_embodiment_description
-input_data_types:
-  - "JOINT_POSITIONS"
-  - "RGB_IMAGES"
-
-output_data_types:
-  - "JOINT_TARGET_POSITIONS"
-
-# Dict[str, Dict[DataType, List[str]], e.g., {"my_robot": {"JOINT_POSITIONS": ["joint_1", "joint_2", ...]}}
-# You can also pass in an empty dict {} to use all available data for all robots
-input_cross_embodiment_description: {
-
-}
-output_cross_embodiment_description: {
-
-}
 
 # Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
 # for images, we must have a resize step to reshape all images from different sources to the same size.
@@ -66,22 +75,8 @@ preprocessing:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
         size: [224, 224]
 
-# Paths and IDs (for cloud vs local training)
-algorithm_id: null    # For cloud training
-training_id: null     # For cloud training
-org_id: null          # For cloud training
-run_name: null        # Optional name for the training run. If not provided, a two-word random name will be generated.
-run_name_auto_increment: false  # If true, when run_name already exists use run_name_1, run_name_2, etc. If false (default), fail when run_name exists.
-
 # Output directory (generated dynamically with the resolver)
-local_output_dir: ${resolve_output_dir:${run_name},${run_name_auto_increment}}
-
-# Custom algorithm parameters (used when algorithm_id is provided)
-# These will be passed directly to the algorithm constructor
-algorithm_params: null
-
-# Resume training
-resume_checkpoint_path: null  # Path to checkpoint to resume from
+local_output_dir: ${resolve_output_dir:${training_name},${training_name_auto_increment}}
 
 # Hydra configuration
 hydra:
