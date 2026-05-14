@@ -100,7 +100,7 @@ CNNMLP_CONFIG = {
 }
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
-TRAINING_ERROR_LOG_MAX_ENTRIES = 100
+TRAINING_ERROR_LOG_MAX_ENTRIES = 10_000
 
 # A batch_size value that is not "auto" and not parseable as an integer.
 # It passes client-side validation (which only checks data types / algorithm
