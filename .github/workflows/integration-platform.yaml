@@ -4,12 +4,20 @@ on:
   schedule:
     - cron: "0 0 * * *"
   workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, tag, or branch to test. Leave empty to use the current branch (staging) and latest release tag (production)."
+        required: false
+        type: string
+        default: ""
 
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
     - uses: actions/setup-python@v4
       with:
         python-version: '3.11'
@@ -52,14 +60,32 @@ jobs:
         echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
         echo "Latest release tag: $latest_release_tag"
 
+    - name: Resolve test harness ref
+      id: harness-ref
+      env:
+        INPUT_REF: ${{ inputs.ref }}
+        RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
+        ENVIRONMENT: ${{ matrix.environment }}
+        BRANCH_REF: ${{ github.ref_name }}
+      run: |
+        if [ -n "$INPUT_REF" ]; then
+          harness_ref="$INPUT_REF"
+        elif [ "$ENVIRONMENT" = "production" ]; then
+          harness_ref="$RELEASE_TAG"
+        else
+          harness_ref="$BRANCH_REF"
+        fi
+        echo "harness_ref=$harness_ref" >> "$GITHUB_OUTPUT"
+        echo "Resolved test harness ref: $harness_ref"
+
     - name: Checkout test harness
       uses: actions/checkout@v4
       with:
-        ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}
+        ref: ${{ steps.harness-ref.outputs.harness_ref }}
         fetch-depth: 0
 
     - name: Verify production test harness ref
-      if: ${{ matrix.environment == 'production' }}
+      if: ${{ matrix.environment == 'production' && inputs.ref == '' }}
       run: |
         checked_out_ref="$(git describe --tags --exact-match HEAD)"
         expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
@@ -88,7 +114,7 @@ jobs:
     - name: Resolve test harness
       run: |
         echo "Test harness environment: ${{ matrix.environment }}"
-        echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}"
+        echo "Test harness ref: ${{ steps.harness-ref.outputs.harness_ref }}"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness paths:"
         echo "  tests/integration/platform/test_runtime_data_flow.py"
