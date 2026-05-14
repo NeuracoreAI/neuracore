@@ -191,6 +191,7 @@ def test_model_backward(
                 ).all(), f"Parameter {name} has non-finite gradients"
 
 
+@pytest.mark.slow
 def test_run_validation(tmp_path: Path, mock_login, monkeypatch, Pi05):  # noqa: N803
     from neuracore.ml.utils import validate as validate_module
 
