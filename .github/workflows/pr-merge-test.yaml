@@ -1,0 +1,46 @@
+name: PR Merge Test
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'neuracore/ml/**'
+      - 'neuracore/core/**'
+      - 'tests/unit/ml/**'
+      - 'tests/unit/conftest.py'
+      - 'neuracore/__init__.py'
+      - 'setup.py'
+      - '.github/workflows/pr-merge-test.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test-ml-slow:
+    runs-on: ubuntu-latest
+    env:
+      UV_VENV_SEED: "true"
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.10", "3.11"]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "setup.py"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Python dependencies
+        run: uv pip install ".[dev,ml]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+
+      - name: Run slow ML unit tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run pytest tests/unit/ml -m "slow"

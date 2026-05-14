@@ -7,7 +7,6 @@ on:
   push:
     branches:
       - main
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -156,4 +155,4 @@ jobs:
         if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run pytest tests/unit/ml
+        run: uv run pytest tests/unit/ml -m "not slow"
