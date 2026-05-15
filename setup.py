@@ -91,6 +91,7 @@ setup(
         "dev": [
             "pytest>=6.2.5",
             "pytest-cov>=2.12.1",
+            "diff-cover",
             "pytest-asyncio>=0.15.1",
             "pytest-xdist",
             "twine>=3.4.2",

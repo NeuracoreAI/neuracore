@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   detect-changes:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     outputs:
       ml: ${{ steps.filter.outputs.ml }}
       non-ml: ${{ steps.filter.outputs.non-ml }}
@@ -43,7 +43,7 @@ jobs:
               - '.pre-commit-config.yaml'
 
   pre-commit:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.10", "3.11"]
@@ -56,15 +56,17 @@ jobs:
 
   test-non-ml:
     needs: [detect-changes, pre-commit]
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.11"]
+        package-manager: [uv, pip]
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
-      SHOULD_RUN_COVERAGE: ${{ matrix.python-version == '3.11' }}
+      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11' && matrix.package-manager == 'uv' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
@@ -72,8 +74,14 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up uv
+      - name: Set up Python
         if: env.SHOULD_RUN == 'true'
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up uv
+        if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'uv'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -83,9 +91,15 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          uv pip install ".[dev,import]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
-          if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
-            uv pip install pytest-cov diff-cover
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            EXTRAS=".[dev]"
+          else
+            EXTRAS=".[dev,import]"
+          fi
+          if [ "${{ matrix.package-manager }}" = "uv" ]; then
+            uv pip install "${EXTRAS}" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+          else
+            pip install "${EXTRAS}" --extra-index-url https://download.pytorch.org/whl/cpu
           fi
 
       - name: Run non-ML unit tests
@@ -93,16 +107,28 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ matrix.package-manager }}" = "uv" ]; then
+            PYTEST="uv run pytest"
+          else
+            PYTEST="pytest"
+          fi
+          # Importer tests require pinocchio, which only publishes manylinux wheels
+          IGNORE="--ignore=tests/unit/ml"
+          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+            IGNORE="${IGNORE} --ignore=tests/unit/importer"
+          fi
+          PYTEST_ARGS="-sv -o log_cli=true --log-cli-level=INFO"
           if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
-            uv run pytest tests/unit \
-              --ignore=tests/unit/ml \
+            ${PYTEST} tests/unit \
+              ${IGNORE} \
+              ${PYTEST_ARGS} \
               --cov=neuracore \
               --junitxml=pytest.xml \
               --cov-report=term-missing:skip-covered \
               --cov-report=xml \
               | tee pytest-coverage.txt
           else
-            uv run pytest tests/unit --ignore=tests/unit/ml
+            ${PYTEST} tests/unit ${IGNORE} ${PYTEST_ARGS}
           fi
 
       - name: Generate diff coverage
@@ -124,9 +150,20 @@ jobs:
             pytest.xml
             diff-cover.json
             
+  test-non-ml-complete:
+    needs: [test-non-ml]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check all matrix jobs passed
+        run: |
+          if [ "${{ needs.test-non-ml.result }}" != "success" ]; then
+            exit 1
+          fi
+
   test-ml:
     needs: [detect-changes, pre-commit]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
@@ -155,4 +192,4 @@ jobs:
         if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run pytest tests/unit/ml -m "not slow"
+        run: uv run pytest tests/unit/ml -m "not slow" -sv -o log_cli=true --log-cli-level=INFO
