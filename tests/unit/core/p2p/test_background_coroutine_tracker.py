@@ -43,6 +43,7 @@ async def _dummy_coroutine():
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
 async def test_handles_closed_event_loop(caplog):
     """
     Verify that submitting a coroutine to a closed loop is handled gracefully.

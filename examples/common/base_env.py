@@ -2,22 +2,23 @@
 
 import mujoco
 import numpy as np
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class CameraData(BaseModel):
     """Camera observation data structure."""
 
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     rgb: np.ndarray
     depth: np.ndarray | None = None
     point_cloud: np.ndarray | None = None
 
-    class Config:
-        arbitrary_types_allowed = True
-
 
 class Observation(BaseModel):
     """Complete observation structure for bimanual robot tasks."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     qpos: dict[str, float]
     qvel: dict[str, float]
@@ -29,9 +30,6 @@ class Observation(BaseModel):
     reward: float | None = None
     end_effector_poses: dict[str, list[float]] | None = None
     gripper_open_amounts: dict[str, float] | None = None
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 class MuJoCoEnvironment:

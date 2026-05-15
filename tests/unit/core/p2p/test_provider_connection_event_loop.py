@@ -88,6 +88,7 @@ def video_source(nc_loop):
     return VideoSource(stream_enabled=enabled, mid="video-0")
 
 
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_caller_event_loop_not_overwritten_when_adding_event_source(
     provider_connection, json_source, nc_loop
 ):
@@ -128,6 +129,7 @@ def test_caller_event_loop_not_overwritten_when_adding_video_source(
         main_loop.close()
 
 
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_add_event_source_from_thread_with_no_loop(
     provider_connection, json_source, nc_loop
 ):
@@ -154,6 +156,7 @@ def test_add_event_source_from_thread_with_no_loop(
     assert result["done"] is True
 
 
+@pytest.mark.filterwarnings("ignore::RuntimeWarning")
 def test_add_event_source_from_main_with_own_loop(
     provider_connection, json_source, nc_loop
 ):

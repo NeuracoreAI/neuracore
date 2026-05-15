@@ -42,7 +42,6 @@ def callback(
         help="Show the neuracore version and exit.",
         callback=_version_callback,
         is_eager=True,
-        is_flag=True,
     ),
 ) -> None:
     """Handle global CLI option for --version."""

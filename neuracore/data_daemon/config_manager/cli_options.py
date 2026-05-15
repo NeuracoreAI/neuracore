@@ -115,7 +115,6 @@ BackgroundOption = Annotated[
     typer.Option(
         "--background",
         help="Run the daemon in the background without terminal output.",
-        is_flag=True,
     ),
 ]
 
@@ -124,6 +123,5 @@ DebugOption = Annotated[
     typer.Option(
         "--debug",
         help="Enable debug mode.",
-        is_flag=True,
     ),
 ]

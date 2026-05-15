@@ -59,6 +59,7 @@ class BackgroundCoroutineTracker:
         """
         if self.loop.is_closed():
             logger.warning("Cannot submit coroutine; event loop is closed.")
+            coroutine.close()
             return
 
         def _submit_coroutine(coroutine: Coroutine) -> None:
