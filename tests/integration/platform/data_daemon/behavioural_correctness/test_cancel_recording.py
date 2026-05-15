@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -71,6 +72,7 @@ def test_cancel_recording_produces_no_data(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Verify that cancelling a recording discards all logged data."""
     if not has_configured_org():
@@ -83,7 +85,6 @@ def test_cancel_recording_produces_no_data(
     specs = build_context_specs(case, dataset_name=dataset_name)
     spec = specs[0]
     robot_name = spec.robot_name
-    test_wall_start = time.perf_counter()
 
     try:
         with scoped_storage_state(case, dataset_name=dataset_name):
@@ -133,7 +134,7 @@ def test_cancel_recording_produces_no_data(
             request=request,
             case=case,
             results=[],
-            test_wall_s=time.perf_counter() - test_wall_start,
+            test_wall_s=test_wall_timer(),
         )
 
     assert_post_test_storage_state(case.storage_state_action)
@@ -146,6 +147,7 @@ def test_cancel_then_start_new_recording(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Verify a valid recording succeeds after cancelling a prior one.
 
@@ -163,7 +165,6 @@ def test_cancel_then_start_new_recording(
     spec = specs[0]
     robot_name = spec.robot_name
     results: list[ContextResult] = []
-    test_wall_start = time.perf_counter()
 
     try:
         with scoped_storage_state(case, dataset_name=dataset_name):
@@ -253,5 +254,5 @@ def test_cancel_then_start_new_recording(
             case=case,
             results=results,
             label_prefix="no_gap" if gap_s == 0 else f"{gap_s}s_gap",
-            test_wall_s=time.perf_counter() - test_wall_start,
+            test_wall_s=test_wall_timer(),
         )

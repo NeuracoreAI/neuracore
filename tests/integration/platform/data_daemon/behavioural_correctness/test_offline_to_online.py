@@ -1,4 +1,4 @@
-import time
+from collections.abc import Callable
 
 import pytest
 
@@ -53,6 +53,7 @@ def test_offline_pending_data_recovers_when_online(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Verify offline recordings are correctly uploaded when the daemon goes online.
 
@@ -72,7 +73,6 @@ def test_offline_pending_data_recovers_when_online(
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
-    test_wall_start = time.perf_counter()
 
     try:
         with scoped_storage_state(case, dataset_name=dataset_name):
@@ -95,5 +95,5 @@ def test_offline_pending_data_recovers_when_online(
             request=request,
             case=case,
             results=results,
-            test_wall_s=time.perf_counter() - test_wall_start,
+            test_wall_s=test_wall_timer(),
         )

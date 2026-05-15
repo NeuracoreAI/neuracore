@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 import neuracore as nc
@@ -45,6 +47,7 @@ def test_cloud_upload_and_readiness_performance(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     log_run_analysis_on_teardown,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Record a high-volume online workload and verify cloud upload timing.
 
@@ -75,4 +78,4 @@ def test_cloud_upload_and_readiness_performance(
                     timeout_s=case_timeout_seconds(case),
                 )
         finally:
-            log_run_analysis_on_teardown(case, results)
+            log_run_analysis_on_teardown(case, results, test_wall_s=test_wall_timer())

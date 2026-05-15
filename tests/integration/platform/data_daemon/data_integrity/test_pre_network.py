@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+from collections.abc import Callable
 
 import pytest
 
@@ -55,6 +55,7 @@ def test_disk_db_data_integrity(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Record data in offline mode and verify local disk and DB state.
 
@@ -75,7 +76,6 @@ def test_disk_db_data_integrity(
 
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
-    test_wall_start = time.perf_counter()
     specs = build_context_specs(case, dataset_name=dataset_name)
     with scoped_storage_state(case, dataset_name=dataset_name):
         try:
@@ -90,5 +90,5 @@ def test_disk_db_data_integrity(
                 request=request,
                 case=case,
                 results=results,
-                test_wall_s=time.perf_counter() - test_wall_start,
+                test_wall_s=test_wall_timer(),
             )
