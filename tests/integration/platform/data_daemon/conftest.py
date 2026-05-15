@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 
 import pytest
@@ -99,22 +100,35 @@ def clear_daemon_timer_stats() -> None:
 
 
 @pytest.fixture()
+def test_wall_timer() -> Callable[[], float]:
+    """Return a callable that computes elapsed wall time since test start."""
+    start = time.perf_counter()
+    return lambda: time.perf_counter() - start
+
+
+@pytest.fixture()
 def log_run_analysis_on_teardown(
     request: pytest.FixtureRequest,
-) -> Callable[[DataDaemonTestCase, list[ContextResult]], None]:
+) -> Callable[[DataDaemonTestCase, list[ContextResult], float | None], None]:
     """Register case+results to be passed to log_run_analysis at teardown."""
-    state: dict[str, object] = {}
+    state: dict[str, any] = {}
 
-    def register(case: DataDaemonTestCase, results: list[ContextResult]) -> None:
+    def register(
+        case: DataDaemonTestCase,
+        results: list[ContextResult],
+        test_wall_s: float | None = None,
+    ) -> None:
         state["case"] = case
         state["results"] = results
+        state["test_wall_s"] = test_wall_s
 
     def finalizer() -> None:
         if state.get("results"):
             try:
                 request.node.run_analysis_report = build_isolation_run_analysis(
-                    case=state["case"],  # type: ignore[arg-type]
-                    results=state["results"],  # type: ignore[arg-type]
+                    case=state["case"],
+                    results=state["results"],
+                    test_wall_s=state.get("test_wall_s"),
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -140,8 +154,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     all_labels = sorted({label for run in SESSION_RUNS for label in run["timer_stats"]})
     for run in SESSION_RUNS:
         dataset_suffix = (
-            f"  dataset={run['dataset_name']!r}" if run.get("dataset_name") else ""
-        )
+            run.get("label_prefix") + "  " if run.get("label_prefix") else ""
+        ) + (f"  dataset={run['dataset_name']!r}" if run.get("dataset_name") else "")
         ctx_parts = "  ".join(
             f"ctx[{c['context_index']}]={c['wall_s']:.1f}s"
             for c in sorted(run["context_results"], key=lambda c: c["context_index"])

@@ -509,12 +509,13 @@ def wait_for_dataset_ready(
     """
     wait_start = time.perf_counter()
     last_error: Exception | None = None
-
+    recording_count: int | None = None
     while True:
         elapsed_s = time.perf_counter() - wait_start
         try:
             dataset = nc.get_dataset(dataset_name)
-            if len(dataset) >= expected_recording_count:
+            recording_count = len(dataset)
+            if recording_count >= expected_recording_count:
                 return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -522,7 +523,9 @@ def wait_for_dataset_ready(
         if elapsed_s >= timeout_s:
             raise TimeoutError(
                 f"Timed out waiting for dataset '{dataset_name}' to have "
-                f"{expected_recording_count} recording(s) after {timeout_s}s"
+                f"{expected_recording_count} recording(s) after {timeout_s}s. "
+                f"Has {recording_count if recording_count is not None else 0} "
+                f"recording(s)."
             ) from last_error
 
         time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed_s)))

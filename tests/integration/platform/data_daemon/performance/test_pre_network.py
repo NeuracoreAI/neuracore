@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -39,6 +41,7 @@ def test_disk_db_write_performance(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     log_run_analysis_on_teardown,
+    test_wall_timer: Callable[[], float],
 ) -> None:
     """Record a high-volume offline workload and verify trace write timing.
 
@@ -58,4 +61,6 @@ def test_disk_db_write_performance(
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs, wait_for_traces=True)
             finally:
-                log_run_analysis_on_teardown(case, results)
+                log_run_analysis_on_teardown(
+                    case, results, test_wall_s=test_wall_timer()
+                )
