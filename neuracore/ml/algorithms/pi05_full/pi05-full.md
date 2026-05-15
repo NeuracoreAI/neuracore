@@ -43,22 +43,12 @@ The mechanical changes are:
 
 6. **`finetune_action_expert_only` tightened** to set `requires_grad=False` on VLM parameters (small fix to inherited code so Stage 2 saves backward compute and memory).
 
-7. **New `DataType.SUBTASK_LANGUAGE`** added to `neuracore_types`. Same shape and serialization as `DataType.LANGUAGE`, distinct enum value.
 
 What does **not** change: pretrained weights initialization (`lerobot/pi05_base`), `transformers_replace` patches (adaRMS, gated residuals, SigLIP), image preprocessing, state discretization in prompt, time sampling, sinusoidal time embedding, Euler denoiser, optimizer/scheduler, gradient checkpointing, torch.compile path, output type plumbing for joints/gripper.
 
 ## 2. Architecture
 
 ### File map
-
-`neuracore_types/` (separate package, additions only):
-
-```
-neuracore_types/nc_data/subtask_language_data.py             NEW
-neuracore_types/batched_nc_data/batched_subtask_language_data.py   NEW
-neuracore_types/nc_data/__init__.py                          EDIT
-neuracore_types/batched_nc_data/__init__.py                  EDIT
-```
 
 `neuracore/ml/algorithms/pi05_full/` (currently a copy of pi05; will diverge):
 
