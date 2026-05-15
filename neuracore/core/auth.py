@@ -13,7 +13,7 @@ import requests
 from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import get_session
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 from .const import API_URL
@@ -57,11 +57,10 @@ class Auth(metaclass=SingletonMetaclass):
 
         # Verify API key with server and get access token
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/auth/verify-api-key",
-                    json={"api_key": api_key},
-                )
+            response = get_session().post(
+                f"{API_URL}/auth/verify-api-key",
+                json={"api_key": api_key},
+            )
             if response.status_code != 200:
                 raise AuthenticationError(
                     "Could not verify API key. Please check your key and try again."
@@ -135,11 +134,10 @@ class Auth(metaclass=SingletonMetaclass):
         # Placeholder for version validation logic
         from neuracore_types import __version__ as nc_types_version
 
-        with Session() as session:
-            response = session.get(
-                f"{API_URL}/auth/verify-version",
-                params={"version": nc_types_version},
-            )
+        response = get_session().get(
+            f"{API_URL}/auth/verify-version",
+            params={"version": nc_types_version},
+        )
         if response.status_code != 200:
             raise AuthenticationError(
                 f"Version validation failed: {response.json().get('detail')}"

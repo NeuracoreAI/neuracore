@@ -27,7 +27,7 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import get_session
 from neuracore.core.utils.robot_data_spec_utils import (
     resolve_embodiment_descriptions_with_override,
 )
@@ -227,12 +227,11 @@ def deploy_model(
         config=DeploymentConfig(gpu_type=gpu_type),
     ).model_dump(mode="json")
     try:
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{org_id}/models/deploy",
-                headers=auth.get_headers(),
-                json=payload,
-            )
+        response = get_session().post(
+            f"{API_URL}/org/{org_id}/models/deploy",
+            headers=auth.get_headers(),
+            json=payload,
+        )
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -263,11 +262,10 @@ def get_endpoint_status(endpoint_id: str) -> str:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        with Session() as session:
-            response = session.get(
-                f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
-                headers=auth.get_headers(),
-            )
+        response = get_session().get(
+            f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
+            headers=auth.get_headers(),
+        )
         response.raise_for_status()
         return response.json()["status"]
     except Exception as e:
@@ -297,11 +295,10 @@ def delete_endpoint(endpoint_id: str) -> None:
     auth = get_auth()
     org_id = get_current_org()
     try:
-        with Session() as session:
-            response = session.delete(
-                f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
-                headers=auth.get_headers(),
-            )
+        response = get_session().delete(
+            f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
+            headers=auth.get_headers(),
+        )
         response.raise_for_status()
     except Exception as e:
         raise ValueError(f"Error deleting endpoint: {e}")

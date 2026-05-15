@@ -15,7 +15,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import get_session
 
 TRACE_FILE = "trace.json"
 
@@ -55,12 +55,11 @@ class BucketUploader(ABC):
 
         org_id = get_current_org()
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces",
-                    json={"data_type": data_type.value},
-                    headers=get_auth().get_headers(),
-                )
+            response = get_session().post(
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces",
+                json={"data_type": data_type.value},
+                headers=get_auth().get_headers(),
+            )
             response.raise_for_status()
             body = response.json()
             return body.get("id")
@@ -96,12 +95,11 @@ class BucketUploader(ABC):
 
         org_id = get_current_org()
         try:
-            with Session() as session:
-                session.put(
-                    f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces/{trace_id}",
-                    json=data_trace_payload,
-                    headers=get_auth().get_headers(),
-                )
+            get_session().put(
+                f"{API_URL}/org/{org_id}/recording/{self.recording_id}/traces/{trace_id}",
+                json=data_trace_payload,
+                headers=get_auth().get_headers(),
+            )
         except requests.exceptions.RequestException:
             pass
 
