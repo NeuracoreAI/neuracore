@@ -381,7 +381,7 @@ enum Response { Ack { sequence: u64 }, Err { code: String, message: String } }
 
 **Backpressure**: iceoryx2 publishers have a configurable queue depth per subscriber. When the daemon is slow, the SDK's `loan` blocks (or returns `LoanError::ExceedsMaxLoanedSamples`) — natural backpressure without manual slot accounting.
 
-**Discovery & lifecycle**: daemon creates a `Node` named `neuracore-data-daemon-{pid}` and the three services on startup. SDK opens by name. On daemon shutdown, the node is `drop`ped, which `iceoryx2` cleans up (discovery files removed). On SIGKILL, stale node files are reaped by iceoryx2's automatic dead-node detection (next daemon start triggers reclamation). The integration tests' "socket unlinked" assertion ([test_signal_cleanup.py](tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py)) is rewritten to check "no `iceoryx2` node files remain under the daemon's node prefix" — same shape of assertion, different artefact.
+**Discovery & lifecycle**: daemon creates a `Node` named `neuracore-data-daemon-{pid}` and the three services as part of Phase 4 (the IPC bring-up was originally pencilled into Phase 2 but deferred so the producer rewrite, dispatcher, and service creation can land together). SDK opens by name. On daemon shutdown, the node is `drop`ped, which `iceoryx2` cleans up (discovery files removed). On SIGKILL, stale node files are reaped by iceoryx2's automatic dead-node detection (next daemon start triggers reclamation). The integration tests' "socket unlinked" assertion ([test_signal_cleanup.py](tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py)) is rewritten to check "no `iceoryx2` node files remain under the daemon's node prefix" — same shape of assertion, different artefact — and the IPC-shaped assertions are gated to Phase 4.
 
 **SDK producer rewrite scope.** [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) and its companions are rewritten on top of [iceoryx2's Python bindings](https://iceoryx.io/v2.0.5/getting-started/examples/python/) (`iceoryx2-py`). The producer-side public API (`ProducerChannel.send_batched_data`, etc.) is preserved so [neuracore/core/streaming/data_stream.py](neuracore/core/streaming/data_stream.py) is unaffected. Risk: iceoryx2's Python binding is younger than the Rust API; mitigation noted in "Open items".
 
@@ -475,12 +475,11 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 - `lifecycle/daemonize.rs`: double-fork + setsid for `--background`; foreground mode for non-background.
 - `lifecycle/pidfile.rs`: `flock` on the PID file path from `NEURACORE_DAEMON_PID_PATH`; write PID; clean up on shutdown.
 - `lifecycle/signals.rs`: install SIGTERM and SIGINT handlers that fire a `tokio::sync::broadcast::Sender<()>` shutdown signal.
-- `lifecycle/recovery.rs`: on startup, sweep iceoryx2 dead-node files left by a previous SIGKILL (via iceoryx2's `Node::cleanup_dead_nodes`); check for orphan trace dirs.
-- Bring up an iceoryx2 `Node` and create the three services (`commands`, `scalars`, `frames/*`) so producer-side readiness probes can complete. No-op handlers at this phase — accept but discard.
+- `lifecycle/recovery.rs`: on startup, sweep a stale PID file left by a previous SIGKILL (next acquire also recovers via `flock` alone, but eager cleanup keeps `status` / external diagnostics accurate). The iceoryx2 dead-node sweep lands in Phase 4 alongside the actual `Node` bring-up; until then `cleanup_stale_ipc` is a no-op placeholder.
 
-**Deliverable:** `launch --background` returns, prints PID; `stop` sends SIGTERM and cleans up PID + iceoryx2 node files; `status` reads PID file and reports.
+**Deliverable:** `launch --background` returns, prints PID; `stop` sends SIGTERM and cleans up the PID file; `status` reads PID file and reports.
 
-**Test gate:** all 14 tests in [test_signal_cleanup.py](tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py) pass — CLI stop, SIGTERM, SIGINT, SIGKILL recovery, restart idempotency, etc. The socket-cleanup assertions are migrated to iceoryx2-node assertions in the same PR.
+**Test gate:** the lifecycle-only cases in [test_signal_cleanup.py](tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py) pass — CLI stop, SIGTERM, SIGINT, SIGKILL recovery, restart idempotency, etc. The iceoryx2-node assertions migrate alongside the Phase 4 IPC bring-up (see below); any assertion that requires a live IPC service is gated on Phase 4 in the meantime.
 
 **Check:** `pytest tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py -x` is green.
 
@@ -501,9 +500,9 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 ### Phase 4 — IPC + per-trace pipeline (3–4 days)
 
 **Build:**
-- `ipc/server.rs`: `UnixListener`, per-connection task with `LengthDelimitedCodec`. Hello/handshake.
-- `ipc/envelope.rs`: serde types for commands and ACKs.
-- `ipc/frame_ring.rs`: `memmap2`-backed shared memory; `OpenSharedSlots` allocates region; producer can mmap by name. Slot reservation / release / ACK.
+- Bring up the iceoryx2 `Node` (`neuracore-data-daemon-{pid}`) and create the three services (`commands`, `scalars`, `frames/<WxH>`) — originally slated for Phase 2 but deferred here so the IPC, dispatcher, and producer rewrite land together.
+- `lifecycle/recovery.rs`: extend `cleanup_stale_ipc` to call `Node::cleanup_dead_nodes` and reap any discovery files left by a SIGKILL'd predecessor.
+- `ipc/node.rs`, `ipc/services.rs`, `ipc/envelope.rs`: serde types for commands and ACKs; service name conventions.
 - `pipeline/dispatcher.rs`: `DashMap<TraceKey, mpsc::Sender<TraceMessage>>`; on first message, spawn trace_actor.
 - `pipeline/trace_actor.rs`: skeletal — receives messages, logs them, updates DB row, sends ACK back. No encoding yet.
 - Rewrite the Python producer ([neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py)) to speak the new protocol. Keep the public API the same.
@@ -584,7 +583,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 Two visible signals each week:
 
-1. **Test gate position.** The number of integration tests passing must monotonically increase across phases: 0 → 14 (after phase 2) → 14 (after phase 4, internal phase) → 16 (after phase 5, +8 data-integrity-pre-network not counted as 8 separate tests; really +1 in pytest test-count terms, but +8 parametrized cases) → ~17 → 18. Track via the same CI job that runs the integration tests today.
+1. **Test gate position.** The number of integration tests passing must monotonically increase across phases: 0 → lifecycle-only cases of `test_signal_cleanup.py` (after phase 2; the iceoryx2-shaped assertions in that file gate on phase 4) → all 14 of `test_signal_cleanup.py` (after phase 4) → +1 in pytest test-count terms but +8 parametrized cases for `test_pre_network.py::test_disk_db_data_integrity` (after phase 5) → ~17 → 18. Track via the same CI job that runs the integration tests today.
 2. **Phase deliverable demo.** Each phase ends with a recorded demo: phase 2 = signal cleanup loop; phase 4 = Python smoke-test producer talking to Rust daemon; phase 5 = on-disk file diff against Python daemon output; phase 6 = first dataset on staging.
 
 Red flags:
