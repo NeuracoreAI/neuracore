@@ -117,7 +117,12 @@ enum ProfileCommand {
 }
 
 /// Parse the process arguments and dispatch to the matching command handler.
-pub async fn run() -> Result<()> {
+///
+/// Each handler is responsible for spinning up its own Tokio runtime when
+/// needed; this keeps `launch --background` able to `fork` before the
+/// multi-threaded runtime spawns worker threads (post-fork-with-threads is UB
+/// on most libcs).
+pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Launch {
@@ -130,12 +135,16 @@ pub async fn run() -> Result<()> {
         Command::Install => {
             // Preserves the Python stub behaviour for parity.
             println!("Install command is not implemented yet.");
+            Ok(())
         }
         Command::Uninstall => {
             // Preserves the Python stub behaviour for parity.
             println!("Uninstall command is not implemented yet.");
+            Ok(())
         }
-        Command::Profile { command } => profile::run(command),
+        Command::Profile { command } => {
+            profile::run(command);
+            Ok(())
+        }
     }
-    Ok(())
 }
