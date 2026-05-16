@@ -54,7 +54,7 @@ rust/data_daemon/
     │   └── profile.rs           # create/update/get/delete/list
     ├── config/
     │   ├── mod.rs               # merge profile + env overrides
-    │   ├── profile.rs           # JSON profile load/save
+    │   ├── profile.rs           # YAML profile load/save (matches today's on-disk format)
     │   └── env.rs               # NCD_* parsing (parse_bytes, bools, ints)
     ├── lifecycle/
     │   ├── mod.rs
@@ -459,7 +459,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 **Build:**
 - `cargo init` at `rust/data_daemon/`. Wire workspace + CI.
 - clap CLI matching the typer tree exactly (commands, flag names, help strings).
-- `config/profile.rs` reads/writes JSON profiles at `~/.neuracore/data_daemon/profiles/{name}.json`. Same fields as today's `Profile` dataclass.
+- `config/profile.rs` reads/writes YAML profiles at `~/.neuracore/data_daemon/profiles/{name}.yaml`. Same fields as today's `Profile` dataclass. YAML on disk (rather than JSON) matches the existing Python `ProfileManager` and is a hard contract: the integration tests write profile YAML directly (e.g. [tests/integration/platform/data_daemon/shared/profiles.py::scoped_offline_profile](tests/integration/platform/data_daemon/shared/profiles.py)) and expect the daemon to read it. `profile get` still emits JSON to stdout for parity with Python's `model_dump_json(indent=2)`.
 - `config/env.rs` parses all `NCD_*` and runtime env vars; merges with profile.
 - Python shim in `__main__.py` (behind a feature flag so the Python daemon can still be invoked for the rollout window).
 
