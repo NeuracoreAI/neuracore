@@ -19,6 +19,7 @@ use crate::lifecycle::daemonize::{daemonize, DaemonizeOutcome, Readiness, Readin
 use crate::lifecycle::pidfile::{PidFile, PidFileError};
 use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
 use crate::lifecycle::signals::{install_shutdown_handler, ShutdownSignal};
+use crate::state::SqliteStateStore;
 
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
@@ -176,18 +177,37 @@ fn run_daemon(
         }
     }
 
+    let db_path = runtime_env.db_path.clone();
     let outcome = runtime.block_on(async move {
-        // `_shutdown` is the broadcast `Sender` handle. Phase 4 will clone it
-        // into each coordinator (dispatcher, registration, upload, etc.) so
-        // they can subscribe their own receivers; for now only the primary
-        // receiver returned alongside it is awaited.
-        let (_shutdown, mut shutdown_rx) =
-            install_shutdown_handler().context("failed to install shutdown handlers")?;
-        tracing::info!("daemon ready; awaiting shutdown signal");
-        // Phase 4 will replace this trivial await with the real dispatcher,
-        // per-trace actors, registration/upload coordinators, etc.
-        let signal = shutdown_rx.recv().await;
-        Ok::<_, anyhow::Error>(signal.ok().unwrap_or(ShutdownSignal::Sigterm))
+        // Phase 3: open the SQLite state store so the schema exists on first
+        // launch. Phase 4 will wire it into the dispatcher and coordinators.
+        let state_store = SqliteStateStore::open(&db_path)
+            .await
+            .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
+        tracing::info!(path = %db_path.display(), "state store ready");
+
+        // Run the wait loop in a nested block so the state store can be
+        // closed in both the success and error paths before the runtime
+        // tears connections down.
+        let result: Result<ShutdownSignal> = async {
+            // `_shutdown` is the broadcast `Sender` handle. Phase 4 will
+            // clone it into each coordinator (dispatcher, registration,
+            // upload, etc.) so they can subscribe their own receivers; for
+            // now only the primary receiver returned alongside it is
+            // awaited.
+            let (_shutdown, mut shutdown_rx) =
+                install_shutdown_handler().context("failed to install shutdown handlers")?;
+            tracing::info!("daemon ready; awaiting shutdown signal");
+            // Phase 4 will replace this trivial await with the real
+            // dispatcher, per-trace actors, registration/upload
+            // coordinators, etc.
+            let signal = shutdown_rx.recv().await;
+            Ok(signal.ok().unwrap_or(ShutdownSignal::Sigterm))
+        }
+        .await;
+
+        state_store.close().await;
+        result
     });
 
     drop(pid_file);

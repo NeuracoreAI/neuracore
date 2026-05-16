@@ -12,6 +12,7 @@
 mod cli;
 mod config;
 mod lifecycle;
+mod state;
 
 use anyhow::Result;
 
