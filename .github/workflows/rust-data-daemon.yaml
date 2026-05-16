@@ -1,0 +1,56 @@
+name: Rust Data Daemon
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'rust/data_daemon/**'
+      - '.github/workflows/rust-data-daemon.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'rust/data_daemon/**'
+      - '.github/workflows/rust-data-daemon.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: rust/data_daemon
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/data_daemon
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --verbose
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --document-private-items

@@ -60,3 +60,24 @@ repos:
           - .git/COMMIT_EDITMSG
         stages: [commit-msg]
         always_run: true
+
+  # Rust formatting and linting for the data-daemon rewrite crate.
+  # Uses the system cargo toolchain (rustup) so the rustfmt / clippy version
+  # matches the developer's local install and the version CI uses.
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: cargo fmt
+        description: Format Rust sources in the data-daemon crate.
+        entry: cargo fmt --manifest-path rust/data_daemon/Cargo.toml --
+        language: system
+        files: ^rust/data_daemon/.*\.rs$
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy
+        description: Lint the data-daemon crate with clippy (warnings denied).
+        entry: cargo clippy --manifest-path rust/data_daemon/Cargo.toml --all-targets -- -D warnings
+        language: system
+        files: ^rust/data_daemon/.*\.(rs|toml|lock)$
+        pass_filenames: false
