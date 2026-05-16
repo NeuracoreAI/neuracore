@@ -9,6 +9,7 @@ agilex
 aiolimiter
 aiortc
 allclose
+asyncio
 altclip
 asarray
 ascontiguousarray
@@ -41,6 +42,7 @@ categoryarray
 categoryorder
 cdef
 chdir
+chrono
 checkpointed
 checkpointing
 childbody
@@ -329,6 +331,7 @@ roundoff
 rowwise
 rsplit
 rtype
+rustls
 rustup
 Safetensors
 schematypens
@@ -349,6 +352,7 @@ silu
 softmax
 solimp
 solref
+sqlx
 squaredcos
 staticmethod
 statvfs
