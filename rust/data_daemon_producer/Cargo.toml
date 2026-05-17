@@ -1,0 +1,22 @@
+[package]
+name = "data_daemon_producer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Producer-side IPC client for the Neuracore data daemon, exposed to Python via PyO3."
+
+[lib]
+# `cdylib` produces the `.so` Python imports as `neuracore.data_daemon._native_producer`.
+# `rlib` lets Rust integration tests still link against the library.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+data_daemon_ipc = { path = "../data_daemon_ipc" }
+iceoryx2.workspace = true
+once_cell.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

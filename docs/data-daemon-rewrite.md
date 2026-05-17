@@ -26,7 +26,7 @@ The rewrite preserves all *external* contracts unchanged so the existing test su
 
 ### What changes (internal)
 
-- SDK ↔ daemon IPC: replace ZMQ envelopes + `multiprocessing.shared_memory` with **iceoryx2** zero-copy shared-memory services. No Unix socket on disk. Producer-side code in [neuracore/data_daemon/communications_management/producer/](neuracore/data_daemon/communications_management/producer/) is rewritten on top of iceoryx2's Python bindings.
+- SDK ↔ daemon IPC: replace ZMQ envelopes + `multiprocessing.shared_memory` with **iceoryx2** zero-copy shared-memory services. No Unix socket on disk. The producer side is no longer a pure-Python implementation that links the iceoryx2 Python bindings; instead, the producer-side IPC client is implemented in Rust and exposed to Python through a **PyO3** module (`neuracore.data_daemon._native_producer`). The native module exposes a small, stable surface — `start_recording`, `send_data`, `stop_recording` — and [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) becomes a thin Python adaptor on top of it that preserves the public `ProducerChannel` API used by [neuracore/core/streaming/data_stream.py](neuracore/core/streaming/data_stream.py). This avoids depending on iceoryx2's young Python bindings while still giving the SDK a zero-copy path.
 - Encoding: instead of buffering raw bytes through `RawBatchWriter` → `BatchEncoderWorker` → PyAV, the daemon writes raw frames into a per-trace **hand-rolled NUT muxer** on disk; a long-running ffmpeg subprocess reads the NUT and transcodes to `lossy.mp4` (H.264) and `lossless.mp4` (FFV1) in one pass.
 - Threading: one Tokio multi-threaded runtime; one actor task per trace; no sharded worker pools.
 - SQLite schema: tables (`recordings`, `traces`) defined and migrated via `sqlx`, with **freedom to evolve column names and status enums**. The integration-test DB wait helpers ([wait_for_all_traces_written, wait_for_upload_complete_in_db](tests/integration/platform/data_daemon/) — typically in `shared/db_helpers.py`) are updated in lockstep with the schema so the *behavioural* contract (recording stopped → traces written → traces uploaded → progress reported) is preserved but not the literal column layout.
@@ -37,7 +37,13 @@ The rewrite preserves all *external* contracts unchanged so the existing test su
 
 ### 1. Crate layout
 
-Location: `rust/data_daemon/` at repo root (parallel to `neuracore/`). Single binary crate.
+Location: `rust/` at repo root (parallel to `neuracore/`). Cargo workspace with three members:
+
+- `rust/data_daemon/` — daemon binary (everything below); also exposes a tiny `lib.rs` so it can re-export shared types.
+- `rust/data_daemon_ipc/` — shared library crate holding the iceoryx2 service-name conventions, payload structs, and envelope types so both the daemon and the producer crate agree on the wire format byte-for-byte.
+- `rust/data_daemon_producer/` — PyO3 `cdylib` crate that exposes `start_recording`, `send_data`, `stop_recording` to Python. The compiled `.so` ships inside the wheel as `neuracore.data_daemon._native_producer`.
+
+Daemon binary crate layout:
 
 ```
 rust/data_daemon/
@@ -383,7 +389,7 @@ enum Response { Ack { sequence: u64 }, Err { code: String, message: String } }
 
 **Discovery & lifecycle**: daemon creates a `Node` named `neuracore-data-daemon-{pid}` and the three services as part of Phase 4 (the IPC bring-up was originally pencilled into Phase 2 but deferred so the producer rewrite, dispatcher, and service creation can land together). SDK opens by name. On daemon shutdown, the node is `drop`ped, which `iceoryx2` cleans up (discovery files removed). On SIGKILL, stale node files are reaped by iceoryx2's automatic dead-node detection (next daemon start triggers reclamation). The integration tests' "socket unlinked" assertion ([test_signal_cleanup.py](tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py)) is rewritten to check "no `iceoryx2` node files remain under the daemon's node prefix" — same shape of assertion, different artefact — and the IPC-shaped assertions are gated to Phase 4.
 
-**SDK producer rewrite scope.** [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) and its companions are rewritten on top of [iceoryx2's Python bindings](https://iceoryx.io/v2.0.5/getting-started/examples/python/) (`iceoryx2-py`). The producer-side public API (`ProducerChannel.send_batched_data`, etc.) is preserved so [neuracore/core/streaming/data_stream.py](neuracore/core/streaming/data_stream.py) is unaffected. Risk: iceoryx2's Python binding is younger than the Rust API; mitigation noted in "Open items".
+**SDK producer rewrite scope.** [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) and its companions become a thin adaptor over a Rust producer crate exposed to Python via **PyO3** (built with [`maturin`](https://www.maturin.rs/), shipped as `neuracore.data_daemon._native_producer`). The public `ProducerChannel` Python API (`send_data`, `send_data_parts`, `send_batched_joint_data`, `start_recording_session`, `mark_recording_stop_requested`, `wait_until_sequence_sent`, `open_fixed_shared_slots`, the sequence-number accessors, etc. — see [producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py)) is preserved byte-for-byte so [neuracore/core/streaming/data_stream.py](neuracore/core/streaming/data_stream.py) is unaffected. The native module's surface mirrors that API: sequencing, batching, multi-part assembly, heartbeats, and fixed shared-slot management live inside the Rust crate, not in Python. iceoryx2's commands-service response channel acknowledges every send and supplies the sequence number that `wait_until_sequence_sent` blocks on. Rationale: the producer hot path stays GIL-free; sequence semantics come straight from iceoryx2 acks instead of a duplicated Python-side queue; and the Python shim has no IPC concerns to maintain. (Phase 4 staging: 4e builds a minimal three-method skeleton against the commands service; 4h grows the surface to the full contract once the per-resolution `frames/<WxH>` services from 4f are in place.) Risk: iceoryx2 is a native dependency on the wheel side; mitigation is the same as for the daemon binary (build it once in CI and ship it inside the wheel).
 
 ### 8. External API (preserved verbatim)
 
@@ -452,9 +458,22 @@ The Rust binary is built per-platform and shipped as a wheel data file via `matu
 
 ## Implementation Plan
 
-Eight phases. Each phase has a *deliverable* (what must exist), an *integration-test gate* (which of the 18 tests in [tests/integration/platform/data_daemon/](tests/integration/platform/data_daemon/) it should unblock), and a *check* (how to confirm we're on track). Estimated time assumes one engineer full-time; phases 3–5 can parallelise with two.
+Eight phases. Each phase has a *deliverable* (what must exist), an *integration-test gate* (which of the 18 tests in [tests/integration/platform/data_daemon/](tests/integration/platform/data_daemon/) it should unblock), and a *check* (how to confirm we're on track). Estimated time assumes one engineer full-time; phases 3–5 can parallelise with two. Phases 4, 5, and 6 are decomposed into labelled sub-phases (`4a`, `4b`, …) so that each merge is a smaller, individually verifiable step.
 
-### Phase 1 — Scaffolding & CLI parity (2 days)
+### Status snapshot (verified 2026-05-17)
+
+| Phase | Status |
+|---|---|
+| 1 — Scaffolding & CLI | ✓ Done (commit `0b452b0`) |
+| 2 — Lifecycle | ✓ Done (commit `eeff931`) |
+| 3 — SQLite state store | ✓ Done (commit `b9df0c9`) |
+| 4 — IPC + per-trace pipeline | Daemon side complete — sub-phases 4a–4g + 4j done, producer-side 4h + 4i deferred (see below) |
+| 5 — Encoding | Not started |
+| 6 — Cloud upload | Not started |
+| 7 — Performance & edge cases | Not started |
+| 8 — Hardening & rollout | Not started |
+
+### Phase 1 — Scaffolding & CLI parity (2 days) — ✓ Done (commit `0b452b0`)
 
 **Build:**
 - `cargo init` at `rust/data_daemon/`. Wire workspace + CI.
@@ -469,7 +488,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 **Check:** golden-file CLI tests pass.
 
-### Phase 2 — Daemon lifecycle (2–3 days)
+### Phase 2 — Daemon lifecycle (2–3 days) — ✓ Done (commit `eeff931`)
 
 **Build:**
 - `lifecycle/daemonize.rs`: double-fork + setsid for `--background`; foreground mode for non-background.
@@ -483,7 +502,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 **Check:** `pytest tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py -x` is green.
 
-### Phase 3 — SQLite state store (1–2 days)
+### Phase 3 — SQLite state store (1–2 days) — ✓ Done (commit `b9df0c9`)
 
 **Build:**
 - sqlx migration `0001_initial.sql` (schema above).
@@ -499,32 +518,145 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 ### Phase 4 — IPC + per-trace pipeline (3–4 days)
 
-**Build:**
-- Bring up the iceoryx2 `Node` (`neuracore-data-daemon-{pid}`) and create the three services (`commands`, `scalars`, `frames/<WxH>`) — originally slated for Phase 2 but deferred here so the IPC, dispatcher, and producer rewrite land together.
-- `lifecycle/recovery.rs`: extend `cleanup_stale_ipc` to call `Node::cleanup_dead_nodes` and reap any discovery files left by a SIGKILL'd predecessor.
-- `ipc/node.rs`, `ipc/services.rs`, `ipc/envelope.rs`: serde types for commands and ACKs; service name conventions.
-- `pipeline/dispatcher.rs`: `DashMap<TraceKey, mpsc::Sender<TraceMessage>>`; on first message, spawn trace_actor.
-- `pipeline/trace_actor.rs`: skeletal — receives messages, logs them, updates DB row, sends ACK back. No encoding yet.
-- Rewrite the Python producer ([neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py)) to speak the new protocol. Keep the public API the same.
+Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged; the producer-side rewrites (4h, 4i) are sequenced to land before Phase 5 begins so the smoke-test producer can drive a trace row to `WRITTEN` end-to-end. The overall phase deliverable is unchanged: a Python SDK → daemon round-trip that drives a trace row to `WRITTEN`, plus full `test_signal_cleanup.py` passing (including the iceoryx2-shaped assertions).
 
-**Deliverable:** a smoke test (Python SDK → daemon) showing a START_TRACE → 100 FRAME → END_TRACE round-trip creates a trace row that transitions to `WRITTEN` (with no on-disk file yet).
+#### 4a — Cargo workspace + crate skeletons — ✓ Done
 
-**Test gate:** internal smoke test; partial pass of `test_startup.py` (single-instance guarantee survives because of phase 2).
+**Build:** convert `rust/` to a Cargo workspace; add `data_daemon_ipc` and `data_daemon_producer` members alongside `data_daemon`. Workspace dependencies declared in `rust/Cargo.toml`.
 
-**Check:** can run two terminal sessions — daemon in one, a small Python `produce.py` in the other — and see DB rows appearing.
+**Deliverable:** `cargo build --workspace` is green.
+
+**Check:** `rust/Cargo.toml`, `rust/data_daemon_ipc/Cargo.toml`, `rust/data_daemon_producer/Cargo.toml` all present; `cargo metadata --format-version 1` lists the three members.
+
+#### 4b — Shared IPC types (`data_daemon_ipc`) — ✓ Done
+
+**Build:** serde envelope types (`Command`, `Ack`, `Err`), service-name constants, payload structs (`ScalarFrame`, `VideoFrame` placeholders), size constants. Round-trip unit tests for envelopes.
+
+**Deliverable:** daemon + producer crates both depend on `data_daemon_ipc` and agree on byte layout.
+
+**Check:** `cargo test -p data_daemon_ipc` is green.
+
+#### 4c — iceoryx2 `Node` + `commands` service — ✓ Done
+
+**Build:** `rust/data_daemon/src/ipc/node.rs` brings up the `Node` named `neuracore-data-daemon-{pid}` and creates the `commands` request/response service with `COMMANDS_MAX_PAYLOAD_BYTES = 8 MiB`.
+
+**Deliverable:** a binary that starts up and creates the commands service.
+
+**Check:** `cargo test -p data_daemon ipc::` is green; manual `iox2-cli` discovery lists the service.
+
+#### 4d — Listener, dispatcher, skeletal trace_actor — ✓ Done
+
+**Build:** `ipc/listener.rs` polls the commands subscriber on a 10 ms interval and forwards parsed envelopes to `pipeline/dispatcher.rs`. Dispatcher routes via `DashMap<TraceKey, mpsc::Sender>` with a bounded(64) channel per trace. `pipeline/trace_actor.rs` is skeletal — receives messages, updates the DB row, no encoding.
+
+**Deliverable:** in-process unit test demonstrates routing from listener through dispatcher to a per-trace actor task.
+
+**Check:** `cargo test -p data_daemon pipeline::dispatcher` green.
+
+#### 4e — PyO3 producer cdylib (skeleton) — ✓ Done (expanded in 4h)
+
+**Build:** `data_daemon_producer` cdylib that builds as `neuracore.data_daemon._native_producer`. Exposes `start_recording`, `send_data`, `stop_recording` against the commands service.
+
+**Deliverable:** the wheel-side native module loads in Python.
+
+**Check:** `maturin develop -p data_daemon_producer` succeeds; `python -c "import neuracore.data_daemon._native_producer as p; print(p)"` works.
+
+#### 4f — `scalars` + per-resolution `frames/<WxH>` services — ✓ Done
+
+**Built:** extended `data_daemon_ipc` with the `SCALARS` service-name constant, the `frames(width, height)` builder and `frames_max_payload_bytes` helper, and a new [`Envelope::OpenFrameStream { trace_id, width, height }`](rust/data_daemon_ipc/src/lib.rs) variant the listener uses as the lazy-open trigger. `ipc/node.rs` brings up `commands` + `scalars` at startup and exposes `IpcTransport::open_frame_subscriber(width, height)` for the listener to attach to the per-resolution service on demand. The listener drains every subscriber synchronously into a `Vec<Envelope>` per tick, then awaits dispatcher forwards — this matters because iceoryx2 0.8's `Subscriber` is `!Send` and a borrow held across an `.await` would make the listener future un-spawnable.
+
+**Decision (2026-05-17):** all three service families carry `[u8]` payloads encoding the existing `Envelope` enum. The doc originally pencilled in typed `ScalarFrame` / `VideoFrame` structs for zero-copy; that optimisation lives in 4h alongside the producer-side `loan_uninit` work, because it is the producer that benefits from writing pixel bytes straight into a loaned sample. For Phase 4 the wire stays JSON so the daemon-side topology can land without a producer rewrite.
+
+**Check:** `cargo test -p data_daemon_ipc` covers envelope round-trips, the resolution-keyed service name, and the payload budget; the lazy `frames/<WxH>` open path is exercised by the listener once a producer publishes `OpenFrameStream` (Phase 4h).
+
+#### 4g — Wire IPC into the launch runtime — ✓ Done
+
+**Built:** declared the previously orphan `mod ipc;` and `mod pipeline;` in [main.rs](rust/data_daemon/src/main.rs) (a side-effect of which is that the `pipeline::dispatcher` integration test now actually runs under `cargo test`), then replaced the placeholder await in [launch.rs](rust/data_daemon/src/cli/launch.rs) with: `IpcTransport::bring_up()` → `dispatcher::spawn(state_store.clone(), shutdown_tx.subscribe())` → inline `listener::run(transport, dispatcher_tx.clone(), shutdown_tx.subscribe()).await`. The listener is run **inline** rather than via `tokio::spawn` because iceoryx2's `Subscriber` is `!Send`; a small companion task captures the shutdown signal value for logging. Ordered shutdown: listener returns (its frame drops the iceoryx2 `Node`) → local `dispatcher_tx` is dropped (inbox closes) → `dispatcher_handle.shutdown().await` drains per-trace actors → signal-capture task is joined.
+
+**Deliverable:** `cargo run -- launch` boots a daemon that accepts envelopes; SIGTERM/SIGINT cleanly tears down listener and dispatcher.
+
+**Check:** `cargo test -p data-daemon` is green (39/39 passing — includes `pipeline::dispatcher::tests::dispatcher_drives_trace_to_written_on_end_trace`). Manual two-terminal smoke is deferred to 4i once `producer_channel.py` is ported.
+
+#### 4h — Expand the PyO3 producer surface — TODO
+
+**Build:** in `data_daemon_producer`, add Python entry points for the full `ProducerChannel` contract — `send_data_parts`, `send_batched_joint_data`, `start_new_trace`, `end_trace`, `heartbeat`, `mark_recording_stop_requested`, `wait_until_sequence_sent`, `get_last_{accepted,enqueued,sent}_sequence_number`, `open_fixed_shared_slots`, `cleanup_producer_channel`. Sequence numbers are assigned in Rust on enqueue/loan and acknowledged via the iceoryx2 commands response channel — that becomes the source of truth for `wait_until_sequence_sent`. Multi-part payloads are assembled into a single iceoryx2 loan inside Rust (no Python-side queue). Fixed shared-slot mode for RGB images flows through the `frames/<WxH>` services from 4f.
+
+**Decision (2026-05-17):** the Python adaptor stays a thin shim; sequencing, batching, multi-part assembly, and slot management live in Rust. This keeps the producer hot path GIL-free and lets iceoryx2 acks drive sequence semantics directly.
+
+**Deliverable:** `neuracore.data_daemon._native_producer` exposes every behaviour the Python adaptor needs.
+
+**Check:** new tests in `data_daemon_producer/tests/` cover each entry point against a stub daemon node.
+
+#### 4i — Port `producer_channel.py` to the native shim — TODO
+
+**Build:** rewrite [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) so each public method is a one-liner that forwards to `_native_producer`. Public signatures consumed by [neuracore/core/streaming/data_stream.py:70-152](neuracore/core/streaming/data_stream.py#L70-L152) are preserved byte-for-byte.
+
+**Deliverable:** SDK callers compile against the rewritten shim; the existing producer-side unit tests pass without modification.
+
+**Check:** `pytest neuracore/data_daemon/communications_management/producer/ -x` and the SDK-side streaming tests green.
+
+#### 4j — Dead-node sweep on startup — ✓ Done
+
+**Built:** replaced the `Ok(0)` placeholder in [lifecycle/recovery.rs::cleanup_stale_ipc](rust/data_daemon/src/lifecycle/recovery.rs) with `iceoryx2::Node::<ipc::Service>::cleanup_dead_nodes(Config::global_config())`, returning the report's `cleanups` count and warning on `failed_cleanups`. iceoryx2 0.8 also runs this sweep automatically inside `NodeBuilder::create` (gated on `cleanup_dead_nodes_on_creation`), but doing it eagerly here keeps the `status` command's view of the system consistent before the new daemon races to create its own node. A cargo smoke test asserts the call is safe on a clean host; reproducing a SIGKILL'd iceoryx2 node from inside a cargo test would require spawning a child binary, so the end-to-end reclamation assertion is left to `test_signal_cleanup.py` once the Python producer side lands.
+
+**Deliverable:** after a SIGKILL of a previous daemon, the next `launch` reaps the stale iceoryx2 node before bringing up its own.
+
+**Test gate (deferred):** the full `tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py` suite — including the iceoryx2-shaped assertions — flips green once 4i lands and the Python producer can drive a full lifecycle round-trip. The daemon-side cleanup mechanics are in place.
+
+**Check:** `cargo test -p data-daemon lifecycle::recovery` green (`cleanup_stale_ipc_is_safe_on_a_clean_host`).
 
 ### Phase 5 — Encoding (3–4 days)
 
-**Build:**
-- `encoding/json_trace.rs`: incremental JSON-array writer with 4 MiB flush threshold.
-- `encoding/nut_writer.rs`: minimal NUT muxer that supports our raw RGB frames (one video stream, append-only).
-- `encoding/video_encoder.rs`: spawn ffmpeg subprocess per video trace, supervise; on completion, finalize.
-- `encoding/metadata.rs`: video sidecar `trace.json`.
-- `storage/paths.rs`: path resolution.
-- `storage/budget.rs`: tracked free-space accounting; pause writes when below `MIN_FREE_DISK_BYTES` (32 MiB, [const.py:57](neuracore/data_daemon/const.py#L57)).
-- Wire trace_actor to actual writers.
+Decomposed into 7 sub-phases (5a–5g). Each writer lands behind cargo unit tests first; the integration gate runs once 5f wires them into the trace actor.
 
-**Deliverable:** offline-mode recordings produce identical-shape files to today: `recordings/{rec}/RGB/{trace}/{lossy.mp4, lossless.mp4, trace.json}` and `recordings/{rec}/{data_type}/{trace}/trace.json`.
+#### 5a — Storage paths + budget — TODO
+
+**Build:** `storage/paths.rs` resolves `recordings/{recording_id}/{data_type}/{trace_id}/` to a `PathBuf` matching today's layout ([const.py:63](neuracore/data_daemon/const.py#L63)). `storage/budget.rs` tracks free space and pauses writes when below `MIN_FREE_DISK_BYTES = 32 MiB` ([const.py:57](neuracore/data_daemon/const.py#L57)).
+
+**Deliverable:** trace_actor can derive its output directory; budget check returns `Available` / `Exhausted` with a warning event.
+
+**Check:** unit tests on path construction + budget evaluation under simulated low-disk.
+
+#### 5b — JSON trace writer — TODO
+
+**Build:** `encoding/json_trace.rs` — incremental JSON-array writer (`[` on open, comma separator between entries, in-memory `BytesMut` flushed to disk at 4 MiB threshold per [const.py:55](neuracore/data_daemon/const.py#L55)). On finalize, flush, append `]`, close, record `total_bytes`.
+
+**Deliverable:** writes a valid `trace.json` for scalar / sensor traces.
+
+**Check:** unit test parses the output back with `serde_json`; the entry count and bytes total match the input.
+
+#### 5c — NUT muxer — TODO
+
+**Build:** `encoding/nut_writer.rs` — minimal NUT muxer for one raw-RGB stream. Header on first frame (resolution, pix_fmt, timebase from frame metadata); per-frame packets appended afterwards. Append-only and crash-safe so partial recovery is possible.
+
+**Deliverable:** a `raw.nut` file readable by `ffprobe` with the expected stream count and dimensions.
+
+**Check:** unit test runs `ffprobe -of json` on the artifact and asserts the stream metadata.
+
+#### 5d — Video encoder subprocess — TODO
+
+**Build:** `encoding/video_encoder.rs` — per video trace spawn a `tokio::process::Command` for `ffmpeg -y -fflags +genpts -i raw.nut -map 0:v -c:v libx264 -preset veryfast -crf 23 lossy.mp4 -map 0:v -c:v ffv1 lossless.mp4`. Supervise the child; finalize on exit; delete `raw.nut` once both mp4s are verified non-empty.
+
+**Deliverable:** a video trace produces both `lossy.mp4` and `lossless.mp4`.
+
+**Check:** cargo test feeds a small synthetic NUT through the encoder; both outputs decode under `ffprobe`.
+
+#### 5e — Video sidecar metadata — TODO
+
+**Build:** `encoding/metadata.rs` — accumulate per-frame dictionaries in memory (timestamps, dimensions, etc.); on finalize, flush a sidecar `trace.json` matching the shape of [video_trace.py](neuracore/data_daemon/recording_encoding_disk_manager/encoding/video_trace.py).
+
+**Deliverable:** video traces have a `trace.json` alongside the two mp4s.
+
+**Check:** fixture diff against a Python-generated `trace.json`.
+
+#### 5f — Wire trace_actor to real writers — TODO
+
+**Build:** replace the skeletal state machine in `pipeline/trace_actor.rs` (currently just logs and counts) with concrete JSON / NUT branches keyed on `data_type`. Drop each iceoryx2 `Sample` after `write_all` so the slot returns to the producer's pool. Debounce `bytes_written` DB updates (every N writes or every M ms — match today's policy).
+
+**Deliverable:** end-to-end Python producer → daemon → on-disk artifacts in offline mode for both scalar and video traces.
+
+**Check:** manual smoke test produces the expected output tree (`recordings/{rec}/RGB/{trace}/{lossy.mp4, lossless.mp4, trace.json}` and `recordings/{rec}/{data_type}/{trace}/trace.json`).
+
+#### 5g — Phase 5 integration gate — TODO
 
 **Test gate:** all 8 cases of [data_integrity/test_pre_network.py::test_disk_db_data_integrity](tests/integration/platform/data_daemon/data_integrity/test_pre_network.py) pass — verifies on-disk timestamps, monotonicity, expected duration windows, frame counts.
 
@@ -532,16 +664,57 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 ### Phase 6 — Cloud upload pipeline (3–4 days)
 
-**Build:**
-- `api/client.rs`: `reqwest::Client` + `reqwest-retry` with status-code-aware retry; bearer auth header.
-- `api/auth.rs`: read token from `~/.neuracore/config.json`; on 401 invoke refresh (call Python helper or re-read the file after the SDK refreshes; pick the simpler one).
-- `upload/registration.rs`: batch-register subscriber on `TraceWritten`; up to 50/batch, 1 s debounce.
-- `upload/uploader.rs`: resumable PUT with `Content-Range` and 64 MiB chunks; 308 continuation, 410 session refresh, MD5/x-goog-hash verification.
-- `upload/status.rs`: batch trace-status updates with the exact debounce policy from today (50 traces / 4 s in-progress / 0.2 s completion).
-- `upload/progress.rs`: periodic `traces-metadata` POST.
-- `connection/monitor.rs`: 10 s health check; pauses uploader on failure.
+Decomposed into 7 sub-phases (6a–6g). HTTP client + auth land first behind `wiremock` so each coordinator (registration, uploader, status, progress) can be unit-tested against a fake before they're wired into the live event bus.
 
-**Deliverable:** offline-recorded local data uploads to the platform when the daemon comes online. Trace rows move `pending → registered → queued → uploading → uploaded`.
+#### 6a — HTTP client, auth, models — TODO
+
+**Build:** `api/client.rs` (`reqwest::Client` + `reqwest-retry` + `reqwest-middleware`, status-code-aware retry on `{408, 425, 429, 500, 502, 503, 504}`, max 3 attempts, cap 30 s — matches `BACKEND_API_MAX_RETRIES` at [const.py:74-80](neuracore/data_daemon/const.py#L74-L80)). `api/auth.rs` reads the bearer token from `~/.neuracore/config.json`; on 401, re-read after a short delay (file-watch approach per §10). `api/models.rs` carries the request/response serde types for the seven backend endpoints from §8.
+
+**Deliverable:** a typed client returns Ok on `HEAD /status/health` against a `wiremock` fake; retries and 401-reload behaviour are exercised by tests.
+
+**Check:** `cargo test -p data_daemon api::` green.
+
+#### 6b — Connection monitor — TODO
+
+**Build:** `connection/monitor.rs` runs a 10 s `HEAD /status/health` tick and emits `ConnectionState::{Up, Down}` on the daemon event bus. Uploaders subscribe and pause on `Down`.
+
+**Deliverable:** monitor task runs alongside the dispatcher; state changes are visible in tracing logs.
+
+**Check:** integration smoke with `wiremock` toggled to 503 confirms a state transition.
+
+#### 6c — Batch registration coordinator — TODO
+
+**Build:** `upload/registration.rs` subscribes to `TraceWritten`; buffers up to 50 traces or 1 s; POSTs `/org/{org}/recording/traces/batch-register` with the `cloud_files` list; stores the returned session URIs in the DB; updates `registration_status='registered'`; emits `ReadyForUpload`.
+
+**Deliverable:** a `WRITTEN` trace transitions to `registered` against a `wiremock` fake.
+
+**Check:** `cargo test` with `wiremock` confirms the batch size + debounce; DB row inspection shows the URI is stored.
+
+#### 6d — Resumable uploader — TODO
+
+**Build:** `upload/uploader.rs` subscribes to `ReadyForUpload`; for each trace, opens the on-disk files and PUTs them in 64 MiB chunks with `Content-Range`. Handles 200/201 → done, 308 → continue, 410 → fetch new URI via `GET /resumable_upload_url`, 401 → re-read token + retry once. MD5 / x-goog-hash verification on completion. Updates `bytes_uploaded` and enqueues a `BatchUpdate`.
+
+**Deliverable:** a file upload completes against `wiremock`; `bytes_uploaded` equals the file size.
+
+**Check:** `wiremock` scripted with chunked PUT semantics confirms 308 continuation + 410 refresh flow.
+
+#### 6e — Status updater (debounced) — TODO
+
+**Build:** `upload/status.rs` reads from the `BatchUpdate` channel and applies today's exact policy from [trace_status_updater.py:168](neuracore/data_daemon/upload_management/trace_status_updater.py#L168) — flush every 50 traces, every 4 s for in-progress, every 0.2 s when a completion is queued. PUTs `/recording/{rec_id}/traces/batch-update`.
+
+**Deliverable:** debounce flushes match the policy under stress.
+
+**Check:** deterministic timer-driven unit tests assert flush thresholds.
+
+#### 6f — Progress reporter — TODO
+
+**Build:** `upload/progress.rs` runs a 30 s tick that POSTs `/recording/{rec_id}/traces-metadata` with the bytes-uploaded snapshot per trace, until the recording's `progress_reported` flips to `reported`.
+
+**Deliverable:** a recording's row reaches `progress_reported='reported'` after all uploads complete.
+
+**Check:** integration smoke confirms the field flips on the DB row.
+
+#### 6g — Phase 6 integration gate — TODO
 
 **Test gate:** [data_integrity/test_network.py::test_cloud_data_integrity](tests/integration/platform/data_daemon/data_integrity/test_network.py) (8 cases) and [behavioural_correctness/test_offline_to_online.py](tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py) pass.
 
@@ -583,8 +756,8 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 Two visible signals each week:
 
-1. **Test gate position.** The number of integration tests passing must monotonically increase across phases: 0 → lifecycle-only cases of `test_signal_cleanup.py` (after phase 2; the iceoryx2-shaped assertions in that file gate on phase 4) → all 14 of `test_signal_cleanup.py` (after phase 4) → +1 in pytest test-count terms but +8 parametrized cases for `test_pre_network.py::test_disk_db_data_integrity` (after phase 5) → ~17 → 18. Track via the same CI job that runs the integration tests today.
-2. **Phase deliverable demo.** Each phase ends with a recorded demo: phase 2 = signal cleanup loop; phase 4 = Python smoke-test producer talking to Rust daemon; phase 5 = on-disk file diff against Python daemon output; phase 6 = first dataset on staging.
+1. **Test gate position.** Keyed off sub-phase deliverables: 0 → lifecycle-only cases of `test_signal_cleanup.py` (after phase 2) → smoke-test producer round-trip drives a DB row to `WRITTEN` (after 4g) → SDK-side producer unit tests pass against the native shim (after 4i) → full `test_signal_cleanup.py` including iceoryx2-shaped assertions (after 4j) → all 8 cases of `test_pre_network.py::test_disk_db_data_integrity` (after 5g) → +`test_network.py` and `test_offline_to_online.py` (after 6g) → 18/18 (after phase 7). Track via the same CI job that runs the integration tests today.
+2. **Sub-phase deliverable demo.** Each merged sub-phase ends with a recorded demo where it's meaningful: 4g = Python smoke-test producer talking to Rust daemon; 4i = SDK code path running unchanged against the native shim; 5f = on-disk file diff against Python daemon output; 6d = first resumable upload against staging; 6g = first full dataset on staging.
 
 Red flags:
 

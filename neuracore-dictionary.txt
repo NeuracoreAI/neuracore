@@ -41,6 +41,7 @@ castshadow
 categoryarray
 categoryorder
 cdef
+cdylib
 chdir
 chrono
 checkpointed
@@ -79,6 +80,7 @@ cuda
 cudnn
 daemonising
 daemonization
+dashmap
 dataconfig
 dataformats
 dataid
@@ -298,6 +300,8 @@ proprios
 PSNR
 pyav
 pydantic
+pyfunction
+pymodule
 pygments
 pyquaternion
 pytest
@@ -323,6 +327,7 @@ RETRYABLE
 rgba
 rgbd
 rgbs
+rlib
 rlds
 Robotiq
 rosdep
@@ -387,6 +392,7 @@ njoints
 unet
 Unet
 unet
+uninit
 Unet's
 unistd
 UNITREE
