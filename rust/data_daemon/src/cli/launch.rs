@@ -9,17 +9,27 @@
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
+use crate::ipc::listener;
+use crate::ipc::node::IpcTransport;
 use crate::lifecycle::daemonize::{daemonize, DaemonizeOutcome, Readiness, ReadinessReporter};
 use crate::lifecycle::pidfile::{PidFile, PidFileError};
 use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
 use crate::lifecycle::signals::{install_shutdown_handler, ShutdownSignal};
+use crate::pipeline::dispatcher;
 use crate::state::SqliteStateStore;
+
+/// Upper bound on how long we wait for the signal-capture task after the
+/// listener returns. In normal operation it has already completed; the
+/// timeout exists so a future bug that lets the listener exit without a
+/// shutdown signal degrades to a `?signal=sigterm` log rather than a hang.
+const SIGNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
@@ -131,10 +141,9 @@ fn run_daemon(
         }
         PidReclaim::StillRunning(_) | PidReclaim::Absent => {}
     }
-    match cleanup_stale_ipc() {
-        Ok(0) => {}
-        Ok(cleaned) => tracing::info!(count = cleaned, "cleaned stale ipc artefacts"),
-        Err(error) => tracing::warn!(%error, "failed to clean stale ipc artefacts"),
+    let cleaned = cleanup_stale_ipc();
+    if cleaned > 0 {
+        tracing::info!(count = cleaned, "cleaned stale ipc artefacts");
     }
 
     // Acquire the single-instance PID file *before* starting the Tokio runtime
@@ -179,8 +188,6 @@ fn run_daemon(
 
     let db_path = runtime_env.db_path.clone();
     let outcome = runtime.block_on(async move {
-        // Phase 3: open the SQLite state store so the schema exists on first
-        // launch. Phase 4 will wire it into the dispatcher and coordinators.
         let state_store = SqliteStateStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
@@ -190,19 +197,69 @@ fn run_daemon(
         // closed in both the success and error paths before the runtime
         // tears connections down.
         let result: Result<ShutdownSignal> = async {
-            // `_shutdown` is the broadcast `Sender` handle. Phase 4 will
-            // clone it into each coordinator (dispatcher, registration,
-            // upload, etc.) so they can subscribe their own receivers; for
-            // now only the primary receiver returned alongside it is
-            // awaited.
-            let (_shutdown, mut shutdown_rx) =
+            let (shutdown_tx, shutdown_rx) =
                 install_shutdown_handler().context("failed to install shutdown handlers")?;
+
+            // Bring up iceoryx2 *before* the dispatcher: a failure here is
+            // user-visible (the daemon can't accept IPC at all) and must
+            // unwind cleanly through the same path as a normal shutdown.
+            let transport =
+                IpcTransport::bring_up().context("failed to bring up iceoryx2 transport")?;
+
+            let (dispatcher_tx, dispatcher_handle) =
+                dispatcher::spawn(state_store.clone(), shutdown_tx.subscribe());
+
+            // Capture the actual shutdown signal in a spawned task so we
+            // can log which signal triggered the exit *after* the listener
+            // returns. The listener itself cannot be `tokio::spawn`'d —
+            // iceoryx2 subscriber ports are `!Send` — so we run it inline
+            // and let the dispatcher + signal-capture tasks ride the
+            // multi-thread runtime in parallel.
+            let mut signal_rx = shutdown_tx.subscribe();
+            let signal_task = tokio::spawn(async move {
+                signal_rx
+                    .recv()
+                    .await
+                    .ok()
+                    .unwrap_or(ShutdownSignal::Sigterm)
+            });
+            // Drain the primary handler-installed receiver so it doesn't
+            // accumulate broadcasts behind our back; we no longer need it.
+            drop(shutdown_rx);
+
             tracing::info!("daemon ready; awaiting shutdown signal");
-            // Phase 4 will replace this trivial await with the real
-            // dispatcher, per-trace actors, registration/upload
-            // coordinators, etc.
-            let signal = shutdown_rx.recv().await;
-            Ok(signal.ok().unwrap_or(ShutdownSignal::Sigterm))
+            listener::run(transport, dispatcher_tx.clone(), shutdown_tx.subscribe()).await;
+
+            // Ordered shutdown — by the time `listener::run` has returned
+            // the iceoryx2 node has already been dropped (it lived inside
+            // the listener task's frame):
+            //   1. drop our local dispatcher sender so the dispatcher
+            //      inbox closes,
+            //   2. dispatcher drains, clears the routing map, and the
+            //      per-trace actors observe EOF and exit,
+            //   3. read the captured shutdown signal for the log line.
+            drop(dispatcher_tx);
+            dispatcher_handle.shutdown().await;
+            // In normal operation the listener returns *because* a shutdown
+            // signal fired, so `signal_task` is already complete. Bound the
+            // wait so a future code path that lets the listener exit
+            // independently (panic, dispatcher dropped) can't hang the
+            // daemon's exit on a signal that never arrives.
+            let signal = match tokio::time::timeout(SIGNAL_CAPTURE_TIMEOUT, signal_task).await {
+                Ok(Ok(captured)) => captured,
+                Ok(Err(error)) => {
+                    tracing::warn!(?error, "signal-capture task join failed");
+                    ShutdownSignal::Sigterm
+                }
+                Err(_) => {
+                    tracing::debug!(
+                        "listener exited without a shutdown signal; defaulting to sigterm"
+                    );
+                    ShutdownSignal::Sigterm
+                }
+            };
+
+            Ok(signal)
         }
         .await;
 

@@ -9,6 +9,10 @@
 
 use std::path::Path;
 
+use iceoryx2::config::Config;
+use iceoryx2::node::Node;
+use iceoryx2::prelude::ipc;
+
 use crate::lifecycle::pidfile::{pid_is_running, read_pid_from_file};
 
 /// Outcome of [`reclaim_stale_pid_file`], surfaced for logging.
@@ -51,13 +55,33 @@ pub fn reclaim_stale_pid_file(pid_path: &Path) -> std::io::Result<PidReclaim> {
 
 /// Reap stale iceoryx2 node files left by a SIGKILL'd daemon.
 ///
-/// Placeholder for the Phase 4 IPC bring-up: when the daemon starts using
-/// iceoryx2 services this will call `iceoryx2::node::Node::cleanup_dead_nodes`
-/// (or equivalent) and remove the resulting empty discovery files. Until then
-/// there are no iceoryx2 artefacts on disk, so this is a no-op that returns
-/// the count of cleaned artefacts (always zero).
-pub fn cleanup_stale_ipc() -> std::io::Result<usize> {
-    Ok(0)
+/// After SIGKILL, iceoryx2's per-node discovery files survive on the
+/// filesystem (typically `/tmp/iceoryx2/...`) and prevent a fresh daemon from
+/// cleanly attaching to its own services if the OS reuses the killed PID.
+/// `Node::cleanup_dead_nodes` walks the global discovery registry, classifies
+/// each entry, and removes the artefacts of nodes whose owning process is
+/// gone.
+///
+/// Returns the number of dead nodes successfully reclaimed. The call itself
+/// is infallible from our perspective — per-artefact failures are logged here
+/// (they typically indicate the current process lacks permission to touch
+/// another user's resources, which is expected when iceoryx2 is shared
+/// system-wide) and never block daemon startup.
+///
+/// `NodeBuilder::create` *also* sweeps dead nodes on construction (controlled
+/// by `cleanup_dead_nodes_on_creation`), but doing it eagerly here keeps the
+/// `status` command's view of the system consistent before the new daemon
+/// races to create its own node.
+pub fn cleanup_stale_ipc() -> usize {
+    let report = Node::<ipc::Service>::cleanup_dead_nodes(Config::global_config());
+    if report.failed_cleanups > 0 {
+        tracing::warn!(
+            failed = report.failed_cleanups,
+            "iceoryx2 dead-node sweep left {} artefacts behind (likely permission-denied; continuing)",
+            report.failed_cleanups
+        );
+    }
+    report.cleanups
 }
 
 #[cfg(test)]
@@ -106,5 +130,18 @@ mod tests {
         let outcome = reclaim_stale_pid_file(&path).unwrap();
         assert_eq!(outcome, PidReclaim::StillRunning(our_pid));
         assert!(path.exists());
+    }
+
+    #[test]
+    fn cleanup_stale_ipc_is_safe_on_a_clean_host() {
+        // Smoke test: the call must return even when there are no dead
+        // nodes to reclaim. The real reclamation path is exercised by
+        // `test_signal_cleanup.py` once Phase 4 lands end-to-end; reproducing
+        // a SIGKILL'd iceoryx2 node from inside a cargo test would require
+        // spawning a child binary, which is out of scope here.
+        //
+        // We can't assert the exact count because a parallel cargo test
+        // process could be creating nodes; we just check the call returned.
+        let _ = cleanup_stale_ipc();
     }
 }
