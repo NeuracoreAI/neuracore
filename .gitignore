@@ -121,3 +121,8 @@ examples/logs/
 examples/test_streaming/
 
 .data_daemon_test_state/
+
+# Bundled rust daemon binary; built via `cargo build --release -p data-daemon`
+# and dropped in by the launch path. Wheel packaging (maturin / cibuildwheel)
+# will eventually bundle this — until then it stays a per-machine artefact.
+neuracore/data_daemon/bin/

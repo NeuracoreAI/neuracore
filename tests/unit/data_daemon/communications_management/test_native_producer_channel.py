@@ -1,16 +1,15 @@
 """Unit tests for ``NativeProducerChannel``.
 
 The PyO3 ``_native_producer`` cdylib is not built into the wheel yet, so we
-stub it with a recording fake. The fake's call log is the only thing under
-test — we are validating that the Python adaptor translates ProducerChannel-
-shaped lifecycle calls into the right native entry points in the right order.
+stub it with the recording fake from ``conftest.py``. The fake's call log is
+the only thing under test — we are validating that the Python adaptor
+translates ProducerChannel-shaped lifecycle calls into the right native entry
+points in the right order.
 """
 
 from __future__ import annotations
 
 import sys
-import types
-from collections.abc import Iterator
 
 import pytest
 from neuracore_types import DataType
@@ -21,69 +20,9 @@ from neuracore.data_daemon.communications_management.producer import (
 from neuracore.data_daemon.communications_management.producer.native_producer_channel import (  # noqa: E501
     NativeProducerChannel,
 )
-
-
-class _NativeStub:
-    """Records every native entry-point call for inspection by tests."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple]] = []
-
-    def start_recording(self, recording_id: str) -> None:
-        self.calls.append(("start_recording", (recording_id,)))
-
-    def start_trace(
-        self,
-        recording_id: str,
-        trace_id: str,
-        data_type: str,
-        data_type_name: str | None = None,
-    ) -> None:
-        self.calls.append(
-            ("start_trace", (recording_id, trace_id, data_type, data_type_name))
-        )
-
-    def open_frame_stream(self, trace_id: str, width: int, height: int) -> None:
-        self.calls.append(("open_frame_stream", (trace_id, width, height)))
-
-    def send_data(
-        self,
-        trace_id: str,
-        payload: bytes,
-        timestamp_ns: int,
-        timestamp_s: float | None = None,
-    ) -> None:
-        self.calls.append(
-            ("send_data", (trace_id, bytes(payload), timestamp_ns, timestamp_s))
-        )
-
-    def end_trace(self, trace_id: str) -> None:
-        self.calls.append(("end_trace", (trace_id,)))
-
-    def stop_recording(self, recording_id: str) -> None:
-        self.calls.append(("stop_recording", (recording_id,)))
-
-
-@pytest.fixture
-def native_stub(monkeypatch: pytest.MonkeyPatch) -> Iterator[_NativeStub]:
-    """Install a fake ``_native_producer`` for the duration of one test."""
-    stub = _NativeStub()
-    fake_module = types.ModuleType("neuracore.data_daemon._native_producer")
-    fake_module.start_recording = stub.start_recording  # type: ignore[attr-defined]
-    fake_module.start_trace = stub.start_trace  # type: ignore[attr-defined]
-    fake_module.open_frame_stream = stub.open_frame_stream  # type: ignore[attr-defined]
-    fake_module.send_data = stub.send_data  # type: ignore[attr-defined]
-    fake_module.end_trace = stub.end_trace  # type: ignore[attr-defined]
-    fake_module.stop_recording = stub.stop_recording  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(
-        sys.modules, "neuracore.data_daemon._native_producer", fake_module
-    )
-    monkeypatch.setattr(adaptor, "_NATIVE_MODULE", None)
-    try:
-        yield stub
-    finally:
-        monkeypatch.setattr(adaptor, "_NATIVE_MODULE", None)
+from tests.unit.data_daemon.communications_management.conftest import (
+    NativeProducerStub as _NativeStub,
+)
 
 
 def test_start_recording_session_emits_start_recording_then_start_trace(
