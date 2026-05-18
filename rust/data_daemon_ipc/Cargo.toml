@@ -9,6 +9,6 @@ description = "Shared IPC envelope, payload, and service-name definitions for th
 path = "src/lib.rs"
 
 [dependencies]
+postcard.workspace = true
 serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true

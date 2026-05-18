@@ -9,6 +9,7 @@
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -16,6 +17,7 @@ use anyhow::{Context, Result};
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
+use crate::encoding::video_encoder::VideoEncoder;
 use crate::ipc::listener;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::daemonize::{daemonize, DaemonizeOutcome, Readiness, ReadinessReporter};
@@ -23,7 +25,9 @@ use crate::lifecycle::pidfile::{PidFile, PidFileError};
 use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
 use crate::lifecycle::signals::{install_shutdown_handler, ShutdownSignal};
 use crate::pipeline::dispatcher;
+use crate::pipeline::trace_actor::TraceActorContext;
 use crate::state::SqliteStateStore;
+use crate::storage::budget::{StorageBudget, StoragePolicy};
 
 /// Upper bound on how long we wait for the signal-capture task after the
 /// listener returns. In normal operation it has already completed; the
@@ -187,11 +191,26 @@ fn run_daemon(
     }
 
     let db_path = runtime_env.db_path.clone();
+    let recordings_root = runtime_env.recordings_root.clone();
+    let storage_policy = StoragePolicy {
+        // Profile-driven storage cap arrives in Phase 7's quota tightening
+        // pass; for now we honour only the free-disk safety margin.
+        storage_limit_bytes: config
+            .storage_limit
+            .and_then(|value| u64::try_from(value).ok()),
+        ..StoragePolicy::default()
+    };
     let outcome = runtime.block_on(async move {
         let state_store = SqliteStateStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
         tracing::info!(path = %db_path.display(), "state store ready");
+        let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
+        let actor_context = Arc::new(TraceActorContext::new(
+            recordings_root.clone(),
+            storage_budget,
+            VideoEncoder::new(),
+        ));
 
         // Run the wait loop in a nested block so the state store can be
         // closed in both the success and error paths before the runtime
@@ -206,8 +225,11 @@ fn run_daemon(
             let transport =
                 IpcTransport::bring_up().context("failed to bring up iceoryx2 transport")?;
 
-            let (dispatcher_tx, dispatcher_handle) =
-                dispatcher::spawn(state_store.clone(), shutdown_tx.subscribe());
+            let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn(
+                state_store.clone(),
+                Arc::clone(&actor_context),
+                shutdown_tx.subscribe(),
+            );
 
             // Capture the actual shutdown signal in a spawned task so we
             // can log which signal triggered the exit *after* the listener
@@ -345,7 +367,10 @@ fn init_tracing(debug: bool, log_file: Option<&Path>) -> Result<()> {
             .with_ansi(false)
             .try_init();
     } else {
-        let _ = builder.try_init();
+        // Write to stderr so the parent's stdout=DEVNULL plumbing (used by
+        // the python launcher in background mode) does not silently swallow
+        // structured log output.
+        let _ = builder.with_writer(std::io::stderr).try_init();
     }
     Ok(())
 }

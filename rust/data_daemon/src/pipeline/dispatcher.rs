@@ -19,7 +19,9 @@ use tokio::sync::{broadcast, mpsc, Notify};
 use tokio::task::JoinHandle;
 
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::pipeline::trace_actor::{self, trace_key, TraceActorMessage, TraceKey};
+use crate::pipeline::trace_actor::{
+    self, trace_key, TraceActorContext, TraceActorMessage, TraceKey,
+};
 use crate::state::{SqliteStateStore, StateStore};
 
 /// Bounded per-trace queue size, matching the planning doc (§4).
@@ -57,9 +59,12 @@ impl DispatcherHandle {
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
 ///
 /// The returned sender is handed to the IPC listener. The dispatcher task
-/// owns the matching receiver and the per-trace `DashMap`.
+/// owns the matching receiver and the per-trace `DashMap`. `actor_context`
+/// is shared with every per-trace actor it spawns — recordings root,
+/// storage-budget tracker, and the configured video encoder.
 pub fn spawn(
     store: SqliteStateStore,
+    actor_context: Arc<TraceActorContext>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
     // Capacity sized to absorb a burst of envelopes from the listener while
@@ -70,7 +75,7 @@ pub fn spawn(
     let drained = Arc::new(Notify::new());
     let drained_for_task = Arc::clone(&drained);
     let join = tokio::spawn(async move {
-        run(store, rx, shutdown_rx).await;
+        run(store, actor_context, rx, shutdown_rx).await;
         drained_for_task.notify_one();
     });
     (tx, DispatcherHandle { join, drained })
@@ -78,6 +83,7 @@ pub fn spawn(
 
 async fn run(
     store: SqliteStateStore,
+    actor_context: Arc<TraceActorContext>,
     mut rx: mpsc::Receiver<Envelope>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
@@ -102,7 +108,9 @@ async fn run(
                     tracing::debug!("dispatcher inbox closed; exiting");
                     break;
                 };
-                if let Some(handle) = handle_envelope(&store, &routing, envelope).await {
+                if let Some(handle) =
+                    handle_envelope(&store, &actor_context, &routing, envelope).await
+                {
                     actor_handles.push(handle);
                 }
             }
@@ -127,6 +135,7 @@ async fn run(
 /// don't trigger actor creation (or that target an actor already running).
 async fn handle_envelope(
     store: &Arc<SqliteStateStore>,
+    actor_context: &Arc<TraceActorContext>,
     routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
     envelope: Envelope,
 ) -> Option<JoinHandle<()>> {
@@ -139,8 +148,18 @@ async fn handle_envelope(
             }
             Envelope::StopRecording { recording_id } => {
                 tracing::info!(recording_id, "recording stop received");
-                // No trace context on the wire — phase 5's recording-scoped
-                // bookkeeping closes the loop here. For phase 4 we just log.
+                match store.mark_recording_stopped(&recording_id).await {
+                    Ok(row) => {
+                        tracing::info!(
+                            recording_id,
+                            stopped_at = ?row.stopped_at,
+                            "recording marked stopped"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, recording_id, "failed to mark recording stopped");
+                    }
+                }
             }
             _ => unreachable!("trace_key only returns None for recording-scoped envelopes"),
         }
@@ -165,9 +184,10 @@ async fn handle_envelope(
     let (tx, actor_rx) = mpsc::channel(TRACE_QUEUE_CAPACITY);
     routing.insert(key.clone(), tx.clone());
     let actor_store = Arc::clone(store);
+    let actor_context = Arc::clone(actor_context);
     let actor_key = key.clone();
     let join = tokio::spawn(async move {
-        trace_actor::run(actor_store, actor_key, actor_rx).await;
+        trace_actor::run(actor_store, actor_context, actor_key, actor_rx).await;
     });
 
     if tx
@@ -186,7 +206,10 @@ async fn handle_envelope(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encoding::video_encoder::VideoEncoder;
     use crate::state::{SqliteStateStore, TraceWriteStatus};
+    use crate::storage::budget::{StorageBudget, StoragePolicy};
+    use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{timeout, Duration};
@@ -199,11 +222,26 @@ mod tests {
         (store, dir)
     }
 
+    fn test_context(recordings_root: PathBuf) -> Arc<TraceActorContext> {
+        let policy = StoragePolicy {
+            storage_limit_bytes: None,
+            min_free_disk_bytes: 0,
+            refresh_interval: Duration::from_secs(60),
+        };
+        let budget = Arc::new(StorageBudget::new(&recordings_root, policy));
+        Arc::new(TraceActorContext::new(
+            recordings_root,
+            budget,
+            VideoEncoder::new(),
+        ))
+    }
+
     #[tokio::test]
     async fn dispatcher_drives_trace_to_written_on_end_trace() {
-        let (store, _dir) = open_store().await;
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"));
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
-        let (tx, handle) = spawn(store.clone(), shutdown_rx);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
         tx.send(Envelope::StartRecording {
             recording_id: "rec-1".into(),
@@ -218,17 +256,17 @@ mod tests {
             recording_id: "rec-1".into(),
             trace_id: "trace-1".into(),
             data_type: "joints".into(),
+            data_type_name: None,
         })
         .await
         .expect("start trace");
-        for index in 0..5 {
-            tx.send(Envelope::Frame {
-                trace_id: "trace-1".into(),
-                timestamp_ns: index,
-                payload: vec![index as u8; 4],
-            })
-            .await
-            .expect("frame");
+        for index in 0..5i64 {
+            // Send valid JSON payloads so the actor writes structured entries
+            // into the trace.json array (rather than the byte-count fallback).
+            let payload = serde_json::to_vec(&serde_json::json!({"i": index})).unwrap();
+            tx.send(Envelope::frame("trace-1".into(), index, None, payload))
+                .await
+                .expect("frame");
         }
         tx.send(Envelope::EndTrace {
             trace_id: "trace-1".into(),
@@ -248,6 +286,21 @@ mod tests {
             .expect("get trace")
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
-        assert_eq!(trace.bytes_written, 20);
+
+        // Verify the artefact on disk parses back to exactly what we sent.
+        let trace_dir = context
+            .recordings_root
+            .join("rec-1")
+            .join("joints")
+            .join("trace-1");
+        let bytes = std::fs::read(trace_dir.join("trace.json")).expect("trace.json exists");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                {"i": 0}, {"i": 1}, {"i": 2}, {"i": 3}, {"i": 4}
+            ])
+        );
+        assert_eq!(trace.total_bytes as u64, bytes.len() as u64);
     }
 }
