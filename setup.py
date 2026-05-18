@@ -118,7 +118,7 @@ setup(
             "torch==2.7.1",
             "huggingface-hub==0.36.0",
             "tensorflow-datasets>=4.9.9",
-            "tensorflow>=2.20.0",
+            "tensorflow-cpu>=2.20.0",
             "pin-pink>=4",
             "mcap>=1.3.1,<2",
             "mcap-protobuf-support>=0.5.4,<0.6",
