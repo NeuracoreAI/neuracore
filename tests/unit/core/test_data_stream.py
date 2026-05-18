@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import json
 import struct
-import sys
-import types
 
 import numpy as np
 import pytest
@@ -24,6 +22,12 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     DEFAULT_VIDEO_SLOT_SIZE,
+)
+from tests.unit.data_daemon.communications_management.conftest import (
+    NativeProducerStub as _NativeProducerStub,
+)
+from tests.unit.data_daemon.communications_management.conftest import (
+    install_native_stub,
 )
 
 
@@ -234,65 +238,11 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
     assert stream.is_recording() is False
 
 
-class _NativeProducerStub:
-    """Records native producer entry-point calls for assertion."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple]] = []
-
-    def start_recording(self, recording_id: str) -> None:
-        self.calls.append(("start_recording", (recording_id,)))
-
-    def start_trace(
-        self,
-        recording_id: str,
-        trace_id: str,
-        data_type: str,
-        data_type_name: str | None = None,
-    ) -> None:
-        self.calls.append(
-            ("start_trace", (recording_id, trace_id, data_type, data_type_name))
-        )
-
-    def open_frame_stream(self, trace_id: str, width: int, height: int) -> None:
-        self.calls.append(("open_frame_stream", (trace_id, width, height)))
-
-    def send_data(
-        self,
-        trace_id: str,
-        payload: bytes,
-        timestamp_ns: int,
-        timestamp_s: float | None = None,
-    ) -> None:
-        self.calls.append(
-            ("send_data", (trace_id, bytes(payload), timestamp_ns, timestamp_s))
-        )
-
-    def end_trace(self, trace_id: str) -> None:
-        self.calls.append(("end_trace", (trace_id,)))
-
-    def stop_recording(self, recording_id: str) -> None:
-        self.calls.append(("stop_recording", (recording_id,)))
-
-
 @pytest.fixture
 def native_runtime(monkeypatch: pytest.MonkeyPatch):
     """Force the data-stream module to pick the native producer this test."""
     stub = _NativeProducerStub()
-    fake_module = types.ModuleType("neuracore.data_daemon._native_producer")
-    for method_name in (
-        "start_recording",
-        "start_trace",
-        "open_frame_stream",
-        "send_data",
-        "end_trace",
-        "stop_recording",
-    ):
-        setattr(fake_module, method_name, getattr(stub, method_name))
-    monkeypatch.setitem(
-        sys.modules, "neuracore.data_daemon._native_producer", fake_module
-    )
-    monkeypatch.setattr(native_adaptor, "_NATIVE_MODULE", None)
+    install_native_stub(monkeypatch, stub)
     monkeypatch.setattr(
         "neuracore.core.streaming.data_stream.rust_daemon_enabled",
         lambda: True,

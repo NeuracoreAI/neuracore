@@ -467,8 +467,8 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 | 1 — Scaffolding & CLI | ✓ Done (commit `0b452b0`) |
 | 2 — Lifecycle | ✓ Done (commit `eeff931`) |
 | 3 — SQLite state store | ✓ Done (commit `b9df0c9`) |
-| 4 — IPC + per-trace pipeline | Daemon side complete — sub-phases 4a–4g + 4j done, producer-side 4h + 4i deferred (see below) |
-| 5 — Encoding | Not started |
+| 4 — IPC + per-trace pipeline | Daemon side complete — sub-phases 4a–4g + 4j done. 4h is partial (the 4e skeleton plus `open_frame_stream`); 4i landed as a minimal-interface cutover (see below). |
+| 5 — Encoding | Daemon side complete — sub-phases 5a–5f done; 5g (pytest integration gate) still deferred until 4h carries the full sequence/batch surface and the `_native_producer` cdylib ships inside the wheel. |
 | 6 — Cloud upload | Not started |
 | 7 — Performance & edge cases | Not started |
 | 8 — Hardening & rollout | Not started |
@@ -518,7 +518,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 
 ### Phase 4 — IPC + per-trace pipeline (3–4 days)
 
-Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged; the producer-side rewrites (4h, 4i) are sequenced to land before Phase 5 begins so the smoke-test producer can drive a trace row to `WRITTEN` end-to-end. The overall phase deliverable is unchanged: a Python SDK → daemon round-trip that drives a trace row to `WRITTEN`, plus full `test_signal_cleanup.py` passing (including the iceoryx2-shaped assertions).
+Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged. The producer-side work landed in two steps: the original plan called for the full `ProducerChannel` contract in Rust (4h) followed by a verbatim port of `producer_channel.py` to the native shim (4i); in practice 4i shipped first as a minimal-interface cutover (a side-by-side `NativeProducerChannel` selected by `NCD_RUST_DAEMON`), with the full 4h surface — sequence numbers, batched joint data, shared-slot transport — sequenced after the SDK round-trip is exercised end-to-end. The overall phase deliverable is unchanged: a Python SDK → daemon round-trip that drives a trace row to `WRITTEN`, plus full `test_signal_cleanup.py` passing (including the iceoryx2-shaped assertions).
 
 #### 4a — Cargo workspace + crate skeletons — ✓ Done
 
@@ -566,6 +566,8 @@ Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged; the produce
 
 **Decision (2026-05-17):** all three service families carry `[u8]` payloads encoding the existing `Envelope` enum. The doc originally pencilled in typed `ScalarFrame` / `VideoFrame` structs for zero-copy; that optimisation lives in 4h alongside the producer-side `loan_uninit` work, because it is the producer that benefits from writing pixel bytes straight into a loaned sample. For Phase 4 the wire stays JSON so the daemon-side topology can land without a producer rewrite.
 
+**Decision (2026-05-18, supersedes the JSON note above):** the envelope wire format is now [postcard](https://docs.rs/postcard) (length-prefixed binary), not JSON. `Vec<u8>` payloads travel as length-prefix + raw bytes rather than the ~3× JSON array-of-integers expansion, and `f64` timestamps round-trip bit-exact through the IEEE-754 byte pattern — so the `frame_payload` shim and the `timestamp_s_bits` `u64` round-trip from the original 4f wiring are gone. The speculative `SCALARS` / `frames(...)` service-name constants and their daemon-side dead subscribers were removed in the same pass; sub-phase 4h will reintroduce the per-resolution path once a real producer publishes to it.
+
 **Check:** `cargo test -p data_daemon_ipc` covers envelope round-trips, the resolution-keyed service name, and the payload budget; the lazy `frames/<WxH>` open path is exercised by the listener once a producer publishes `OpenFrameStream` (Phase 4h).
 
 #### 4g — Wire IPC into the launch runtime — ✓ Done
@@ -576,23 +578,47 @@ Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged; the produce
 
 **Check:** `cargo test -p data-daemon` is green (39/39 passing — includes `pipeline::dispatcher::tests::dispatcher_drives_trace_to_written_on_end_trace`). Manual two-terminal smoke is deferred to 4i once `producer_channel.py` is ported.
 
-#### 4h — Expand the PyO3 producer surface — TODO
+#### 4h — Expand the PyO3 producer surface — partial
 
-**Build:** in `data_daemon_producer`, add Python entry points for the full `ProducerChannel` contract — `send_data_parts`, `send_batched_joint_data`, `start_new_trace`, `end_trace`, `heartbeat`, `mark_recording_stop_requested`, `wait_until_sequence_sent`, `get_last_{accepted,enqueued,sent}_sequence_number`, `open_fixed_shared_slots`, `cleanup_producer_channel`. Sequence numbers are assigned in Rust on enqueue/loan and acknowledged via the iceoryx2 commands response channel — that becomes the source of truth for `wait_until_sequence_sent`. Multi-part payloads are assembled into a single iceoryx2 loan inside Rust (no Python-side queue). Fixed shared-slot mode for RGB images flows through the `frames/<WxH>` services from 4f.
+**Built so far (2026-05-17):** the 4e skeleton plus
+[`open_frame_stream`](rust/data_daemon_producer/src/lib.rs), which publishes the
+[`OpenFrameStream`](rust/data_daemon_ipc/src/lib.rs) envelope so the daemon's
+per-trace actor opens the NUT video pipeline ahead of the first pixel frame.
+This is the minimum the native path needs to differentiate scalar from video
+traces.
+
+**Still TODO:** the rest of the `ProducerChannel` contract —
+`send_data_parts`, `send_batched_joint_data`, `heartbeat`,
+`mark_recording_stop_requested`, `wait_until_sequence_sent`,
+`get_last_{accepted,enqueued,sent}_sequence_number`, `open_fixed_shared_slots`,
+`cleanup_producer_channel`. Sequence numbers are intended to come from
+iceoryx2 commands-response acknowledgements (source of truth for
+`wait_until_sequence_sent`); multi-part payloads to be assembled into a single
+iceoryx2 loan in Rust; shared-slot mode for RGB to flow through the
+`frames/<WxH>` services from 4f. None of those are wired yet — the 4i interim
+gives the SDK enough surface to drive a Rust daemon end-to-end without them.
 
 **Decision (2026-05-17):** the Python adaptor stays a thin shim; sequencing, batching, multi-part assembly, and slot management live in Rust. This keeps the producer hot path GIL-free and lets iceoryx2 acks drive sequence semantics directly.
 
-**Deliverable:** `neuracore.data_daemon._native_producer` exposes every behaviour the Python adaptor needs.
+**Deliverable (full):** `neuracore.data_daemon._native_producer` exposes every behaviour the Python adaptor needs. **Deliverable (partial, today):** the 5 lifecycle entry points plus `open_frame_stream` are live and consumed by the 4i shim.
 
-**Check:** new tests in `data_daemon_producer/tests/` cover each entry point against a stub daemon node.
+**Check:** new tests in `data_daemon_producer/tests/` cover each entry point against a stub daemon node — these still need to be added alongside the full-surface work.
 
-#### 4i — Port `producer_channel.py` to the native shim — TODO
+#### 4i — Route the SDK to the native producer behind `NCD_RUST_DAEMON` — ✓ Done
 
-**Build:** rewrite [neuracore/data_daemon/communications_management/producer/producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) so each public method is a one-liner that forwards to `_native_producer`. Public signatures consumed by [neuracore/core/streaming/data_stream.py:70-152](neuracore/core/streaming/data_stream.py#L70-L152) are preserved byte-for-byte.
+**Built:** rather than rewrite [producer_channel.py](neuracore/data_daemon/communications_management/producer/producer_channel.py) outright (which would have required the full 4h surface — sequence allocator, sender thread, shared-slot transport, batched joint data, etc.), 4i lands as a side-by-side adaptor and a single backend toggle:
 
-**Deliverable:** SDK callers compile against the rewritten shim; the existing producer-side unit tests pass without modification.
+- Centralised the rollout flag in [rust_selection.py::rust_daemon_enabled](neuracore/data_daemon/rust_selection.py) so both [__main__.py](neuracore/data_daemon/__main__.py) (binary handoff) and [data_stream.py](neuracore/core/streaming/data_stream.py) (SDK routing) agree on which daemon is in play.
+- Added [NativeProducerChannel](neuracore/data_daemon/communications_management/producer/native_producer_channel.py): a thin per-stream wrapper that lazy-imports `_native_producer` and translates `start_recording_session` / `announce_frame_resolution` / `send_frame` / `cleanup_producer_channel` into the matching `StartRecording` / `StartTrace` / `OpenFrameStream` / `Frame` / `EndTrace` envelopes. Sequencing, batching, multi-part assembly, shared-slot transport, heartbeats, and stop-cutoff semantics are deliberately *not* reimplemented — iceoryx2 handles delivery and the daemon-side actor is responsible for the rest. The shim exposes degrade-gracefully no-ops (`send_batched_joint_data`, `get_last_*_sequence_number`, `wait_until_sequence_sent`) so [api/logging.py](neuracore/api/logging.py) does not need to branch on backend at every call site.
+- Branched [data_stream.py](neuracore/core/streaming/data_stream.py) on `rust_daemon_enabled()` at construction time. `_handle_ensure_producer_channel` instantiates either `ProducerChannel` or `NativeProducerChannel`; `_send_to_daemon` and `VideoDataStream.log` ship raw frame bytes through the native publisher (the legacy `[header][metadata_json][frame]` packing would land inside the NUT spool and break ffmpeg, so video skips it under the native path). A new `_on_producer_channel_ready` hook lets `VideoDataStream` announce its resolution as soon as the trace exists.
 
-**Check:** `pytest neuracore/data_daemon/communications_management/producer/ -x` and the SDK-side streaming tests green.
+The legacy `ProducerChannel` remains the default and is unchanged — flipping `NCD_RUST_DAEMON` is the only mechanism that switches the SDK to the native publisher, matching the binary-side rollout flag.
+
+**Deliverable:** SDK callers compile and operate identically under the default flag; setting `NCD_RUST_DAEMON=1` routes every `DataStream` through `_native_producer` instead of zmq.
+
+**Deferred to a future sub-phase:** producer ↔ daemon sequence-number propagation (needs 4h's iceoryx2 commands-response wiring), `send_batched_joint_data`, and bundling the `_native_producer` cdylib into the wheel (today the import fails with a clear `RuntimeError` pointing at the rollout flag if the cdylib is missing).
+
+**Check:** `cargo build -p data_daemon_producer` green; `cargo test --workspace` green (74 + 6 + 0); `pytest tests/unit/data_daemon/communications_management/test_native_producer_channel.py tests/unit/core/test_data_stream.py tests/unit/data_daemon/communications_management/test_producer_channel.py tests/unit/data_daemon/test_messaging.py` green (57 passed); pre-commit (pyupgrade, isort, black, ruff, pydocstyle, mypy, cspell) clean on the touched files.
 
 #### 4j — Dead-node sweep on startup — ✓ Done
 
@@ -608,7 +634,7 @@ Decomposed into 10 sub-phases. Sub-phases 4a–4g and 4j are merged; the produce
 
 Decomposed into 7 sub-phases (5a–5g). Each writer lands behind cargo unit tests first; the integration gate runs once 5f wires them into the trace actor.
 
-#### 5a — Storage paths + budget — TODO
+#### 5a — Storage paths + budget — ✓ Done
 
 **Build:** `storage/paths.rs` resolves `recordings/{recording_id}/{data_type}/{trace_id}/` to a `PathBuf` matching today's layout ([const.py:63](neuracore/data_daemon/const.py#L63)). `storage/budget.rs` tracks free space and pauses writes when below `MIN_FREE_DISK_BYTES = 32 MiB` ([const.py:57](neuracore/data_daemon/const.py#L57)).
 
@@ -616,7 +642,7 @@ Decomposed into 7 sub-phases (5a–5g). Each writer lands behind cargo unit test
 
 **Check:** unit tests on path construction + budget evaluation under simulated low-disk.
 
-#### 5b — JSON trace writer — TODO
+#### 5b — JSON trace writer — ✓ Done
 
 **Build:** `encoding/json_trace.rs` — incremental JSON-array writer (`[` on open, comma separator between entries, in-memory `BytesMut` flushed to disk at 4 MiB threshold per [const.py:55](neuracore/data_daemon/const.py#L55)). On finalize, flush, append `]`, close, record `total_bytes`.
 
@@ -624,7 +650,7 @@ Decomposed into 7 sub-phases (5a–5g). Each writer lands behind cargo unit test
 
 **Check:** unit test parses the output back with `serde_json`; the entry count and bytes total match the input.
 
-#### 5c — NUT muxer — TODO
+#### 5c — NUT muxer — ✓ Done
 
 **Build:** `encoding/nut_writer.rs` — minimal NUT muxer for one raw-RGB stream. Header on first frame (resolution, pix_fmt, timebase from frame metadata); per-frame packets appended afterwards. Append-only and crash-safe so partial recovery is possible.
 
@@ -632,29 +658,33 @@ Decomposed into 7 sub-phases (5a–5g). Each writer lands behind cargo unit test
 
 **Check:** unit test runs `ffprobe -of json` on the artifact and asserts the stream metadata.
 
-#### 5d — Video encoder subprocess — TODO
+#### 5d — Video encoder subprocess — ✓ Done
 
-**Build:** `encoding/video_encoder.rs` — per video trace spawn a `tokio::process::Command` for `ffmpeg -y -fflags +genpts -i raw.nut -map 0:v -c:v libx264 -preset veryfast -crf 23 lossy.mp4 -map 0:v -c:v ffv1 lossless.mp4`. Supervise the child; finalize on exit; delete `raw.nut` once both mp4s are verified non-empty.
+**Built:** [`encoding/video_encoder.rs`](rust/data_daemon/src/encoding/video_encoder.rs) spawns one supervised `tokio::process::Command` per video trace and demuxes the spooled NUT into two mp4 outputs in a single pass. The original plan pencilled in `-c:v ffv1` for the lossless leg, but ffv1 is not a registered codec in the MP4 container (ffmpeg reports *"Could not find tag for codec ffv1 in stream #0"*); the on-disk layout contract requires the file to be called `lossless.mp4`, so we match the existing Python writer in [video_trace.py](neuracore/data_daemon/recording_encoding_disk_manager/encoding/video_trace.py) and use `libx264` with `-pix_fmt yuv444p10le -preset ultrafast -qp 0` for mathematically-lossless output. The lossy leg is `libx264 -pix_fmt yuv420p -preset ultrafast -qp 23`, also matching Python. `-fflags +genpts` regenerates timestamps when the spool was truncated mid-frame. Outputs are stat'd post-exit; the source `raw.nut` is unlinked only after both mp4s verify non-empty (so a failed encode leaves the spool in place for retry). `kill_on_drop(true)` ensures the child is reaped if the supervising future is cancelled.
 
 **Deliverable:** a video trace produces both `lossy.mp4` and `lossless.mp4`.
 
-**Check:** cargo test feeds a small synthetic NUT through the encoder; both outputs decode under `ffprobe`.
+**Check:** `cargo test -p data-daemon encoding::video_encoder` is green (6/6). The end-to-end `transcode_emits_both_outputs_and_removes_raw` test feeds a synthetic 16×16 NUT through the encoder and verifies both outputs with `ffprobe` (stream count, codec_type, width, height); the test self-skips on hosts that lack `ffmpeg`/`ffprobe`.
 
-#### 5e — Video sidecar metadata — TODO
+#### 5e — Video sidecar metadata — ✓ Done
 
-**Build:** `encoding/metadata.rs` — accumulate per-frame dictionaries in memory (timestamps, dimensions, etc.); on finalize, flush a sidecar `trace.json` matching the shape of [video_trace.py](neuracore/data_daemon/recording_encoding_disk_manager/encoding/video_trace.py).
+**Built:** [`encoding/metadata.rs`](rust/data_daemon/src/encoding/metadata.rs) accumulates per-frame metadata dictionaries in memory and flushes a single `trace.json` sidecar on finalize. Output bytes match the Python writer byte-for-byte: `serde_json::to_vec` produces the same compact rendering as Python's `json.dumps(separators=(",", ":"), ensure_ascii=False)`, and the `preserve_order` feature already enabled on `serde_json` keeps insertion order stable. `finish` stamps `"frame_idx"` (0-based) and overwrites `"frame": null` on every entry, mirroring [`VideoTrace.finish`](neuracore/data_daemon/recording_encoding_disk_manager/encoding/video_trace.py). Non-object payloads dropped via `record_value`, and array payloads are flattened — matching the Python `_handle_metadata` recursion the producer relies on when it batches frames.
 
 **Deliverable:** video traces have a `trace.json` alongside the two mp4s.
 
-**Check:** fixture diff against a Python-generated `trace.json`.
+**Check:** `cargo test -p data-daemon encoding::metadata` is green (5/5). `fixture_matches_python_video_trace_output` asserts a hand-rolled fixture of the exact bytes the Python writer emits for the same inputs (covers integer + float timestamps, string values, nested objects, and the `frame`-overwrite path).
 
-#### 5f — Wire trace_actor to real writers — TODO
+#### 5f — Wire trace_actor to real writers — ✓ Done
 
-**Build:** replace the skeletal state machine in `pipeline/trace_actor.rs` (currently just logs and counts) with concrete JSON / NUT branches keyed on `data_type`. Drop each iceoryx2 `Sample` after `write_all` so the slot returns to the producer's pool. Debounce `bytes_written` DB updates (every N writes or every M ms — match today's policy).
+**Built:** replaced the skeletal counter in [pipeline/trace_actor.rs](rust/data_daemon/src/pipeline/trace_actor.rs) with a real state machine that opens a [`JsonTraceWriter`](rust/data_daemon/src/encoding/json_trace.rs) for scalar traces and a [`NutWriter`](rust/data_daemon/src/encoding/nut_writer.rs) + [`VideoMetadataAccumulator`](rust/data_daemon/src/encoding/metadata.rs) pair for traces whose producer publishes an [`Envelope::OpenFrameStream`](rust/data_daemon_ipc/src/lib.rs). `EndTrace` flushes the JSON writer (scalars) or shells out to [`VideoEncoder::run`](rust/data_daemon/src/encoding/video_encoder.rs) and then writes the sidecar (video). Writers are opened lazily on the first frame so an empty trace still finalises as `[]` without producing a stub `raw.nut`.
 
-**Deliverable:** end-to-end Python producer → daemon → on-disk artifacts in offline mode for both scalar and video traces.
+The dispatcher now takes a shared [`TraceActorContext`](rust/data_daemon/src/pipeline/trace_actor.rs) that bundles the recordings root, a single [`StorageBudget`](rust/data_daemon/src/storage/budget.rs) (5a), and the configured `VideoEncoder`. [launch.rs](rust/data_daemon/src/cli/launch.rs) constructs it once and clones the `Arc` into every actor — the budget's in-tree usage estimate therefore accumulates across traces, matching the Python encoder manager's pre-flight check. DB writes are debounced: `bytes_written` flushes every 32 frames or on finalise (`BYTES_WRITTEN_DEBOUNCE_FRAMES`); the first frame still bumps `write_status` from `initializing → writing` so the registration coordinator's filter (§5 schema) eventually picks the trace up.
 
-**Check:** manual smoke test produces the expected output tree (`recordings/{rec}/RGB/{trace}/{lossy.mp4, lossless.mp4, trace.json}` and `recordings/{rec}/{data_type}/{trace}/trace.json`).
+**Decision (2026-05-17):** the producer→daemon wire format for scalar payloads is still TBD (the producer rewrite is 4h/4i). The actor accepts any payload: when the bytes parse as JSON it appends verbatim, otherwise it wraps them in `{"timestamp_ns": …, "payload_len": …}` so the on-disk `trace.json` is always valid. For video traces, the per-frame metadata is synthesised from the envelope's `timestamp_ns` and the announced resolution — the producer doesn't ship a separate metadata channel yet. Both shapes can be tightened in 4h/4i without changing the actor's external contract.
+
+**Deliverable:** in-process integration: dispatcher → actor → on-disk artefacts for both scalar (`recordings/{rec}/{data_type}/{trace}/trace.json`) and video (`recordings/{rec}/RGB/{trace}/{lossy.mp4, lossless.mp4, trace.json}`) paths.
+
+**Check:** `cargo test -p data-daemon` is green (74/74, +4 actor tests covering JSON finalise, empty-trace finalise, video transcode end-to-end, and the shutdown-without-end failure path; the video case self-skips on hosts without ffmpeg). `cargo clippy -p data-daemon --all-targets -- -D warnings` clean. Manual two-terminal smoke against a live Python producer is deferred to 4i alongside the rest of the producer-driven gates.
 
 #### 5g — Phase 5 integration gate — TODO
 
