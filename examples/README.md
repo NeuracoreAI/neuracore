@@ -44,7 +44,7 @@ The data collection example demonstrates how to:
 
 **NOTE:** You might need to set the `MUJOCO_GL` environment to `egl` using `export MUJOCO_GL=egl` if your RGB Camera Feed visualizations are glitchy on the Robot Data Visualiser Console.
 
-**Halid TODO**: we need to explain why to do the above for the users.
+**Halid Note**: we need to explain why to do the above for the users.
 
 1. Run the ALOHA example and record the demos:
 ```bash
@@ -70,7 +70,9 @@ Launch training example show how to:
 **NOTE: Before running this example:**
 - Collect a dataset following the example: [Data Collection](#data-collection)
 
-Now that you have some data, navigate to "Data" tab in the Neuracore Dashboard to launch a training run on your newly collected data.
+Now that you have some data, navigate to "Data" tab in the Neuracore Dashboard to launch a training run on your newly collected data. 
+
+**Halid Note**: The above the instruction is kind of hidden, some pictures will be nice. The `Data` tab is the mistake. It should be `Training` tab
 
 Alternatively, you can launch training runs from the python API:
 
@@ -78,7 +80,7 @@ Alternatively, you can launch training runs from the python API:
 python example_launch_training.py \
    --name 'My Training Job' \
    --algorithm_name 'CNNMLP' \
-   --dataset_name 'Example Dataset'
+   --dataset_name 'Example Dataset' # Halid Note: this should 'My Example Dataset'.
 ```
 For more available arguments run `python example_launch_training.py --help`
 
@@ -103,7 +105,7 @@ pip install "neuracore[ml]"
 
 Run the local model with ALOHA example:
 ```bash
-python example_local_endpoint.py
+python example_local_endpoint.py # Halid TODO: example_local_endpoint_vx300s.py  
 ```
 or if your running the Bi Gym example:
 ```bash 
@@ -123,6 +125,8 @@ The server deployment example shows how to:
 - Wait for the training run to finish
 - Go to the "Endpoint" tab on your Neuracore Dashboard and start an endpoint. Call it __"MyExampleEndpoint"__
 - Wait for the status to be active
+
+**Halid Note**: We need to add the online inference deployment instruction here.
 
 Once you have completed the steps above:
 ```bash

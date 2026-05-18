@@ -1,7 +1,6 @@
-"""This example demonstrates how you can start an endpoint on the cloud
-and locally run the robot using the endpoint."""
+"""This example demonstrates how you can run a local policy rollout
+in a VX300s environment using Neuracore."""
 
-import sys
 from typing import cast
 
 import matplotlib.pyplot as plt
@@ -15,41 +14,82 @@ from neuracore_types import (
     EmbodimentDescription,
 )
 
-import time
 import neuracore as nc
-from neuracore import EndpointError
 
-ENDPOINT_NAME = "test_vx300" # Halid note: make this configuration from users
+TRAINING_JOB_NAME = "My Training Job" # Halid note: make this configuration from users
+
 CAMERA_NAMES = ["angle"]
+
+# Specification of the order that will be fed into the model
+INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + BimanualViperXTask.LEFT_GRIPPER_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+            + BimanualViperXTask.RIGHT_GRIPPER_JOINT_NAMES
+        )
+    },
+    DataType.RGB_IMAGES: {i: name for i, name in enumerate(CAMERA_NAMES)},
+}
+
+OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
+    DataType.JOINT_TARGET_POSITIONS: {
+        i: name
+        for i, name in enumerate(
+            BimanualViperXTask.LEFT_ARM_JOINT_NAMES
+            + [BimanualViperXTask.LEFT_GRIPPER_OPEN]
+            + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+            + [BimanualViperXTask.RIGHT_GRIPPER_OPEN]
+        )
+    },
+}
 
 
 def main():
-
     nc.login()
     nc.connect_robot(
         robot_name="Mujoco VX300s",
         urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
         overwrite=False,
     )
+    # If you have a train run name, you can use it to connect to a local. E.g.:
+    policy = nc.policy(
+        train_run_name=TRAINING_JOB_NAME,
+        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    )
 
-    try:
-        policy = nc.policy_remote_server(ENDPOINT_NAME)
-    except EndpointError:
-        print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
-        print(
-            "Once you have trained a model, endpoints can be started at https://neuracore.com/dashboard/endpoints"
-        )
-        sys.exit(1)
+    # If you know the path to the local model.nc.zip file, you can use it directly as:
+    # policy = nc.policy(
+    #     model_file="PATH/TO/MODEL.nc.zip",
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    # )
+
+    # Alternatively, you can connect to a local endpoint that has been started
+    # policy = nc.policy_local_server(
+    #     train_run_name=TRAINING_JOB_NAME,
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    # )
+
+    # Optional. Set the checkpoint to the last epoch.
+    # Note by default, model is loaded from the last epoch.
+    # policy.set_checkpoint(epoch=-1)
 
     onscreen_render = True
-    render_cam_name = "angle"
+    render_cam_name = CAMERA_NAMES[0]
+    num_rollouts = 10
 
-    for episode_idx in range(10):
+    for episode_idx in range(num_rollouts):
         print(f"{episode_idx=}")
 
         # Setup the environment
         env = make_sim_env()
-        BOX_POSE[0] = env.sample_box_pose() 
+        # resample the initial cube pose
+        BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
 
         # Setup plotting
@@ -59,19 +99,10 @@ def main():
             plt.ion()
 
         horizon = 1
-
         # Run episode
         for i in range(400):
 
             nc.log_joint_positions(positions=obs.qpos)
-            t = time.time()
-            
-            # Halid Note: this is needed if
-            nc.log_language(
-                name="instruction",
-                language="Pick up the cube and pass it to the other robot",
-                timestamp=t,
-            )
 
             for key, value in obs.cameras.items():
                 if key in CAMERA_NAMES:
@@ -82,6 +113,7 @@ def main():
                 predictions: dict[DataType, dict[str, BatchedNCData]] = policy.predict(
                     timeout=5
                 )
+
                 joint_target_positions = cast(
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],

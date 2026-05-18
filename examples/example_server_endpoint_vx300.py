@@ -1,12 +1,22 @@
-"""This example demonstrates how you can run a local policy rollout
-in a VX300s environment using Neuracore."""
+"""This example demonstrates how you can start an endpoint on the cloud
+and locally run the robot using the endpoint."""
 
+import sys
 from typing import cast
 
 import matplotlib.pyplot as plt
 import torch
 from common.base_env import BimanualViperXTask
-from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, BOX_POSE, make_sim_env
+from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
+from neuracore_types import BatchedJointData, BatchedNCData, DataType
+
+import neuracore as nc
+from neuracore import EndpointError
+
+ENDPOINT_NAME = "test_vx300" # Halid note: make this configuration from users
+CAMERA_NAMES = ["angle"]
+
+
 from neuracore_types import (
     BatchedJointData,
     BatchedNCData,
@@ -14,13 +24,6 @@ from neuracore_types import (
     EmbodimentDescription,
 )
 
-import neuracore as nc
-
-TRAINING_JOB_NAME = "MyTrainingJob"
-
-CAMERA_NAMES = ["angle"]
-
-# Specification of the order that will be fed into the model
 INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
     DataType.JOINT_POSITIONS: {
         i: name
@@ -46,50 +49,34 @@ OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
     },
 }
 
-
 def main():
+
     nc.login()
     nc.connect_robot(
         robot_name="Mujoco VX300s",
         urdf_path=str(BIMANUAL_VIPERX_URDF_PATH),
         overwrite=False,
     )
-    # If you have a train run name, you can use it to connect to a local. E.g.:
-    policy = nc.policy(
-        train_run_name=TRAINING_JOB_NAME,
-        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
-        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
-    )
 
-    # If you know the path to the local model.nc.zip file, you can use it directly as:
-    # policy = nc.policy(
-    #     model_file="PATH/TO/MODEL.nc.zip",
-    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
-    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
-    # )
-
-    # Alternatively, you can connect to a local endpoint that has been started
-    # policy = nc.policy_local_server(
-    #     train_run_name=TRAINING_JOB_NAME,
-    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
-    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
-    # )
-
-    # Optional. Set the checkpoint to the last epoch.
-    # Note by default, model is loaded from the last epoch.
-    # policy.set_checkpoint(epoch=-1)
+    try:
+        policy = nc.policy_remote_server(ENDPOINT_NAME,
+            input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+            output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,)
+    except EndpointError:
+        print(f"Please ensure that the endpoint '{ENDPOINT_NAME}' is running.")
+        print(
+            "Once you have trained a model, endpoints can be started at https://neuracore.com/dashboard/endpoints"
+        )
+        sys.exit(1)
 
     onscreen_render = True
-    render_cam_name = CAMERA_NAMES[0]
-    num_rollouts = 10
+    render_cam_name = "angle"
 
-    for episode_idx in range(num_rollouts):
+    for episode_idx in range(10):
         print(f"{episode_idx=}")
 
         # Setup the environment
         env = make_sim_env()
-        # resample the initial cube pose
-        BOX_POSE[0] = env.sample_box_pose()
         obs = env.reset()
 
         # Setup plotting
@@ -99,6 +86,7 @@ def main():
             plt.ion()
 
         horizon = 1
+
         # Run episode
         for i in range(400):
 
@@ -113,7 +101,6 @@ def main():
                 predictions: dict[DataType, dict[str, BatchedNCData]] = policy.predict(
                     timeout=5
                 )
-
                 joint_target_positions = cast(
                     dict[str, BatchedJointData],
                     predictions[DataType.JOINT_TARGET_POSITIONS],
