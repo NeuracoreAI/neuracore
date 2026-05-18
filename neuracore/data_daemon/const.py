@@ -7,6 +7,7 @@ from pathlib import Path
 
 HEARTBEAT_TIMEOUT_SECS = 10
 NEVER_OPENED_TIMEOUT_SECS = 20
+DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS = 20
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.app/api")
 
 TRACE_ID_FIELD_SIZE = 36  # bytes allocated for the trace_id string in chunk headers
@@ -66,10 +67,10 @@ DEFAULT_RECORDING_ROOT_PATH = (
 )
 DEFAULT_DAEMON_DB_PATH = Path.home() / ".neuracore" / "data_daemon" / "state.db"
 
-DEFAULT_STORAGE_FREE_FRACTION = 0.5  # Use 50% of free disk space for local storage.
-DEFAULT_TARGET_DRAIN_HOURS = 12.0  # Aim to drain stored data within ~12 hours.
-DEFAULT_MIN_BANDWIDTH_MIB_S = 1.0  # Avoid too-slow uploads even on large disks.
-DEFAULT_MAX_BANDWIDTH_MIB_S = 20.0  # Cap upload bandwidth to avoid saturating links.
+DEFAULT_STORAGE_FREE_FRACTION = 0.5  # Use 50% of free disk space for local storage
+DEFAULT_TARGET_DRAIN_HOURS = 12.0  # Aim to drain stored data within ~12 hours
+DEFAULT_MIN_BANDWIDTH_MIB_S = 1.0  # Avoid too-slow uploads even on large disks
+DEFAULT_MAX_BANDWIDTH_MIB_S = 20.0  # Cap upload bandwidth to avoid saturating links
 
 # Backend API retry configuration
 BACKEND_API_MAX_RETRIES = 3

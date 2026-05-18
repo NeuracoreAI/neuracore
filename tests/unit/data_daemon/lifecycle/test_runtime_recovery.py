@@ -12,6 +12,7 @@ from neuracore.data_daemon.const import (
     DEFAULT_SHARED_MEMORY_SIZE,
     SHARED_SLOT_SHM_PREFIX,
 )
+from neuracore.data_daemon.lifecycle import runtime_recovery
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
     pid_is_running,
@@ -20,7 +21,8 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     SharedMemoryCapacityError,
     cleanup_socket_files,
-    cleanup_stale_shared_memory_buffers,
+    cleanup_stale_shared_slot_control_sockets,
+    cleanup_stale_shared_slot_segments,
     ensure_shared_memory_capacity,
     reconcile_state_with_filesystem,
     shared_memory_required_bytes,
@@ -91,7 +93,7 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
 
 
-def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
+def test_cleanup_stale_shared_slot_segments_removes_stale_shared_slot_segments(
     tmp_path: Path,
 ) -> None:
     shm_dir = tmp_path / "dev-shm"
@@ -107,12 +109,42 @@ def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
     live_name = "neuracore-keep-live"
     (shm_dir / live_name).write_bytes(b"shm")
 
-    cleaned = cleanup_stale_shared_memory_buffers(shm_dir=shm_dir)
+    cleaned = cleanup_stale_shared_slot_segments(shm_dir=shm_dir)
 
     assert cleaned == len(stale_names)
     for stale_name in stale_names:
         assert not (shm_dir / stale_name).exists()
     assert (shm_dir / live_name).exists()
+
+
+def test_cleanup_stale_shared_slot_control_sockets_removes_ack_sockets(
+    tmp_path: Path,
+) -> None:
+    ack_dir = tmp_path / "slot_acks"
+    ack_dir.mkdir()
+
+    stale_names = (
+        "slot_control_123_first.ipc",
+        "slot_control_456_second.ipc",
+    )
+    for socket_name in stale_names:
+        (ack_dir / socket_name).write_text("stale", encoding="utf-8")
+
+    keep_names = (
+        "management.sock",
+        "slot_control_789_missing_suffix",
+        "other_control_123.ipc",
+    )
+    for socket_name in keep_names:
+        (ack_dir / socket_name).write_text("keep", encoding="utf-8")
+
+    cleaned = cleanup_stale_shared_slot_control_sockets(ack_dir=ack_dir)
+
+    assert cleaned == len(stale_names)
+    for stale_name in stale_names:
+        assert not (ack_dir / stale_name).exists()
+    for keep_name in keep_names:
+        assert (ack_dir / keep_name).exists()
 
 
 def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
@@ -371,7 +403,7 @@ def test_reconcile_marks_empty_trace_dir_as_incomplete(tmp_path: Path) -> None:
     assert updated.error_code == TraceErrorCode.WRITE_FAILED
 
 
-def test_shutdown_removes_pid_and_sockets(tmp_path: Path) -> None:
+def test_shutdown_removes_pid_and_sockets(tmp_path: Path, monkeypatch) -> None:
     pid_path = tmp_path / "daemon.pid"
     pid_path.write_text("123", encoding="utf-8")
     db_path = tmp_path / "state.db"
@@ -380,6 +412,19 @@ def test_shutdown_removes_pid_and_sockets(tmp_path: Path) -> None:
     events_path = tmp_path / "events.sock"
     socket_path.write_text("stale", encoding="utf-8")
     events_path.write_text("stale", encoding="utf-8")
+
+    stale_cleanup_calls: list[tuple[Path, ...]] = []
+
+    def fake_cleanup_stale_runtime_state(paths):
+        path_tuple = tuple(paths)
+        stale_cleanup_calls.append(path_tuple)
+        runtime_recovery.cleanup_socket_files(path_tuple)
+
+    monkeypatch.setattr(
+        runtime_recovery,
+        "cleanup_stale_runtime_state",
+        fake_cleanup_stale_runtime_state,
+    )
 
     shutdown(
         pid_path=pid_path,
@@ -390,3 +435,4 @@ def test_shutdown_removes_pid_and_sockets(tmp_path: Path) -> None:
     assert not socket_path.exists()
     assert not events_path.exists()
     assert not pid_path.exists()
+    assert stale_cleanup_calls == [(socket_path, events_path)]

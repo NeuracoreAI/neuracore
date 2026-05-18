@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import time
 from collections.abc import Callable
 
 from neuracore.data_daemon.communications_management.producer.models import (
@@ -144,10 +145,15 @@ class ProducerChannelMessageSender:
         with self._sequence_cv:
             return self._sender_error
 
-    def wait_until_sequence_sent(self, sequence_number: int) -> bool:
+    def wait_until_sequence_sent(
+        self,
+        sequence_number: int,
+        timeout_s: float | None = None,
+    ) -> bool:
         """Block until the sender thread has sent up to `sequence_number`."""
         if sequence_number <= 0:
             return True
+        deadline = None if timeout_s is None else time.monotonic() + timeout_s
         with self._sequence_cv:
             while self._last_socket_sent_sequence_number < sequence_number:
                 if self._sender_error is not None:
@@ -155,7 +161,13 @@ class ProducerChannelMessageSender:
                 sender_thread = self._sender_thread
                 if sender_thread is None or not sender_thread.is_alive():
                     return False
-                self._sequence_cv.wait()
+                if deadline is None:
+                    self._sequence_cv.wait()
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._sequence_cv.wait(timeout=min(0.05, remaining))
             return True
 
     def _build_envelope(

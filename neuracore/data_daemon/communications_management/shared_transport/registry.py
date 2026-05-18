@@ -44,6 +44,10 @@ def create_control_socket_path(base_dir: Path = ACK_BASE_DIR) -> Path:
     return socket_path
 
 
+class SharedSlotUnhealthyError(RuntimeError):
+    """Raised when the shared-slot transport can no longer accept work."""
+
+
 class SharedSlotTimeout(TimeoutError):
     """Raised when shared-slot setup, allocation, or credit return times out."""
 
@@ -448,15 +452,23 @@ class SharedSlotRegistry:
         if stalled_since is None or now - stalled_since < self.ack_timeout_s:
             return
 
+        in_flight_sequences = sorted(self._state.in_flight)
         logger.warning(
             "Shared-slot credit stalled shm_name=%s slot_id=%s sequence_id=%s "
-            "in_flight=%d free_slots=%d stalled_for=%.3fs",
+            "in_flight=%d free_slots=%d stalled_for=%.3fs ack_timeout=%.3fs "
+            "last_acked_sequence_id=%s acked_sequence_count=%d "
+            "max_ack_latency=%.3fs in_flight_sequences=%s",
             oldest_entry.shm_name,
             oldest_entry.slot_id,
             oldest_entry.sequence_id,
             len(self._state.in_flight),
             len(self._state.free_slots),
             now - stalled_since,
+            self.ack_timeout_s,
+            self._state.last_acked_sequence_id,
+            self._state.acked_sequence_count,
+            self._state.max_ack_latency_s,
+            in_flight_sequences[:16],
         )
         self._state.ack_timeout_count += 1
         self._mark_unhealthy_locked(
@@ -523,7 +535,7 @@ class SharedSlotRegistry:
         """Apply one returned slot credit to the in-flight state."""
         entry = self._state.in_flight.get(sequence_id)
         if entry is None or entry.shm_name != shm_name or entry.slot_id != slot_id:
-            logger.warning(
+            logger.debug(
                 "Ignoring stale or unknown slot credit "
                 "shm_name=%s slot_id=%s sequence_id=%s",
                 shm_name,
@@ -574,10 +586,18 @@ class SharedSlotRegistry:
         sequence_ids: list[int] | None = None,
     ) -> None:
         """Transition to unhealthy state and release affected slots."""
+        was_healthy = self._state.healthy
+        diagnostics = self._format_unhealthy_diagnostics_locked()
         self._state.healthy = False
         self._state.unhealthy_reason = reason
         if error_message is not None:
             self._state.failure_message = error_message
+        if was_healthy:
+            logger.error(
+                "Shared-slot transport marked unhealthy reason=%s %s",
+                reason,
+                diagnostics,
+            )
         ids_to_release = (
             list(self._state.in_flight) if sequence_ids is None else sequence_ids
         )
@@ -587,8 +607,33 @@ class SharedSlotRegistry:
 
     def _build_unhealthy_error_locked(self) -> RuntimeError:
         """Build the most specific unhealthy transport error available."""
-        message = self._state.failure_message or "Shared-slot transport is unhealthy"
-        return RuntimeError(message)
+        base_message = (
+            self._state.failure_message or "Shared-slot transport is unhealthy"
+        )
+        reason = self._state.unhealthy_reason
+        if reason:
+            message = (
+                f"{base_message}: reason={reason} "
+                f"{self._format_unhealthy_diagnostics_locked()}"
+            )
+        else:
+            message = f"{base_message}: {self._format_unhealthy_diagnostics_locked()}"
+        return SharedSlotUnhealthyError(message)
+
+    def _format_unhealthy_diagnostics_locked(self) -> str:
+        """Return compact state details for unhealthy transport logs/errors."""
+        in_flight_sequences = sorted(self._state.in_flight)
+        return (
+            f"shm_name={self._state.shm_name} ready={self._state.ready} "
+            f"closed={self._state.closed} in_flight={len(self._state.in_flight)} "
+            f"free_slots={len(self._state.free_slots)} slot_count={self.slot_count} "
+            f"last_acked_sequence_id={self._state.last_acked_sequence_id} "
+            f"acked_sequence_count={self._state.acked_sequence_count} "
+            f"ack_timeout_count={self._state.ack_timeout_count} "
+            f"last_ack_latency_s={self._state.last_ack_latency_s} "
+            f"max_ack_latency_s={self._state.max_ack_latency_s:.3f} "
+            f"in_flight_sequences={in_flight_sequences[:16]}"
+        )
 
     def _close_control_resources(self) -> None:
         """Close the producer-side control socket and its ZMQ context."""

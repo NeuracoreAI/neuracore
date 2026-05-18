@@ -259,7 +259,14 @@ class DataBridge:
     ) -> None:
         """Handle an OPEN_FIXED_SHARED_SLOTS command from a producer."""
         payload = message.payload.get(message.command.value, {})
-        self._shared_slot_handler.handle_open(channel, payload)
+        previous_trace_id = channel.trace_id
+        self._shared_slot_handler.handle_open(
+            channel,
+            payload,
+            on_abandoned_sequences=self._handle_abandoned_shared_slot_sequences,
+        )
+        if previous_trace_id is not None:
+            self.channels.set_trace_id(channel, None)
 
     def _handle_shared_slot_descriptor(
         self, channel: ChannelState, message: MessageEnvelope
@@ -270,6 +277,10 @@ class DataBridge:
         if sequence_number is None:
             raise ValueError("Shared-slot descriptor missing sequence_number")
 
+        descriptor = self._shared_slot_handler.mark_descriptor_pending(
+            channel,
+            descriptor_payload,
+        )
         self._mark_shared_slot_sequence_pending(
             SharedSlotSequenceProgressRequest(
                 producer_id=channel.producer_id,
@@ -279,6 +290,10 @@ class DataBridge:
         try:
             self._spool_worker.enqueue(channel, descriptor_payload)
         except Exception:
+            self._shared_slot_handler.mark_descriptor_completed(
+                channel.producer_id,
+                descriptor,
+            )
             self._mark_shared_slot_sequence_completed(
                 SharedSlotSequenceProgressRequest(
                     producer_id=channel.producer_id,
@@ -286,6 +301,27 @@ class DataBridge:
                 )
             )
             raise
+
+    def _handle_abandoned_shared_slot_sequences(
+        self,
+        producer_id: str,
+        sequence_numbers: list[int],
+    ) -> None:
+        """Unblock recording finalization for abandoned shared-slot descriptors."""
+        if not sequence_numbers:
+            return
+        for sequence_number in sequence_numbers:
+            self._mark_shared_slot_sequence_completed(
+                SharedSlotSequenceProgressRequest(
+                    producer_id=producer_id,
+                    sequence_number=sequence_number,
+                )
+            )
+        self._trace_lifecycle.set_max_producer_sequence(
+            producer_id,
+            max(sequence_numbers),
+        )
+        self._trace_lifecycle.finalize_closing_recordings()
 
     def _on_complete_message(
         self,

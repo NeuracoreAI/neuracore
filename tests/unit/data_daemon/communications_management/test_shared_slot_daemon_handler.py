@@ -1,3 +1,5 @@
+import threading
+import time
 from collections import namedtuple
 
 import pytest
@@ -109,3 +111,97 @@ def test_handle_descriptor_preserves_spool_error_when_credit_return_fails(
 
     with pytest.raises(RuntimeError, match="spool failed"):
         handler.handle_descriptor(channel, descriptor_payload, chunk_spool=object())
+
+
+def _descriptor_payload(shm_name: str, sequence_id: int = 42) -> dict[str, int | str]:
+    return {
+        "shm_name": shm_name,
+        "slot_id": 1,
+        "offset": 0,
+        "length": 16,
+        "sequence_id": sequence_id,
+        "slot_size": 256,
+    }
+
+
+def _open_payload(endpoint: str = "ipc://new-credits") -> dict[str, int | str]:
+    return {
+        "control_endpoint": endpoint,
+        "slot_size": 256,
+        "slot_count": 1,
+    }
+
+
+def test_handle_open_waits_for_previous_shared_slot_descriptors(monkeypatch) -> None:
+    handler = SharedSlotDaemonHandler(
+        comm=object(),  # type: ignore[arg-type]
+        reopen_drain_timeout_s=0.5,
+    )
+    channel = consumer_models.ChannelState(producer_id="producer-1")
+    channel.mark_shared_slot_transport_open(
+        control_endpoint="ipc://old-credits",
+        shm_name="old-shm",
+    )
+    descriptor = handler.mark_descriptor_pending(
+        channel, _descriptor_payload("old-shm")
+    )
+    abandoned: list[int] = []
+
+    monkeypatch.setattr(handler, "_send_ready_message", lambda **_kwargs: None)
+
+    def complete_old_descriptor() -> None:
+        time.sleep(0.05)
+        handler.mark_descriptor_completed(channel.producer_id, descriptor)
+
+    thread = threading.Thread(target=complete_old_descriptor)
+    thread.start()
+    try:
+        handler.handle_open(
+            channel,
+            _open_payload(),
+            on_abandoned_sequences=lambda _producer_id, seqs: abandoned.extend(seqs),
+        )
+    finally:
+        thread.join(timeout=1.0)
+        handler.close()
+
+    assert abandoned == []
+    assert channel.shared_slot.shm_name != "old-shm"
+
+
+def test_handle_open_abandons_stalled_previous_shared_slot_descriptors(
+    monkeypatch,
+) -> None:
+    handler = SharedSlotDaemonHandler(
+        comm=object(),  # type: ignore[arg-type]
+        reopen_drain_timeout_s=0.01,
+    )
+    channel = consumer_models.ChannelState(producer_id="producer-1")
+    channel.mark_shared_slot_transport_open(
+        control_endpoint="ipc://old-credits",
+        shm_name="old-shm",
+    )
+    handler.mark_descriptor_pending(channel, _descriptor_payload("old-shm"))
+    abandoned: list[int] = []
+
+    monkeypatch.setattr(handler, "_send_ready_message", lambda **_kwargs: None)
+
+    try:
+        handler.handle_open(
+            channel,
+            _open_payload(),
+            on_abandoned_sequences=lambda _producer_id, seqs: abandoned.extend(seqs),
+        )
+
+        assert abandoned == [42]
+        assert channel.shared_slot.shm_name != "old-shm"
+        with pytest.raises(
+            shared_slot_daemon_handler_module.SharedSlotDescriptorAbandoned
+        ):
+            handler.handle_descriptor(
+                channel,
+                _descriptor_payload("old-shm"),
+                chunk_spool=object(),
+            )
+    finally:
+        handler.close()

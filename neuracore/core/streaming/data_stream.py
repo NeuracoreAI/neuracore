@@ -21,6 +21,10 @@ from neuracore.data_daemon.communications_management.producer import ProducerCha
 logger = logging.getLogger(__name__)
 
 
+class MissingProducerChannelError(RuntimeError):
+    """Raised when a stream is stopped without an active producer channel."""
+
+
 @dataclass
 class DataRecordingContext:
     """Context information needed for recording data to the daemon.
@@ -120,7 +124,9 @@ class DataStream(ABC):
         producer_channel = self.get_producer_channel()
 
         if not isinstance(producer_channel, ProducerChannel):
-            raise RuntimeError(f"Stream {self._stream_name} has no ProducerChannel")
+            raise MissingProducerChannelError(
+                f"Stream {self._stream_name} has no ProducerChannel"
+            )
 
         stop_cutoff_sequence_number = producer_channel.mark_recording_stop_requested()
 
@@ -138,7 +144,7 @@ class DataStream(ABC):
         self._producer_channel = None
 
         if not isinstance(producer_channel, ProducerChannel):
-            raise RuntimeError("Stream has no ProducerChannel")
+            raise MissingProducerChannelError("Stream has no ProducerChannel")
 
         try:
             if producer_channel.trace_id:

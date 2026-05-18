@@ -9,7 +9,15 @@ import zlib
 from collections.abc import Callable
 from pathlib import Path
 
-from ..shared_transport.shared_slot_daemon_handler import SharedSlotDaemonHandler
+from neuracore.data_daemon.communications_management.shared_transport.models import (
+    SharedSlotTransportResult,
+)
+from neuracore.data_daemon.models import SharedSlotDescriptor
+
+from ..shared_transport.shared_slot_daemon_handler import (
+    SharedSlotDaemonHandler,
+    SharedSlotDescriptorAbandoned,
+)
 from .bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
 from .completion_worker import CompletionWorker
 from .models import (
@@ -101,21 +109,62 @@ class _SpoolShard:
             finally:
                 self._queue.task_done()
 
-    def _process(self, work: SpoolDescriptorWork) -> None:
-        self._acquire_spool_admission()
-        chunk_spool_ref: ChunkSpoolRef | None = None
+    def _get_transport_result(
+        self, work: SpoolDescriptorWork
+    ) -> tuple[SharedSlotTransportResult, bool] | None:
+        """Gets a transport result from the shared-slot handler."""
+        descriptor: SharedSlotDescriptor | None = None
+        release_admission = True
+
         try:
             transport_result = self._shared_slot_handler.handle_descriptor(
                 work.channel,
                 work.descriptor_payload,
                 self._chunk_spool,
             )
-            chunk_spool_ref = transport_result.chunk_spool_ref
-        except Exception:
-            self._release_spool_admission()
-            raise
+            descriptor = transport_result.descriptor
+            release_admission = False
+        except SharedSlotDescriptorAbandoned:
+            descriptor = self._descriptor_from_payload_or_none(work.descriptor_payload)
+            logger.warning(
+                "Skipping abandoned shared-slot descriptor "
+                "producer_id=%s shm_name=%s sequence_id=%s",
+                work.channel.producer_id,
+                (
+                    descriptor.shm_name
+                    if descriptor is not None
+                    else work.descriptor_payload.get("shm_name")
+                ),
+                (
+                    descriptor.sequence_id
+                    if descriptor is not None
+                    else work.descriptor_payload.get("sequence_id")
+                ),
+            )
+            return None
+        finally:
+            if descriptor is None:
+                descriptor = self._descriptor_from_payload_or_none(
+                    work.descriptor_payload
+                )
+            if descriptor is not None:
+                self._shared_slot_handler.mark_descriptor_completed(
+                    work.channel.producer_id,
+                    descriptor,
+                )
+        return (transport_result, release_admission)
+
+    def _process(self, work: SpoolDescriptorWork) -> None:
+        self._acquire_spool_admission()
+        chunk_spool_ref: ChunkSpoolRef | None = None
+        release_admission = True
 
         try:
+            transport_result_data = self._get_transport_result(work)
+            if transport_result_data is None:
+                return
+
+            transport_result, release_admission = transport_result_data
             descriptor = transport_result.descriptor
             chunk_metadata = transport_result.chunk_metadata
             trace_id = transport_result.trace_id
@@ -136,7 +185,7 @@ class _SpoolShard:
                         sequence_number=descriptor.sequence_id,
                     )
                 )
-                logger.warning(
+                logger.debug(
                     "Shared-slot packet missing recording metadata "
                     "trace_id=%s producer_id=%s sequence_id=%s",
                     trace_id,
@@ -208,6 +257,17 @@ class _SpoolShard:
         finally:
             if chunk_spool_ref is not None:
                 self._release_chunk_ref(chunk_spool_ref)
+            elif release_admission:
+                self._release_spool_admission()
+
+    @staticmethod
+    def _descriptor_from_payload_or_none(
+        descriptor_payload: dict,
+    ) -> SharedSlotDescriptor | None:
+        try:
+            return SharedSlotDescriptor.from_dict(descriptor_payload)
+        except Exception:
+            return None
 
     def _release_chunk_ref(self, ref: ChunkSpoolRef) -> None:
         try:

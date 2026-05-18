@@ -756,3 +756,41 @@ class TestDaemonRuntimeContext:
             assert context_result.services is mock_services
             assert context_result.recording_disk_manager is mock_rdm
             assert context_result.comm_manager is mock_comm
+
+
+def test_prepare_runtime_state_cleans_stale_runtime_state(
+    tmp_path: Path,
+    mock_config: DaemonConfig,
+) -> None:
+    runtime = DaemonRuntime(
+        db_path=tmp_path / "state.db",
+        pid_path=tmp_path / "daemon.pid",
+        socket_paths=(),
+    )
+    runtime._manage_pid = False
+    calls: list[tuple[tuple[Path, ...], str, str]] = []
+
+    def fake_cleanup_stale_runtime_state(
+        paths,
+        action="Recovered",
+        context="",
+    ):
+        calls.append((tuple(paths), action, context))
+
+    with (
+        patch(
+            "neuracore.data_daemon.runtime.cleanup_stale_runtime_state",
+            side_effect=fake_cleanup_stale_runtime_state,
+        ),
+        patch(
+            "neuracore.data_daemon.runtime.validate_or_recover_sqlite",
+            return_value=True,
+        ),
+        patch(
+            "neuracore.data_daemon.runtime.shared_memory_free_bytes",
+            return_value=10**9,
+        ),
+    ):
+        runtime._prepare_runtime_state(mock_config)
+
+    assert calls == [((), "Recovered", "")]

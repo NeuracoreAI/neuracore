@@ -6,6 +6,7 @@ import logging
 import math
 import queue
 import threading
+import time
 import uuid
 from collections.abc import Iterator, Sequence
 
@@ -34,6 +35,7 @@ from neuracore.data_daemon.models import (
 )
 
 from ..shared_transport.communications_manager import CommunicationsManager
+from ..shared_transport.registry import SharedSlotTimeout, SharedSlotUnhealthyError
 from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
 from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_heartbeat_service import ProducerHeartbeatService
@@ -308,9 +310,16 @@ class ProducerChannel:
         """Return the most recent sequence number enqueued for the sender thread."""
         return self._message_sender.get_last_enqueued_sequence_number()
 
-    def wait_until_sequence_sent(self, sequence_number: int) -> bool:
+    def wait_until_sequence_sent(
+        self,
+        sequence_number: int,
+        timeout_s: float | None = None,
+    ) -> bool:
         """Block until the sender thread has sent up to `sequence_number`."""
-        return self._message_sender.wait_until_sequence_sent(sequence_number)
+        return self._message_sender.wait_until_sequence_sent(
+            sequence_number,
+            timeout_s=timeout_s,
+        )
 
     def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
         """Announce the fixed shared-slot transport for this producer."""
@@ -430,6 +439,103 @@ class ProducerChannel:
         if chunk_parts:
             yield chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
 
+    def _ping_daemon_for_shared_slot_recovery(
+        self,
+        timeout_s: float = 2.0,
+    ) -> bool:
+        """Return True when a heartbeat can be sent during slot recovery."""
+        started_at = time.monotonic()
+        try:
+            sequence_number = self._send(CommandType.HEARTBEAT, {})
+            alive = self.wait_until_sequence_sent(
+                sequence_number,
+                timeout_s=timeout_s,
+            )
+        except Exception:
+            elapsed_s = time.monotonic() - started_at
+            logger.warning(
+                "Shared-slot recovery daemon ping failed elapsed=%.3fs",
+                elapsed_s,
+                exc_info=True,
+            )
+            return False
+
+        elapsed_s = time.monotonic() - started_at
+        logger.info(
+            "Shared-slot recovery daemon ping alive=%s elapsed=%.3fs",
+            alive,
+            elapsed_s,
+        )
+        return alive
+
+    def _reset_shared_slot_transport_for_recovery(self) -> None:
+        """Replace the shared-slot transport after a recoverable slot failure."""
+        old_transport = self._shared_slot_transport
+        slot_size = old_transport.slot_size if old_transport is not None else None
+        self._close_shared_slot_transport()
+        self._shared_slot_transport = SharedSlotVideoTransport(
+            sequence_allocator=self._sequence_allocator,
+            slot_size=slot_size or DEFAULT_VIDEO_SLOT_SIZE,
+            allocate_timeout_s=3.0,
+        )
+        self.open_fixed_shared_slots(slot_size=slot_size)
+
+    def _stop_shared_slot_logging_after_failure(self) -> None:
+        """Stop accepting more recording data after unrecoverable slot failure."""
+        with self._recording_send_lock:
+            if self._stop_cutoff_sequence_number is None:
+                self._stop_cutoff_sequence_number = (
+                    self.get_last_accepted_sequence_number()
+                )
+        self._close_shared_slot_transport()
+
+    def _send_data_parts_shared_slots(
+        self,
+        normalised_parts: Sequence[memoryview],
+        total_chunks: int,
+        trace_metadata: TraceTransportMetadata,
+    ) -> None:
+        """Send one logical payload over the shared-slot transport."""
+        self.open_fixed_shared_slots()
+        shared_slot_transport = self._shared_slot_transport
+        if shared_slot_transport is None:
+            raise SharedSlotUnhealthyError("Shared-slot transport is not available")
+
+        produced_chunks = 0
+        trace_id = self.trace_id
+        if trace_id is None:
+            raise RuntimeError("Trace ID required for shared-slot transport")
+
+        for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
+            metadata = SharedMemoryChunkMetadata(
+                trace_id=trace_id,
+                chunk_index=idx,
+                total_chunks=total_chunks,
+                trace_metadata=trace_metadata if idx == 0 else None,
+            ).to_dict()
+
+            with self._recording_send_lock:
+                if self._recording_data_stopped():
+                    return
+
+                sequence_number = shared_slot_transport.enqueue_packet(
+                    producer_id=self.channel_id,
+                    sender=self._message_sender,
+                    metadata=metadata,
+                    chunk=chunk,
+                    stop_cutoff_sequence_number=self._stop_cutoff_sequence_number,
+                )
+
+            if sequence_number is None:
+                return
+
+            produced_chunks += 1
+
+        if produced_chunks != total_chunks:
+            raise RuntimeError(
+                "Chunk count mismatch while serializing payload for transport"
+            )
+
     def send_data_parts(
         self,
         parts: Sequence[BytePart],
@@ -466,7 +572,6 @@ class ProducerChannel:
             raise ValueError("Dataset ID or name required")
 
         total_chunks = math.ceil(total_bytes / self.chunk_size)
-        produced_chunks = 0
         trace_metadata = TraceTransportMetadata(
             recording_id=recording_id,
             data_type=data_type,
@@ -505,40 +610,33 @@ class ProducerChannel:
             self._send_socket_data_chunk(payload)
             return
 
-        self.open_fixed_shared_slots()
-        shared_slot_transport = self._shared_slot_transport
-        if shared_slot_transport is None:
-            raise RuntimeError("Shared-slot transport is not available")
-
-        for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
-            metadata = SharedMemoryChunkMetadata(
-                trace_id=trace_id,
-                chunk_index=idx,
-                total_chunks=total_chunks,
-                trace_metadata=trace_metadata if idx == 0 else None,
-            ).to_dict()
-
-            with self._recording_send_lock:
-                if self._recording_data_stopped():
-                    return
-
-                sequence_number = shared_slot_transport.enqueue_packet(
-                    producer_id=self.channel_id,
-                    sender=self._message_sender,
-                    metadata=metadata,
-                    chunk=chunk,
-                    stop_cutoff_sequence_number=self._stop_cutoff_sequence_number,
+        for attempt in range(2):
+            try:
+                self._send_data_parts_shared_slots(
+                    normalised_parts,
+                    total_chunks,
+                    trace_metadata,
                 )
-
-            if sequence_number is None:
                 return
+            except (SharedSlotTimeout, SharedSlotUnhealthyError) as exc:
+                if attempt > 0:
+                    self._stop_shared_slot_logging_after_failure()
+                    raise RuntimeError(
+                        "Shared-slot transport remained unhealthy after recovery"
+                    ) from exc
 
-            produced_chunks += 1
+                if not self._ping_daemon_for_shared_slot_recovery(timeout_s=2.0):
+                    self._stop_shared_slot_logging_after_failure()
+                    raise RuntimeError(
+                        "Shared-slot transport failed and daemon did not respond "
+                        "to recovery ping"
+                    ) from exc
 
-        if produced_chunks != total_chunks:
-            raise RuntimeError(
-                "Chunk count mismatch while serializing payload for transport"
-            )
+                logger.warning(
+                    "Shared-slot transport unhealthy; resetting transport and "
+                    "retrying payload once"
+                )
+                self._reset_shared_slot_transport_for_recovery()
 
     def initialize_new_producer_channel(
         self,

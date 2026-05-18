@@ -21,7 +21,7 @@ import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.streaming.data_stream import DataStream
+from neuracore.core.streaming.data_stream import DataStream, MissingProducerChannelError
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.http_session import Session
 from neuracore.data_daemon.communications_management.shared_transport import (
@@ -228,6 +228,15 @@ class Robot:
         self._data_stream_counts[stream.data_type] += 1
         self._data_streams[stream_id] = stream
 
+    def _remove_data_stream(self, stream_id: str, stream: DataStream) -> None:
+        """Remove a stream from the robot registry if it still matches."""
+        if self._data_streams.get(stream_id) is not stream:
+            return
+
+        self._data_streams.pop(stream_id)
+        if self._data_stream_counts[stream.data_type] > 0:
+            self._data_stream_counts[stream.data_type] -= 1
+
     def get_data_stream(self, stream_id: str) -> DataStream | None:
         """Retrieve a data stream by its identifier.
 
@@ -366,7 +375,7 @@ class Robot:
         """Stop recording on all data streams for this robot instance."""
         producer_stop_sequence_numbers: dict[str, int] = {}
 
-        for stream_id, stream in self._data_streams.items():
+        for stream_id, stream in list(self._data_streams.items()):
             try:
 
                 (producer_channel, stop_cutoff_sequence_number) = (
@@ -382,6 +391,9 @@ class Robot:
                     wait_for_producer_drain=wait_for_producer_drain,
                 )
 
+            except MissingProducerChannelError as exc:
+                logger.info("Removing stale data stream %s: %s", stream_id, exc)
+                self._remove_data_stream(stream_id, stream)
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)
 

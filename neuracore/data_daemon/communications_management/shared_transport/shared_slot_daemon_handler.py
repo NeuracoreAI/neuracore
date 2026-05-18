@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
+from collections.abc import Callable
 from multiprocessing.shared_memory import SharedMemory
 from typing import Protocol
 
 import zmq
 
 from neuracore.data_daemon.const import SHARED_SLOT_SHM_PREFIX
+from neuracore.data_daemon.helpers import env_float
 from neuracore.data_daemon.models import (
     CommandType,
     MessageEnvelope,
@@ -30,6 +34,12 @@ from .shared_slot_transport import parse_shared_frame_packet_view
 
 logger = logging.getLogger(__name__)
 
+SHARED_SLOT_REOPEN_DRAIN_TIMEOUT_S = 1
+
+
+class SharedSlotDescriptorAbandoned(RuntimeError):
+    """Raised when a queued descriptor belongs to an abandoned slot session."""
+
 
 class _AckSenderSocket(Protocol):
     def close(self, linger: int = 0) -> None: ...
@@ -44,12 +54,28 @@ class _AckSenderSocket(Protocol):
 class SharedSlotDaemonHandler:
     """Own daemon-side shared-slot transport mechanics."""
 
-    def __init__(self, comm: CommunicationsManager) -> None:
+    def __init__(
+        self,
+        comm: CommunicationsManager,
+        reopen_drain_timeout_s: float = SHARED_SLOT_REOPEN_DRAIN_TIMEOUT_S,
+    ) -> None:
         """Initialize daemon-side caches for shared memory and ACK sockets."""
         self._comm = comm
         self._shared_memory_cache: dict[str, SharedMemory] = {}
         self._ack_sender_sockets: dict[str, _AckSenderSocket] = {}
         self._shared_memory_budget = SharedMemoryBudget()
+        self._reopen_drain_timeout_s = env_float(
+            "NCD_SHARED_SLOT_REOPEN_DRAIN_TIMEOUT_S",
+            float(reopen_drain_timeout_s),
+        )
+        self._descriptor_delay_once_s = env_float(
+            "NCD_TEST_SHARED_SLOT_DESCRIPTOR_DELAY_ONCE_S",
+            0.0,
+        )
+        self._descriptor_delay_lock = threading.Lock()
+        self._pending_by_shm: dict[str, set[tuple[str, int]]] = {}
+        self._abandoned_descriptors: set[tuple[str, str, int]] = set()
+        self._pending_condition = threading.Condition()
 
     def _cleanup_previous_shared_slots(
         self, channel: ChannelState, control_endpoint: str | None = None
@@ -82,11 +108,15 @@ class SharedSlotDaemonHandler:
         self,
         channel: ChannelState,
         payload: dict,
+        on_abandoned_sequences: Callable[[str, list[int]], None] | None = None,
     ) -> None:
         """Open daemon-owned fixed shared slots for one channel."""
         request = OpenFixedSharedSlotsModel(**payload)
 
         if channel.shared_slot.shm_name is not None:
+            abandoned_sequences = self._wait_or_abandon_previous_session(channel)
+            if abandoned_sequences and on_abandoned_sequences is not None:
+                on_abandoned_sequences(channel.producer_id, abandoned_sequences)
             self._cleanup_previous_shared_slots(channel, request.control_endpoint)
 
         shm_name = f"{SHARED_SLOT_SHM_PREFIX}{uuid.uuid4().hex[:16]}"
@@ -165,7 +195,9 @@ class SharedSlotDaemonHandler:
         chunk_spool: BridgeChunkSpool,
     ) -> SharedSlotTransportResult:
         """Spool, credit, and parse one shared-slot descriptor."""
+        self._delay_pending_descriptor_processing(channel, payload)
         descriptor = SharedSlotDescriptor.from_dict(payload)
+        self._raise_if_descriptor_abandoned(channel, descriptor)
         spool_failed = False
         try:
             metadata_dict, chunk_spool_ref = self._spool_shared_slot_packet(
@@ -207,6 +239,133 @@ class SharedSlotDaemonHandler:
             trace_id=chunk_metadata.trace_id,
             trace_metadata=chunk_metadata.trace_metadata,
         )
+
+    def _delay_pending_descriptor_processing(
+        self,
+        channel: ChannelState,
+        payload: dict,
+    ) -> None:
+        """Optional one-shot descriptor delay used by integration tests."""
+        with self._descriptor_delay_lock:
+            delay_s = self._descriptor_delay_once_s
+            self._descriptor_delay_once_s = 0.0
+        if delay_s <= 0.0:
+            return
+
+        logger.warning(
+            "Delaying shared-slot descriptor processing for test "
+            "producer_id=%s shm_name=%s sequence_id=%s delay=%.3fs",
+            channel.producer_id,
+            payload.get("shm_name"),
+            payload.get("sequence_id"),
+            delay_s,
+        )
+        time.sleep(delay_s)
+
+    def mark_descriptor_pending(
+        self,
+        channel: ChannelState,
+        payload: dict,
+    ) -> SharedSlotDescriptor:
+        """Track a shared-slot descriptor until the spool worker has handled it."""
+        descriptor = SharedSlotDescriptor.from_dict(payload)
+        with self._pending_condition:
+            descriptor_key = self._descriptor_key(channel, descriptor)
+            if descriptor_key in self._abandoned_descriptors:
+                raise SharedSlotDescriptorAbandoned(
+                    "Shared-slot descriptor belongs to an abandoned session "
+                    f"producer_id={channel.producer_id} "
+                    f"shm_name={descriptor.shm_name} "
+                    f"sequence_id={descriptor.sequence_id}"
+                )
+            self._pending_by_shm.setdefault(descriptor.shm_name, set()).add(
+                (channel.producer_id, descriptor.sequence_id)
+            )
+            self._pending_condition.notify_all()
+        return descriptor
+
+    def mark_descriptor_completed(
+        self,
+        producer_id: str,
+        descriptor: SharedSlotDescriptor,
+    ) -> None:
+        """Clear daemon-side pending tracking for one shared-slot descriptor."""
+        with self._pending_condition:
+            pending = self._pending_by_shm.get(descriptor.shm_name)
+            if pending is not None:
+                pending.discard((producer_id, descriptor.sequence_id))
+                if not pending:
+                    self._pending_by_shm.pop(descriptor.shm_name, None)
+            self._abandoned_descriptors.discard(
+                (producer_id, descriptor.shm_name, descriptor.sequence_id)
+            )
+            self._pending_condition.notify_all()
+
+    def _descriptor_key(
+        self,
+        channel: ChannelState,
+        descriptor: SharedSlotDescriptor,
+    ) -> tuple[str, str, int]:
+        return (channel.producer_id, descriptor.shm_name, descriptor.sequence_id)
+
+    def _raise_if_descriptor_abandoned(
+        self,
+        channel: ChannelState,
+        descriptor: SharedSlotDescriptor,
+    ) -> None:
+        with self._pending_condition:
+            descriptor_key = self._descriptor_key(channel, descriptor)
+            if descriptor_key not in self._abandoned_descriptors:
+                return
+        raise SharedSlotDescriptorAbandoned(
+            "Skipping abandoned shared-slot descriptor "
+            f"producer_id={channel.producer_id} "
+            f"shm_name={descriptor.shm_name} "
+            f"sequence_id={descriptor.sequence_id}"
+        )
+
+    def _wait_or_abandon_previous_session(self, channel: ChannelState) -> list[int]:
+        """Wait for old descriptors before reusing a producer's shared-slot state."""
+        shm_name = channel.shared_slot.shm_name
+        if shm_name is None:
+            return []
+
+        deadline = time.monotonic() + self._reopen_drain_timeout_s
+        with self._pending_condition:
+            while True:
+                pending = self._pending_by_shm.get(shm_name, set())
+                producer_pending = {
+                    sequence_id
+                    for producer_id, sequence_id in pending
+                    if producer_id == channel.producer_id
+                }
+                if not producer_pending:
+                    return []
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    abandoned = sorted(producer_pending)
+                    for sequence_id in abandoned:
+                        pending.discard((channel.producer_id, sequence_id))
+                        self._abandoned_descriptors.add(
+                            (channel.producer_id, shm_name, sequence_id)
+                        )
+                    if not pending:
+                        self._pending_by_shm.pop(shm_name, None)
+                    self._pending_condition.notify_all()
+                    break
+                self._pending_condition.wait(timeout=min(0.1, remaining))
+
+        logger.warning(
+            "Abandoning stalled shared-slot session before reopen "
+            "producer_id=%s shm_name=%s pending_sequences=%s "
+            "timeout=%.3fs",
+            channel.producer_id,
+            shm_name,
+            abandoned,
+            self._reopen_drain_timeout_s,
+        )
+        return abandoned
 
     def cleanup_channel_resources(self, channel: ChannelState) -> None:
         """Close daemon-side shared-slot resources associated with one channel."""
@@ -302,7 +461,6 @@ class SharedSlotDaemonHandler:
 
     def _send_ready_message(
         self,
-        *,
         endpoint: str,
         ready: SharedSlotReadyModel,
     ) -> None:
@@ -318,7 +476,6 @@ class SharedSlotDaemonHandler:
 
     def _send_open_failed_message(
         self,
-        *,
         endpoint: str,
         failure: SharedSlotOpenFailedModel,
     ) -> None:
