@@ -16,9 +16,15 @@ from dataclasses import dataclass
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer import ProducerChannel
+from neuracore.data_daemon.communications_management.producer import (
+    NativeProducerChannel,
+    ProducerChannel,
+)
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
+
+ProducerLike = ProducerChannel | NativeProducerChannel
 
 
 class MissingProducerChannelError(RuntimeError):
@@ -64,7 +70,11 @@ class DataStream(ABC):
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
-        self._producer_channel: ProducerChannel | None = None
+        self._producer_channel: ProducerLike | None = None
+        # Frozen at construction so every stream in a process agrees on backend
+        # — flipping NCD_RUST_DAEMON mid-process would otherwise hand the
+        # legacy ProducerChannel to one stream and the native shim to another.
+        self._use_native_producer = rust_daemon_enabled()
 
     @property
     def data_type(self) -> DataType:
@@ -109,21 +119,39 @@ class DataStream(ABC):
         if self._producer_channel is None:
             channel_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
-            self._producer_channel = ProducerChannel(
-                id=channel_id,
-                recording_id=context.recording_id,
-                data_type=self._data_type,
-            )
+            if self._use_native_producer:
+                self._producer_channel = NativeProducerChannel(
+                    id=channel_id,
+                    recording_id=context.recording_id,
+                    data_type=self._data_type,
+                    data_type_name=self._stream_name,
+                )
+            else:
+                self._producer_channel = ProducerChannel(
+                    id=channel_id,
+                    recording_id=context.recording_id,
+                    data_type=self._data_type,
+                )
 
         self._producer_channel.start_recording_session(
             recording_id=context.recording_id
         )
+        self._on_producer_channel_ready()
 
-    def prepare_recording_stopped(self) -> tuple[ProducerChannel, int]:
+    def _on_producer_channel_ready(self) -> None:
+        """Hook for subclasses to publish per-trace setup once the channel is up.
+
+        Concrete streams override this to send envelopes that need the active
+        trace_id — e.g. :meth:`VideoDataStream._on_producer_channel_ready` emits
+        ``OpenFrameStream`` so the daemon-side actor opens the video writer
+        before the first frame arrives.
+        """
+
+    def prepare_recording_stopped(self) -> tuple[ProducerLike, int]:
         """Mark the producer channel as stopping and return it."""
         producer_channel = self.get_producer_channel()
 
-        if not isinstance(producer_channel, ProducerChannel):
+        if producer_channel is None:
             raise MissingProducerChannelError(
                 f"Stream {self._stream_name} has no ProducerChannel"
             )
@@ -143,7 +171,7 @@ class DataStream(ABC):
         producer_channel = self._producer_channel
         self._producer_channel = None
 
-        if not isinstance(producer_channel, ProducerChannel):
+        if producer_channel is None:
             raise MissingProducerChannelError("Stream has no ProducerChannel")
 
         try:
@@ -173,7 +201,7 @@ class DataStream(ABC):
         """
         return self._latest_data
 
-    def get_producer_channel(self) -> ProducerChannel | None:
+    def get_producer_channel(self) -> ProducerLike | None:
         """Return the active producer channel for this stream, if present."""
         return self._producer_channel
 
@@ -188,6 +216,9 @@ class DataStream(ABC):
             data: Serialized data bytes to send.
         """
         if self._producer_channel is None or self._context is None:
+            return
+        if isinstance(self._producer_channel, NativeProducerChannel):
+            self._producer_channel.send_frame(data)
             return
         self._producer_channel.send_data(
             data=data,
@@ -209,6 +240,11 @@ class DataStream(ABC):
         """Send a logical payload assembled from multiple byte-like parts."""
         if self._producer_channel is None or self._context is None:
             return
+        if isinstance(self._producer_channel, NativeProducerChannel):
+            raise RuntimeError(
+                "NativeProducerChannel does not accept multi-part payloads; "
+                "send raw frame bytes via send_frame() instead."
+            )
         self._producer_channel.send_data_parts(
             parts=parts,
             total_bytes=total_bytes,
@@ -290,25 +326,48 @@ class VideoDataStream(DataStream):
         if not self.is_recording():
             return
 
-        # Serialize metadata and frame to bytes
-        # Frame is sent as raw numpy bytes with metadata as JSON header
+        frame_source = (
+            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
+        )
+        frame_view = memoryview(frame_source).cast("B")
+
+        if isinstance(self._producer_channel, NativeProducerChannel):
+            # Native daemon: the per-trace actor learns the resolution from the
+            # OpenFrameStream envelope (sent by _on_producer_channel_ready) and
+            # spools raw pixel bytes into a NUT file. The legacy header /
+            # metadata-JSON prefix would land inside the NUT spool and break
+            # ffmpeg, so we ship the contiguous frame view on its own.
+            #
+            # The daemon synthesises the per-frame sidecar timestamp from the
+            # envelope's `timestamp_ns`; we must forward the SDK-supplied
+            # `metadata.timestamp` (seconds, float) here so the on-disk
+            # trace.json matches what the user actually logged. Falling back
+            # to wall-clock would land us with `time.time_ns()` in the
+            # sidecar — fine for live capture but a mismatch under the
+            # integration matrix's manual-timestamp mode.
+            self._producer_channel.send_frame(
+                frame_view,
+                timestamp_s=metadata.timestamp,
+            )
+            return
+
+        # Legacy daemon: pack [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
         metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
         metadata_dict["width"] = self.width
         metadata_dict["height"] = self.height
         metadata_dict["frame_nbytes"] = int(frame.size * frame.itemsize)
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
-
-        # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
         header = struct.pack("<I", len(metadata_json))
-        frame_source = (
-            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
-        )
-        frame_view = memoryview(frame_source).cast("B")
         total_bytes = len(header) + len(metadata_json) + len(frame_view)
         self._send_to_daemon_parts(
             (header, metadata_json, frame_view),
             total_bytes=total_bytes,
         )
+
+    def _on_producer_channel_ready(self) -> None:
+        """Announce the camera resolution to the native daemon, if present."""
+        if isinstance(self._producer_channel, NativeProducerChannel):
+            self._producer_channel.announce_frame_resolution(self.width, self.height)
 
 
 class DepthDataStream(VideoDataStream):

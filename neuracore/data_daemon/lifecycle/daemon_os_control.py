@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import FrameType
-from typing import cast
+from typing import IO, cast
 
 import filelock
 
@@ -20,6 +20,7 @@ from neuracore.data_daemon.const import (
 )
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.auth_preflight import ensure_daemon_auth_ready
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 # cspell:ignore WNOHANG waitpid
 
@@ -105,8 +106,31 @@ def cleanup_stale_client_state(
     )
 
 
+def _rust_daemon_binary() -> Path | None:
+    """Return the path to the bundled Rust data-daemon binary, if present."""
+    try:
+        from importlib.resources import files
+
+        candidate = files("neuracore.data_daemon") / "bin" / "data-daemon"
+        path = Path(str(candidate))
+    except (ImportError, ModuleNotFoundError, FileNotFoundError):
+        return None
+    return path if path.is_file() else None
+
+
 def _build_daemon_runner_command() -> list[str]:
-    """Build the command used to launch the daemon runner entrypoint."""
+    """Build the command used to launch the daemon runner entrypoint.
+
+    Hands off to the bundled Rust daemon binary when ``NCD_RUST_DAEMON`` is
+    truthy and the binary ships in the package; otherwise launches the Python
+    runner as before. The Rust binary's ``launch`` subcommand stays in the
+    foreground so it inherits the same process semantics the Python runner
+    relies on (signal handling, parent-side ``Popen.wait``).
+    """
+    if rust_daemon_enabled():
+        binary = _rust_daemon_binary()
+        if binary is not None:
+            return [str(binary), "launch"]
     return [
         sys.executable,
         "-m",
@@ -120,11 +144,19 @@ def _build_daemon_launch_env(
     db_path: Path,
     env_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build the environment for launching the daemon subprocess."""
+    """Build the environment for launching the daemon subprocess.
+
+    The Rust daemon manages its own PID file (see
+    [rust/data_daemon/src/cli/launch.rs](../../rust/data_daemon/src/cli/launch.rs)),
+    so ``NEURACORE_DAEMON_MANAGE_PID=0`` is suppressed in that mode. The Python
+    runner keeps the override so its parent can write the PID itself after the
+    socket appears.
+    """
     environment = os.environ.copy()
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-    environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
+    if not rust_daemon_enabled():
+        environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
     if env_overrides:
         environment.update(env_overrides)
     return cast(dict[str, str], environment)
@@ -146,9 +178,22 @@ def _start_daemon_subprocess(
     )
     current_working_directory = str(Path.cwd())
 
+    debug_log_path: Path | None = None
+    debug_log_handle = None
+    if rust_daemon_enabled() and os.environ.get("NDD_DEBUG"):
+        # In debug mode mirror the rust daemon's stderr to a sibling log so
+        # tests can inspect tracing output even when the parent does not
+        # drain Popen.stderr.
+        debug_log_path = db_path.parent / "daemon.log"
+        debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_log_handle = open(debug_log_path, "ab", buffering=0)  # noqa: SIM115
+
     try:
         if background:
-            return subprocess.Popen(
+            stderr_target: int | IO[bytes] = (
+                debug_log_handle if debug_log_handle is not None else subprocess.PIPE
+            )
+            process = subprocess.Popen(
                 _build_daemon_runner_command(),
                 close_fds=True,
                 cwd=current_working_directory,
@@ -156,20 +201,26 @@ def _start_daemon_subprocess(
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=stderr_target,
             )
-
-        return subprocess.Popen(
-            _build_daemon_runner_command(),
-            close_fds=True,
-            cwd=current_working_directory,
-            env=environment,
-            start_new_session=False,
-            stdout=stdout,
-            stderr=stderr,
-        )
+        else:
+            process = subprocess.Popen(
+                _build_daemon_runner_command(),
+                close_fds=True,
+                cwd=current_working_directory,
+                env=environment,
+                start_new_session=False,
+                stdout=stdout,
+                stderr=stderr,
+            )
     except OSError as error:
+        if debug_log_handle is not None:
+            debug_log_handle.close()
         raise RuntimeError(f"Failed to start daemon: {error}") from error
+
+    if debug_log_handle is not None:
+        debug_log_handle.close()
+    return process
 
 
 def launch_daemon_subprocess(
@@ -181,7 +232,14 @@ def launch_daemon_subprocess(
     stdout: int | None = None,
     stderr: int | None = None,
 ) -> subprocess.Popen:
-    """Launch the daemon runner subprocess and poll until it is ready."""
+    """Launch the daemon runner subprocess and poll until it is ready.
+
+    Readiness signal differs by backend: the Python daemon publishes a Unix
+    socket the SDK connects to, while the Rust daemon never opens one (its IPC
+    is iceoryx2 shared memory) — so under ``NCD_RUST_DAEMON`` we instead wait
+    for the daemon to write its PID file. The Rust binary also acquires the
+    PID file itself, so the parent must not overwrite it.
+    """
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
     process = _start_daemon_subprocess(
@@ -192,8 +250,19 @@ def launch_daemon_subprocess(
         stdout=stdout,
         stderr=stderr,
     )
-    socket_poll_interval_s = 0.05
+    poll_interval_s = 0.05
     daemon_startup_timeout_s = time.monotonic() + timeout_s
+    rust_mode = rust_daemon_enabled() and _rust_daemon_binary() is not None
+
+    def _ready() -> bool:
+        if rust_mode:
+            existing = read_pid_from_file(pid_path)
+            return existing is not None and pid_is_running(existing)
+        return SOCKET_PATH.exists()
+
+    readiness_target = (
+        "pid file " + str(pid_path) if rust_mode else "socket " + str(SOCKET_PATH)
+    )
 
     while time.monotonic() < daemon_startup_timeout_s:
         if process.poll() is not None:
@@ -205,17 +274,18 @@ def launch_daemon_subprocess(
                 f"Daemon process exited unexpectedly during startup "
                 f"(exit code {process.returncode}).{detail}"
             )
-        if SOCKET_PATH.exists():
+        if _ready():
             break
-        time.sleep(socket_poll_interval_s)
+        time.sleep(poll_interval_s)
     else:
         process.terminate()
         raise RuntimeError(
             f"Daemon did not become ready within {timeout_s}s: "
-            f"socket {SOCKET_PATH} never appeared."
+            f"{readiness_target} never appeared."
         )
 
-    pid_path.write_text(str(process.pid), encoding="utf-8")
+    if not rust_mode:
+        pid_path.write_text(str(process.pid), encoding="utf-8")
     return process
 
 
