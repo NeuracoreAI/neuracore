@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from multiprocessing.shared_memory import SharedMemory
+from uuid import uuid4
 
 import pytest
 import zmq
@@ -41,6 +42,7 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_SLOT_COUNT,
     HEARTBEAT_TIMEOUT_SECS,
     SHARED_MEMORY_RECORD_HEADER_FORMAT,
+    SHARED_SLOT_SHM_PREFIX,
 )
 from neuracore.data_daemon.models import (
     BatchedJointDataItemPayload,
@@ -756,7 +758,7 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
         ack_timeout_s=0.01,
         allocate_timeout_s=0.01,
     )
-    shm_name = f"test-credit-timeout-{time.time_ns()}"
+    shm_name = f"{SHARED_SLOT_SHM_PREFIX}{uuid4().hex[:16]}"
     shm = SharedMemory(name=shm_name, create=True, size=2048 * 2)
 
     try:
@@ -813,7 +815,7 @@ def test_shared_slot_ready_message_populates_free_slots() -> None:
         ack_timeout_s=DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
         allocate_timeout_s=DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
     )
-    shm_name = f"test-ready-populates-free-slots-{time.time_ns()}"
+    shm_name = f"{SHARED_SLOT_SHM_PREFIX}{uuid4().hex[:16]}"
     shm = SharedMemory(name=shm_name, create=True, size=2048 * 3)
 
     try:
@@ -842,7 +844,7 @@ def test_shared_slot_ready_message_adopts_daemon_slot_dimensions() -> None:
         ack_timeout_s=DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS,
         allocate_timeout_s=DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS,
     )
-    shm_name = f"test-ready-adopts-slot-dimensions-{time.time_ns()}"
+    shm_name = f"{SHARED_SLOT_SHM_PREFIX}{uuid4().hex[:16]}"
     shm = SharedMemory(name=shm_name, create=True, size=4096 * 4)
 
     try:

@@ -5,10 +5,12 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+import sys
 import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from neuracore.data_daemon.const import SHARED_SLOT_SHM_PREFIX
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
     remove_pid_file,
@@ -18,8 +20,13 @@ from neuracore.data_daemon.state_management.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
-_SHARED_MEMORY_DIR = Path("/dev/shm")
-_NEURACORE_SHARED_SLOT_PREFIX = "neuracore-slots-"
+
+def _default_shm_path() -> str:
+    """Pick the right disk path for shared-memory budget estimation."""
+    return "/dev/shm" if sys.platform.startswith("linux") else "/tmp"
+
+
+_SHARED_MEMORY_DIR = Path(_default_shm_path())
 
 
 class SharedMemoryCapacityError(RuntimeError):
@@ -99,7 +106,7 @@ def cleanup_stale_shared_slot_segments(
     cleaned = 0
 
     for shm_path in shm_dir.iterdir():
-        if not shm_path.name.startswith(_NEURACORE_SHARED_SLOT_PREFIX):
+        if not shm_path.name.startswith(SHARED_SLOT_SHM_PREFIX):
             continue
 
         try:
