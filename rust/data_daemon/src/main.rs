@@ -9,8 +9,17 @@
 //! See `docs/data-daemon-rewrite.md` for the full architecture and the
 //! phased implementation plan. This is the Phase 2 entry point.
 
+// The cloud subsystem and HTTP client expose a wide surface that the daemon
+// binary consumes via the launch routine — `cargo check` would otherwise
+// flag each unused item as dead code while phase 6 stabilises.
+#[allow(dead_code)]
+mod api;
 mod cli;
+#[allow(dead_code)]
+mod cloud;
 mod config;
+#[allow(dead_code)]
+mod connection;
 mod encoding;
 mod ipc;
 mod lifecycle;

@@ -39,6 +39,9 @@ from neuracore.core.streaming.data_stream import (
     RGBDataStream,
     VideoDataStream,
 )
+from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
+    get_provide_live_data_enabled_manager,
+)
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
@@ -103,6 +106,15 @@ def _publish_json_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
+    # Short-circuit before the Pydantic `model_dump` when live-data provision
+    # is globally disabled (e.g. `NEURACORE_PROVIDE_LIVE_DATA=no`, or after a
+    # runtime `disable()` on the manager). The downstream `JSONSource.publish`
+    # already returns early in that case, but it does so *after* receiving the
+    # serialized dict — and `model_dump(mode="json")` is the dominant cost at
+    # 1 kHz+ logging rates. Checking the manager first turns the whole call
+    # into a single attribute lookup when there is no consumer.
+    if get_provide_live_data_enabled_manager().is_disabled():
+        return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_json_source(str_id, data_type, sensor_key=str_id).publish(
@@ -294,31 +306,62 @@ def _log_group_of_joint_data(
         return
 
     robot = _get_robot(robot_name, instance)
+
+    # Hot path: at 1 kHz × N joints the per-iteration Python overhead
+    # dominates. Hoist the robot-wide state out of the loop, look up cached
+    # per-joint bindings, and inline the small amount of work the legacy
+    # _log_joint_data_point did so each iteration is roughly: dict lookup,
+    # one Pydantic init, one attribute write, one list append.
+    binding_cache = robot._joint_stream_bindings
+    current_recording_id = robot.get_current_recording_id()
+    live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
+    robot_id = robot.id
+    robot_instance = robot.instance
+    live_data_orchestrator = (
+        None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
+    )
+
     batched_items: list[BatchedJointDataItemPayload] = []
     batch_transport_stream: JsonDataStream | None = None
 
-    for key, value in joint_data.items():
-        logged_joint_data = _log_joint_data_point(
-            data_type=data_type,
-            name=key,
-            value=value,
-            robot=robot,
-            timestamp=timestamp,
-            send_to_daemon=False,
-        )
-        joint_stream_binding = logged_joint_data.binding
-        joint_stream = joint_stream_binding.stream
+    for joint_name, joint_value in joint_data.items():
+        cache_key = (data_type, joint_name)
+        binding = binding_cache.get(cache_key)
+        if binding is None:
+            binding = _get_or_create_joint_stream(data_type, joint_name, robot)
+            binding_cache[cache_key] = binding
 
-        if logged_joint_data.trace_id is not None:
-            if batch_transport_stream is None:
-                batch_transport_stream = joint_stream
-            batched_items.append(
-                BatchedJointDataItemPayload(
-                    trace_id=logged_joint_data.trace_id,
-                    data_type_name=joint_stream_binding.storage_name,
-                    value=value,
-                )
+        joint_stream = binding.stream
+        if current_recording_id is not None and not joint_stream.is_recording():
+            start_stream(robot, joint_stream)
+
+        data = JointData(timestamp=timestamp, value=joint_value)
+        joint_stream.log(data=data, send_to_daemon=False)
+
+        if live_data_orchestrator is not None and robot_id is not None:
+            live_data_orchestrator.get_provider_manager(
+                robot_id, robot_instance
+            ).get_json_source(
+                binding.stream_id, data_type, sensor_key=binding.stream_id
+            ).publish(
+                data.model_dump(mode="json")
             )
+
+        producer_channel = joint_stream.get_producer_channel()
+        if producer_channel is None or joint_stream.get_recording_context() is None:
+            continue
+        trace_id = producer_channel.trace_id
+        if trace_id is None:
+            continue
+        if batch_transport_stream is None:
+            batch_transport_stream = joint_stream
+        batched_items.append(
+            BatchedJointDataItemPayload(
+                trace_id=trace_id,
+                data_type_name=binding.storage_name,
+                value=joint_value,
+            )
+        )
 
     if batch_transport_stream is None or not batched_items:
         return

@@ -15,6 +15,15 @@ use tokio::sync::broadcast;
 /// store on the next tick.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
+/// Connection state reported by the network monitor (phase 6b).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Backend reachable.
+    Up,
+    /// Backend unreachable; uploaders pause until the next `Up` transition.
+    Down,
+}
+
 /// Events the daemon's coordinator tasks react to.
 ///
 /// All payloads are owned `String`/`Copy` types so events can be cloned cheaply
@@ -23,26 +32,51 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 pub enum DaemonEvent {
     /// A trace finished writing to local disk and is ready for registration.
     TraceWritten {
+        /// Trace identifier the event applies to.
         trace_id: String,
+        /// Parent recording identifier.
         recording_id: String,
     },
     /// A trace was successfully registered with the backend.
     TraceRegistered {
+        /// Trace identifier the event applies to.
         trace_id: String,
+        /// Parent recording identifier.
         recording_id: String,
     },
     /// Registration completed and the trace is queued for upload.
     ReadyForUpload {
+        /// Trace identifier the event applies to.
         trace_id: String,
+        /// Parent recording identifier.
         recording_id: String,
     },
     /// A trace has finished uploading.
     UploadComplete {
+        /// Trace identifier the event applies to.
         trace_id: String,
+        /// Parent recording identifier.
         recording_id: String,
     },
+    /// A trace's upload progressed by some number of bytes (used to drive the
+    /// debounced status updater).
+    UploadProgress {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording identifier.
+        recording_id: String,
+        /// Bytes uploaded so far.
+        bytes_uploaded: i64,
+        /// Total bytes once finalised; reported when known.
+        total_bytes: Option<i64>,
+    },
     /// A recording was stopped by the producer.
-    RecordingStopped { recording_id: String },
+    RecordingStopped {
+        /// Recording identifier the event applies to.
+        recording_id: String,
+    },
+    /// Connection state to the backend changed.
+    ConnectionStateChanged(ConnectionState),
 }
 
 /// Owns the sender end of the broadcast channel and hands out subscribers.

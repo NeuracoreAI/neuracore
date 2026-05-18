@@ -14,9 +14,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::api::auth::FileAuthProvider;
+use crate::api::client::{ApiClient, ApiClientOptions};
+use crate::cloud::{
+    read_org_id_from_config, spawn_progress_reporter, spawn_registration, spawn_status_updater,
+    spawn_uploader, StatusUpdate,
+};
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
+use crate::connection::spawn_connection_monitor;
 use crate::encoding::video_encoder::VideoEncoder;
 use crate::ipc::listener;
 use crate::ipc::node::IpcTransport;
@@ -24,9 +31,9 @@ use crate::lifecycle::daemonize::{daemonize, DaemonizeOutcome, Readiness, Readin
 use crate::lifecycle::pidfile::{PidFile, PidFileError};
 use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
 use crate::lifecycle::signals::{install_shutdown_handler, ShutdownSignal};
-use crate::pipeline::dispatcher;
+use crate::pipeline::dispatcher::{self, DispatcherContext};
 use crate::pipeline::trace_actor::TraceActorContext;
-use crate::state::SqliteStateStore;
+use crate::state::{EventBus, SqliteStateStore, StateStore};
 use crate::storage::budget::{StorageBudget, StoragePolicy};
 
 /// Upper bound on how long we wait for the signal-capture task after the
@@ -200,17 +207,34 @@ fn run_daemon(
             .and_then(|value| u64::try_from(value).ok()),
         ..StoragePolicy::default()
     };
+    let api_url = runtime_env.api_url.clone();
+    let config_for_runtime = config.clone();
     let outcome = runtime.block_on(async move {
         let state_store = SqliteStateStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
         tracing::info!(path = %db_path.display(), "state store ready");
+        // Re-arm rows stuck in transient `registering` / `uploading` states
+        // from a previous unclean exit — the claim/drain queries that drive
+        // the coordinators only scan terminal-or-pending rows, so without
+        // this sweep a SIGKILL during phase 6 would leak traces.
+        match state_store.reset_stale_pipeline_states().await {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "re-armed stale pipeline rows from prior run"),
+            Err(error) => {
+                tracing::warn!(%error, "failed to reset stale pipeline states (continuing)")
+            }
+        }
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
-        let actor_context = Arc::new(TraceActorContext::new(
-            recordings_root.clone(),
-            storage_budget,
-            VideoEncoder::new(),
-        ));
+        let event_bus = EventBus::new();
+        let actor_context = Arc::new(
+            TraceActorContext::new(
+                recordings_root.clone(),
+                storage_budget,
+                VideoEncoder::new(),
+            )
+            .with_event_bus(event_bus.clone()),
+        );
 
         // Run the wait loop in a nested block so the state store can be
         // closed in both the success and error paths before the runtime
@@ -225,9 +249,53 @@ fn run_daemon(
             let transport =
                 IpcTransport::bring_up().context("failed to bring up iceoryx2 transport")?;
 
-            let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn(
+            // Resolve the org_id from the local SDK-managed config first,
+            // falling back to the daemon profile (NCD_CURRENT_ORG_ID or the
+            // YAML profile override). Either source is fine — the local
+            // config file is the most up-to-date, and the profile override
+            // is the documented escape hatch for tests.
+            let config_path = dirs::home_dir()
+                .map(|home| home.join(".neuracore").join("config.json"))
+                .unwrap_or_else(|| std::path::PathBuf::from(".neuracore/config.json"));
+            let org_id = read_org_id_from_config(&config_path)
+                .or_else(|| config_for_runtime.current_org_id.clone());
+
+            // Spawn the cloud-side coordinators *before* the dispatcher so
+            // they have an active subscription to the event bus by the time
+            // any `TraceWritten` / `RecordingStopped` fires. A late
+            // subscriber sees no replay (broadcast channels don't replay),
+            // so a coordinator that races behind a fast end-to-end trace
+            // would otherwise miss its trigger event and have to wait for
+            // the next periodic tick. Order is also load-bearing for
+            // ordered shutdown: dropping the dispatcher first guarantees
+            // no new `TraceWritten` lands while the coordinators drain.
+            let cloud_handles = if config_for_runtime.offline.unwrap_or(false) {
+                tracing::info!("offline mode — skipping cloud coordinator spawn");
+                None
+            } else {
+                match build_api_client(&api_url, &config_path) {
+                    Ok(api_client) => Some(spawn_cloud_coordinators(
+                        state_store.clone(),
+                        event_bus.clone(),
+                        api_client,
+                        Arc::new(recordings_root.clone()),
+                        shutdown_tx.clone(),
+                    )),
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to build API client; cloud uploads disabled");
+                        None
+                    }
+                }
+            };
+
+            let dispatcher_context = DispatcherContext {
+                org_id: org_id.clone(),
+                event_bus: Some(event_bus.clone()),
+            };
+            let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
                 state_store.clone(),
                 Arc::clone(&actor_context),
+                dispatcher_context,
                 shutdown_tx.subscribe(),
             );
 
@@ -249,7 +317,7 @@ fn run_daemon(
             // accumulate broadcasts behind our back; we no longer need it.
             drop(shutdown_rx);
 
-            tracing::info!("daemon ready; awaiting shutdown signal");
+            tracing::info!(?org_id, "daemon ready; awaiting shutdown signal");
             listener::run(transport, dispatcher_tx.clone(), shutdown_tx.subscribe()).await;
 
             // Ordered shutdown — by the time `listener::run` has returned
@@ -259,9 +327,14 @@ fn run_daemon(
             //      inbox closes,
             //   2. dispatcher drains, clears the routing map, and the
             //      per-trace actors observe EOF and exit,
-            //   3. read the captured shutdown signal for the log line.
+            //   3. wait for the cloud coordinators to finish their
+            //      in-flight requests,
+            //   4. read the captured shutdown signal for the log line.
             drop(dispatcher_tx);
             dispatcher_handle.shutdown().await;
+            if let Some(handles) = cloud_handles {
+                handles.join_all().await;
+            }
             // In normal operation the listener returns *because* a shutdown
             // signal fired, so `signal_task` is already complete. Bound the
             // wait so a future code path that lets the listener exit
@@ -379,6 +452,88 @@ fn ensure_default_profile_exists(profiles: &ProfileManager) -> Result<(), Profil
     match profiles.create_profile(DEFAULT_PROFILE_NAME) {
         Ok(()) | Err(ProfileError::AlreadyExists(_)) => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// Bundle of handles for the Phase 6 cloud coordinators.
+struct CloudHandles {
+    connection: crate::connection::MonitorHandle,
+    registration: crate::cloud::RegistrationCoordinatorHandle,
+    uploader: crate::cloud::UploaderHandle,
+    status: crate::cloud::StatusUpdaterHandle,
+    progress: crate::cloud::ProgressReporterHandle,
+}
+
+impl CloudHandles {
+    async fn join_all(self) {
+        // Connection monitor drops first because its tick is bounded by the
+        // health-check interval; the others have either bus subscriptions
+        // or pending requests that may need a moment to wrap up after the
+        // shutdown signal fires.
+        self.connection.join().await;
+        self.registration.join().await;
+        self.uploader.join().await;
+        self.status.join().await;
+        self.progress.join().await;
+    }
+}
+
+fn build_api_client(api_url: &str, config_path: &Path) -> Result<Arc<ApiClient>> {
+    let auth = Arc::new(
+        FileAuthProvider::new(config_path, api_url.to_string())
+            .context("failed to construct auth provider")?,
+    );
+    let options = ApiClientOptions::new(api_url.to_string());
+    let client = ApiClient::new(options, auth).context("failed to build api client")?;
+    Ok(Arc::new(client))
+}
+
+fn spawn_cloud_coordinators(
+    state_store: SqliteStateStore,
+    event_bus: EventBus,
+    client: Arc<ApiClient>,
+    recordings_root: Arc<PathBuf>,
+    shutdown_tx: crate::lifecycle::signals::ShutdownHandle,
+) -> CloudHandles {
+    let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
+    let connection = spawn_connection_monitor(
+        Arc::clone(&client),
+        event_bus.clone(),
+        shutdown_tx.subscribe(),
+    );
+    let registration = spawn_registration(
+        state_store.clone(),
+        event_bus.clone(),
+        Arc::clone(&client),
+        shutdown_tx.subscribe(),
+    );
+    let uploader = spawn_uploader(
+        state_store.clone(),
+        event_bus.clone(),
+        Arc::clone(&client),
+        Arc::clone(&recordings_root),
+        status_tx.clone(),
+        shutdown_tx.subscribe(),
+    );
+    // Drop the local sender so the channel closes as soon as the uploader
+    // exits — the status task uses the close to break out of its select!
+    // loop on shutdown.
+    drop(status_tx);
+    let status = spawn_status_updater(
+        state_store.clone(),
+        Arc::clone(&client),
+        status_rx,
+        shutdown_tx.subscribe(),
+    );
+    let progress =
+        spawn_progress_reporter(state_store, Arc::clone(&client), shutdown_tx.subscribe());
+
+    CloudHandles {
+        connection,
+        registration,
+        uploader,
+        status,
+        progress,
     }
 }
 

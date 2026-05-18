@@ -40,8 +40,25 @@ def assert_recordings_folder_absent() -> None:
     ), f"Recordings folder still present: {recordings_root}"
 
 
+_INFRA_TABLES = frozenset({
+    # sqlx migration bookkeeping (Rust daemon)
+    "_sqlx_migrations",
+    # Alembic migration bookkeeping (legacy Python daemon)
+    "alembic_version",
+    # SQLite internal sequence table
+    "sqlite_sequence",
+})
+
+
 def assert_db_empty() -> None:
-    """Fail if any known daemon DB tables contain rows."""
+    """Fail if any user-data daemon DB tables contain rows.
+
+    Migration-bookkeeping tables (``_sqlx_migrations``, ``alembic_version``)
+    and SQLite's internal ``sqlite_sequence`` are excluded — they're owned
+    by the migration framework, not by the daemon's domain model, so a
+    non-zero row count there is expected after the daemon has started even
+    once.
+    """
     db_path = get_daemon_db_path()
     if not db_path.exists():
         return
@@ -54,6 +71,8 @@ def assert_db_empty() -> None:
         }
     non_empty: list[str] = []
     for table in sorted(tables):
+        if table in _INFRA_TABLES:
+            continue
         with sqlite3.connect(str(db_path)) as conn:
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[
                 0

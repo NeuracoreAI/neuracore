@@ -90,6 +90,7 @@ ddpm
 DDPM
 denoise
 denoised
+deserialise
 denoising
 devnull
 diaginertia
@@ -129,6 +130,7 @@ finfo
 fixturenames
 fogend
 fogstart
+footgun
 forcelimited
 forcerange
 fovy
@@ -199,6 +201,7 @@ LEROBOT
 lerobot
 levelname
 libcs
+libdata
 libgl
 libglew
 libglib
@@ -251,6 +254,8 @@ neginf
 neuraco
 neuracore
 newbyteorder
+nokey
+noprint
 nhead
 nheads
 Nonblock
@@ -323,6 +328,8 @@ RDWR
 reannounce
 rels
 reraises
+reqwest
+resumably
 RETRYABLE
 rgba
 rgbd
@@ -363,6 +370,7 @@ staticmethod
 statvfs
 subdirs
 synchronizable
+syncpoints
 targetbody
 TDVB
 teleop
@@ -406,6 +414,7 @@ utaustin
 Vaswani
 vertadr
 vertnum
+vcodec
 VIPERX
 viser
 vlln

@@ -18,5 +18,18 @@ iceoryx2.workspace = true
 libc.workspace = true
 once_cell.workspace = true
 pyo3.workspace = true
+# Used by the batched joint-data fast path to format each per-item
+# `{"timestamp":...,"value":...}` payload. We deliberately do NOT hand-format
+# via `write!`: Rust's `Display for f64` strips trailing zeros (1.0 → "1"),
+# which would land integer-valued joint values on disk as JSON integers
+# instead of floats and break the cloud-side data-verification pass.
+# serde_json uses ryu under the hood and always emits at least one fractional
+# digit, matching Python's `json.dumps` shape.
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Opt-in tracing subscriber for the diagnostic per-frame log. Only initialises
+# when `NCD_PRODUCER_LOG` is set so Python imports don't pay for it in normal
+# operation.
+tracing-subscriber.workspace = true

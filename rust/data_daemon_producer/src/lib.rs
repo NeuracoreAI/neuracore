@@ -53,6 +53,8 @@
 //! daemon's bookkeeping for the *parent's* still-live publisher.
 
 use std::cell::RefCell;
+use std::fs::OpenOptions;
+use std::path::PathBuf;
 use std::sync::Once;
 
 use data_daemon_ipc::service_name::{
@@ -67,6 +69,7 @@ use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use thiserror::Error;
+use tracing_subscriber::EnvFilter;
 
 /// Errors raised while publishing envelopes to the daemon.
 #[derive(Debug, Error)]
@@ -314,14 +317,237 @@ fn send_data(
     if trace_id.is_empty() {
         return Err(PyValueError::new_err("trace_id must not be empty"));
     }
+    // Diagnostic per-frame log. Only fires when `NCD_PRODUCER_LOG` is set;
+    // the log carries each call's wall-clock duration so producer-throughput
+    // analysis can grep + awk the file for per-trace percentiles. When the
+    // gate is off the whole block compiles to a single atomic-bool load.
+    let log_enabled = producer_log_enabled();
+    let started = if log_enabled {
+        Some(std::time::Instant::now())
+    } else {
+        None
+    };
     let envelope = Envelope::frame(
         trace_id.to_string(),
         timestamp_ns,
         timestamp_s,
         payload.to_vec(),
     );
+    let encode_done = started.map(|t| t.elapsed());
     publish_envelope(&envelope)?;
+    if let Some(start) = started {
+        let total = start.elapsed();
+        let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
+        let publish_us = total.as_micros().saturating_sub(encode_us);
+        // Log only every 100th call per thread to keep the file size
+        // sensible at 30k+ envelopes/sec, while still giving enough samples
+        // for a percentile read. Stats summary is bucketed by thread via the
+        // trace_id tail so different traces interleave cleanly.
+        let trace_tail = trace_id_tail(trace_id);
+        let count = increment_thread_call_counter();
+        if count.is_multiple_of(100) {
+            tracing::debug!(
+                trace_id = trace_tail,
+                payload_len = payload.len(),
+                encode_us,
+                publish_us,
+                total_us = total.as_micros() as u64,
+                call_count = count,
+                "send_data timing"
+            );
+        }
+    }
     Ok(())
+}
+
+/// Send a batch of scalar joint samples in one PyO3 call.
+///
+/// Each `(trace_id, value)` item becomes its own `Frame` envelope, but the
+/// JSON payload construction and iceoryx2 publishes all happen inside this
+/// single Rust call. Compared to the legacy per-item shim that crossed the
+/// PyO3 boundary and ran CPython `json.dumps` for every joint, this collapses:
+///
+/// - 10× PyO3 boundary crossings → 1
+/// - 10× CPython `json.dumps` → 10× `write!` against a small `Vec<u8>`
+/// - 10× thread-local publisher lookup → 1 (the inner loop reuses the slot)
+///
+/// Wire format is intentionally unchanged: the daemon still receives one
+/// `Frame` envelope per item carrying the same compact
+/// `{"timestamp":<f64>,"value":<f64>}` JSON the legacy shim produced, so no
+/// dispatcher or trace-actor changes are required.
+#[pyfunction]
+#[pyo3(signature = (items, timestamp_ns, timestamp_s = None))]
+fn send_batched_joint_data(
+    py: Python<'_>,
+    items: Vec<(String, f64)>,
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    // Fall back to ns→s if the caller omits timestamp_s so the per-frame
+    // "timestamp" field still has a sensible value to write into trace.json.
+    let timestamp_for_json =
+        timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
+    let log_enabled = producer_log_enabled();
+
+    // The JSON formatting and iceoryx2 publishes touch no Python state —
+    // releasing the GIL here lets the test's other producer threads (camera
+    // at 120 Hz, custom_1d at 3.1 kHz, the sibling joint streams) keep
+    // making progress while this thread is inside Rust. At 1 kHz × multiple
+    // joint streams the per-call GIL hold was costing the workload several
+    // hundred microseconds of avoidable serialisation each second.
+    // Pre-validate every trace_id before we publish anything. Without this
+    // check a malformed item N would leave items 0..N already on the wire
+    // and surface the error as an exception — leaving the daemon to
+    // process a partial batch the caller assumes it never sent. Hoisting
+    // the loop also keeps the validation cost paid once per batch rather
+    // than during the GIL-released hot path.
+    if let Some(bad_index) = items.iter().position(|(trace_id, _)| trace_id.is_empty()) {
+        return Err(PyValueError::new_err(format!(
+            "trace_id must not be empty (item index {bad_index})"
+        )));
+    }
+    py.allow_threads(|| -> PyResult<()> {
+        for (trace_id, value) in &items {
+            let started = if log_enabled {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            // serde_json (via ryu) always emits at least one fractional
+            // digit for f64 — so integer-valued joint values land on disk
+            // as `1.0`, not `1`, matching Python's `json.dumps` shape and
+            // keeping the cloud-side data verification happy.
+            let payload = serde_json::to_vec(&ScalarFrameEntry {
+                timestamp: timestamp_for_json,
+                value: *value,
+            })
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!(
+                    "failed to encode joint frame JSON: {error}"
+                ))
+            })?;
+            let payload_len = payload.len();
+            let envelope =
+                Envelope::frame(trace_id.clone(), timestamp_ns, timestamp_s, payload);
+            let encode_done = started.map(|t| t.elapsed());
+            publish_envelope(&envelope)?;
+            if let Some(start) = started {
+                let total = start.elapsed();
+                let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
+                let publish_us = total.as_micros().saturating_sub(encode_us);
+                let trace_tail = trace_id_tail(trace_id);
+                let count = increment_thread_call_counter();
+                if count.is_multiple_of(100) {
+                    tracing::debug!(
+                        trace_id = trace_tail,
+                        payload_len,
+                        encode_us,
+                        publish_us,
+                        total_us = total.as_micros() as u64,
+                        call_count = count,
+                        "send_data timing"
+                    );
+                }
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Per-item JSON shape written to `trace.json` for scalar joint streams.
+///
+/// Field order matches the legacy `BATCHED_JOINT_DATA` zmq path
+/// ([data_bridge.py:508](../../../neuracore/data_daemon/communications_management/consumer/data_bridge.py#L508))
+/// so byte-level diffs against historical recordings stay stable.
+#[derive(serde::Serialize)]
+struct ScalarFrameEntry {
+    timestamp: f64,
+    value: f64,
+}
+
+thread_local! {
+    /// Per-thread monotonic counter of `send_data` calls. Used to decimate
+    /// the diagnostic log to one line per 100 calls without locking. Lives
+    /// alongside the `PRODUCER` slot so it shares the same thread lifetime.
+    static THREAD_CALL_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn increment_thread_call_counter() -> u64 {
+    THREAD_CALL_COUNTER.with(|cell| {
+        let next = cell.get().saturating_add(1);
+        cell.set(next);
+        next
+    })
+}
+
+/// Tail of a trace UUID for log readability. The integration test logs the
+/// same suffix on the daemon side, so the two timelines join on the same
+/// label without a full 36-char UUID per line.
+fn trace_id_tail(trace_id: &str) -> &str {
+    let len = trace_id.len();
+    if len <= 8 {
+        trace_id
+    } else {
+        &trace_id[len - 8..]
+    }
+}
+
+/// Returns true once `NCD_PRODUCER_LOG=1` (or any non-empty value other than
+/// `0`/`false`) has been observed *and* the tracing subscriber has been
+/// installed. The first call initialises the subscriber against a file path
+/// taken from `NCD_PRODUCER_LOG_FILE` (default `/tmp/ncd_producer.log`); the
+/// subscriber is shared across all Python threads in the process.
+fn producer_log_enabled() -> bool {
+    static INIT: Once = Once::new();
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let raw = std::env::var("NCD_PRODUCER_LOG").unwrap_or_default();
+        let enabled = !raw.is_empty() && raw != "0" && !raw.eq_ignore_ascii_case("false");
+        if enabled {
+            INIT.call_once(install_producer_tracing);
+        }
+        enabled
+    })
+}
+
+/// Install a `tracing-subscriber` that writes to the file named by
+/// `NCD_PRODUCER_LOG_FILE` (defaults to `<temp-dir>/ncd_producer.log`,
+/// resolved via `std::env::temp_dir` so the path is portable across
+/// Linux/macOS/Windows hosts).
+///
+/// Installing a global subscriber from a cdylib is normally a footgun
+/// because the embedding process loses control of formatting. We accept
+/// that cost here because this code is gated entirely behind
+/// `NCD_PRODUCER_LOG`: the subscriber is only constructed when the
+/// operator explicitly opts in to per-frame producer diagnostics, and
+/// `try_init` short-circuits when the embedder has already installed
+/// their own subscriber — our events route through the embedder's
+/// subscriber in that case and the file write is a no-op.
+fn install_producer_tracing() {
+    let path: PathBuf = std::env::var_os("NCD_PRODUCER_LOG_FILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("ncd_producer.log"));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path);
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_ansi(false);
+    let result = match file {
+        Ok(handle) => builder
+            .with_writer(std::sync::Mutex::new(handle))
+            .try_init(),
+        Err(_) => builder.with_writer(std::io::stderr).try_init(),
+    };
+    // If `try_init` returns Err the host already installed a subscriber and
+    // our events will use it; nothing more to do.
+    let _ = result;
 }
 
 /// Announce the resolution of an upcoming video trace.
@@ -383,6 +609,7 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(start_trace, module)?)?;
     module.add_function(wrap_pyfunction!(send_data, module)?)?;
+    module.add_function(wrap_pyfunction!(send_batched_joint_data, module)?)?;
     module.add_function(wrap_pyfunction!(open_frame_stream, module)?)?;
     module.add_function(wrap_pyfunction!(end_trace, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
