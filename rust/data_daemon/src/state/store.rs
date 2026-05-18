@@ -187,6 +187,38 @@ pub trait StateStore: Send + Sync {
     ///
     /// Returns the number of trace rows rewritten.
     async fn reset_stale_pipeline_states(&self) -> Result<u64, StateStoreError>;
+
+    /// Mark trace rows whose writer-side state is stale (`writing` /
+    /// `initializing` / `pending_metadata`) and whose `last_updated` is older
+    /// than `stale_threshold_secs` as `failed`.
+    ///
+    /// On startup these rows belong to a previous daemon process — by
+    /// definition no current actor is touching them — and leaving them in a
+    /// transient state would forever block their parent recording from
+    /// reaching the "all traces written" gate the progress reporter waits on.
+    /// The age threshold is a defence against accidentally clobbering a row
+    /// that the current daemon has just begun writing (the row's
+    /// `last_updated` is touched on creation, so a fresh row will not be
+    /// caught by the sweep).
+    ///
+    /// Returns the number of trace rows rewritten.
+    async fn mark_stale_writing_traces_failed(
+        &self,
+        stale_threshold_secs: i64,
+    ) -> Result<u64, StateStoreError>;
+
+    /// Atomically mark a recording as cancelled and burn every non-terminal
+    /// trace it owns to terminal states the cloud coordinators ignore
+    /// (`write_status = failed`, `upload_status = failed`,
+    /// `registration_status = failed` if not already `registered`).
+    ///
+    /// Idempotent: re-cancelling a recording that already has a
+    /// `cancelled_at` leaves the timestamp untouched. Returns the recording
+    /// row after the update and the number of trace rows touched.
+    async fn cancel_recording(
+        &self,
+        recording_id: &str,
+    ) -> Result<(RecordingRow, u64), StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -809,6 +841,119 @@ impl StateStore for SqliteStateStore {
         tx.commit().await?;
         Ok(reg_result.rows_affected() + upload_result.rows_affected())
     }
+
+    async fn mark_stale_writing_traces_failed(
+        &self,
+        stale_threshold_secs: i64,
+    ) -> Result<u64, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        let cutoff = now - chrono::Duration::seconds(stale_threshold_secs);
+        let result = sqlx::query(
+            "UPDATE traces \
+                SET write_status = ?1, \
+                    error_code = COALESCE(error_code, ?2), \
+                    error_message = COALESCE(error_message, ?3), \
+                    last_updated = ?4 \
+              WHERE write_status IN (?5, ?6, ?7) \
+                AND last_updated <= ?8",
+        )
+        .bind(TraceWriteStatus::Failed.as_str())
+        .bind(TraceErrorCode::WriteFailed.as_str())
+        .bind("daemon exited before encoding finished")
+        .bind(now)
+        .bind(TraceWriteStatus::Writing.as_str())
+        .bind(TraceWriteStatus::Initializing.as_str())
+        .bind(TraceWriteStatus::PendingMetadata.as_str())
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(result.rows_affected())
+    }
+
+    async fn cancel_recording(
+        &self,
+        recording_id: &str,
+    ) -> Result<(RecordingRow, u64), StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        // Make sure the recording row exists — the producer may cancel
+        // before the StartRecording envelope is processed (e.g. fast
+        // start→cancel sequence under load).
+        Self::upsert_recording_locked(&mut tx, recording_id).await?;
+
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET cancelled_at = COALESCE(cancelled_at, ?2), \
+                    progress_reported = ?3, \
+                    last_updated = ?2 \
+              WHERE recording_id = ?1",
+        )
+        .bind(recording_id)
+        .bind(now)
+        .bind(ProgressReportStatus::Reported.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        // Burn every non-terminal trace so the registration / upload /
+        // progress coordinators ignore them. `failed` is the existing
+        // terminal label for all three pipelines; tagging with the
+        // recording-cancelled error code lets operators distinguish a
+        // user-cancel from an actual write or upload failure.
+        let write_result = sqlx::query(
+            "UPDATE traces \
+                SET write_status = ?1, \
+                    error_code = ?2, \
+                    error_message = COALESCE(error_message, ?3), \
+                    last_updated = ?4 \
+              WHERE recording_id = ?5 \
+                AND write_status NOT IN (?6, ?1)",
+        )
+        .bind(TraceWriteStatus::Failed.as_str())
+        .bind(TraceErrorCode::RecordingCancelled.as_str())
+        .bind("recording cancelled by producer")
+        .bind(now)
+        .bind(recording_id)
+        .bind(TraceWriteStatus::Written.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE traces \
+                SET upload_status = ?1, last_updated = ?2 \
+              WHERE recording_id = ?3 \
+                AND upload_status NOT IN (?1, ?4)",
+        )
+        .bind(TraceUploadStatus::Failed.as_str())
+        .bind(now)
+        .bind(recording_id)
+        .bind(TraceUploadStatus::Uploaded.as_str())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE traces \
+                SET registration_status = ?1, last_updated = ?2 \
+              WHERE recording_id = ?3 \
+                AND registration_status NOT IN (?1, ?4)",
+        )
+        .bind(TraceRegistrationStatus::Failed.as_str())
+        .bind(now)
+        .bind(recording_id)
+        .bind(TraceRegistrationStatus::Registered.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let record = RecordingRow::from_row(&row)?;
+
+        tx.commit().await?;
+        Ok((record, write_result.rows_affected()))
+    }
 }
 
 #[cfg(test)]
@@ -1028,6 +1173,159 @@ mod tests {
             TraceRegistrationStatus::Registered
         );
         assert_eq!(clean.upload_status, TraceUploadStatus::Queued);
+    }
+
+    #[tokio::test]
+    async fn mark_stale_writing_traces_failed_burns_old_rows_only() {
+        let (store, _tempdir) = open_store().await;
+        for (trace_id, write_status) in [
+            ("fresh-writing", TraceWriteStatus::Writing),
+            ("stale-writing", TraceWriteStatus::Writing),
+            ("stale-initializing", TraceWriteStatus::Initializing),
+            ("stale-pending-meta", TraceWriteStatus::PendingMetadata),
+            ("done", TraceWriteStatus::Written),
+            ("failed", TraceWriteStatus::Failed),
+        ] {
+            store
+                .create_trace("rec-1", trace_id, Some("JOINT_POSITIONS"), Some("arm"))
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    trace_id,
+                    TraceUpdate {
+                        write_status: Some(write_status),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        // Backdate the three "stale-*" rows to ~5 minutes ago by stamping
+        // last_updated directly. SQLite stores `DATETIME` as ISO8601 text,
+        // which `NaiveDateTime` serialises automatically.
+        let stale_at = Utc::now().naive_utc() - chrono::Duration::seconds(300);
+        for trace_id in ["stale-writing", "stale-initializing", "stale-pending-meta"] {
+            sqlx::query("UPDATE traces SET last_updated = ?1 WHERE trace_id = ?2")
+                .bind(stale_at)
+                .bind(trace_id)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+
+        let touched = store.mark_stale_writing_traces_failed(30).await.unwrap();
+        assert_eq!(touched, 3, "only stale writing-side rows should be touched");
+
+        for trace_id in ["stale-writing", "stale-initializing", "stale-pending-meta"] {
+            let row = store.get_trace(trace_id).await.unwrap().unwrap();
+            assert_eq!(row.write_status, TraceWriteStatus::Failed);
+            assert_eq!(row.error_code, Some(TraceErrorCode::WriteFailed));
+        }
+        // Fresh + already-terminal rows are not touched.
+        let fresh = store.get_trace("fresh-writing").await.unwrap().unwrap();
+        assert_eq!(fresh.write_status, TraceWriteStatus::Writing);
+        let done = store.get_trace("done").await.unwrap().unwrap();
+        assert_eq!(done.write_status, TraceWriteStatus::Written);
+        let failed = store.get_trace("failed").await.unwrap().unwrap();
+        assert_eq!(failed.error_code, None, "pre-existing rows untouched");
+    }
+
+    #[tokio::test]
+    async fn cancel_recording_burns_traces_and_stamps_cancelled_at() {
+        let (store, _tempdir) = open_store().await;
+        store.create_recording("rec-1").await.unwrap();
+        for (trace_id, write, upload, reg) in [
+            (
+                "in-flight",
+                TraceWriteStatus::Writing,
+                TraceUploadStatus::Pending,
+                TraceRegistrationStatus::Pending,
+            ),
+            (
+                "registered-queued",
+                TraceWriteStatus::Written,
+                TraceUploadStatus::Queued,
+                TraceRegistrationStatus::Registered,
+            ),
+            (
+                "already-uploaded",
+                TraceWriteStatus::Written,
+                TraceUploadStatus::Uploaded,
+                TraceRegistrationStatus::Registered,
+            ),
+        ] {
+            store
+                .create_trace("rec-1", trace_id, Some("JOINT_POSITIONS"), None)
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    trace_id,
+                    TraceUpdate {
+                        write_status: Some(write),
+                        upload_status: Some(upload),
+                        registration_status: Some(reg),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        // A trace belonging to another recording must not be touched.
+        store
+            .create_trace("rec-other", "untouched", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+
+        let (row, touched) = store.cancel_recording("rec-1").await.unwrap();
+        assert!(row.cancelled_at.is_some(), "cancelled_at must be stamped");
+        assert_eq!(row.progress_reported, ProgressReportStatus::Reported);
+        assert_eq!(touched, 1, "only the non-Written trace's write was touched");
+
+        let in_flight = store.get_trace("in-flight").await.unwrap().unwrap();
+        assert_eq!(in_flight.write_status, TraceWriteStatus::Failed);
+        assert_eq!(
+            in_flight.error_code,
+            Some(TraceErrorCode::RecordingCancelled)
+        );
+        assert_eq!(in_flight.upload_status, TraceUploadStatus::Failed);
+
+        let queued = store.get_trace("registered-queued").await.unwrap().unwrap();
+        assert_eq!(queued.upload_status, TraceUploadStatus::Failed);
+        assert_eq!(queued.write_status, TraceWriteStatus::Written);
+
+        let uploaded = store.get_trace("already-uploaded").await.unwrap().unwrap();
+        assert_eq!(uploaded.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(
+            uploaded.registration_status,
+            TraceRegistrationStatus::Registered
+        );
+
+        let other = store.get_trace("untouched").await.unwrap().unwrap();
+        assert_eq!(other.write_status, TraceWriteStatus::Initializing);
+        assert_eq!(other.upload_status, TraceUploadStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn cancel_recording_is_idempotent() {
+        let (store, _tempdir) = open_store().await;
+        store.create_recording("rec-1").await.unwrap();
+        store
+            .create_trace("rec-1", "trace-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+
+        let (first, _) = store.cancel_recording("rec-1").await.unwrap();
+        let first_at = first.cancelled_at.expect("cancelled_at set");
+        // Sleep across a clock tick to make a date change observable.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let (second, _) = store.cancel_recording("rec-1").await.unwrap();
+        assert_eq!(
+            second.cancelled_at,
+            Some(first_at),
+            "subsequent cancels must not slide cancelled_at forward"
+        );
     }
 
     #[tokio::test]

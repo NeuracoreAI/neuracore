@@ -23,7 +23,7 @@ use crate::cloud::{
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
-use crate::connection::spawn_connection_monitor;
+use crate::connection::{spawn_connection_monitor, spawn_wakelock};
 use crate::encoding::video_encoder::VideoEncoder;
 use crate::ipc::listener;
 use crate::ipc::node::IpcTransport;
@@ -41,6 +41,13 @@ use crate::storage::budget::{StorageBudget, StoragePolicy};
 /// timeout exists so a future bug that lets the listener exit without a
 /// shutdown signal degrades to a `?signal=sigterm` log rather than a hang.
 const SIGNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// `last_updated` age (in seconds) below which a `writing` /
+/// `pending_metadata` / `initializing` trace row is left alone by the
+/// startup-time sweep. Comfortably larger than the trace_actor's debounce
+/// flush interval, so a row a current daemon has just begun writing isn't
+/// caught.
+const STALE_WRITE_THRESHOLD_SECS: i64 = 30;
 
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
@@ -225,6 +232,23 @@ fn run_daemon(
                 tracing::warn!(%error, "failed to reset stale pipeline states (continuing)")
             }
         }
+        // Phase 7 — burn trace rows the previous daemon left mid-write.
+        // Those rows can never reach `written` (the actor that owned them
+        // is gone) and would otherwise pin their recording in the
+        // "all traces written" gate the progress reporter waits on. The
+        // 30 s threshold gives a future daemon launched on top of an
+        // earlier orderly-shutdown's tail a chance to recover; in
+        // practice every row caught by this sweep is hours stale.
+        match state_store
+            .mark_stale_writing_traces_failed(STALE_WRITE_THRESHOLD_SECS)
+            .await
+        {
+            Ok(0) => {}
+            Ok(count) => tracing::info!(count, "marked stale writing traces as failed"),
+            Err(error) => {
+                tracing::warn!(%error, "failed to mark stale writing traces failed (continuing)")
+            }
+        }
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
         let event_bus = EventBus::new();
         let actor_context = Arc::new(
@@ -288,6 +312,19 @@ fn run_daemon(
                 }
             };
 
+            // Phase 7 — hold a wakelock while at least one trace is queued
+            // for upload. Spawned regardless of `offline` so a profile
+            // configured "online but flaky network" still keeps the host
+            // awake when traces queue up locally; the wakelock task does
+            // nothing on hosts without `systemd-inhibit`.
+            let wakelock_handle = config_for_runtime
+                .keep_wakelock_while_upload
+                .unwrap_or(false)
+                .then(|| {
+                    tracing::info!("wakelock-while-upload enabled");
+                    spawn_wakelock(event_bus.clone(), shutdown_tx.subscribe())
+                });
+
             let dispatcher_context = DispatcherContext {
                 org_id: org_id.clone(),
                 event_bus: Some(event_bus.clone()),
@@ -334,6 +371,9 @@ fn run_daemon(
             dispatcher_handle.shutdown().await;
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
+            }
+            if let Some(handle) = wakelock_handle {
+                handle.join().await;
             }
             // In normal operation the listener returns *because* a shutdown
             // signal fired, so `signal_task` is already complete. Bound the

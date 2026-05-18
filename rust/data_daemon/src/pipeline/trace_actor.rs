@@ -130,7 +130,9 @@ pub fn trace_key(envelope: &Envelope) -> Option<TraceKey> {
         | Envelope::Frame { trace_id, .. }
         | Envelope::EndTrace { trace_id, .. }
         | Envelope::OpenFrameStream { trace_id, .. } => Some(trace_id.clone()),
-        Envelope::StartRecording { .. } | Envelope::StopRecording { .. } => None,
+        Envelope::StartRecording { .. }
+        | Envelope::StopRecording { .. }
+        | Envelope::CancelRecording { .. } => None,
     }
 }
 
@@ -139,6 +141,9 @@ pub fn trace_key(envelope: &Envelope) -> Option<TraceKey> {
 pub enum TraceActorMessage {
     /// A producer-originated envelope routed to this trace.
     Envelope(Envelope),
+    /// Drop the in-flight writer and delete the on-disk artefacts. Sent by
+    /// the dispatcher when the parent recording is cancelled.
+    Cancel,
 }
 
 /// Internal state of a per-trace actor.
@@ -182,55 +187,64 @@ pub async fn run(
     let mut state = ActorState::new(trace_id.clone());
 
     while let Some(message) = inbox.recv().await {
-        let TraceActorMessage::Envelope(envelope) = message;
-        match envelope {
-            Envelope::StartTrace {
-                recording_id,
-                data_type,
-                data_type_name,
-                ..
-            } => {
-                state
-                    .handle_start_trace(&store, recording_id, data_type, data_type_name)
-                    .await
-            }
-            Envelope::OpenFrameStream { width, height, .. } => {
-                state.handle_open_frame_stream(width, height);
-            }
-            Envelope::Frame {
-                timestamp_ns,
-                timestamp_s,
-                payload,
-                ..
-            } => {
-                state
-                    .handle_frame(&store, &context, timestamp_ns, timestamp_s, payload)
-                    .await
-            }
-            Envelope::EndTrace { trace_id } => {
-                tracing::info!(trace_id, "end_trace envelope received by actor");
-                state.handle_end_trace(&store, &context).await;
-                // After end-of-trace there is nothing more for this actor to
-                // do; returning drops the receiver so the dispatcher's
-                // shutdown sweep is free of dangling senders.
+        match message {
+            TraceActorMessage::Envelope(envelope) => match envelope {
+                Envelope::StartTrace {
+                    recording_id,
+                    data_type,
+                    data_type_name,
+                    ..
+                } => {
+                    state
+                        .handle_start_trace(&store, recording_id, data_type, data_type_name)
+                        .await
+                }
+                Envelope::OpenFrameStream { width, height, .. } => {
+                    state.handle_open_frame_stream(width, height);
+                }
+                Envelope::Frame {
+                    timestamp_ns,
+                    timestamp_s,
+                    payload,
+                    ..
+                } => {
+                    state
+                        .handle_frame(&store, &context, timestamp_ns, timestamp_s, payload)
+                        .await
+                }
+                Envelope::EndTrace { trace_id } => {
+                    tracing::info!(trace_id, "end_trace envelope received by actor");
+                    state.handle_end_trace(&store, &context).await;
+                    // After end-of-trace there is nothing more for this
+                    // actor to do; returning drops the receiver so the
+                    // dispatcher's shutdown sweep is free of dangling
+                    // senders.
+                    return;
+                }
+                Envelope::StartRecording { .. }
+                | Envelope::StopRecording { .. }
+                | Envelope::CancelRecording { .. } => {
+                    // Recording-scoped envelopes never carry a trace_id, so
+                    // the dispatcher routes them through its own branch —
+                    // they can't reach a per-trace actor. The match arm
+                    // exists so adding a new recording-scoped variant is a
+                    // compile error here rather than a silent ignore.
+                    unreachable!("recording-scoped envelopes are filtered by trace_key");
+                }
+            },
+            TraceActorMessage::Cancel => {
+                tracing::info!(trace_id = state.trace_id, "cancel received by actor");
+                state.handle_cancel(&store, &context).await;
                 return;
-            }
-            Envelope::StartRecording { .. } | Envelope::StopRecording { .. } => {
-                // Recording-scoped envelopes never carry a trace_id, so the
-                // dispatcher routes them through its own branch — they can't
-                // reach a per-trace actor. The match arm exists so adding a
-                // new recording-scoped variant is a compile error here rather
-                // than a silent ignore.
-                unreachable!("recording-scoped envelopes are filtered by trace_key");
             }
         }
     }
 
-    // Inbox closed without an explicit `EndTrace` — typically a shutdown or a
-    // stop-recording cancel. Mark the trace as failed so the lifecycle is
-    // observable from the DB and the registration coordinator doesn't pick it
-    // up. Skip when no StartTrace has been seen — there is no row yet, and
-    // writing one in `failed` state would be misleading.
+    // Inbox closed without an explicit `EndTrace` or `Cancel` — typically a
+    // shutdown or a stop-recording cancel. Mark the trace as failed so the
+    // lifecycle is observable from the DB and the registration coordinator
+    // doesn't pick it up. Skip when no StartTrace has been seen — there is
+    // no row yet, and writing one in `failed` state would be misleading.
     state.handle_shutdown_without_end(&store).await;
 }
 
@@ -252,6 +266,10 @@ struct ActorState {
     /// changed since the last flush (e.g. when the JSON writer is still
     /// buffering).
     last_db_bytes: i64,
+    /// Running count of frames the storage budget refused. Logged
+    /// periodically so a runaway producer with no disk left doesn't drown
+    /// the daemon log in identical warnings.
+    dropped_over_budget: u64,
 }
 
 impl ActorState {
@@ -265,6 +283,7 @@ impl ActorState {
             frame_count: 0,
             bytes_on_disk: 0,
             last_db_bytes: 0,
+            dropped_over_budget: 0,
         }
     }
 
@@ -348,7 +367,19 @@ impl ActorState {
             return;
         };
 
-        if !self.ensure_writer_open(context, &recording_id, &data_type, &payload) {
+        // Phase 7 — the storage budget gates every frame, not just the
+        // writer-open path. Refusing here keeps the on-disk artefact
+        // bounded; the producer sees no error (the SDK contract is
+        // best-effort delivery for sensor data), but the dropped count is
+        // surfaced both on the periodic warning and at finalise. Running
+        // the check *before* `ensure_writer_open` also means an empty
+        // trace whose first frame is over-budget never produces a stub
+        // trace directory.
+        if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
+            return;
+        }
+
+        if !self.ensure_writer_open(context, &recording_id, &data_type) {
             return;
         }
 
@@ -390,43 +421,58 @@ impl ActorState {
         }
     }
 
-    /// Lazily open the JSON or video writer. Returns `false` when the storage
-    /// budget refuses the write so the caller can skip the frame without
-    /// touching the DB row.
+    /// Ask the storage budget whether `payload_len` bytes may be written
+    /// against the currently open writer. Returns `true` when the write is
+    /// allowed; emits a (rate-limited) warning and bumps the
+    /// `dropped_over_budget` counter when it isn't. Best-effort failures
+    /// (a `statvfs` error, an inaccessible parent directory) default to
+    /// "allow" so a transient kernel hiccup doesn't drop sample data —
+    /// matches the python implementation's fail-open frame ingestion path.
+    fn budget_allows_frame(&mut self, budget: &Arc<StorageBudget>, payload_len: usize) -> bool {
+        match budget.check(payload_len as u64) {
+            Ok(check) if check.is_available() => true,
+            Ok(check) => {
+                self.dropped_over_budget = self.dropped_over_budget.saturating_add(1);
+                // Cap the warning to roughly one log per ~256 dropped frames
+                // so a 30 fps stream that runs out of disk doesn't spam the
+                // daemon log faster than 0.1 lines/s. The first drop always
+                // gets a warning so operators see the failure immediately.
+                if self.dropped_over_budget == 1 || self.dropped_over_budget.is_multiple_of(256) {
+                    tracing::warn!(
+                        trace_id = self.trace_id,
+                        dropped = self.dropped_over_budget,
+                        ?check,
+                        "storage budget refused frame; dropping"
+                    );
+                }
+                false
+            }
+            Err(error) => {
+                // Fail-open: a transient kernel hiccup must not silently
+                // drop sample data. The next periodic refresh will
+                // re-evaluate against the real used-bytes total.
+                tracing::warn!(
+                    %error,
+                    trace_id = self.trace_id,
+                    "storage budget query failed; allowing frame through"
+                );
+                true
+            }
+        }
+    }
+
+    /// Lazily open the JSON or video writer. Returns `false` if the writer
+    /// could not be opened (I/O error); the storage-budget gate now lives
+    /// in [`Self::budget_allows_frame`] which the caller runs *before* this
+    /// method.
     fn ensure_writer_open(
         &mut self,
         context: &Arc<TraceActorContext>,
         recording_id: &str,
         data_type: &str,
-        payload: &[u8],
     ) -> bool {
         if !matches!(self.writer, TraceWriter::Pending) {
             return true;
-        }
-
-        // The budget tracker's check is best-effort — we ask for `payload.len()`
-        // even though the JSON path expands the buffer and the video path may
-        // spool an entire frame-plus-header. That mirrors the Python encoder
-        // manager's pre-flight check, which also looks at the *incoming*
-        // payload size, not the eventual on-disk footprint.
-        let requested = payload.len() as u64;
-        match context.storage_budget.check(requested) {
-            Ok(check) if check.is_available() => {}
-            Ok(check) => {
-                tracing::warn!(
-                    trace_id = self.trace_id,
-                    ?check,
-                    "storage budget refused write; dropping frame"
-                );
-                return false;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    trace_id = self.trace_id,
-                    "storage budget query failed; allowing write to proceed"
-                );
-            }
         }
 
         let trace_dir = self.trace_directory(recording_id, data_type, context);
@@ -614,6 +660,7 @@ impl ActorState {
                     trace_id = self.trace_id,
                     recording_id,
                     frame_count = self.frame_count,
+                    dropped_over_budget = self.dropped_over_budget,
                     total_bytes,
                     "trace finalised"
                 );
@@ -716,6 +763,53 @@ impl ActorState {
                 trace_id = self.trace_id,
                 "failed to mark trace as failed"
             );
+        }
+    }
+
+    /// Tear down the writer and delete the on-disk trace directory.
+    ///
+    /// Called when the parent recording is cancelled. The DB row's
+    /// `write_status` is left untouched here — the dispatcher will issue a
+    /// single `cancel_recording` transaction once every actor has exited
+    /// (the trace's terminal state is `Failed` with
+    /// `error_code = recording_cancelled`).
+    async fn handle_cancel(
+        &mut self,
+        _store: &Arc<SqliteStateStore>,
+        context: &Arc<TraceActorContext>,
+    ) {
+        // Drop the writer first so the BufWriter releases its file handle
+        // before we unlink the directory. The encoders carry `BufWriter`s
+        // around `File` handles — on Linux the unlink succeeds with an open
+        // handle but the disk blocks aren't reclaimed until the handle is
+        // closed, so dropping first keeps the storage budget's free-bytes
+        // estimate accurate.
+        self.writer = TraceWriter::Pending;
+
+        let (Some(recording_id), Some(data_type)) =
+            (self.recording_id.clone(), self.data_type.clone())
+        else {
+            // No StartTrace observed — nothing on disk to clean up.
+            return;
+        };
+        let trace_dir = self.trace_directory(&recording_id, &data_type, context);
+        if let Err(error) = std::fs::remove_dir_all(&trace_dir) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    %error,
+                    trace_id = self.trace_id,
+                    path = %trace_dir.display(),
+                    "failed to remove cancelled trace directory"
+                );
+            }
+        }
+        // Release the bytes we'd previously reserved against the storage
+        // budget so the cap can absorb a re-run of the same recording
+        // without an unnecessary refresh-rescan delay.
+        if self.bytes_on_disk > 0 {
+            context.storage_budget.release(self.bytes_on_disk);
+            self.bytes_on_disk = 0;
+            self.last_db_bytes = 0;
         }
     }
 
@@ -1016,6 +1110,75 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         // No `StartTrace` ⇒ no row was created.
         assert!(store.get_trace("trace-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_frame_drops_when_storage_budget_exhausted() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        // Build a context whose storage budget refuses any non-zero write
+        // request. `min_free_disk_bytes = u64::MAX` short-circuits the
+        // free-disk check regardless of actual filesystem state.
+        let root = tempdir.path().join("recordings");
+        let policy = StoragePolicy {
+            storage_limit_bytes: None,
+            min_free_disk_bytes: u64::MAX,
+            refresh_interval: Duration::from_secs(60),
+        };
+        let budget = Arc::new(crate::storage::budget::StorageBudget::new(&root, policy));
+        let context = Arc::new(TraceActorContext::new(
+            root.clone(),
+            budget,
+            VideoEncoder::new(),
+        ));
+        let store_arc = Arc::new(store.clone());
+
+        let mut state = ActorState::new("trace-1".to_string());
+        state
+            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
+            .await;
+        for index in 0..3i64 {
+            let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
+            state
+                .handle_frame(&store_arc, &context, index, None, payload)
+                .await;
+        }
+        assert_eq!(state.frame_count, 0, "all frames must have been dropped");
+        assert_eq!(state.dropped_over_budget, 3);
+        // No writer ever opened so no on-disk trace file exists.
+        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
+            .directory(context.recordings_root.as_path());
+        assert!(!trace_dir.join("trace.json").exists());
+    }
+
+    #[tokio::test]
+    async fn handle_cancel_removes_disk_dir_and_resets_writer() {
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let context = test_context(&tempdir.path().join("recordings"));
+        let store_arc = Arc::new(store.clone());
+
+        let mut state = ActorState::new("trace-1".to_string());
+        state
+            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
+            .await;
+        let payload = serde_json::to_vec(&json!({"i": 0})).unwrap();
+        state
+            .handle_frame(&store_arc, &context, 0, None, payload)
+            .await;
+
+        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
+            .directory(context.recordings_root.as_path());
+        assert!(trace_dir.exists(), "writer opens directory on first frame");
+
+        state.handle_cancel(&store_arc, &context).await;
+        assert!(!trace_dir.exists(), "cancel must remove the trace dir");
+        assert!(matches!(state.writer, TraceWriter::Pending));
+        assert_eq!(state.bytes_on_disk, 0);
     }
 
     #[tokio::test]

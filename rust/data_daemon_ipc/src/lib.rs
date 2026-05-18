@@ -144,6 +144,19 @@ pub enum Envelope {
         /// [`Envelope::StartRecording`].
         recording_id: String,
     },
+    /// Producer cancels a recording — the daemon drops every in-flight
+    /// per-trace actor, deletes the on-disk artefacts, marks the recording
+    /// row as cancelled, and does not upload any of its traces.
+    ///
+    /// Sent in lieu of (or after) a [`StopRecording`] envelope when the
+    /// producer decides the recording should be discarded entirely. The
+    /// daemon is idempotent: a CancelRecording after a successful upload is
+    /// a no-op (the recording row already records what was uploaded).
+    CancelRecording {
+        /// Recording identifier supplied earlier in
+        /// [`Envelope::StartRecording`].
+        recording_id: String,
+    },
     /// Producer announces that it is about to publish video frames of
     /// `(width, height)` for `trace_id`.
     ///
@@ -186,6 +199,7 @@ impl Envelope {
             Envelope::Frame { .. } => "frame",
             Envelope::EndTrace { .. } => "end_trace",
             Envelope::StopRecording { .. } => "stop_recording",
+            Envelope::CancelRecording { .. } => "cancel_recording",
             Envelope::OpenFrameStream { .. } => "open_frame_stream",
         }
     }
@@ -294,6 +308,17 @@ mod tests {
             recording_id: "rec-1".into(),
         };
         assert_eq!(env.kind(), "stop_recording");
+    }
+
+    #[test]
+    fn cancel_recording_round_trips() {
+        let original = Envelope::CancelRecording {
+            recording_id: "rec-1".into(),
+        };
+        let bytes = original.encode().expect("encode");
+        let decoded = Envelope::decode(&bytes).expect("decode");
+        assert_eq!(original, decoded);
+        assert_eq!(original.kind(), "cancel_recording");
     }
 
     #[test]

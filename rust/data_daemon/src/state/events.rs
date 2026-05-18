@@ -75,6 +75,14 @@ pub enum DaemonEvent {
         /// Recording identifier the event applies to.
         recording_id: String,
     },
+    /// A recording was cancelled by the producer. The dispatcher publishes
+    /// this after every per-trace actor for the recording has been torn
+    /// down, the on-disk artefacts have been deleted, and the recording's
+    /// `cancelled_at` has been stamped.
+    RecordingCancelled {
+        /// Recording identifier the event applies to.
+        recording_id: String,
+    },
     /// Connection state to the backend changed.
     ConnectionStateChanged(ConnectionState),
 }

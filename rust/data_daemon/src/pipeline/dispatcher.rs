@@ -11,6 +11,7 @@
 //! mutability gives lock-free reads while still allowing concurrent inserts
 //! when the daemon is starting multiple traces in parallel.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -24,13 +25,23 @@ use crate::pipeline::trace_actor::{
 };
 use crate::state::{SqliteStateStore, StateStore};
 
-/// Bounded per-trace queue size, matching the planning doc (§4).
+/// Bounded per-trace queue size.
 ///
-/// Sized so the listener can briefly outrun a slow actor (e.g. SQLite write
-/// stall) without losing samples, but small enough that backpressure
-/// propagates back through the listener → iceoryx2 publisher within ~1 s at
-/// 60 fps.
-const TRACE_QUEUE_CAPACITY: usize = 64;
+/// Phase 7 raised this from 64 to 256 after the high-dimensionality
+/// performance case (1000-channel scalar trace at ~3 kHz) revealed the old
+/// cap acted as a forced flush throttle: a brief SQLite write stall on the
+/// trace_actor would back-propagate through the listener and stutter
+/// every other trace running in the same daemon. 256 absorbs 4× the burst
+/// at the cost of ~10 KiB extra of `Envelope` headers per trace, still
+/// comfortably below the iceoryx2 publisher's `Block`-on-full strategy.
+const TRACE_QUEUE_CAPACITY: usize = 256;
+
+/// Bounded listener → dispatcher channel.
+///
+/// Sized to absorb a one-second burst of lifecycle envelopes from the
+/// integration matrix's parallel-context recordings without forcing the
+/// listener loop into per-envelope await stalls.
+const DISPATCHER_INBOX_CAPACITY: usize = 1024;
 
 /// Handle owned by the daemon main loop. Drop it on shutdown to close every
 /// per-trace actor.
@@ -103,7 +114,7 @@ pub fn spawn_with_context(
     context: DispatcherContext,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
-    let (tx, rx) = mpsc::channel::<Envelope>(256);
+    let (tx, rx) = mpsc::channel::<Envelope>(DISPATCHER_INBOX_CAPACITY);
     let drained = Arc::new(Notify::new());
     let drained_for_task = Arc::clone(&drained);
     let join = tokio::spawn(async move {
@@ -122,6 +133,11 @@ async fn run(
 ) {
     let store = Arc::new(store);
     let routing: Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>> = Arc::new(DashMap::new());
+    // Reverse index from recording_id → trace_id so `CancelRecording` can
+    // reach every actor it owns in one pass. The set entry is removed when
+    // the actor reports `EndTrace` (via the routing map's natural eviction
+    // path) or when cancellation tears the actor down.
+    let recording_traces: Arc<DashMap<String, HashSet<TraceKey>>> = Arc::new(DashMap::new());
     // The dispatcher tracks each spawned actor's `JoinHandle` so it can await
     // their completion on shutdown — otherwise the runtime would tear them
     // down mid-write when the daemon exits.
@@ -141,8 +157,15 @@ async fn run(
                     tracing::debug!("dispatcher inbox closed; exiting");
                     break;
                 };
-                if let Some(handle) =
-                    handle_envelope(&store, &actor_context, &context, &routing, envelope).await
+                if let Some(handle) = handle_envelope(
+                    &store,
+                    &actor_context,
+                    &context,
+                    &routing,
+                    &recording_traces,
+                    envelope,
+                )
+                .await
                 {
                     actor_handles.push(handle);
                 }
@@ -152,6 +175,7 @@ async fn run(
 
     // Drop every per-trace sender so the actors observe EOF and exit cleanly.
     routing.clear();
+    recording_traces.clear();
 
     for handle in actor_handles {
         if let Err(error) = handle.await {
@@ -171,6 +195,7 @@ async fn handle_envelope(
     actor_context: &Arc<TraceActorContext>,
     context: &DispatcherContext,
     routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
+    recording_traces: &Arc<DashMap<String, HashSet<TraceKey>>>,
     envelope: Envelope,
 ) -> Option<JoinHandle<()>> {
     let Some(key) = trace_key(&envelope) else {
@@ -205,10 +230,25 @@ async fn handle_envelope(
                     }
                 }
             }
+            Envelope::CancelRecording { recording_id } => {
+                handle_cancel_recording(store, context, routing, recording_traces, recording_id)
+                    .await;
+            }
             _ => unreachable!("trace_key only returns None for recording-scoped envelopes"),
         }
         return None;
     };
+
+    // Maintain the recording → trace_id reverse index so `CancelRecording`
+    // can reach every actor. We learn the recording from `StartTrace`; later
+    // envelopes (`Frame`, `OpenFrameStream`, `EndTrace`) only carry the
+    // trace id and don't update the index.
+    if let Envelope::StartTrace { recording_id, .. } = &envelope {
+        recording_traces
+            .entry(recording_id.clone())
+            .or_default()
+            .insert(key.clone());
+    }
 
     if let Some(sender) = routing.get(&key) {
         if sender
@@ -247,6 +287,69 @@ async fn handle_envelope(
     Some(join)
 }
 
+/// Tear down every per-trace actor that belongs to `recording_id`, then mark
+/// the recording cancelled in the state store and publish the
+/// `RecordingCancelled` event.
+async fn handle_cancel_recording(
+    store: &Arc<SqliteStateStore>,
+    context: &DispatcherContext,
+    routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
+    recording_traces: &Arc<DashMap<String, HashSet<TraceKey>>>,
+    recording_id: String,
+) {
+    tracing::info!(recording_id, "recording cancel received");
+
+    // Take ownership of the reverse-index entry so subsequent traces for the
+    // (now-cancelled) recording don't get caught up in a second sweep.
+    let traces = recording_traces
+        .remove(&recording_id)
+        .map(|(_, set)| set)
+        .unwrap_or_default();
+
+    let mut senders: Vec<mpsc::Sender<TraceActorMessage>> = Vec::with_capacity(traces.len());
+    for trace_id in &traces {
+        // `routing.remove` instead of `get` so the actor's sender is taken
+        // off the map immediately — any in-flight envelope that races the
+        // cancel sees a missing entry and is dropped on the floor (intended:
+        // a cancelled recording's data should not survive).
+        if let Some((_, sender)) = routing.remove(trace_id) {
+            senders.push(sender);
+        }
+    }
+
+    for sender in &senders {
+        if sender.send(TraceActorMessage::Cancel).await.is_err() {
+            tracing::debug!(
+                recording_id,
+                "per-trace actor already exited before cancel arrived"
+            );
+        }
+    }
+    // Drop the senders we held locally so each actor observes its inbox
+    // closed even if the Cancel message couldn't be delivered (e.g. the
+    // actor had already returned).
+    drop(senders);
+
+    match store.cancel_recording(&recording_id).await {
+        Ok((row, touched)) => {
+            tracing::info!(
+                recording_id,
+                cancelled_at = ?row.cancelled_at,
+                trace_rows_touched = touched,
+                "recording marked cancelled"
+            );
+            if let Some(bus) = context.event_bus.as_ref() {
+                bus.publish(crate::state::DaemonEvent::RecordingCancelled {
+                    recording_id: recording_id.clone(),
+                });
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, recording_id, "failed to mark recording cancelled");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,6 +381,108 @@ mod tests {
             budget,
             VideoEncoder::new(),
         ))
+    }
+
+    #[tokio::test]
+    async fn dispatcher_cancels_recording_and_deletes_on_disk_artefacts() {
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"));
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let mut bus_subscriber = bus.subscribe();
+        let dispatcher_context = DispatcherContext {
+            org_id: None,
+            event_bus: Some(bus.clone()),
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(Envelope::StartRecording {
+            recording_id: "rec-cancel".into(),
+            robot_id: None,
+            robot_name: None,
+            dataset_id: None,
+            dataset_name: None,
+        })
+        .await
+        .expect("start recording");
+        tx.send(Envelope::StartTrace {
+            recording_id: "rec-cancel".into(),
+            trace_id: "trace-cancel".into(),
+            data_type: "joints".into(),
+            data_type_name: None,
+        })
+        .await
+        .expect("start trace");
+        // Ship a couple of frames so the writer is open and the trace
+        // directory exists on disk before cancellation lands.
+        for index in 0..3i64 {
+            let payload = serde_json::to_vec(&serde_json::json!({"i": index})).unwrap();
+            tx.send(Envelope::frame("trace-cancel".into(), index, None, payload))
+                .await
+                .expect("frame");
+        }
+
+        // Give the actor a chance to apply the first frames before we cancel
+        // — otherwise the trace directory check races the writer's lazy
+        // open. The dispatcher serialises StartTrace → Frame → Cancel
+        // through a single tokio task so a brief yield is enough.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let trace_dir = context
+            .recordings_root
+            .join("rec-cancel")
+            .join("joints")
+            .join("trace-cancel");
+        assert!(trace_dir.exists(), "writer must have opened before cancel");
+
+        tx.send(Envelope::CancelRecording {
+            recording_id: "rec-cancel".into(),
+        })
+        .await
+        .expect("cancel recording");
+
+        drop(tx);
+        timeout(Duration::from_secs(2), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        // The on-disk trace directory must be gone.
+        assert!(
+            !trace_dir.exists(),
+            "cancelled trace directory should be removed; found {}",
+            trace_dir.display()
+        );
+
+        // The DB row reflects the cancellation.
+        let recording = store
+            .get_recording("rec-cancel")
+            .await
+            .expect("get recording")
+            .expect("recording exists");
+        assert!(recording.cancelled_at.is_some());
+        let trace = store
+            .get_trace("trace-cancel")
+            .await
+            .expect("get trace")
+            .expect("trace exists");
+        assert_eq!(trace.write_status, TraceWriteStatus::Failed);
+        assert_eq!(trace.upload_status, crate::state::TraceUploadStatus::Failed);
+
+        // The event bus saw the cancellation.
+        let mut found_cancel = false;
+        while let Ok(event) = bus_subscriber.try_recv() {
+            if matches!(
+                event,
+                crate::state::DaemonEvent::RecordingCancelled { ref recording_id } if recording_id == "rec-cancel"
+            ) {
+                found_cancel = true;
+            }
+        }
+        assert!(found_cancel, "RecordingCancelled event must be published");
     }
 
     #[tokio::test]

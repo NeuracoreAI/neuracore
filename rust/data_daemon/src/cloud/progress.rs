@@ -83,6 +83,15 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         if recording.stopped_at.is_none() {
             continue;
         }
+        // Cancelled recordings are dropped on the daemon side and never
+        // reported to the backend — `cancel_recording` already stamped
+        // `progress_reported = 'reported'` so the post-flush check would
+        // short-circuit, but the expected-trace-count PUT runs *before* that
+        // check and would otherwise leak a count for a recording the backend
+        // doesn't expect.
+        if recording.cancelled_at.is_some() {
+            continue;
+        }
         let Some(org_id) = recording.org_id.clone() else {
             continue;
         };
