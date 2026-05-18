@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
+import types
 
 import numpy as np
+import pytest
 from neuracore_types import DataType
 
-from neuracore.core.streaming.data_stream import DataRecordingContext, RGBDataStream
+from neuracore.core.streaming.data_stream import (
+    DataRecordingContext,
+    JsonDataStream,
+    RGBDataStream,
+)
+from neuracore.data_daemon.communications_management.producer import (
+    native_producer_channel as native_adaptor,
+)
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     producer_transport_args_for_data_type,
 )
@@ -220,5 +230,139 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
     assert producer.cleanup_wait_for_slot_drain_calls == [False]
     assert producer.stop_wait_for_slot_drain_calls == [False]
     assert stream.get_recording_context() is None
+    assert stream.get_producer_channel() is None
+    assert stream.is_recording() is False
+
+
+class _NativeProducerStub:
+    """Records native producer entry-point calls for assertion."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple]] = []
+
+    def start_recording(self, recording_id: str) -> None:
+        self.calls.append(("start_recording", (recording_id,)))
+
+    def start_trace(
+        self,
+        recording_id: str,
+        trace_id: str,
+        data_type: str,
+        data_type_name: str | None = None,
+    ) -> None:
+        self.calls.append(
+            ("start_trace", (recording_id, trace_id, data_type, data_type_name))
+        )
+
+    def open_frame_stream(self, trace_id: str, width: int, height: int) -> None:
+        self.calls.append(("open_frame_stream", (trace_id, width, height)))
+
+    def send_data(
+        self,
+        trace_id: str,
+        payload: bytes,
+        timestamp_ns: int,
+        timestamp_s: float | None = None,
+    ) -> None:
+        self.calls.append(
+            ("send_data", (trace_id, bytes(payload), timestamp_ns, timestamp_s))
+        )
+
+    def end_trace(self, trace_id: str) -> None:
+        self.calls.append(("end_trace", (trace_id,)))
+
+    def stop_recording(self, recording_id: str) -> None:
+        self.calls.append(("stop_recording", (recording_id,)))
+
+
+@pytest.fixture
+def native_runtime(monkeypatch: pytest.MonkeyPatch):
+    """Force the data-stream module to pick the native producer this test."""
+    stub = _NativeProducerStub()
+    fake_module = types.ModuleType("neuracore.data_daemon._native_producer")
+    for method_name in (
+        "start_recording",
+        "start_trace",
+        "open_frame_stream",
+        "send_data",
+        "end_trace",
+        "stop_recording",
+    ):
+        setattr(fake_module, method_name, getattr(stub, method_name))
+    monkeypatch.setitem(
+        sys.modules, "neuracore.data_daemon._native_producer", fake_module
+    )
+    monkeypatch.setattr(native_adaptor, "_NATIVE_MODULE", None)
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.rust_daemon_enabled",
+        lambda: True,
+    )
+    yield stub
+    monkeypatch.setattr(native_adaptor, "_NATIVE_MODULE", None)
+
+
+def test_rgb_stream_uses_native_producer_when_rust_daemon_enabled(
+    native_runtime: _NativeProducerStub,
+) -> None:
+    width, height = 4, 3
+    stream = RGBDataStream("front_camera", width=width, height=height)
+    stream.start_recording(_context())
+
+    sequence = [call[0] for call in native_runtime.calls]
+    assert sequence == ["start_recording", "start_trace", "open_frame_stream"]
+
+    start_trace_args = native_runtime.calls[1][1]
+    assert start_trace_args[2] == DataType.RGB_IMAGES.value
+    open_args = native_runtime.calls[2][1]
+    assert open_args[1:] == (width, height)
+
+
+def test_rgb_stream_native_log_sends_only_raw_frame_bytes(
+    native_runtime: _NativeProducerStub,
+) -> None:
+    width, height = 4, 3
+    stream = RGBDataStream("front_camera", width=width, height=height)
+    stream.start_recording(_context())
+
+    frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
+    stream.log(_DummyCameraData(timestamp=1.0), frame)
+
+    send_calls = [call for call in native_runtime.calls if call[0] == "send_data"]
+    assert len(send_calls) == 1
+    _, payload, _, _ = send_calls[0][1]
+    assert payload == bytes(frame)
+
+
+def test_json_stream_native_log_publishes_serialized_payload(
+    native_runtime: _NativeProducerStub,
+) -> None:
+    class _Payload:
+        def model_dump(self, mode: str = "json"):
+            del mode
+            return {"value": 1.5}
+
+    stream = JsonDataStream(
+        data_type=DataType.JOINT_POSITIONS, data_type_name="joint_x"
+    )
+    stream.start_recording(_context())
+
+    stream.log(_Payload())
+
+    send_calls = [call for call in native_runtime.calls if call[0] == "send_data"]
+    assert len(send_calls) == 1
+    _, payload, _, _ = send_calls[0][1]
+    assert json.loads(payload.decode("utf-8")) == {"value": 1.5}
+
+
+def test_native_stream_stop_recording_emits_end_trace(
+    native_runtime: _NativeProducerStub,
+) -> None:
+    stream = JsonDataStream(
+        data_type=DataType.JOINT_POSITIONS, data_type_name="joint_x"
+    )
+    stream.start_recording(_context())
+    stream.stop_recording(stop_cutoff_sequence_number=0)
+
+    assert any(call[0] == "end_trace" for call in native_runtime.calls)
     assert stream.get_producer_channel() is None
     assert stream.is_recording() is False

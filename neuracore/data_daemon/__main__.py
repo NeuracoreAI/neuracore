@@ -14,12 +14,7 @@ import os
 import sys
 from importlib.resources import files
 
-TRUTHY_VALUES = {"1", "true", "yes", "y"}
-
-
-def _rust_daemon_enabled() -> bool:
-    """Return whether the bundled Rust data-daemon binary should be used."""
-    return os.environ.get("NCD_RUST_DAEMON", "").strip().lower() in TRUTHY_VALUES
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 
 def _rust_binary_path() -> str | None:
@@ -30,7 +25,7 @@ def _rust_binary_path() -> str | None:
 
 def main() -> None:
     """Dispatch to the Rust data daemon when enabled, else the Python CLI."""
-    if _rust_daemon_enabled():
+    if rust_daemon_enabled():
         binary = _rust_binary_path()
         if binary is not None:
             os.execv(binary, [binary, *sys.argv[1:]])
