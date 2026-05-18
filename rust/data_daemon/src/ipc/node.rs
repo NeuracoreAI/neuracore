@@ -1,23 +1,21 @@
 //! iceoryx2 node and per-stream service bring-up.
 //!
 //! The daemon owns a single iceoryx2 [`Node`] for the duration of the process.
-//! At startup it opens two long-lived subscribers — `commands` for lifecycle
-//! envelopes and `scalars` for low-rate sensor data — and exposes
-//! [`IpcTransport::open_frame_subscriber`] so the listener can lazily open the
-//! per-resolution `frames/<WxH>` services on first use. Holding everything off
-//! a single [`Node`] keeps the dead-node sweep in
-//! `lifecycle::recovery::cleanup_stale_ipc` able to reap every artefact this
-//! daemon left behind in one pass.
+//! At startup it opens the long-lived `commands` subscriber, which in phase 4
+//! carries every envelope variant (lifecycle commands and frame payloads).
+//! Sub-phase 4h splits the high-throughput frame traffic onto dedicated
+//! per-resolution services; until then there is only one subscriber to drain.
 
-use data_daemon_ipc::service_name::{self, COMMANDS, SCALARS};
+use data_daemon_ipc::service_name::{
+    COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_PUBLISHERS_PER_SERVICE,
+};
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::{ipc, NodeName};
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use thiserror::Error;
 
-/// Errors raised while bringing up or extending the daemon's iceoryx2
-/// transport.
+/// Errors raised while bringing up the daemon's iceoryx2 transport.
 ///
 /// The inner cause fields are named `detail` rather than `source` so
 /// `thiserror` doesn't try to wrap them in `dyn StdError`; the iceoryx2 error
@@ -61,54 +59,29 @@ pub enum IpcSetupError {
     },
 }
 
-/// A subscriber port on a per-resolution `frames/<WxH>` service.
-///
-/// Holds both the [`Subscriber`] and the [`PortFactory`] handle so the
-/// service stays alive even after the listener drops its reference.
-pub struct FrameSubscription {
-    /// iceoryx2 service handle kept alive alongside the subscriber.
-    _service: PortFactory<ipc::Service, [u8], ()>,
-    /// Subscriber the listener polls.
-    subscriber: Subscriber<ipc::Service, [u8], ()>,
-}
-
-impl FrameSubscription {
-    /// Borrow the subscriber port for polling.
-    pub fn subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
-        &self.subscriber
-    }
-}
-
 /// Daemon-side iceoryx2 transport.
 ///
-/// Holds the node and the long-lived `commands` + `scalars` subscribers. The
-/// struct is `Send` (so it can move into the tokio main task) but not `Sync`
-/// because iceoryx2's subscriber ports own shared-memory descriptors that
-/// must be advanced from a single thread.
+/// Holds the node and the long-lived `commands` subscriber. The struct is
+/// `Send` (so it can move into the tokio main task) but not `Sync` because
+/// iceoryx2's subscriber ports own shared-memory descriptors that must be
+/// advanced from a single thread.
 pub struct IpcTransport {
     /// Backing iceoryx2 node. Holding it alive keeps every service this
     /// daemon created visible to discovery.
-    node: Node<ipc::Service>,
+    _node: Node<ipc::Service>,
     /// Subscriber on `neuracore/data_daemon/commands`.
     commands_subscriber: Subscriber<ipc::Service, [u8], ()>,
-    /// Subscriber on `neuracore/data_daemon/scalars`.
-    scalars_subscriber: Subscriber<ipc::Service, [u8], ()>,
-    /// Service handles held alongside the subscribers so port discovery
-    /// doesn't race the service handle going out of scope.
+    /// Service handle held alongside the subscriber so port discovery doesn't
+    /// race the service handle going out of scope.
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
-    _scalars_service: PortFactory<ipc::Service, [u8], ()>,
 }
 
 impl IpcTransport {
     /// Bring up the daemon's iceoryx2 transport.
     ///
     /// Creates a node named after this daemon's PID
-    /// (`neuracore-data-daemon-{pid}`), opens the `commands` and `scalars`
-    /// services, and builds subscribers on both. Per-resolution
-    /// `frames/<WxH>` services are opened lazily via
-    /// [`open_frame_subscriber`](Self::open_frame_subscriber) when an
-    /// [`OpenFrameStream`](data_daemon_ipc::Envelope::OpenFrameStream)
-    /// envelope arrives.
+    /// (`neuracore-data-daemon-{pid}`), opens the `commands` service, and
+    /// builds a subscriber on it.
     pub fn bring_up() -> Result<Self, IpcSetupError> {
         let node_name = format!("neuracore-data-daemon-{}", std::process::id());
         let parsed_name =
@@ -122,50 +95,17 @@ impl IpcTransport {
             .map_err(|error| IpcSetupError::NodeCreate(error.to_string()))?;
 
         let (commands_service, commands_subscriber) = open_subscriber(&node, COMMANDS)?;
-        let (scalars_service, scalars_subscriber) = open_subscriber(&node, SCALARS)?;
 
         Ok(IpcTransport {
-            node,
+            _node: node,
             commands_subscriber,
-            scalars_subscriber,
             _commands_service: commands_service,
-            _scalars_service: scalars_service,
         })
     }
 
     /// Borrow the `commands` subscriber port.
     pub fn commands_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
         &self.commands_subscriber
-    }
-
-    /// Borrow the `scalars` subscriber port.
-    pub fn scalars_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
-        &self.scalars_subscriber
-    }
-
-    /// Open (or attach to) the per-resolution `frames/<WxH>` service.
-    ///
-    /// Idempotent on the iceoryx2 side — `open_or_create()` reattaches if the
-    /// producer side has already created the service. The returned
-    /// [`FrameSubscription`] owns the subscriber and the service handle; the
-    /// listener stores it in its local registry and polls it in the same
-    /// drain loop as the long-lived subscribers.
-    pub fn open_frame_subscriber(
-        &self,
-        width: u32,
-        height: u32,
-    ) -> Result<FrameSubscription, IpcSetupError> {
-        // The per-resolution payload budget
-        // (`service_name::frames_max_payload_bytes`) is enforced on the
-        // *publisher* side via `initial_max_slice_len`; the subscriber
-        // honours whatever the publisher negotiated, so there is nothing to
-        // pass through here. Phase 4h wires that publisher up.
-        let name = service_name::frames(width, height);
-        let (service, subscriber) = open_subscriber(&self.node, &name)?;
-        Ok(FrameSubscription {
-            _service: service,
-            subscriber,
-        })
     }
 }
 
@@ -189,9 +129,17 @@ fn open_subscriber(
             name: name.to_string(),
             detail: format!("{error}"),
         })?;
+    // `subscriber_max_buffer_size` is sized for the worst-case burst of
+    // lifecycle envelopes a single SDK call can publish (see
+    // `LIFECYCLE_SUBSCRIBER_BUFFER_SIZE` for the failure mode at the
+    // iceoryx2 default of 2). The publisher side reuses the same service
+    // config via `open_or_create` so producers honour this without having to
+    // declare it explicitly themselves.
     let service = node
         .service_builder(&service_name)
         .publish_subscribe::<[u8]>()
+        .subscriber_max_buffer_size(LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)
+        .max_publishers(MAX_PUBLISHERS_PER_SERVICE)
         .open_or_create()
         .map_err(|error| IpcSetupError::ServiceOpen {
             name: name.to_string(),

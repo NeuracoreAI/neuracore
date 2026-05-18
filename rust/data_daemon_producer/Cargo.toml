@@ -15,8 +15,8 @@ path = "src/lib.rs"
 anyhow.workspace = true
 data_daemon_ipc = { path = "../data_daemon_ipc" }
 iceoryx2.workspace = true
+libc.workspace = true
 once_cell.workspace = true
 pyo3.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

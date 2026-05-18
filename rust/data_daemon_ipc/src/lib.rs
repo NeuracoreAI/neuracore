@@ -8,12 +8,18 @@
 //! - the helpers to (de)serialize that envelope to/from the byte slice payload
 //!   iceoryx2 transports.
 //!
-//! Phase 4 (see `docs/data-daemon-rewrite.md`) intentionally carries every
-//! lifecycle message — including the frame payloads used by the smoke-test
-//! deliverable — over a single `[u8]` slice service. Phase 5 introduces the
-//! typed per-resolution `frames/<WxH>` zero-copy services for real video
-//! traffic; the envelope schema is designed so that addition does not require
-//! a breaking wire change for the existing command/lifecycle messages.
+//! Envelopes are encoded with [`postcard`], a compact length-prefixed binary
+//! format. Payload bytes travel raw (length-prefix + bytes — no base64 or
+//! `[u8]→[i32]` expansion that JSON would force), and `f64` fields round-trip
+//! bit-exact because postcard writes the IEEE-754 byte pattern directly. The
+//! schema is forward-compatible: postcard's enum representation tags variants
+//! with a u32 discriminant, so new envelope variants append cleanly.
+//!
+//! Phase 4 carries every lifecycle message — including the frame payloads used
+//! by the smoke-test deliverable — over the single `[u8]` slice `commands`
+//! service. Phase 5 introduces typed per-resolution `frames/<WxH>` zero-copy
+//! services for real video traffic; that addition does not require a breaking
+//! change to the existing command/lifecycle messages.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -22,100 +28,75 @@ use thiserror::Error;
 pub mod service_name {
     /// Pub/sub service carrying lifecycle envelopes
     /// (`start_recording`, `start_trace`, `end_trace`, `stop_recording`,
-    /// `open_frame_stream`).
-    ///
-    /// The payload type is `[u8]`; each message is a JSON-encoded
-    /// [`Envelope`](super::Envelope). Sub-phase 4f split scalar samples and
-    /// video frames onto dedicated services for backpressure isolation; this
-    /// service stays small and infrequent — at most one message per trace
-    /// lifecycle transition.
+    /// `open_frame_stream`) and, in phase 4, every `frame` payload.
     pub const COMMANDS: &str = "neuracore/data_daemon/commands";
-
-    /// Pub/sub service carrying scalar / sensor frame payloads.
-    ///
-    /// Joint poses, IMU samples, language tokens, and other low-rate JSON
-    /// payloads land here. The throughput bound is loose (sub-MB/s in
-    /// practice), so JSON-encoded envelopes are fine; the dedicated service
-    /// just keeps a slow consumer from back-pressuring lifecycle commands.
-    pub const SCALARS: &str = "neuracore/data_daemon/scalars";
 
     /// Maximum size of a single command-stream sample.
     ///
-    /// Sized for lifecycle envelopes (`StartRecording`, `StartTrace`,
-    /// `EndTrace`, `StopRecording`, `OpenFrameStream`) — all under a few
-    /// hundred bytes of JSON in practice. 8 MiB is deliberate headroom for
-    /// the phase 4 smoke-test path where `Frame` envelopes also travel over
-    /// `commands` (carrying small test payloads of a few KiB each); a real
-    /// RGB frame would not fit because `serde_json::serialize_bytes` emits
-    /// `[u8]` as a JSON array of integers (~3× expansion), pushing a 6 MiB
-    /// raw frame past this cap. Phase 4h routes frame traffic onto the
-    /// dedicated `frames/<WxH>` services with `loan_uninit` zero-copy, at
-    /// which point this budget can drop to the lifecycle footprint.
-    pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 8 * 1024 * 1024;
+    /// Sized so a 1920×1080 RGB24 frame (6,220,800 bytes) plus the postcard
+    /// envelope scaffolding fits comfortably while still under iceoryx2's slice
+    /// budget. Phase 4h ships per-resolution `frames/<WxH>` services for the
+    /// real video path; once that lands this cap can drop back to the
+    /// lifecycle-only footprint (~64 KiB).
+    // TODO(sub-phase 4h): drop this back to lifecycle-only once the
+    // per-resolution `frames/<WxH>` services take over the video path.
+    pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
-    /// Maximum size of a single scalar-stream sample.
+    /// Subscriber buffer depth for the lifecycle service.
     ///
-    /// 1 MiB comfortably covers the largest joint pose or language-token
-    /// payload observed in the integration tests, with headroom for the JSON
-    /// envelope scaffolding.
-    pub const SCALARS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
-
-    /// Bytes-per-pixel assumed for the per-resolution `frames/<WxH>`
-    /// services. Phase 4 ships RGB only; RGBA / depth variants would extend
-    /// this constant once they're modelled.
-    pub const FRAME_BYTES_PER_PIXEL: usize = 3;
-
-    /// Headroom added on top of `width * height * FRAME_BYTES_PER_PIXEL` for
-    /// the JSON envelope scaffolding (variant tag, trace_id, timestamp).
-    /// 1 KiB is comfortably above the empirical worst case of a few hundred
-    /// bytes.
-    pub const FRAME_ENVELOPE_OVERHEAD_BYTES: usize = 1024;
-
-    /// Build the iceoryx2 service name for raw RGB frames of the given
-    /// resolution.
+    /// iceoryx2's default subscriber buffer is 2 samples with safe-overflow
+    /// enabled — fine for high-rate sensor streams where dropping old data is
+    /// the right answer, but catastrophic for lifecycle envelopes. A single
+    /// `nc.log_joint_positions` call publishes one `StartRecording` +
+    /// `StartTrace` per joint plus one `Frame` per joint via the native
+    /// producer (typically 14+ envelopes back-to-back); with the default the
+    /// listener only ever sees the trailing two, and the earlier `StartTrace`
+    /// envelopes are silently dropped — which would otherwise surface
+    /// downstream as missing per-trace state on disk because the per-trace
+    /// actor never learns the recording or data-type identifiers.
     ///
-    /// One service per `(width, height)` pair so the iceoryx2 publisher /
-    /// subscriber sample size is fixed and the loan pool can be tuned
-    /// per-resolution. The daemon opens these lazily on the first
-    /// [`OpenFrameStream`](super::Envelope::OpenFrameStream) envelope it
-    /// observes for a new resolution.
-    pub fn frames(width: u32, height: u32) -> String {
-        format!("neuracore/data_daemon/frames/{width}x{height}")
-    }
+    /// 1024 covers the busiest burst observed in the data-integrity test
+    /// matrix (multi-camera multi-joint recordings at 1000 Hz joint logging)
+    /// with comfortable headroom; combined with iceoryx2's default
+    /// `Block`-on-unable-to-deliver strategy this provides reliable in-order
+    /// delivery for every lifecycle envelope.
+    pub const LIFECYCLE_SUBSCRIBER_BUFFER_SIZE: usize = 1024;
 
-    /// Maximum size of a single video-frame sample for the given resolution.
-    pub fn frames_max_payload_bytes(width: u32, height: u32) -> usize {
-        (width as usize)
-            .saturating_mul(height as usize)
-            .saturating_mul(FRAME_BYTES_PER_PIXEL)
-            .saturating_add(FRAME_ENVELOPE_OVERHEAD_BYTES)
-    }
+    /// Maximum number of concurrent publishers per service.
+    ///
+    /// iceoryx2's default cap of 2 is unworkable for the SDK's threading
+    /// model: the native producer parks its iceoryx2 publisher in a
+    /// `thread_local!` (publishers are `!Sync`), so each Python OS thread
+    /// that calls into the producer builds its own. The integration matrix
+    /// fans up to ~32 worker threads (`parallel_contexts=8` × three joint
+    /// roles + one RGB role) and the orchestrator thread also publishes
+    /// lifecycle envelopes, comfortably exceeding the default. Hitting the
+    /// cap surfaces as
+    /// `PublisherCreateError::ExceedsMaxSupportedPublishers` from
+    /// `publisher_builder().create()` and the SDK can't drain the trace.
+    ///
+    /// Both sides agree on this constant via `open_or_create`, so the first
+    /// party in (the daemon at startup) seeds the service with the larger
+    /// cap and the producer's later open observes the same attribute set.
+    pub const MAX_PUBLISHERS_PER_SERVICE: usize = 128;
 }
 
 /// A single message exchanged between the producer and the daemon.
 ///
-/// Variants mirror the lifecycle described in §4 of the rewrite plan. The
-/// internal-tagged representation (`#[serde(tag = "kind")]`) keeps the wire
-/// format self-describing and forward-compatible — adding a new variant
-/// doesn't displace existing fields.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+/// Variants mirror the lifecycle described in §4 of the rewrite plan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Envelope {
     /// Producer announces a new recording session.
     StartRecording {
         /// Recording identifier supplied by the SDK.
         recording_id: String,
         /// Optional robot identifier.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         robot_id: Option<String>,
         /// Optional robot human-readable name.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         robot_name: Option<String>,
         /// Optional dataset identifier.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dataset_id: Option<String>,
         /// Optional dataset human-readable name.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         dataset_name: Option<String>,
     },
     /// Producer opens a new trace within an active recording.
@@ -126,6 +107,12 @@ pub enum Envelope {
         trace_id: String,
         /// Wire data-type label (e.g. `"video"`, `"joints"`).
         data_type: String,
+        /// Optional per-stream label (e.g. joint name or camera id). When
+        /// present it disambiguates traces that share a `data_type` — joint
+        /// streams produce one trace per joint name, video streams one per
+        /// camera id — so downstream tooling (and the integration test
+        /// matrix) can identify the producing stream from the DB row alone.
+        data_type_name: Option<String>,
     },
     /// Producer delivers one frame/sample for a trace.
     ///
@@ -136,10 +123,14 @@ pub enum Envelope {
         /// Trace this frame belongs to.
         trace_id: String,
         /// Caller-supplied capture time in nanoseconds since the Unix epoch.
-        #[serde(default)]
         timestamp_ns: i64,
-        /// Opaque per-frame bytes.
-        #[serde(with = "frame_payload")]
+        /// Optional caller-supplied capture time in seconds (f64) since the
+        /// Unix epoch. Postcard writes this as 8 raw IEEE-754 bytes so the
+        /// value round-trips bit-exact — required for the integration
+        /// matrix's exact-match timestamp assertion on the video sidecar.
+        timestamp_s: Option<f64>,
+        /// Opaque per-frame bytes. Postcard transports these as
+        /// length-prefix + raw bytes (no expansion).
         payload: Vec<u8>,
     },
     /// Producer closes a trace; no further frames will follow.
@@ -157,13 +148,10 @@ pub enum Envelope {
     /// `(width, height)` for `trace_id`.
     ///
     /// Sent on the [`COMMANDS`](service_name::COMMANDS) service so the daemon
-    /// can lazily open the matching
-    /// [`frames(width, height)`](service_name::frames) iceoryx2 service
-    /// before the first frame arrives. The producer must wait for the daemon
-    /// to acknowledge this (or, in phase 4, simply allow enough time for the
-    /// daemon's listener tick) before publishing the first frame, otherwise
-    /// the early samples land in the per-resolution service's queue with no
-    /// subscriber attached and are dropped.
+    /// can lazily open the matching per-resolution iceoryx2 service before
+    /// the first frame arrives. In phase 4 the frame payloads also travel
+    /// over `COMMANDS`; phase 4h moves them onto dedicated zero-copy
+    /// services keyed by resolution.
     OpenFrameStream {
         /// Trace these frames belong to.
         trace_id: String,
@@ -175,6 +163,21 @@ pub enum Envelope {
 }
 
 impl Envelope {
+    /// Convenience constructor for [`Envelope::Frame`].
+    pub fn frame(
+        trace_id: String,
+        timestamp_ns: i64,
+        timestamp_s: Option<f64>,
+        payload: Vec<u8>,
+    ) -> Self {
+        Envelope::Frame {
+            trace_id,
+            timestamp_ns,
+            timestamp_s,
+            payload,
+        }
+    }
+
     /// Variant name used in tracing/logging.
     pub fn kind(&self) -> &'static str {
         match self {
@@ -187,48 +190,27 @@ impl Envelope {
         }
     }
 
-    /// Encode the envelope as a JSON byte vector ready for an iceoryx2 sample.
+    /// Encode the envelope as a postcard byte vector ready for an iceoryx2
+    /// sample.
     pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
-        serde_json::to_vec(self).map_err(EnvelopeCodecError::Encode)
+        postcard::to_allocvec(self).map_err(EnvelopeCodecError::Encode)
     }
 
     /// Decode an envelope from the byte slice carried in an iceoryx2 sample.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
-        serde_json::from_slice(bytes).map_err(EnvelopeCodecError::Decode)
-    }
-}
-
-/// Frame-payload byte vector codec.
-///
-/// `serde_json` represents Rust byte slices as JSON arrays of integers, which
-/// is wire-compatible but verbose. This shim makes the (de)serialize calls
-/// explicit so a future migration to a binary envelope (e.g. msgpack) only
-/// needs to touch this module.
-mod frame_payload {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(bytes)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
-        // Matches what `serde_json` produces for `serialize_bytes` today: a
-        // JSON array of integers, which `Vec::<u8>::deserialize` decodes
-        // directly. A binary encoder that emits a true byte string would
-        // need a custom `Visitor` here.
-        Vec::<u8>::deserialize(deserializer)
+        postcard::from_bytes(bytes).map_err(EnvelopeCodecError::Decode)
     }
 }
 
 /// Errors raised while encoding or decoding an [`Envelope`].
 #[derive(Debug, Error)]
 pub enum EnvelopeCodecError {
-    /// Failed to serialize the envelope to JSON.
+    /// Failed to serialize the envelope.
     #[error("failed to encode envelope: {0}")]
-    Encode(#[source] serde_json::Error),
-    /// Failed to deserialize the envelope from JSON.
+    Encode(#[source] postcard::Error),
+    /// Failed to deserialize the envelope.
     #[error("failed to decode envelope: {0}")]
-    Decode(#[source] serde_json::Error),
+    Decode(#[source] postcard::Error),
 }
 
 #[cfg(test)]
@@ -236,11 +218,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn envelope_round_trips_through_json() {
+    fn envelope_round_trips_through_postcard() {
         let original = Envelope::StartTrace {
             recording_id: "rec-1".into(),
             trace_id: "trace-1".into(),
             data_type: "video".into(),
+            data_type_name: Some("camera_0".into()),
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -249,14 +232,60 @@ mod tests {
 
     #[test]
     fn frame_envelope_preserves_payload_bytes() {
-        let original = Envelope::Frame {
-            trace_id: "trace-1".into(),
-            timestamp_ns: 1_000_000,
-            payload: vec![1, 2, 3, 4, 5, 6],
-        };
+        let original = Envelope::frame("trace-1".into(), 1_000_000, None, vec![1, 2, 3, 4, 5, 6]);
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn frame_timestamp_s_is_bit_exact_over_postcard_wire() {
+        // Postcard writes `f64` as 8 raw IEEE-754 bytes, so values that
+        // would shift under a decimal parser (e.g. `7/60`) round-trip
+        // bit-identically — required for the integration matrix's
+        // exact-match assertion on the video sidecar timestamps.
+        let original = Envelope::frame(
+            "trace-1".into(),
+            116_666_666,
+            Some(7.0_f64 / 60.0_f64),
+            vec![0xAA, 0xBB],
+        );
+        let bytes = original.encode().expect("encode");
+        let decoded = Envelope::decode(&bytes).expect("decode");
+        assert_eq!(original, decoded);
+        if let Envelope::Frame { timestamp_s, .. } = decoded {
+            assert_eq!(
+                timestamp_s.map(f64::to_bits),
+                Some((7.0_f64 / 60.0_f64).to_bits()),
+            );
+        } else {
+            panic!("decoded envelope was not a Frame");
+        }
+    }
+
+    #[test]
+    fn frame_payload_does_not_expand_under_postcard() {
+        // The whole point of moving off JSON is that `Vec<u8>` no longer
+        // expands ~3× as a JSON array of integers. Encode a 1 MiB payload
+        // and check the wire form is within a small constant of the raw
+        // bytes (variant tag + length prefix + trace_id + timestamps).
+        const PAYLOAD_LEN: usize = 1024 * 1024;
+        let original = Envelope::frame("trace-1".into(), 0, None, vec![0xAB; PAYLOAD_LEN]);
+        let bytes = original.encode().expect("encode");
+        // Empirically postcard adds well under 256 bytes of framing on top
+        // of the raw payload for this envelope. Allow a generous 4 KiB
+        // headroom so the test stays stable across minor postcard / serde
+        // revisions without losing its teeth.
+        assert!(
+            bytes.len() <= PAYLOAD_LEN + 4096,
+            "postcard wire form ({} bytes) is too far from raw payload ({} bytes)",
+            bytes.len(),
+            PAYLOAD_LEN,
+        );
+        assert!(
+            bytes.len() >= PAYLOAD_LEN,
+            "wire form must contain the raw bytes"
+        );
     }
 
     #[test]
@@ -278,24 +307,5 @@ mod tests {
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
         assert_eq!(original.kind(), "open_frame_stream");
-    }
-
-    #[test]
-    fn frame_service_name_is_resolution_keyed() {
-        assert_eq!(
-            service_name::frames(1920, 1080),
-            "neuracore/data_daemon/frames/1920x1080"
-        );
-        assert_eq!(
-            service_name::frames(256, 256),
-            "neuracore/data_daemon/frames/256x256"
-        );
-    }
-
-    #[test]
-    fn frame_payload_budget_covers_rgb_plus_overhead() {
-        let budget = service_name::frames_max_payload_bytes(1920, 1080);
-        assert!(budget >= 1920 * 1080 * 3);
-        assert!(budget <= 1920 * 1080 * 3 + 4096);
     }
 }

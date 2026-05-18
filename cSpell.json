@@ -19,5 +19,37 @@
     "dictionaries": [
         "neuracore-dictionary"
     ],
-    "words": []
+    "words": [
+        "allocvec",
+        "atfork",
+        "colorspace",
+        "debouncer",
+        "demux",
+        "demuxed",
+        "demuxer",
+        "demuxers",
+        "demuxes",
+        "doctests",
+        "ENOENT",
+        "fflags",
+        "ffprobe",
+        "fourcc",
+        "framecode",
+        "genpts",
+        "isinstance",
+        "libavformat",
+        "libc",
+        "loglevel",
+        "muxer",
+        "nostdin",
+        "postcard",
+        "pthread",
+        "sdecode",
+        "sencode",
+        "startcode",
+        "startcodes",
+        "syncpoint",
+        "vdecode",
+        "vencode"
+    ]
 }

@@ -75,6 +75,7 @@ pub trait StateStore: Send + Sync {
         recording_id: &str,
         trace_id: &str,
         data_type: Option<&str>,
+        data_type_name: Option<&str>,
     ) -> Result<TraceRecord, StateStoreError>;
 
     /// Apply a partial update to an existing trace.
@@ -113,6 +114,19 @@ pub trait StateStore: Send + Sync {
         limit: usize,
         max_wait_secs: f64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
+
+    /// Mark a recording as stopped by setting its `stopped_at` to now.
+    ///
+    /// Idempotent: re-stopping a recording that already has a `stopped_at`
+    /// leaves the existing timestamp untouched so duplicate `StopRecording`
+    /// envelopes (e.g. SDK retry on socket reconnect) do not slide the wall
+    /// time forward. The recording row is created on demand if it does not
+    /// already exist so a stop that races ahead of `create_recording` still
+    /// records the terminal state.
+    async fn mark_recording_stopped(
+        &self,
+        recording_id: &str,
+    ) -> Result<RecordingRow, StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -261,6 +275,7 @@ impl StateStore for SqliteStateStore {
         recording_id: &str,
         trace_id: &str,
         data_type: Option<&str>,
+        data_type_name: Option<&str>,
     ) -> Result<TraceRecord, StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
@@ -270,14 +285,15 @@ impl StateStore for SqliteStateStore {
         let now = Utc::now().naive_utc();
         sqlx::query(
             "INSERT INTO traces (trace_id, recording_id, write_status, data_type, \
-                                 created_at, last_updated) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5) \
+                                 data_type_name, created_at, last_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
              ON CONFLICT(trace_id) DO NOTHING",
         )
         .bind(trace_id)
         .bind(recording_id)
         .bind(TraceWriteStatus::Initializing.as_str())
         .bind(data_type)
+        .bind(data_type_name)
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -491,6 +507,38 @@ impl StateStore for SqliteStateStore {
         tx.commit().await?;
         Ok(claimed)
     }
+
+    async fn mark_recording_stopped(
+        &self,
+        recording_id: &str,
+    ) -> Result<RecordingRow, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        // Ensure the recording row exists — the SDK may publish StopRecording
+        // before the StartRecording envelope under load.
+        Self::upsert_recording_locked(&mut tx, recording_id).await?;
+
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET stopped_at = COALESCE(stopped_at, ?2), \
+                    last_updated = ?2 \
+              WHERE recording_id = ?1",
+        )
+        .bind(recording_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let record = RecordingRow::from_row(&row)?;
+
+        tx.commit().await?;
+        Ok(record)
+    }
 }
 
 #[cfg(test)]
@@ -536,7 +584,7 @@ mod tests {
         let (store, _tempdir) = open_store().await;
 
         let trace = store
-            .create_trace("rec-1", "trace-1", Some("video"))
+            .create_trace("rec-1", "trace-1", Some("video"), None)
             .await
             .expect("create_trace");
         assert_eq!(trace.trace_id, "trace-1");
@@ -553,7 +601,7 @@ mod tests {
 
         // Creating the same trace twice is a no-op (write_status preserved).
         let again = store
-            .create_trace("rec-1", "trace-1", Some("video"))
+            .create_trace("rec-1", "trace-1", Some("video"), None)
             .await
             .expect("idempotent create_trace");
         assert_eq!(again.trace_id, "trace-1");
@@ -568,7 +616,7 @@ mod tests {
     async fn update_trace_overwrites_only_set_fields() {
         let (store, _tempdir) = open_store().await;
         store
-            .create_trace("rec-1", "trace-1", None)
+            .create_trace("rec-1", "trace-1", None, None)
             .await
             .expect("create_trace");
 
@@ -609,7 +657,7 @@ mod tests {
         for index in 0..5 {
             let trace_id = format!("trace-{index}");
             store
-                .create_trace("rec-1", &trace_id, None)
+                .create_trace("rec-1", &trace_id, None, None)
                 .await
                 .expect("create_trace");
             store
@@ -654,7 +702,7 @@ mod tests {
     async fn claim_for_registration_respects_age_trigger() {
         let (store, _tempdir) = open_store().await;
         store
-            .create_trace("rec-1", "trace-1", None)
+            .create_trace("rec-1", "trace-1", None, None)
             .await
             .expect("create_trace");
         store

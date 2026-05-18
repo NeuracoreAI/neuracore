@@ -23,13 +23,12 @@
 //!   trace. Callers manage `trace_id` themselves; the producer is intentionally
 //!   stateless so it can be invoked from multiple Python threads without
 //!   per-trace bookkeeping inside the Rust layer.
+//! - [`open_frame_stream`](crate::open_frame_stream) publishes an
+//!   [`OpenFrameStream`](data_daemon_ipc::Envelope::OpenFrameStream) envelope
+//!   to switch the daemon-side actor into the video-writer path before the
+//!   first pixel frame.
 //! - [`stop_recording`](crate::stop_recording) publishes a
 //!   [`StopRecording`](data_daemon_ipc::Envelope::StopRecording) envelope.
-//!
-//! Phase 4 keeps the producer minimal — there is no sequencing, batching, or
-//! shared-slot management here. Sub-phase 4h widens the API to the full
-//! `ProducerChannel` Python contract once the per-resolution `frames/<WxH>`
-//! services from 4f are exercised end-to-end.
 //!
 //! ## Threading
 //!
@@ -41,14 +40,29 @@
 //! matches Python's threading model — the GIL serialises Python execution but
 //! does *not* prevent multiple OS threads from holding handles into the
 //! daemon's IPC namespace — and it keeps every PyO3 entry point lock-free.
+//!
+//! ## Fork safety
+//!
+//! iceoryx2's shared-memory descriptors are bound to the parent PID; a fork
+//! child that re-used them would silently drop every Frame envelope. We
+//! register a one-shot `pthread_atfork` child handler on first publisher
+//! construction (see [`ensure_fork_handler_registered`]). After a fork the
+//! child resumes in the single thread that called `fork`; the handler clears
+//! that thread's `PRODUCER` slot so the next publish rebuilds. The inherited
+//! `ProducerState` is `mem::forget`'d — running its `Drop` would notify the
+//! daemon's bookkeeping for the *parent's* still-live publisher.
 
 use std::cell::RefCell;
+use std::sync::Once;
 
-use data_daemon_ipc::service_name::{COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES};
+use data_daemon_ipc::service_name::{
+    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
+    MAX_PUBLISHERS_PER_SERVICE,
+};
 use data_daemon_ipc::Envelope;
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::publisher::Publisher;
-use iceoryx2::prelude::ipc;
+use iceoryx2::prelude::{ipc, UnableToDeliverStrategy};
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -103,20 +117,24 @@ struct ProducerState {
 
 thread_local! {
     /// One iceoryx2 publisher per OS thread. See the module-level note on
-    /// threading for the rationale.
+    /// threading for the rationale. Const-initialised so the slot is a plain
+    /// TLS load — required for the `pthread_atfork` child handler to access
+    /// it without invoking a lazy initializer in a post-fork context.
     static PRODUCER: RefCell<Option<ProducerState>> = const { RefCell::new(None) };
 }
 
 /// Run `f` against this thread's producer state, lazily building it on first
-/// use.
+/// use. The fork-child handler is responsible for clearing the slot in the
+/// post-fork child; no per-call PID check is needed here.
 fn with_producer<R>(
     operation: impl FnOnce(&ProducerState) -> Result<R, ProducerError>,
 ) -> Result<R, ProducerError> {
     PRODUCER.with(|cell| {
-        let mut slot = cell.borrow_mut();
-        if slot.is_none() {
-            *slot = Some(build_producer_state()?);
+        if cell.borrow().is_none() {
+            let state = build_producer_state()?;
+            *cell.borrow_mut() = Some(state);
         }
+        let slot = cell.borrow();
         let state = slot
             .as_ref()
             .expect("producer state populated immediately above");
@@ -125,20 +143,38 @@ fn with_producer<R>(
 }
 
 fn build_producer_state() -> Result<ProducerState, ProducerError> {
+    // Register the fork-child handler exactly once per process, lazily on the
+    // first publisher build. Doing it here (rather than in `_native_producer`
+    // module init) keeps the registration co-located with the only state it
+    // protects and avoids touching libc from the Python import path.
+    ensure_fork_handler_registered();
+
     let node = NodeBuilder::new()
         .create::<ipc::Service>()
         .map_err(|error| ProducerError::NodeCreate(error.to_string()))?;
     let service_name = COMMANDS
         .try_into()
         .map_err(|error| ProducerError::ServiceOpen(format!("invalid service name: {error}")))?;
+    // Declare the same `subscriber_max_buffer_size` and `max_publishers` the
+    // daemon configures so a producer that races the daemon to `open_or_create`
+    // doesn't seed the service with iceoryx2's default attributes (which would
+    // drop bursts of lifecycle envelopes and fail the integration matrix's
+    // ~32 worker threads).
     let service = node
         .service_builder(&service_name)
         .publish_subscribe::<[u8]>()
+        .subscriber_max_buffer_size(LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)
+        .max_publishers(MAX_PUBLISHERS_PER_SERVICE)
         .open_or_create()
         .map_err(|error| ProducerError::ServiceOpen(error.to_string()))?;
     let publisher = service
         .publisher_builder()
         .initial_max_slice_len(COMMANDS_MAX_PAYLOAD_BYTES)
+        // Block on a full subscriber buffer instead of iceoryx2's default
+        // `DiscardSample`. Lifecycle envelopes must reach the daemon for the
+        // per-trace state machine to advance — silent drops surface in the
+        // integration matrix as recordings stuck in `writing` forever.
+        .unable_to_deliver_strategy(UnableToDeliverStrategy::Block)
         .create()
         .map_err(|error| ProducerError::PublisherCreate(error.to_string()))?;
     Ok(ProducerState {
@@ -146,6 +182,46 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         _service: service,
         publisher,
     })
+}
+
+/// Install the `pthread_atfork` child handler exactly once per process.
+fn ensure_fork_handler_registered() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        // SAFETY: `pthread_atfork` is the standard libc primitive for
+        // registering fork callbacks. `on_fork_in_child` is `extern "C"`,
+        // touches only a const-initialised TLS slot, and the only "work" it
+        // does is `mem::forget` — none of which can panic across the FFI
+        // boundary, allocate, or take a lock that the parent could hold.
+        let result = unsafe { libc::pthread_atfork(None, None, Some(on_fork_in_child)) };
+        if result != 0 {
+            tracing::warn!(
+                errno = result,
+                "pthread_atfork registration failed; fork-safety relies on caller-managed cleanup",
+            );
+        }
+    });
+}
+
+/// `pthread_atfork` child callback.
+///
+/// Runs once in the post-fork child, in the single surviving thread (whichever
+/// called `fork`). Clears that thread's `PRODUCER` slot so the next call to
+/// [`with_producer`] rebuilds a fresh iceoryx2 node + publisher whose
+/// descriptors belong to the new process. The inherited `ProducerState` is
+/// `mem::forget`'d on purpose: running its `Drop` would notify the daemon's
+/// bookkeeping for the *parent's* still-live publisher, unregistering it.
+///
+/// `thread_local!` slots owned by *other* threads at fork time are
+/// inaccessible from the child's surviving thread, but that is fine — those
+/// threads no longer exist in the child, and Rust's per-thread TLS allocation
+/// means no stale slot can ever be observed from the child.
+extern "C" fn on_fork_in_child() {
+    PRODUCER.with(|cell| {
+        if let Some(stale) = cell.borrow_mut().take() {
+            std::mem::forget(stale);
+        }
+    });
 }
 
 fn publish_envelope(envelope: &Envelope) -> Result<(), ProducerError> {
@@ -161,9 +237,6 @@ fn publish_envelope(envelope: &Envelope) -> Result<(), ProducerError> {
             .publisher
             .loan_slice_uninit(bytes.len())
             .map_err(|error| ProducerError::Loan(error.to_string()))?;
-        // `write_payload` is reserved for fixed-size payloads; for slices we
-        // copy through `write_from_slice` which fills the loaned region in
-        // one memcpy.
         let sample = sample.write_from_slice(&bytes);
         sample
             .send()
@@ -202,8 +275,13 @@ fn start_recording(
 /// before the first [`send_data`] for that trace, matching the per-trace state
 /// machine described in §5 of the rewrite plan.
 #[pyfunction]
-#[pyo3(signature = (recording_id, trace_id, data_type))]
-fn start_trace(recording_id: &str, trace_id: &str, data_type: &str) -> PyResult<()> {
+#[pyo3(signature = (recording_id, trace_id, data_type, data_type_name = None))]
+fn start_trace(
+    recording_id: &str,
+    trace_id: &str,
+    data_type: &str,
+    data_type_name: Option<String>,
+) -> PyResult<()> {
     if recording_id.is_empty() || trace_id.is_empty() || data_type.is_empty() {
         return Err(PyValueError::new_err(
             "recording_id, trace_id and data_type must not be empty",
@@ -213,6 +291,7 @@ fn start_trace(recording_id: &str, trace_id: &str, data_type: &str) -> PyResult<
         recording_id: recording_id.to_string(),
         trace_id: trace_id.to_string(),
         data_type: data_type.to_string(),
+        data_type_name: data_type_name.filter(|value| !value.is_empty()),
     };
     publish_envelope(&envelope)?;
     Ok(())
@@ -225,15 +304,46 @@ fn start_trace(recording_id: &str, trace_id: &str, data_type: &str) -> PyResult<
 /// mapping. The adaptor must have already published an
 /// [`Envelope::StartTrace`] for `trace_id` before the first frame.
 #[pyfunction]
-#[pyo3(signature = (trace_id, payload, timestamp_ns = 0))]
-fn send_data(trace_id: &str, payload: &[u8], timestamp_ns: i64) -> PyResult<()> {
+#[pyo3(signature = (trace_id, payload, timestamp_ns = 0, timestamp_s = None))]
+fn send_data(
+    trace_id: &str,
+    payload: &[u8],
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<()> {
     if trace_id.is_empty() {
         return Err(PyValueError::new_err("trace_id must not be empty"));
     }
-    let envelope = Envelope::Frame {
-        trace_id: trace_id.to_string(),
+    let envelope = Envelope::frame(
+        trace_id.to_string(),
         timestamp_ns,
-        payload: payload.to_vec(),
+        timestamp_s,
+        payload.to_vec(),
+    );
+    publish_envelope(&envelope)?;
+    Ok(())
+}
+
+/// Announce the resolution of an upcoming video trace.
+///
+/// The daemon-side trace actor uses the presence of this envelope to switch
+/// the per-trace writer from JSON to the NUT video pipeline. The producer
+/// must send this before the first [`Envelope::Frame`] payload carrying pixel
+/// bytes, otherwise the early frames will be wrapped into the JSON sidecar
+/// instead of spooled to the muxer.
+#[pyfunction]
+#[pyo3(signature = (trace_id, width, height))]
+fn open_frame_stream(trace_id: &str, width: u32, height: u32) -> PyResult<()> {
+    if trace_id.is_empty() {
+        return Err(PyValueError::new_err("trace_id must not be empty"));
+    }
+    if width == 0 || height == 0 {
+        return Err(PyValueError::new_err("width and height must be non-zero"));
+    }
+    let envelope = Envelope::OpenFrameStream {
+        trace_id: trace_id.to_string(),
+        width,
+        height,
     };
     publish_envelope(&envelope)?;
     Ok(())
@@ -273,6 +383,7 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(start_trace, module)?)?;
     module.add_function(wrap_pyfunction!(send_data, module)?)?;
+    module.add_function(wrap_pyfunction!(open_frame_stream, module)?)?;
     module.add_function(wrap_pyfunction!(end_trace, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     Ok(())

@@ -11,10 +11,12 @@
 
 mod cli;
 mod config;
+mod encoding;
 mod ipc;
 mod lifecycle;
 mod pipeline;
 mod state;
+mod storage;
 
 use anyhow::Result;
 
