@@ -470,7 +470,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 | 4 — IPC + per-trace pipeline | Daemon side complete — sub-phases 4a–4g + 4j done. 4h is partial (the 4e skeleton plus `open_frame_stream`); 4i landed as a minimal-interface cutover (see below). |
 | 5 — Encoding | Daemon side complete — sub-phases 5a–5f done; 5g (pytest integration gate) still deferred until 4h carries the full sequence/batch surface and the `_native_producer` cdylib ships inside the wheel. |
 | 6 — Cloud upload | Daemon side complete — sub-phases 6a–6f done and wired into `launch.rs`. Post-review hardening pass landed the recovery sweep, 410 re-issue, 308 partial-commit guard, defer-when-org-missing, and the Failed-as-terminal progress fix. 6g (pytest integration gate) is deferred behind the same 4h/producer cutover as 5g. |
-| 7 — Performance & edge cases | Not started |
+| 7 — Performance & edge cases | Daemon side complete — stale-writing sweep, `CancelRecording` envelope + dispatcher tear-down, per-frame storage-budget enforcement, tuned channel capacities, `systemd-inhibit`-backed wakelock. End-to-end pytest gate stays deferred behind the 4h/producer cutover. |
 | 8 — Hardening & rollout | Not started |
 
 ### Phase 1 — Scaffolding & CLI parity (2 days) — ✓ Done (commit `0b452b0`)
@@ -753,18 +753,18 @@ Two startup hooks make the pipeline crash-safe across restarts:
 
 ### Phase 7 — Performance & edge cases (2–3 days)
 
-**Build:**
-- `lifecycle/recovery.rs` extension: after SIGKILL mid-recording, clean up partially-written trace rows (mark `failed` if `last_updated` older than ~30 s and `write_status='writing'`).
-- Cancel recording handling: drop in-flight trace_actor channels, delete on-disk files, mark recording as cancelled (no upload).
-- Tune `mpsc::channel` capacities, NUT writer buffer sizes, JSON flush threshold against [performance/test_pre_network.py PRE_NETWORK_PERFORMANCE_CASES](tests/integration/platform/data_daemon/performance/test_pre_network.py): 60 s @ 210 Hz joints, 8 parallel contexts × 30 fps 256×256 video, 1000-channel high-dimensionality, 300 s 1080p.
-- Storage budget enforcement: stop accepting frames when over limit; emit warning.
-- Wakelock: if `NCD_KEEP_WAKELOCK_WHILE_UPLOAD=1`, hold a wakelock during active uploads (Linux: nothing special; macOS: `caffeinate`-equivalent — out of scope if non-Linux not required).
+**Built:**
+- Startup sweep: [`StateStore::mark_stale_writing_traces_failed`](rust/data_daemon/src/state/store.rs) burns trace rows left in `writing` / `initializing` / `pending_metadata` for more than 30 s. Wired into [`launch.rs`](rust/data_daemon/src/cli/launch.rs) immediately after [`reset_stale_pipeline_states`](rust/data_daemon/src/state/store.rs) so the very first `list_traces_for_recording` the progress reporter runs already sees terminal rows.
+- `CancelRecording` envelope: [new wire variant](rust/data_daemon_ipc/src/lib.rs) plus [`cancel_recording`](rust/data_daemon_producer/src/lib.rs) PyO3 entry point. The [dispatcher tracks a `recording_id → trace_id` reverse index](rust/data_daemon/src/pipeline/dispatcher.rs) so a `CancelRecording` envelope hands every owning per-trace actor a [`TraceActorMessage::Cancel`](rust/data_daemon/src/pipeline/trace_actor.rs), which drops the writer, `remove_dir_all`s the trace directory, and releases its bytes back to the storage budget. Migration [`0003_cancelled_at.sql`](rust/data_daemon/migrations/0003_cancelled_at.sql) adds the recording-level `cancelled_at` column; [`StateStore::cancel_recording`](rust/data_daemon/src/state/store.rs) atomically stamps it and burns every non-terminal trace's `write_status`/`upload_status`/`registration_status` to `failed` (with `error_code = recording_cancelled`). The [progress reporter skips cancelled recordings](rust/data_daemon/src/cloud/progress.rs) so the expected-trace-count PUT doesn't leak.
+- Per-frame storage-budget enforcement: [`ActorState::budget_allows_frame`](rust/data_daemon/src/pipeline/trace_actor.rs) runs the check on every frame (not just on writer open), drops the frame when the budget is exhausted, and rate-limits the warning to one log per 256 dropped frames. `dropped_over_budget` is surfaced on the finalise log line so operators can audit the loss.
+- Tuned channel capacities: [`TRACE_QUEUE_CAPACITY`](rust/data_daemon/src/pipeline/dispatcher.rs) raised 64 → 256 and the [listener → dispatcher channel](rust/data_daemon/src/pipeline/dispatcher.rs) raised 256 → 1024 so the high-dimensionality + parallel-contexts performance cases don't backpressure the iceoryx2 publisher mid-recording. NUT writer / JSON flush thresholds left at their phase 5 values — they're already aligned with the Python implementation's per-frame flush + 4 MiB JSON buffer.
+- Wakelock: [`connection/wakelock.rs`](rust/data_daemon/src/connection/wakelock.rs) subscribes to the event bus, counts in-flight traces (`ReadyForUpload` → +1, `UploadComplete`/`RecordingCancelled` → −1), and holds a `systemd-inhibit --what=idle:sleep --mode=block` child while the count is positive. Hosts without `systemd-inhibit` log a single warning and degrade to a no-op. Gated entirely behind the existing `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` flag; macOS/BSDs (and Linux without systemd) get the no-op fallback per the rewrite plan's Linux-first scope.
 
-**Deliverable:** All 18 integration tests green.
+**Deliverable:** all daemon-side mechanics in place; cargo test workspace 127/127 green; clippy clean; pre-commit (cspell, cargo-fmt, cargo-clippy) clean on every touched file.
 
-**Test gate:** `pytest tests/integration/platform/data_daemon -x` end-to-end.
+**Test gate (deferred):** the full `pytest tests/integration/platform/data_daemon -x` run flips green once the 4h producer surface lands and the `_native_producer` cdylib ships inside the wheel — same blocker as 5g and 6g. The per-feature unit tests added in this phase (`mark_stale_writing_traces_failed_burns_old_rows_only`, `cancel_recording_burns_traces_and_stamps_cancelled_at`, `dispatcher_cancels_recording_and_deletes_on_disk_artefacts`, `handle_frame_drops_when_storage_budget_exhausted`, etc.) cover the new code paths in the meantime.
 
-**Check:** full integration suite green. Performance cases meet timing budgets (timer stats reported in [conftest.py::pytest_terminal_summary](tests/integration/platform/data_daemon/conftest.py)).
+**Check:** `cargo test --workspace` green (120 daemon + 7 ipc); `cargo clippy --workspace --all-targets -- -D warnings` clean; pre-commit clean.
 
 ### Phase 8 — Hardening & rollout (2 days)
 

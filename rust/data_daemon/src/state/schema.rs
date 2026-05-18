@@ -126,6 +126,7 @@ string_enum! {
         DiskFull            => "disk_full",
         NetworkError        => "network_error",
         ProgressReportError => "progress_report_error",
+        RecordingCancelled  => "recording_cancelled",
     }
 }
 
@@ -157,6 +158,10 @@ pub struct RecordingRow {
     pub progress_reported: ProgressReportStatus,
     /// Set when the producer issues a stop command.
     pub stopped_at: Option<NaiveDateTime>,
+    /// Set when the producer issues a cancel command. Cancelled recordings
+    /// are ignored by the cloud coordinators and skipped by the progress
+    /// reporter.
+    pub cancelled_at: Option<NaiveDateTime>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -176,6 +181,7 @@ impl RecordingRow {
             uploaded_trace_count: row.try_get("uploaded_trace_count")?,
             progress_reported,
             stopped_at: row.try_get("stopped_at")?,
+            cancelled_at: row.try_get("cancelled_at")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })

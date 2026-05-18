@@ -603,6 +603,23 @@ fn stop_recording(recording_id: &str) -> PyResult<()> {
     Ok(())
 }
 
+/// Cancel a recording — discard any in-flight per-trace actors and their
+/// on-disk artefacts on the daemon side and skip the upload pipeline for
+/// every trace this recording owns. Mirrors the SDK's
+/// `nc.cancel_recording(...)` entry point.
+#[pyfunction]
+#[pyo3(signature = (recording_id))]
+fn cancel_recording(recording_id: &str) -> PyResult<()> {
+    if recording_id.is_empty() {
+        return Err(PyValueError::new_err("recording_id must not be empty"));
+    }
+    let envelope = Envelope::CancelRecording {
+        recording_id: recording_id.to_string(),
+    };
+    publish_envelope(&envelope)?;
+    Ok(())
+}
+
 /// Python module entrypoint registered as `neuracore.data_daemon._native_producer`.
 #[pymodule]
 fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -613,5 +630,6 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(open_frame_stream, module)?)?;
     module.add_function(wrap_pyfunction!(end_trace, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     Ok(())
 }
