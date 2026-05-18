@@ -74,6 +74,12 @@ pub struct TraceActorContext {
     /// integration matrix's parallel `EndTrace` storms don't fork-bomb the
     /// transcoder.
     pub ffmpeg_permits: Arc<Semaphore>,
+    /// Optional daemon event bus. When present, the trace actor publishes a
+    /// [`crate::state::DaemonEvent::TraceWritten`] on finalise so the
+    /// registration coordinator can wake immediately. Optional to keep the
+    /// pre-Phase-6 unit tests, which exercise the actor without a bus,
+    /// running unchanged.
+    pub event_bus: Option<crate::state::EventBus>,
 }
 
 impl TraceActorContext {
@@ -105,7 +111,15 @@ impl TraceActorContext {
             storage_budget,
             video_encoder,
             ffmpeg_permits,
+            event_bus: None,
         }
+    }
+
+    /// Attach a daemon event bus to this context. Returns `self` so it
+    /// composes cleanly with [`new`] / [`with_ffmpeg_permits`].
+    pub fn with_event_bus(mut self, bus: crate::state::EventBus) -> Self {
+        self.event_bus = Some(bus);
+        self
     }
 }
 
@@ -140,12 +154,21 @@ enum TraceWriter {
     /// Scalar trace streaming into a single `trace.json` array.
     Json(JsonTraceWriter),
     /// Video trace spooling RGB frames into `raw.nut` while the sidecar
-    /// metadata buffers in memory. `frame_index` is the PTS we hand to the NUT
-    /// writer (one tick per frame in the configured timebase).
+    /// metadata buffers in memory.
+    ///
+    /// PTS is derived from `timestamp_ns` (microsecond ticks, relative to the
+    /// first frame), matching the Python encoder's PTS contract in
+    /// `disk_video_encoder.py::_compute_pts`. The container's time-base is
+    /// `1/1_000_000`; sliding `pts_origin_us` to the first frame keeps PTS
+    /// values small (avoids ffmpeg quirks with absolute nanosecond PTS) while
+    /// preserving inter-frame spacing exactly. `last_pts` enforces strict
+    /// monotonicity for the rare duplicate-timestamp case.
     Video {
         nut_writer: NutWriter,
         metadata: VideoMetadataAccumulator,
         frame_index: u64,
+        pts_origin_us: Option<i64>,
+        last_pts: Option<u64>,
     },
 }
 
@@ -409,14 +432,15 @@ impl ActorState {
         let trace_dir = self.trace_directory(recording_id, data_type, context);
 
         if let Some((width, height)) = self.video_config {
-            // Time-base 1/1_000_000_000 lets us pass `timestamp_ns` straight
-            // through as the per-frame PTS without any rescaling. ffmpeg
-            // happily consumes that and regenerates per-output timestamps.
+            // Time-base 1/1_000_000 (microsecond ticks) matches the Python
+            // encoder's `PTS_FRACT = 1_000_000` so the on-disk PTS contract
+            // is the same across both implementations. Frame PTS is derived
+            // in `append_frame` as `(timestamp_ns - origin_ns) / 1000`.
             let config = NutVideoConfig {
                 width,
                 height,
                 time_base_num: 1,
-                time_base_den: 1_000_000_000,
+                time_base_den: 1_000_000,
             };
             let raw_nut = trace_dir.join(paths::RAW_NUT_FILENAME);
             match NutWriter::create(&raw_nut, config) {
@@ -426,6 +450,8 @@ impl ActorState {
                         nut_writer,
                         metadata: VideoMetadataAccumulator::new(),
                         frame_index: 0,
+                        pts_origin_us: None,
+                        last_pts: None,
                     };
                 }
                 Err(error) => {
@@ -489,11 +515,45 @@ impl ActorState {
                 nut_writer,
                 metadata,
                 frame_index,
+                pts_origin_us,
+                last_pts,
             } => {
-                nut_writer.write_frame(*frame_index, payload)?;
+                let origin_us = *pts_origin_us.get_or_insert(timestamp_ns / 1_000);
+                // Microsecond ticks relative to the first frame. Clamp at 0 so
+                // a producer that ships a non-monotonic earlier timestamp does
+                // not produce a negative PTS; the `last_pts` monotonicity
+                // guard below catches the rest.
+                let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
+                let mut pts = relative_us as u64;
+                if let Some(previous) = *last_pts {
+                    if pts <= previous {
+                        pts = previous.saturating_add(1);
+                    }
+                }
                 let (width, height) = self
                     .video_config
                     .expect("video writer implies video_config is set");
+                // Decode the 16-byte big-endian test marker the integration
+                // test producer stamps into the top-left 4×4 R-channel grid
+                // (see `tests/.../shared/test_case/build_test_case_context.py`
+                // `encode_frame_number`). The decode is essentially free (16
+                // byte reads); we log it on every frame so a downstream test
+                // failure has a daemon-side timeline of which source-frame
+                // marker arrived at which receive position. Frames produced
+                // outside the test harness decode to a deterministic noisy
+                // value, which is harmless.
+                let marker = decode_test_marker(payload, width);
+                tracing::debug!(
+                    trace_id = self.trace_id,
+                    frame_index = *frame_index,
+                    pts,
+                    timestamp_ns,
+                    payload_len = payload.len(),
+                    marker,
+                    "video frame received"
+                );
+                nut_writer.write_frame(pts, payload)?;
+                *last_pts = Some(pts);
                 let mut entry = serde_json::Map::new();
                 // Match the Python writer's per-frame metadata shape:
                 // `timestamp` is seconds (float), `width`/`height` set when
@@ -557,6 +617,12 @@ impl ActorState {
                     total_bytes,
                     "trace finalised"
                 );
+                if let Some(bus) = context.event_bus.as_ref() {
+                    bus.publish(crate::state::DaemonEvent::TraceWritten {
+                        trace_id: self.trace_id.clone(),
+                        recording_id: recording_id.clone(),
+                    });
+                }
             }
             Err(error) => {
                 tracing::warn!(
@@ -688,6 +754,35 @@ enum FrameAppendError {
     Metadata(#[from] MetadataError),
 }
 
+/// Decode the integration test producer's 16-byte big-endian frame marker.
+///
+/// The test harness stamps the source frame index into the R-channel of the
+/// top-left 4×4 pixel grid (see `tests/.../shared/test_case/constants.py`
+/// `FRAME_BYTE_LENGTH=16`, `FRAME_GRID_SIZE=4`). Pixel `(row, col)` in that
+/// grid carries marker byte `row * 4 + col`, with the R channel at byte
+/// offset `(row * width + col) * 3` in a packed RGB24 buffer.
+///
+/// Returns `None` if the payload is too short for the 4×4 grid at the given
+/// `width`. The first 16 marker bytes are returned as the low bytes of a
+/// `u128` so the integer round-trips losslessly through `tracing::debug!`.
+fn decode_test_marker(payload: &[u8], width: u32) -> Option<u128> {
+    let stride = (width as usize).checked_mul(3)?;
+    // Need bytes through row 3, column 3 inclusive — i.e. offset
+    // `3 * stride + 3 * 3` must exist in `payload`.
+    let last_byte = stride.checked_mul(3)?.checked_add(3 * 3)?;
+    if payload.len() <= last_byte {
+        return None;
+    }
+    let mut marker: u128 = 0;
+    for row in 0..4 {
+        for col in 0..4 {
+            let byte = payload[row * stride + col * 3];
+            marker = (marker << 8) | u128::from(byte);
+        }
+    }
+    Some(marker)
+}
+
 /// Wrap a non-JSON scalar payload in a minimal object so the on-disk
 /// `trace.json` array stays parseable. The verbatim path in
 /// [`ActorState::append_frame`] only reaches this helper after a structural
@@ -749,6 +844,37 @@ mod tests {
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = scalar_fallback_entry(123, &[0xFF, 0xFE]);
         assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
+    }
+
+    #[test]
+    fn decode_test_marker_round_trips_known_indices() {
+        // Build a 64×4 RGB24 buffer, stamp marker `value` into the top-left
+        // 4×4 R-channel grid the way the integration-test producer does, then
+        // verify `decode_test_marker` reads it back.
+        let width: u32 = 64;
+        let stride = (width as usize) * 3;
+        let buffer_len = stride * 4;
+        for value in [0u128, 1, 254, 255, 256, 257, 599, 1 << 32] {
+            let mut payload = vec![100u8; buffer_len];
+            for byte_index in 0..16usize {
+                let shift = (15 - byte_index) * 8;
+                let byte = ((value >> shift) & 0xFF) as u8;
+                let row = byte_index / 4;
+                let col = byte_index % 4;
+                payload[row * stride + col * 3] = byte;
+            }
+            let decoded = decode_test_marker(&payload, width).expect("decode");
+            assert_eq!(decoded, value, "round-trip failed for {value}");
+        }
+    }
+
+    #[test]
+    fn decode_test_marker_returns_none_for_short_payload() {
+        // 4-pixel-wide buffer with only 3 rows is missing the row-3 marker
+        // bytes; the decoder must refuse rather than read out-of-bounds.
+        let width: u32 = 4;
+        let payload = vec![0u8; (width as usize) * 3 * 3];
+        assert!(decode_test_marker(&payload, width).is_none());
     }
 
     #[tokio::test]

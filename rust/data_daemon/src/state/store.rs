@@ -18,7 +18,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::state::schema::{
-    RecordingRow, TraceRecord, TraceRegistrationStatus, TraceUploadStatus, TraceWriteStatus,
+    ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
+    TraceUploadStatus, TraceWriteStatus,
 };
 
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
@@ -58,6 +59,17 @@ pub enum StateStoreError {
 pub trait StateStore: Send + Sync {
     /// Insert a recording row if one does not already exist.
     async fn create_recording(&self, recording_id: &str) -> Result<RecordingRow, StateStoreError>;
+
+    /// Stamp the recording's `org_id` if not already set.
+    ///
+    /// The org is supplied by the producer's `StartRecording` envelope; we
+    /// persist it so the upload coordinator can build the per-org URL paths
+    /// from the same source the registration coordinator used.
+    async fn set_recording_org(
+        &self,
+        recording_id: &str,
+        org_id: &str,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
 
     /// Fetch a recording by ID, returning `None` when absent.
     async fn get_recording(
@@ -127,6 +139,54 @@ pub trait StateStore: Send + Sync {
         &self,
         recording_id: &str,
     ) -> Result<RecordingRow, StateStoreError>;
+
+    /// List every recording row currently in the DB.
+    ///
+    /// Used by the progress reporter to discover stopped recordings whose
+    /// traces have all finished uploading. Returned in `created_at` order.
+    async fn list_recordings(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Atomically transition `progress_reported` for `recording_id`.
+    ///
+    /// `expected` is the status the caller observed before the request — if
+    /// the row no longer matches (e.g. another tick already advanced it) the
+    /// update is a no-op and the current row is returned. Returns `None` when
+    /// the recording is not present.
+    async fn set_progress_report_status(
+        &self,
+        recording_id: &str,
+        expected: ProgressReportStatus,
+        next: ProgressReportStatus,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Stamp the recording's `expected_trace_count` once the producer-side
+    /// trace set is known to be final. Idempotent: the value is only written
+    /// when currently NULL so two reporters cannot race each other into
+    /// inconsistent state.
+    async fn set_expected_trace_count(
+        &self,
+        recording_id: &str,
+        expected_trace_count: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Stamp the recording's `expected_trace_count_reported` to `count` once
+    /// the backend has acknowledged the `expected-trace-count` PUT. Stored as
+    /// a non-zero integer so the reporter can use a single column to mean
+    /// both "reported" (non-zero) and "what we told the backend".
+    async fn mark_expected_trace_count_reported(
+        &self,
+        recording_id: &str,
+        count: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Re-arm pipeline rows that were mid-flight when the daemon last
+    /// stopped. Mirrors `reset_retrying_to_written` in
+    /// `state_store_sqlite.py`. Called on startup so a SIGKILL or panic does
+    /// not leave traces wedged in transient `registering` / `uploading`
+    /// states the coordinators no longer scan.
+    ///
+    /// Returns the number of trace rows rewritten.
+    async fn reset_stale_pipeline_states(&self) -> Result<u64, StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -149,6 +209,17 @@ pub struct TraceUpdate {
     pub total_bytes: Option<i64>,
     /// Bytes uploaded so far.
     pub bytes_uploaded: Option<i64>,
+    /// JSON-encoded `{filepath: session_uri}` map persisted by the
+    /// registration coordinator.
+    pub upload_session_uris: Option<String>,
+    /// Bump the upload-attempt counter when set.
+    pub increment_upload_attempts: bool,
+    /// Set the latest error code (use `Some(None)` to clear, `None` to leave
+    /// untouched).
+    pub error_code: Option<Option<TraceErrorCode>>,
+    /// Set the latest error message (use `Some(None)` to clear, `None` to
+    /// leave untouched).
+    pub error_message: Option<Option<String>>,
 }
 
 impl TraceUpdate {
@@ -161,6 +232,10 @@ impl TraceUpdate {
             && self.bytes_written.is_none()
             && self.total_bytes.is_none()
             && self.bytes_uploaded.is_none()
+            && self.upload_session_uris.is_none()
+            && !self.increment_upload_attempts
+            && self.error_code.is_none()
+            && self.error_message.is_none()
     }
 }
 
@@ -254,6 +329,39 @@ impl StateStore for SqliteStateStore {
         let row = Self::upsert_recording_locked(&mut tx, recording_id).await?;
         tx.commit().await?;
         Ok(row)
+    }
+
+    async fn set_recording_org(
+        &self,
+        recording_id: &str,
+        org_id: &str,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        // Only set org_id when not already set so the producer can't flip
+        // the recording to a different org mid-stream.
+        sqlx::query(
+            "UPDATE recordings \
+                SET org_id = COALESCE(org_id, ?1), last_updated = ?2 \
+              WHERE recording_id = ?3",
+        )
+        .bind(org_id)
+        .bind(now)
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let record = match row {
+            Some(row) => Some(RecordingRow::from_row(&row)?),
+            None => None,
+        };
+        tx.commit().await?;
+        Ok(record)
     }
 
     async fn get_recording(
@@ -359,6 +467,20 @@ impl StateStore for SqliteStateStore {
         if update.bytes_uploaded.is_some() {
             assignments.push("bytes_uploaded = ?");
         }
+        if update.upload_session_uris.is_some() {
+            assignments.push("upload_session_uris = ?");
+        }
+        if update.increment_upload_attempts {
+            // SQLite-native expression so callers don't need to read-modify-
+            // write the existing counter on retry.
+            assignments.push("num_upload_attempts = num_upload_attempts + 1");
+        }
+        if update.error_code.is_some() {
+            assignments.push("error_code = ?");
+        }
+        if update.error_message.is_some() {
+            assignments.push("error_message = ?");
+        }
         assignments.push("last_updated = ?");
 
         let sql = format!(
@@ -386,6 +508,15 @@ impl StateStore for SqliteStateStore {
         }
         if let Some(bytes) = update.bytes_uploaded {
             query = query.bind(bytes);
+        }
+        if let Some(uris) = update.upload_session_uris {
+            query = query.bind(uris);
+        }
+        if let Some(code) = update.error_code {
+            query = query.bind(code.map(|value| value.as_str().to_string()));
+        }
+        if let Some(message) = update.error_message {
+            query = query.bind(message);
         }
         query = query.bind(now).bind(trace_id);
 
@@ -538,6 +669,145 @@ impl StateStore for SqliteStateStore {
 
         tx.commit().await?;
         Ok(record)
+    }
+
+    async fn list_recordings(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query("SELECT * FROM recordings ORDER BY created_at ASC")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn set_progress_report_status(
+        &self,
+        recording_id: &str,
+        expected: ProgressReportStatus,
+        next: ProgressReportStatus,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET progress_reported = ?1, last_updated = ?2 \
+              WHERE recording_id = ?3 AND progress_reported = ?4",
+        )
+        .bind(next.as_str())
+        .bind(now)
+        .bind(recording_id)
+        .bind(expected.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let record = match row {
+            Some(row) => Some(RecordingRow::from_row(&row)?),
+            None => None,
+        };
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn set_expected_trace_count(
+        &self,
+        recording_id: &str,
+        expected_trace_count: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET expected_trace_count = COALESCE(expected_trace_count, ?1), \
+                    last_updated = ?2 \
+              WHERE recording_id = ?3",
+        )
+        .bind(expected_trace_count)
+        .bind(now)
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let record = match row {
+            Some(row) => Some(RecordingRow::from_row(&row)?),
+            None => None,
+        };
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn mark_expected_trace_count_reported(
+        &self,
+        recording_id: &str,
+        count: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET expected_trace_count_reported = ?1, \
+                    last_updated = ?2 \
+              WHERE recording_id = ?3",
+        )
+        .bind(count)
+        .bind(now)
+        .bind(recording_id)
+        .execute(&mut *tx)
+        .await?;
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
+            .bind(recording_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let record = match row {
+            Some(row) => Some(RecordingRow::from_row(&row)?),
+            None => None,
+        };
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn reset_stale_pipeline_states(&self) -> Result<u64, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        // `registering` → `pending` so the registration coordinator's claim
+        // query sees the row again on the next tick.
+        let reg_result = sqlx::query(
+            "UPDATE traces \
+                SET registration_status = ?1, last_updated = ?2 \
+              WHERE registration_status = ?3",
+        )
+        .bind(TraceRegistrationStatus::Pending.as_str())
+        .bind(now)
+        .bind(TraceRegistrationStatus::Registering.as_str())
+        .execute(&mut *tx)
+        .await?;
+        // `uploading` → `retrying` so the uploader's drain (which filters on
+        // `Queued | Retrying`) re-picks it up. Stays inside the registered
+        // half of the pipeline because the session URI is still valid
+        // (`registration_status` is preserved by definition).
+        let upload_result = sqlx::query(
+            "UPDATE traces \
+                SET upload_status = ?1, last_updated = ?2 \
+              WHERE upload_status = ?3",
+        )
+        .bind(TraceUploadStatus::Retrying.as_str())
+        .bind(now)
+        .bind(TraceUploadStatus::Uploading.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(reg_result.rows_affected() + upload_result.rows_affected())
     }
 }
 
@@ -696,6 +966,68 @@ mod tests {
             second.is_empty(),
             "expected no age-eligible traces, got {second:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn reset_stale_pipeline_states_rearms_registering_and_uploading() {
+        let (store, _tempdir) = open_store().await;
+        // Two recordings to make sure the sweep doesn't leak across rows.
+        for (recording_id, trace_id, reg, upload) in [
+            (
+                "rec-stuck-reg",
+                "trace-reg",
+                TraceRegistrationStatus::Registering,
+                TraceUploadStatus::Pending,
+            ),
+            (
+                "rec-stuck-up",
+                "trace-up",
+                TraceRegistrationStatus::Registered,
+                TraceUploadStatus::Uploading,
+            ),
+            (
+                "rec-clean",
+                "trace-clean",
+                TraceRegistrationStatus::Registered,
+                TraceUploadStatus::Queued,
+            ),
+        ] {
+            store.create_recording(recording_id).await.unwrap();
+            store
+                .create_trace(recording_id, trace_id, Some("JOINT_POSITIONS"), Some("arm"))
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    trace_id,
+                    TraceUpdate {
+                        write_status: Some(TraceWriteStatus::Written),
+                        registration_status: Some(reg),
+                        upload_status: Some(upload),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+
+        let touched = store.reset_stale_pipeline_states().await.unwrap();
+        assert_eq!(
+            touched, 2,
+            "registering + uploading rows should be re-armed"
+        );
+
+        let reg = store.get_trace("trace-reg").await.unwrap().unwrap();
+        assert_eq!(reg.registration_status, TraceRegistrationStatus::Pending);
+        let up = store.get_trace("trace-up").await.unwrap().unwrap();
+        assert_eq!(up.upload_status, TraceUploadStatus::Retrying);
+        let clean = store.get_trace("trace-clean").await.unwrap().unwrap();
+        // Untouched rows keep their state — the sweep is targeted.
+        assert_eq!(
+            clean.registration_status,
+            TraceRegistrationStatus::Registered
+        );
+        assert_eq!(clean.upload_status, TraceUploadStatus::Queued);
     }
 
     #[tokio::test]

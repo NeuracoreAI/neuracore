@@ -113,6 +113,12 @@ class Robot:
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
         self._data_stream_counts: dict[DataType, int] = defaultdict(int)
+        # Cache of resolved per-joint stream metadata keyed by
+        # (data_type, joint_name). Populated lazily by the joint-logging hot
+        # path so that high-rate callers (1 kHz × N joints) avoid the
+        # validate_safe_name regex and the dataclass construction on every
+        # call. Mirrors the lifetime of _data_streams.
+        self._joint_stream_bindings: dict = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
 
         self.org_id = org_id or get_current_org()

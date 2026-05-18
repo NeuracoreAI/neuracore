@@ -56,26 +56,58 @@ impl DispatcherHandle {
     }
 }
 
+/// Optional runtime context passed to the dispatcher. Carries pieces of
+/// configuration that influence per-recording side effects but that the
+/// dispatcher itself does not own.
+#[derive(Clone, Default)]
+pub struct DispatcherContext {
+    /// Org identifier the daemon stamps on every new recording row. Set from
+    /// the local `~/.neuracore/config.json` at launch; left as `None` when
+    /// the daemon is running offline.
+    pub org_id: Option<String>,
+    /// Daemon event bus. Used by the dispatcher to publish `TraceWritten`
+    /// once a trace actor reports an `EndTrace`. Optional so unit tests can
+    /// run the dispatcher without a bus.
+    pub event_bus: Option<crate::state::EventBus>,
+}
+
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
 ///
 /// The returned sender is handed to the IPC listener. The dispatcher task
 /// owns the matching receiver and the per-trace `DashMap`. `actor_context`
 /// is shared with every per-trace actor it spawns — recordings root,
 /// storage-budget tracker, and the configured video encoder.
+#[allow(dead_code)]
 pub fn spawn(
     store: SqliteStateStore,
     actor_context: Arc<TraceActorContext>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
-    // Capacity sized to absorb a burst of envelopes from the listener while
-    // the dispatcher fans them out to per-trace actors; small enough that
-    // listener-side backpressure still kicks in promptly under sustained
-    // overload.
+    spawn_with_context(
+        store,
+        actor_context,
+        DispatcherContext::default(),
+        shutdown_rx,
+    )
+}
+
+/// Spawn the dispatcher with an explicit [`DispatcherContext`].
+///
+/// Phase 6 introduces side-effects keyed by the local org_id and the event
+/// bus; this variant accepts both so production code can wire them in while
+/// the legacy unit-test surface (without an event bus / org_id) continues to
+/// work via [`spawn`].
+pub fn spawn_with_context(
+    store: SqliteStateStore,
+    actor_context: Arc<TraceActorContext>,
+    context: DispatcherContext,
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
     let (tx, rx) = mpsc::channel::<Envelope>(256);
     let drained = Arc::new(Notify::new());
     let drained_for_task = Arc::clone(&drained);
     let join = tokio::spawn(async move {
-        run(store, actor_context, rx, shutdown_rx).await;
+        run(store, actor_context, context, rx, shutdown_rx).await;
         drained_for_task.notify_one();
     });
     (tx, DispatcherHandle { join, drained })
@@ -84,6 +116,7 @@ pub fn spawn(
 async fn run(
     store: SqliteStateStore,
     actor_context: Arc<TraceActorContext>,
+    context: DispatcherContext,
     mut rx: mpsc::Receiver<Envelope>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
@@ -109,7 +142,7 @@ async fn run(
                     break;
                 };
                 if let Some(handle) =
-                    handle_envelope(&store, &actor_context, &routing, envelope).await
+                    handle_envelope(&store, &actor_context, &context, &routing, envelope).await
                 {
                     actor_handles.push(handle);
                 }
@@ -136,6 +169,7 @@ async fn run(
 async fn handle_envelope(
     store: &Arc<SqliteStateStore>,
     actor_context: &Arc<TraceActorContext>,
+    context: &DispatcherContext,
     routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
     envelope: Envelope,
 ) -> Option<JoinHandle<()>> {
@@ -144,6 +178,11 @@ async fn handle_envelope(
             Envelope::StartRecording { recording_id, .. } => {
                 if let Err(error) = store.create_recording(&recording_id).await {
                     tracing::warn!(%error, recording_id, "failed to upsert recording row");
+                }
+                if let Some(org_id) = context.org_id.as_deref() {
+                    if let Err(error) = store.set_recording_org(&recording_id, org_id).await {
+                        tracing::warn!(%error, recording_id, "failed to stamp recording org_id");
+                    }
                 }
             }
             Envelope::StopRecording { recording_id } => {
@@ -155,6 +194,11 @@ async fn handle_envelope(
                             stopped_at = ?row.stopped_at,
                             "recording marked stopped"
                         );
+                        if let Some(bus) = context.event_bus.as_ref() {
+                            bus.publish(crate::state::DaemonEvent::RecordingStopped {
+                                recording_id: recording_id.clone(),
+                            });
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(%error, recording_id, "failed to mark recording stopped");

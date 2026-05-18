@@ -225,6 +225,10 @@ pub struct TraceRecord {
     pub num_upload_attempts: i64,
     /// Next scheduled retry time, when in backoff.
     pub next_retry_at: Option<NaiveDateTime>,
+    /// JSON-encoded `{filepath: session_uri}` map populated by the
+    /// registration coordinator. The uploader reads this back on
+    /// `ReadyForUpload` and dispatches one resumable upload per entry.
+    pub upload_session_uris: Option<String>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -265,6 +269,7 @@ impl TraceRecord {
             error_message: row.try_get("error_message")?,
             num_upload_attempts: row.try_get("num_upload_attempts")?,
             next_retry_at: row.try_get("next_retry_at")?,
+            upload_session_uris: row.try_get("upload_session_uris")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })

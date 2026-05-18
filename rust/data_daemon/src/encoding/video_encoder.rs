@@ -134,8 +134,17 @@ impl VideoEncoder {
         // `-y` overwrites existing outputs (resume safety: a previous failed
         // run may have left a partial mp4). `-fflags +genpts` rebuilds the
         // presentation timestamps from the NUT timing when the spool was
-        // truncated mid-frame. Two `-map 0:v -c:v ...` blocks emit both
-        // outputs from a single demux pass.
+        // truncated mid-frame. `-vsync vfr` (applied per output) is the
+        // critical knob here: the NUT spool uses `time_base = 1/1_000_000`
+        // so ffmpeg's demuxer reports `r_frame_rate = 1_000_000/1` (one
+        // million fps). With the default `vsync auto` cfr policy the encoder
+        // would then synthesise an output frame at every microsecond slot
+        // between consecutive input PTS values — for a 10 s clip that is
+        // ~10 million duplicate output frames, and the encode effectively
+        // never completes. `vfr` writes each input frame exactly once at its
+        // original PTS, which is what real-time camera capture actually is.
+        // Two `-map 0:v -c:v ...` blocks emit both outputs from a single
+        // demux pass.
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -149,6 +158,8 @@ impl VideoEncoder {
             .arg(&request.raw_nut)
             .arg("-map")
             .arg("0:v")
+            .arg("-vsync")
+            .arg("vfr")
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
@@ -160,6 +171,8 @@ impl VideoEncoder {
             .arg(&request.lossy_mp4)
             .arg("-map")
             .arg("0:v")
+            .arg("-vsync")
+            .arg("vfr")
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
@@ -408,6 +421,178 @@ mod tests {
             assert_eq!(streams[0]["codec_type"], "video");
             assert_eq!(streams[0]["width"], 16);
             assert_eq!(streams[0]["height"], 16);
+        }
+    }
+
+    #[tokio::test]
+    async fn transcode_preserves_frame_count_for_microsecond_timebase() {
+        // Reproduces the daemon's runtime configuration: 1/1_000_000
+        // time-base with PTS values spaced at 60 Hz (≈16_667 μs apart).
+        // Regression guard for the frame-count collapse where every frame
+        // PTS was effectively zero and ffmpeg coalesced 600 frames into ~6.
+        if locate_binary("ffmpeg").is_none() {
+            eprintln!("ffmpeg not on PATH — skipping frame-count regression test.");
+            return;
+        }
+        let ffprobe = match locate_binary("ffprobe") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffprobe not on PATH — skipping frame-count regression test.");
+                return;
+            }
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("raw.nut");
+        let lossy = tempdir.path().join("lossy.mp4");
+        let lossless = tempdir.path().join("lossless.mp4");
+
+        // 64x64 RGB24 = 12_288 bytes per frame, so 30 frames > MAX_DISTANCE
+        // (65_536) — this size forces the periodic-syncpoint emit path that
+        // the production daemon hits with the integration matrix's smallest
+        // camera (64x64 @ 60 Hz). Reducing this resolution would hide the
+        // regression we just fixed.
+        let config = NutVideoConfig {
+            width: 64,
+            height: 64,
+            time_base_num: 1,
+            time_base_den: 1_000_000,
+        };
+        let mut writer = NutWriter::create(&raw, config).unwrap();
+        // Match the integration matrix's 10s @ 60 Hz workload — 600 frames
+        // crosses the syncpoint cadence enough times that any pixel
+        // shuffle around a syncpoint boundary will be observable.
+        //
+        // Timestamps simulate the integration test's actual producer:
+        // `int((ts_start + N/60) * 1e9)`. The float64 precision loss at
+        // large ts_start (epoch nanoseconds) is intentional — it
+        // reproduces the real-world PTS quantisation that triggered the
+        // bug, and exercises the `last_pts + 1` monotonicity guard the
+        // production trace_actor relies on.
+        let frame_count: u64 = 600;
+        let ts_start_s: f64 = 1_779_000_000.0;
+        for index in 0..frame_count {
+            // Mirror the integration test's frame-code encoder: write the
+            // 16-byte big-endian representation of `index` into the red channel
+            // of the top-left 4x4 pixel grid (the very pattern the data-integrity
+            // pass decodes back from cloud-downloaded frames). The rest of the
+            // frame is a uniform fill so lossy quantisation can't corrupt the
+            // marker.
+            const GRID_SIZE: usize = 4;
+            const WIDTH: usize = 64;
+            let mut buffer = vec![128u8; 64 * 64 * 3];
+            let frame_bytes = (index as u128).to_be_bytes();
+            for row in 0..GRID_SIZE {
+                for col in 0..GRID_SIZE {
+                    let byte_value = frame_bytes[row * GRID_SIZE + col];
+                    let pixel_offset = (row * WIDTH + col) * 3;
+                    buffer[pixel_offset] = byte_value;
+                    buffer[pixel_offset + 1] = 255 - byte_value;
+                    buffer[pixel_offset + 2] = byte_value / 2;
+                }
+            }
+            // Replicate the integration test producer + production
+            // `trace_actor` together: timestamps are derived from float
+            // seconds (so PTS spacing reflects 60 Hz quantisation), then
+            // re-based to a per-trace origin the way `trace_actor` does,
+            // so PTS values stay in the same small range the daemon
+            // actually emits in production.
+            let timestamp_ns: i64 = ((ts_start_s + (index as f64) / 60.0) * 1_000_000_000.0) as i64;
+            let origin_ns: i64 = (ts_start_s * 1_000_000_000.0) as i64;
+            let pts_us = ((timestamp_ns - origin_ns) / 1_000) as u64;
+            writer.write_frame(pts_us, &buffer).unwrap();
+        }
+        writer.finish().unwrap();
+
+        let encoder = VideoEncoder::new();
+        let request = VideoEncodeRequest {
+            raw_nut: raw.clone(),
+            lossy_mp4: lossy.clone(),
+            lossless_mp4: lossless.clone(),
+        };
+        encoder.run(&request).await.expect("transcode succeeds");
+
+        for path in [&lossy, &lossless] {
+            let output = StdCommand::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "default=nokey=1:noprint_wrappers=1",
+                ])
+                .arg(path)
+                .output()
+                .expect("spawn ffprobe");
+            assert!(
+                output.status.success(),
+                "ffprobe rejected {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let raw = String::from_utf8(output.stdout).unwrap();
+            let trimmed = raw.trim();
+            let nb_read_frames: u64 = trimmed.parse().unwrap_or_else(|_| {
+                panic!("expected integer frame count in ffprobe output, got {trimmed:?}")
+            });
+            assert_eq!(
+                nb_read_frames,
+                frame_count,
+                "{} should contain all {} frames (got {})",
+                path.display(),
+                frame_count,
+                nb_read_frames
+            );
+        }
+
+        // The lossless transcode must round-trip the per-frame red marker
+        // exactly. If the muxer shuffles or duplicates frames around a
+        // syncpoint boundary (the integration-test failure mode), the
+        // decoded marker sequence will skip or repeat.
+        let ffmpeg = locate_binary("ffmpeg").expect("ffmpeg located above");
+        let frames_dir = tempdir.path().join("frames");
+        std::fs::create_dir_all(&frames_dir).unwrap();
+        let pattern = frames_dir.join("%04d.rgb");
+        // Use the LOSSLESS mp4 — `qp=0` round-trips the marker bytes
+        // exactly so we can assert on the precise frame index. The lossy
+        // mp4 is also produced by the same encoder invocation; the
+        // integration test exercises both qualities and any frame-shuffle
+        // bug in our muxer would affect both streams equally.
+        let extract = StdCommand::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(&lossless)
+            .args(["-f", "image2", "-vcodec", "rawvideo", "-pix_fmt", "rgb24"])
+            .arg(&pattern)
+            .output()
+            .expect("spawn ffmpeg extract");
+        assert!(
+            extract.status.success(),
+            "ffmpeg extract failed: {}",
+            String::from_utf8_lossy(&extract.stderr)
+        );
+        const GRID_SIZE_BACK: usize = 4;
+        const WIDTH_BACK: usize = 64;
+        for index in 0..frame_count {
+            let path = frames_dir.join(format!("{:04}.rgb", index + 1));
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+            let mut decoded = [0u8; 16];
+            for row in 0..GRID_SIZE_BACK {
+                for col in 0..GRID_SIZE_BACK {
+                    let pixel_offset = (row * WIDTH_BACK + col) * 3;
+                    decoded[row * GRID_SIZE_BACK + col] = bytes[pixel_offset];
+                }
+            }
+            let actual = u128::from_be_bytes(decoded) as u64;
+            assert_eq!(
+                actual, index,
+                "decoded frame at output index {} carries marker {} (expected {})",
+                index, actual, index
+            );
         }
     }
 

@@ -137,7 +137,19 @@ pub struct NutWriter {
     /// Number of bytes a well-formed RGB24 frame must occupy. Cached so the
     /// per-frame size check stays in a single `usize`.
     expected_frame_bytes: usize,
+    /// File offset of the most recently written syncpoint packet. Used to
+    /// populate `back_ptr_div16` on the next syncpoint so demuxers can walk
+    /// the chain when seeking.
+    last_syncpoint_offset: u64,
 }
+
+/// Emit a new syncpoint when the bytes-since-last-syncpoint would exceed
+/// this threshold once the next frame is appended. We pick well below
+/// [`MAX_DISTANCE`] (65536) so even a worst-case oversized header keeps the
+/// distance within spec; ffmpeg's NUT demuxer rejects the file with
+/// `Last frame must have been damaged X > 100 + max_distance` once that
+/// budget is blown.
+const SYNCPOINT_INTERVAL_BYTES: u64 = 32_768;
 
 impl NutWriter {
     /// Create a NUT file at `path` and emit the four mandatory header
@@ -184,6 +196,7 @@ impl NutWriter {
             config,
             bytes_written: 0,
             expected_frame_bytes,
+            last_syncpoint_offset: 0,
         };
         writer.write_headers()?;
         Ok(writer)
@@ -208,6 +221,18 @@ impl NutWriter {
                 expected: self.expected_frame_bytes,
                 actual: rgb_bytes.len(),
             });
+        }
+
+        // Emit a periodic syncpoint before appending the frame so the gap
+        // between consecutive syncpoints stays within the demuxer's reach.
+        // Without this, files containing more than a few frames of >16 KiB
+        // each are rejected as "Last frame must have been damaged".
+        let bytes_since_last = self
+            .bytes_written
+            .saturating_sub(self.last_syncpoint_offset);
+        let projected_frame_bytes = rgb_bytes.len() as u64 + 32;
+        if bytes_since_last.saturating_add(projected_frame_bytes) > SYNCPOINT_INTERVAL_BYTES {
+            self.write_syncpoint(pts)?;
         }
 
         // Frame packets are the *only* NUT packets without a startcode. The
@@ -279,11 +304,31 @@ impl NutWriter {
         let stream_packet = wrap_packet(STREAM_STARTCODE, &stream_payload);
         self.write_all(&stream_packet)?;
 
-        let syncpoint_payload = build_syncpoint_payload();
+        // First syncpoint: global_key_pts = 0, back_ptr_div16 = 0 (no prior
+        // syncpoint to chain back to). Record its on-disk offset so the
+        // periodic re-emit in `write_frame` can chain `back_ptr_div16`.
+        let syncpoint_offset = self.bytes_written;
+        let syncpoint_payload = build_syncpoint_payload(0, 0);
         let syncpoint_packet = wrap_packet(SYNCPOINT_STARTCODE, &syncpoint_payload);
         self.write_all(&syncpoint_packet)?;
+        self.last_syncpoint_offset = syncpoint_offset;
 
         self.flush()?;
+        Ok(())
+    }
+
+    /// Emit a fresh syncpoint with `global_key_pts = pts`. `back_ptr_div16`
+    /// is always 0 — the field is a *seek* hint and the spec requires the
+    /// real distance to be 16-byte-aligned, which we cannot guarantee
+    /// without padding every packet. Setting 0 advertises "no usable back
+    /// chain"; ffmpeg's NUT demuxer falls back to linear scanning, which
+    /// is exactly what the on-demand transcode pass needs.
+    fn write_syncpoint(&mut self, pts: u64) -> Result<(), NutError> {
+        let new_offset = self.bytes_written;
+        let payload = build_syncpoint_payload(pts, 0);
+        let packet = wrap_packet(SYNCPOINT_STARTCODE, &payload);
+        self.write_all(&packet)?;
+        self.last_syncpoint_offset = new_offset;
         Ok(())
     }
 
@@ -374,7 +419,15 @@ fn build_stream_header_payload(config: NutVideoConfig) -> Vec<u8> {
     vencode(&mut payload, MSB_PTS_SHIFT);
     vencode(&mut payload, 1); // max_pts_distance — we always include FLAG_CHECKSUM anyway
     vencode(&mut payload, 0); // decode_delay — no B-frames in raw video
-    vencode(&mut payload, 1); // stream_flags — FLAG_FIXED_FPS (bit 0)
+                              // stream_flags = 0. We deliberately do *not* set FLAG_FIXED_FPS: our
+                              // time_base is microsecond ticks (1/1_000_000), and FLAG_FIXED_FPS would
+                              // tell downstream demuxers the stream runs at exactly 1/time_base fps
+                              // i.e. one million fps. ffmpeg honours that on transcode by inflating the
+                              // output to ~10 million frames per 10 s clip (duplicating every real
+                              // input frame across all 1-µs slots), which makes the encode effectively
+                              // never complete. Real camera capture is variable-rate; an honest VFR
+                              // stream is what we want.
+    vencode(&mut payload, 0); // stream_flags
     vencode(&mut payload, 0); // codec_specific_data length
 
     // Video-class tail.
@@ -390,16 +443,18 @@ fn build_stream_header_payload(config: NutVideoConfig) -> Vec<u8> {
 /// Build the syncpoint payload. One syncpoint near the start is enough for
 /// our short-lived spool files; the spec recommends one per `max_distance`
 /// bytes but does not require it.
-fn build_syncpoint_payload() -> Vec<u8> {
-    let mut payload = Vec::with_capacity(4);
+fn build_syncpoint_payload(global_key_pts: u64, back_ptr_div16: u64) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(8);
 
     // global_key_pts (t): tmp = pts * time_base_count + time_base_id. With
-    // time_base_count = 1 and time_base_id = 0 this is just pts = 0 at the
-    // file's first syncpoint.
-    vencode(&mut payload, 0);
-    // back_ptr_div16 — 0 means "no prior syncpoint", which is the truth
-    // for the only one we emit.
-    vencode(&mut payload, 0);
+    // time_base_count = 1 and time_base_id = 0 this is just the supplied
+    // pts value, which is the PTS of the first frame after this syncpoint.
+    vencode(&mut payload, global_key_pts);
+    // back_ptr_div16 — distance back to the previous syncpoint, in 16-byte
+    // units. The very first syncpoint passes 0 to advertise "no prior
+    // syncpoint"; subsequent ones chain so demuxers can walk the file
+    // backwards when seeking.
+    vencode(&mut payload, back_ptr_div16);
     payload
 }
 

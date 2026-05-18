@@ -34,7 +34,7 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
 TIMESTAMP_MODE_STOCHASTIC = "stochastic"
-STOCHASTIC_JITTER_S = 0.05
+STOCHASTIC_JITTER_S = 0.004  # 120fps is 8.3 ms per frame jitter must be less than half
 # OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
 SCHEDULER_TOLERANCE_S = 0.05
 

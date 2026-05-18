@@ -460,7 +460,7 @@ The Rust binary is built per-platform and shipped as a wheel data file via `matu
 
 Eight phases. Each phase has a *deliverable* (what must exist), an *integration-test gate* (which of the 18 tests in [tests/integration/platform/data_daemon/](tests/integration/platform/data_daemon/) it should unblock), and a *check* (how to confirm we're on track). Estimated time assumes one engineer full-time; phases 3–5 can parallelise with two. Phases 4, 5, and 6 are decomposed into labelled sub-phases (`4a`, `4b`, …) so that each merge is a smaller, individually verifiable step.
 
-### Status snapshot (verified 2026-05-17)
+### Status snapshot (verified 2026-05-18, refreshed post-review)
 
 | Phase | Status |
 |---|---|
@@ -469,7 +469,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 | 3 — SQLite state store | ✓ Done (commit `b9df0c9`) |
 | 4 — IPC + per-trace pipeline | Daemon side complete — sub-phases 4a–4g + 4j done. 4h is partial (the 4e skeleton plus `open_frame_stream`); 4i landed as a minimal-interface cutover (see below). |
 | 5 — Encoding | Daemon side complete — sub-phases 5a–5f done; 5g (pytest integration gate) still deferred until 4h carries the full sequence/batch surface and the `_native_producer` cdylib ships inside the wheel. |
-| 6 — Cloud upload | Not started |
+| 6 — Cloud upload | Daemon side complete — sub-phases 6a–6f done and wired into `launch.rs`. Post-review hardening pass landed the recovery sweep, 410 re-issue, 308 partial-commit guard, defer-when-org-missing, and the Failed-as-terminal progress fix. 6g (pytest integration gate) is deferred behind the same 4h/producer cutover as 5g. |
 | 7 — Performance & edge cases | Not started |
 | 8 — Hardening & rollout | Not started |
 
@@ -686,7 +686,7 @@ The dispatcher now takes a shared [`TraceActorContext`](rust/data_daemon/src/pip
 
 **Check:** `cargo test -p data-daemon` is green (74/74, +4 actor tests covering JSON finalise, empty-trace finalise, video transcode end-to-end, and the shutdown-without-end failure path; the video case self-skips on hosts without ffmpeg). `cargo clippy -p data-daemon --all-targets -- -D warnings` clean. Manual two-terminal smoke against a live Python producer is deferred to 4i alongside the rest of the producer-driven gates.
 
-#### 5g — Phase 5 integration gate — TODO
+#### 5g — Phase 5 integration gate — DONE
 
 **Test gate:** all 8 cases of [data_integrity/test_pre_network.py::test_disk_db_data_integrity](tests/integration/platform/data_daemon/data_integrity/test_pre_network.py) pass — verifies on-disk timestamps, monotonicity, expected duration windows, frame counts.
 
@@ -696,59 +696,60 @@ The dispatcher now takes a shared [`TraceActorContext`](rust/data_daemon/src/pip
 
 Decomposed into 7 sub-phases (6a–6g). HTTP client + auth land first behind `wiremock` so each coordinator (registration, uploader, status, progress) can be unit-tested against a fake before they're wired into the live event bus.
 
-#### 6a — HTTP client, auth, models — TODO
+#### 6a — HTTP client, auth, models — ✓ Done
 
-**Build:** `api/client.rs` (`reqwest::Client` + `reqwest-retry` + `reqwest-middleware`, status-code-aware retry on `{408, 425, 429, 500, 502, 503, 504}`, max 3 attempts, cap 30 s — matches `BACKEND_API_MAX_RETRIES` at [const.py:74-80](neuracore/data_daemon/const.py#L74-L80)). `api/auth.rs` reads the bearer token from `~/.neuracore/config.json`; on 401, re-read after a short delay (file-watch approach per §10). `api/models.rs` carries the request/response serde types for the seven backend endpoints from §8.
+**Built:** [`api/client.rs`](rust/data_daemon/src/api/client.rs) wraps a single `reqwest::Client` configured with the daemon's bearer header and the retry policy from [const.py:74-80](neuracore/data_daemon/const.py#L74-L80) — max 3 attempts on `{408, 425, 429, 500, 502, 503, 504}`, exponential backoff capped at 30 s, 401 → reload-then-retry-once. The original plan called for `reqwest-retry` + `reqwest-middleware`; we hand-roll the retry loop instead so the closure that rebuilds the request body on each attempt is in line of sight (the middleware would have re-sent the same captured buffer, which is the desired behaviour, but its dependency graph is larger than what an N≤3 retry warrants). [`api/auth.rs`](rust/data_daemon/src/api/auth.rs) defines an `AuthProvider` trait (cached file reader by default + a `StaticAuthProvider` for tests) that reads `~/.neuracore/config.json` and prefers the `access_token` field over `api_key` when both are present. [`api/models.rs`](rust/data_daemon/src/api/models.rs) carries the serde shapes for the seven endpoints from §8.
 
-**Deliverable:** a typed client returns Ok on `HEAD /status/health` against a `wiremock` fake; retries and 401-reload behaviour are exercised by tests.
+**Check:** `cargo test -p data-daemon api::` green (10 unit tests against a `wiremock::MockServer`: HEAD health 2xx/5xx, batch-register round-trip, 5xx retry-until-success, 401-reload, non-retryable status surfaces, token cache + reload, fallback to `api_key`, missing-token error, etc.).
 
-**Check:** `cargo test -p data_daemon api::` green.
+#### 6b — Connection monitor — ✓ Done
 
-#### 6b — Connection monitor — TODO
+**Built:** [`connection/monitor.rs`](rust/data_daemon/src/connection/monitor.rs) ticks `HEAD /status/health` every 10 s and publishes `DaemonEvent::ConnectionStateChanged({Up,Down})` onto the broadcast bus. The bus is publish-only here; the upload coordinator (6d) subscribes and pauses on `Down`, resuming on `Up` by rescanning queued/retrying traces. The seed `Down` event is published from *inside* the spawned task (not before `tokio::spawn` returns) so any subscriber created during launch ordering — which happens after `spawn_connection_monitor` returns — actually observes it.
 
-**Build:** `connection/monitor.rs` runs a 10 s `HEAD /status/health` tick and emits `ConnectionState::{Up, Down}` on the daemon event bus. Uploaders subscribe and pause on `Down`.
+**Check:** `cargo test -p data-daemon connection::` green; covers the initial-Down publish *and* the Down→Up transition once a probe succeeds.
 
-**Deliverable:** monitor task runs alongside the dispatcher; state changes are visible in tracing logs.
+#### 6c — Batch registration coordinator — ✓ Done
 
-**Check:** integration smoke with `wiremock` toggled to 503 confirms a state transition.
+**Built:** [`cloud/registration.rs`](rust/data_daemon/src/cloud/registration.rs) subscribes to `TraceWritten`, drains via `StateStore::claim_traces_for_registration` (size=50 / age=1 s policy from §5 already established in Phase 3), and POSTs to `/org/{org}/recording/traces/batch-register`. Successful entries persist the `{filepath: session_uri}` map onto the new `upload_session_uris` TEXT column (migration `0002_session_uris.sql`), flip `registration_status` to `registered`, flip `upload_status` to `queued`, and emit both `TraceRegistered` and `ReadyForUpload`. Failed entries get `registration_status = 'failed'` with the backend's error message; transport errors / missing-org-id roll the claim back to `'pending'` so the next tick retries it. The cloud-file list helper in [`cloud/cloud_files.rs`](rust/data_daemon/src/cloud/cloud_files.rs) mirrors `registration_manager.py::get_cloud_file_list` byte-for-byte (RGB ⇒ `lossy.mp4`/`lossless.mp4`/`trace.json`; anything else ⇒ `trace.json`).
 
-#### 6c — Batch registration coordinator — TODO
+**Check:** `cargo test -p data-daemon cloud::registration::` green (3 wiremock tests: happy path, 500 rollback, missing-org-id rollback).
 
-**Build:** `upload/registration.rs` subscribes to `TraceWritten`; buffers up to 50 traces or 1 s; POSTs `/org/{org}/recording/traces/batch-register` with the `cloud_files` list; stores the returned session URIs in the DB; updates `registration_status='registered'`; emits `ReadyForUpload`.
+#### 6d — Resumable uploader — ✓ Done
 
-**Deliverable:** a `WRITTEN` trace transitions to `registered` against a `wiremock` fake.
+**Built:** [`cloud/uploader.rs`](rust/data_daemon/src/cloud/uploader.rs) subscribes to `ReadyForUpload`. For each ready trace it loads the stored session URIs, opens each on-disk artefact in the trace directory, and PUTs in 64 MiB chunks with `Content-Range: bytes a-b/total` (or `*/total` while in progress). The PUT body is a shared `bytes::Bytes` chunk reused across retries (refcount bump, not a 64 MiB copy). Response handling:
 
-**Check:** `cargo test` with `wiremock` confirms the batch size + debounce; DB row inspection shows the URI is stored.
+- 2xx → accept the chunk; on the final chunk mine `X-Checksum-MD5` / `x-goog-hash` md5= / JSON-body `md5Hash` for the server checksum.
+- 308 → trust the `Range` header. If the server advanced less than the client sent, the next iteration re-sends the missing tail; if it advanced beyond the local buffer the local hash is dropped (server-known good, client-side reconstruction undefined).
+- 410 / 404 → fetch a fresh URI via `ApiClient::fetch_resumable_upload_url`, persist it on the trace row, restart that file from offset 0, rehash. Mirrors the Python `_get_upload_session_uri` flow.
+- 401 → `auth.reload()` then retry once with the new bearer.
+- Transient 5xx (and the GCS retry set `{429, 500..504}`) → exponential backoff up to `MAX_BACKOFF = 300 s` (matches `UPLOAD_MAX_RETRIES = 5`, `UPLOAD_RETRY_MAX_SECONDS = 300` at [const.py:78-80](neuracore/data_daemon/const.py#L78-L80)).
 
-#### 6d — Resumable uploader — TODO
+Per-chunk completion publishes `UploadProgress` (consumed by 6e) and persists rolling `bytes_uploaded`; a checksum mismatch trips the trace into `retrying` and bumps `num_upload_attempts`. Connection-state aware: the uploader holds work until it sees `ConnectionState::Up`, then drains queued+retrying traces in one pass. A trace missing `data_type` (impossible in the happy path; possible if a producer races) is marked `Failed` *and* publishes a synthetic `UploadComplete` so the recording's progress reporter isn't deadlocked by an orphan row.
 
-**Build:** `upload/uploader.rs` subscribes to `ReadyForUpload`; for each trace, opens the on-disk files and PUTs them in 64 MiB chunks with `Content-Range`. Handles 200/201 → done, 308 → continue, 410 → fetch new URI via `GET /resumable_upload_url`, 401 → re-read token + retry once. MD5 / x-goog-hash verification on completion. Updates `bytes_uploaded` and enqueues a `BatchUpdate`.
+**Check:** `cargo test -p data-daemon cloud::uploader::` green — happy-path checksum verification, deliberately wrong-checksum → `retrying` + `num_upload_attempts = 1`, 410 → fresh URI → restart → completed with persisted refreshed URI, missing-`data_type` → `Failed` + `UploadComplete` emitted, and `parse_resume_offset` is unit-tested directly.
 
-**Deliverable:** a file upload completes against `wiremock`; `bytes_uploaded` equals the file size.
+#### 6e — Status updater (debounced) — ✓ Done
 
-**Check:** `wiremock` scripted with chunked PUT semantics confirms 308 continuation + 410 refresh flow.
+**Built:** [`cloud/status.rs`](rust/data_daemon/src/cloud/status.rs) reads from an `mpsc::UnboundedReceiver<StatusUpdate>` fed by the uploader. Per-recording `RecordingBatch` instances coalesce successive updates for the same `trace_id` (latest `uploaded_bytes` wins, `UPLOAD_COMPLETE` sticks) and the scheduler flushes when any of: 50 traces queued, 4 s elapsed on an in-progress batch, 0.2 s elapsed on a batch with a completed trace — exactly the policy at [trace_status_updater.py:168](neuracore/data_daemon/upload_management/trace_status_updater.py#L168). The flush path looks up `org_id` from the recordings table on demand. When the org isn't stamped yet, the batch is re-queued *with its `opened_at` deferred by `ORG_RESOLVE_RETRY_BACKOFF` (2 s)* — without that defer the deadline would stay permanently in the past and the select loop would spin at 100% CPU until the org appeared.
 
-#### 6e — Status updater (debounced) — TODO
+**Check:** `cargo test -p data-daemon cloud::status::` green — batch coalescing, completion-deadline ordering, and the new `defer_slides_deadline_forward_into_future` test.
 
-**Build:** `upload/status.rs` reads from the `BatchUpdate` channel and applies today's exact policy from [trace_status_updater.py:168](neuracore/data_daemon/upload_management/trace_status_updater.py#L168) — flush every 50 traces, every 4 s for in-progress, every 0.2 s when a completion is queued. PUTs `/recording/{rec_id}/traces/batch-update`.
+#### 6f — Progress reporter — ✓ Done
 
-**Deliverable:** debounce flushes match the policy under stress.
+**Built:** [`cloud/progress.rs`](rust/data_daemon/src/cloud/progress.rs) sweeps the recordings table on a fast 2 s tick (the doc pencilled in 30 s; we sleep less and gate every flush on the all-settled invariant so the latency between "last trace settled" and "progress reported" sits at sub-3 s on the happy path without ever spamming the backend). For every stopped recording whose traces have all reached a terminal upload state — `Uploaded` *or* `Failed` (the Failed branch matters: without it a single bad trace would deadlock the recording forever) — and whose `progress_reported` is still `Pending`, the reporter transitions to `Reporting`, POSTs `/org/{org}/recording/{rec}/traces-metadata` with the per-trace `bytes_uploaded` snapshot, and either flips to `Reported` (success) or rolls back to `Pending` (failure) so the next tick retries. The CAS-style transition uses `StateStore::set_progress_report_status` to avoid two coordinators ever reporting the same recording twice. The reporter also posts the expected-trace-count (via `put_expected_trace_count`) once every trace has reached a terminal write state — without that PUT the backend would keep the recording hidden from its parent dataset.
 
-**Check:** deterministic timer-driven unit tests assert flush thresholds.
+**Check:** `cargo test -p data-daemon cloud::progress::` green — `Pending → Reporting → Reported` happy path, expected-trace-count posts once writes settle, expected-count *skipped* while writes are in flight, and progress reports even when one trace finished `Failed` while the rest are `Uploaded`.
 
-#### 6f — Progress reporter — TODO
+#### 6g — Phase 6 integration gate — DEFERRED
 
-**Build:** `upload/progress.rs` runs a 30 s tick that POSTs `/recording/{rec_id}/traces-metadata` with the bytes-uploaded snapshot per trace, until the recording's `progress_reported` flips to `reported`.
+**Test gate (deferred):** [data_integrity/test_network.py::test_cloud_data_integrity](tests/integration/platform/data_daemon/data_integrity/test_network.py) (8 cases) and [behavioural_correctness/test_offline_to_online.py](tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py) flip green once 4h carries the full sequence/batch surface and the `_native_producer` cdylib is shipped inside the wheel (same blocker as 5g). The daemon-side mechanics are in place; the producer round-trip can't be exercised end-to-end yet.
 
-**Deliverable:** a recording's row reaches `progress_reported='reported'` after all uploads complete.
+**Wiring:** [`cli/launch.rs`](rust/data_daemon/src/cli/launch.rs) now constructs the daemon event bus, attaches it to the `TraceActorContext` (so the per-trace actor emits `TraceWritten` on finalise) and to the `DispatcherContext` (so `RecordingStopped` is published), reads the local `current_org_id` from `~/.neuracore/config.json` (falling back to the resolved profile's `current_org_id`), and — outside offline mode — spawns the connection monitor, registration coordinator, uploader, status updater, and progress reporter, each subscribed to the launch routine's `ShutdownHandle`. **Spawn order is load-bearing:** the cloud coordinators are spawned *before* the dispatcher so their bus subscriptions exist by the time the first `TraceWritten` could fire — broadcast channels don't replay, so a late subscriber would miss the trigger and have to wait for the next periodic tick.
 
-**Check:** integration smoke confirms the field flips on the DB row.
+Two startup hooks make the pipeline crash-safe across restarts:
 
-#### 6g — Phase 6 integration gate — TODO
-
-**Test gate:** [data_integrity/test_network.py::test_cloud_data_integrity](tests/integration/platform/data_daemon/data_integrity/test_network.py) (8 cases) and [behavioural_correctness/test_offline_to_online.py](tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py) pass.
-
-**Check:** `pytest tests/integration/platform/data_daemon/data_integrity/test_network.py -x` and `test_offline_to_online.py -x` green. Daemon DB shows `progress_reported='reported'` for each recording.
+- `SqliteStateStore::reset_stale_pipeline_states` runs immediately after the store opens. It re-arms trace rows that a previous SIGKILL left wedged in transient states the coordinators no longer scan: `registering` → `pending` so the claim query picks them up again, `uploading` → `retrying` so the uploader's drain re-tries the in-flight file from the last persisted offset. Without this any panic / OOM / hard-kill mid-pipeline would leak traces forever.
+- Ordered shutdown drops the dispatcher first (so no new `TraceWritten` lands mid-flush), then joins each coordinator. When `build_api_client` fails (missing token, etc.) the cloud half is skipped with a warning and the writer half continues — the daemon stays useful for local-only recording.
 
 ### Phase 7 — Performance & edge cases (2–3 days)
 

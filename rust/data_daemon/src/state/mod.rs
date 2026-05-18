@@ -18,7 +18,7 @@ pub mod schema;
 pub mod store;
 
 #[allow(unused_imports)]
-pub use events::{DaemonEvent, EventBus};
+pub use events::{ConnectionState, DaemonEvent, EventBus};
 #[allow(unused_imports)]
 pub use schema::{
     ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,

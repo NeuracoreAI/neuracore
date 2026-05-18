@@ -12,7 +12,6 @@ lifecycle calls into the matching ``StartRecording`` / ``StartTrace`` /
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
@@ -231,11 +230,16 @@ class NativeProducerChannel:
 
         The legacy producer sends a single ``BATCHED_JOINT_DATA`` zmq message
         and the Python daemon's data-bridge splits it per item. iceoryx2's
-        commands service has no equivalent fan-out, so the shim mirrors the
-        bridge inline: per item, publish a ``Frame`` envelope addressed to
-        that item's ``trace_id`` carrying ``{"timestamp": ..., "value": ...}``
-        — matching the on-disk JSON the legacy daemon wrote
+        commands service has no equivalent fan-out, so the publish happens
+        inside a single PyO3 call (``send_batched_joint_data`` in the
+        native producer crate): one envelope per item, addressed to that
+        item's ``trace_id`` and carrying
+        ``{"timestamp": ..., "value": ...}`` JSON — matching the on-disk
+        format the legacy daemon wrote
         ([data_bridge.py:508](neuracore/data_daemon/communications_management/consumer/data_bridge.py#L508)).
+        Doing the JSON formatting and the iceoryx2 loan/send loop in Rust
+        cuts the 10× PyO3 boundary crossings and 10× CPython ``json.dumps``
+        the per-item Python loop used to pay for each call at 1 kHz.
         """
         if not payload.items:
             return
@@ -247,12 +251,11 @@ class NativeProducerChannel:
         )
         native = _load_native()
         timestamp_ns = int(payload.timestamp * 1_000_000_000)
-        for item in payload.items:
-            entry = json.dumps(
-                {"timestamp": payload.timestamp, "value": item.value},
-                separators=(",", ":"),
-            ).encode("utf-8")
-            native.send_data(item.trace_id, entry, timestamp_ns, payload.timestamp)
+        native.send_batched_joint_data(
+            [(item.trace_id, item.value) for item in payload.items],
+            timestamp_ns,
+            payload.timestamp,
+        )
 
     def get_last_accepted_sequence_number(self) -> int:
         """Return 0; the Rust daemon does not expose sequence numbers."""

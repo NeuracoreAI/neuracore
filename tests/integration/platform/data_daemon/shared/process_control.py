@@ -179,7 +179,13 @@ def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
 
 
 def get_runner_pids() -> set[int]:
-    """Return the PIDs of all running neuracore data-daemon runner processes."""
+    """Return the PIDs of all running neuracore data-daemon runner processes.
+
+    Matches either the Python runner entry point
+    (``neuracore.data_daemon.runner_entry``) or the bundled Rust binary
+    (``neuracore/data_daemon/bin/data-daemon``) — the latter is what runs
+    when ``NCD_RUST_DAEMON=1`` and the wheel includes the compiled binary.
+    """
     env = {**os.environ, "COLUMNS": "32768"}
     output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, env=env)
     runner_pids: set[int] = set()
@@ -188,7 +194,10 @@ def get_runner_pids() -> set[int]:
         if len(parts) != 2:
             continue
         pid_text, args = parts
-        if "neuracore.data_daemon.runner_entry" in args:
+        if (
+            "neuracore.data_daemon.runner_entry" in args
+            or "neuracore/data_daemon/bin/data-daemon" in args
+        ):
             runner_pids.add(int(pid_text))
     return runner_pids
 
