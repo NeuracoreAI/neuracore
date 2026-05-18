@@ -9,6 +9,14 @@ This contains examples for using Neuracore with simulated robot environments. We
 
 **NOTE:** You will need Git LFS to run examples.
 
+**Halid Note**: we need to tell user where it should run the follow commands. Also add a comment to install `Git LFS` like below
+
+```bash
+sudo apt update
+sudo apt install git-lfs -y
+git lfs install
+```
+
 ```bash
 conda create -n neuracore_examples python=3.10
 conda activate neuracore_examples
@@ -35,6 +43,8 @@ The data collection example demonstrates how to:
 - Save demonstrations for future use
 
 **NOTE:** You might need to set the `MUJOCO_GL` environment to `egl` using `export MUJOCO_GL=egl` if your RGB Camera Feed visualizations are glitchy on the Robot Data Visualiser Console.
+
+**Halid TODO**: we need to explain why to do the above for the users.
 
 1. Run the ALOHA example and record the demos:
 ```bash
