@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import signal
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import FrameType
 from typing import cast
@@ -19,9 +21,60 @@ from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_pat
 
 # cspell:ignore WNOHANG waitpid
 
+logger = logging.getLogger(__name__)
+
+# /proc and other Linux-only primitives are skipped on non-Linux platforms.
+# Callers should not rely on Linux-only semantics; helpers degrade gracefully.
+_IS_LINUX = sys.platform.startswith("linux")
+
 
 class DaemonLifecycleError(RuntimeError):
     """Raised when daemon lifecycle checks fail."""
+
+
+def get_daemon_log_path() -> Path:
+    """Return the path for the background daemon's combined stdout/stderr log."""
+    return Path(
+        os.environ.get(
+            "NEURACORE_DAEMON_LOG_PATH",
+            str(Path.home() / ".neuracore" / "logs" / "daemon.log"),
+        )
+    )
+
+
+def open_daemon_log_stream() -> tuple[int, Path] | tuple[None, None]:
+    """Open (or rotate) the daemon log file and return (fd, path).
+
+    The returned file descriptor is owned by the caller and must be closed
+    after passing it to subprocess.Popen. Returns (None, None) when the
+    log destination cannot be created (caller falls back to DEVNULL).
+    """
+    log_path = get_daemon_log_path()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        # Rotate manually on each daemon launch so each spawn starts a fresh
+        # file but the previous N runs are preserved for post-mortem.
+        if log_path.exists() and log_path.stat().st_size > 0:
+            handler = RotatingFileHandler(
+                str(log_path), maxBytes=1, backupCount=5
+            )
+            try:
+                handler.doRollover()
+            finally:
+                handler.close()
+        fd = os.open(
+            log_path,
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
+            0o644,
+        )
+        return fd, log_path
+    except OSError as error:
+        logger.warning(
+            "Failed to open daemon log file %s: %s; falling back to DEVNULL",
+            log_path,
+            error,
+        )
+        return None, None
 
 
 def read_pid_from_file(pid_path: Path) -> int | None:
@@ -43,13 +96,27 @@ def read_pid_from_file(pid_path: Path) -> int | None:
 
 
 def _is_zombie(pid_value: int) -> bool:
-    """Return True if pid_value is a zombie process (Linux /proc only)."""
+    """Return True if pid_value is a zombie process.
+
+    Linux uses /proc/<pid>/stat. macOS/BSD have no /proc filesystem, so we
+    fall back to a non-blocking waitpid for our own children; for foreign
+    PIDs we simply report False (best-effort, matches pre-existing behavior).
+    """
+    if _IS_LINUX:
+        try:
+            stat = Path(f"/proc/{pid_value}/stat").read_text(encoding="utf-8")
+            # State is field 3, after the comm field enclosed in parens.
+            state = stat.split(")")[1].split()[0]
+            return state == "Z"
+        except OSError:
+            return False
+
+    # Non-Linux fallback: a zombie child of *this* process will be reaped
+    # by waitpid(WNOHANG); for unrelated PIDs we cannot detect zombie state.
     try:
-        stat = Path(f"/proc/{pid_value}/stat").read_text(encoding="utf-8")
-        # State is field 3, after the comm field enclosed in parens.
-        state = stat.split(")")[1].split()[0]
-        return state == "Z"
-    except OSError:
+        reaped_pid, _ = os.waitpid(pid_value, os.WNOHANG)
+        return reaped_pid != 0
+    except (ChildProcessError, OSError):
         return False
 
 
@@ -73,6 +140,38 @@ def pid_is_running(pid_value: int) -> bool:
     except PermissionError:
         return True
     return not _is_zombie(pid_value)
+
+
+def management_socket_is_alive(socket_path: Path = SOCKET_PATH) -> bool:
+    """Return True when *something* is listening on the management socket.
+
+    A bare file at the path means nothing — leftover sockets from crashed
+    daemons routinely accumulate. We actively try to connect: that is the
+    only reliable signal that a second daemon would race with an existing
+    one over /tmp/ndd/management.sock.
+    """
+    import socket as _socket
+
+    if not socket_path.exists():
+        return False
+
+    probe = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    probe.settimeout(0.25)
+    try:
+        probe.connect(str(socket_path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return False
+    except OSError:
+        # E.g. PermissionError, timeout — assume something is there and
+        # let the caller surface a clear error rather than racing.
+        return True
+    else:
+        return True
+    finally:
+        try:
+            probe.close()
+        except OSError:
+            pass
 
 
 def cleanup_stale_client_state(
@@ -149,16 +248,31 @@ def _start_daemon_subprocess(
 
     try:
         if background:
-            return subprocess.Popen(
-                _build_daemon_runner_command(),
-                close_fds=True,
-                cwd=current_working_directory,
-                env=environment,
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-            )
+            # Background daemons must not silently discard stderr — auth/SSL/
+            # upload failures need to land somewhere a user can find them.
+            log_fd, log_path = open_daemon_log_stream()
+            try:
+                stdout_target = log_fd if log_fd is not None else subprocess.DEVNULL
+                # stderr is still piped during startup so launch_daemon_subprocess
+                # can capture an immediate-exit error; once startup completes the
+                # daemon's own logging handlers (configured to the same log file
+                # via NEURACORE_DAEMON_LOG_PATH) keep writing.
+                if log_path is not None:
+                    environment["NEURACORE_DAEMON_LOG_PATH"] = str(log_path)
+                process = subprocess.Popen(
+                    _build_daemon_runner_command(),
+                    close_fds=True,
+                    cwd=current_working_directory,
+                    env=environment,
+                    start_new_session=True,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_target,
+                    stderr=subprocess.PIPE,
+                )
+            finally:
+                if log_fd is not None:
+                    os.close(log_fd)
+            return process
 
         return subprocess.Popen(
             _build_daemon_runner_command(),
@@ -240,6 +354,12 @@ def launch_new_daemon_subprocess(
         if existing_pid is not None and pid_is_running(existing_pid):
             raise DaemonLifecycleError(f"Daemon already running (pid={existing_pid})")
 
+        if management_socket_is_alive():
+            raise DaemonLifecycleError(
+                f"A daemon already owns {SOCKET_PATH} (no pid file present). "
+                "Stop that daemon before launching a new one."
+            )
+
         cleanup_stale_client_state(
             pid_path=pid_path,
             db_path=db_path,
@@ -274,6 +394,20 @@ def ensure_daemon_running(
         existing_pid = read_pid_from_file(pid_path)
         if existing_pid is not None and pid_is_running(existing_pid):
             return existing_pid
+
+        # Defend against the MANAGE_PID=0 race: a manually-launched daemon
+        # may be holding the management socket without owning daemon.pid.
+        # Spawning a second daemon in that state causes both to fight over
+        # /tmp/ndd/management.sock and the client to use whichever bound
+        # second. If something is already serving the socket, adopt it
+        # instead of starting another one.
+        if management_socket_is_alive():
+            raise DaemonLifecycleError(
+                f"A daemon already owns {SOCKET_PATH} but no pid file is "
+                "present (likely launched with NEURACORE_DAEMON_MANAGE_PID=0). "
+                "Stop that daemon first or set NEURACORE_DAEMON_MANAGE_PID=1 "
+                "so its lifecycle is tracked."
+            )
 
         cleanup_stale_client_state(
             pid_path=pid_path,

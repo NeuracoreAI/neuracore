@@ -83,6 +83,17 @@ class StateStore(Protocol):
         """Reset in-flight REPORTING rows to PENDING and return affected count."""
         ...
 
+    async def set_recording_last_error(
+        self, recording_id: str, error_message: str
+    ) -> None:
+        """Persist a recording-wide error so it surfaces in state queries.
+
+        Recordings whose progress reports / uploads silently fail used to
+        sit at progress_reported='pending' forever with no visible reason.
+        Writing the error here gives operators a single field to inspect.
+        """
+        ...
+
     async def recording_has_reported_progress(self, recording_id: str) -> bool:
         """Return True when recording progress status is REPORTED."""
         ...

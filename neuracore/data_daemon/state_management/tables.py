@@ -44,6 +44,13 @@ recordings = Table(
         default=ProgressReportStatus.PENDING,
     ),
     Column("stopped_at", DateTime(timezone=False), nullable=True, default=None),
+    # Recording-level error surface. Populated when a recording-wide failure
+    # (e.g. progress-report HTTP failure, auth/SSL outage, org mismatch)
+    # blocks the recording from completing even though individual traces may
+    # not exist yet. Previously such recordings sat in progress_reported=
+    # 'pending' indefinitely with no surfaced reason.
+    Column("last_error", Text, nullable=True, default=None),
+    Column("last_error_at", DateTime(timezone=False), nullable=True, default=None),
     Column(
         "created_at",
         DateTime(timezone=False),

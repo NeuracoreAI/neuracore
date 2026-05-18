@@ -89,7 +89,12 @@ class SharedSlotDaemonHandler:
         if channel.shared_slot.shm_name is not None:
             self._cleanup_previous_shared_slots(channel, request.control_endpoint)
 
-        shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
+        # macOS POSIX shm_open names are capped at PSHMNAMLEN (31 chars
+        # including the leading '/'). Linux tolerates ~255. Use a short
+        # prefix + truncated uuid that fits both: "ncs-" (4) + 16 hex
+        # chars + '/' = 21 chars total. 16 hex bits of entropy is plenty
+        # for the live-allocation set we ever hold at once.
+        shm_name = f"ncs-{uuid.uuid4().hex[:16]}"
 
         reservation = None
         shm: SharedMemory | None = None

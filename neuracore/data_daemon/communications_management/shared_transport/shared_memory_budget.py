@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import sys
 import threading
 from dataclasses import dataclass, field
 
@@ -12,6 +13,16 @@ from neuracore.data_daemon.communications_management.shared_transport.models imp
 logger = logging.getLogger(__name__)
 
 BYTES_PER_MIB = 1024**2
+
+
+def _default_shm_path() -> str:
+    """Pick the right disk path for shared-memory budget estimation.
+
+    /dev/shm only exists on Linux. macOS routes POSIX shm through
+    shm_open() with no user-visible directory; /tmp is the best
+    available proxy for capacity bookkeeping there.
+    """
+    return "/dev/shm" if sys.platform.startswith("linux") else "/tmp"
 
 
 @dataclass(frozen=True)
@@ -42,11 +53,16 @@ class SharedMemoryBudget:
 
     def __init__(
         self,
-        shm_path: str = "/dev/shm",
+        shm_path: str | None = None,
         budget_fraction: float = 0.75,
     ) -> None:
-        """Initialize budget state for future shared-memory reservations."""
-        self._shm_path = shm_path
+        """Initialize budget state for future shared-memory reservations.
+
+        `shm_path` defaults to /dev/shm on Linux and /tmp on macOS/BSD,
+        so the same code path works regardless of where the OS keeps
+        POSIX shared-memory segments.
+        """
+        self._shm_path = shm_path if shm_path is not None else _default_shm_path()
         self._budget_fraction = budget_fraction
         self._lock = threading.Lock()
         self._reserved_bytes = 0
@@ -60,8 +76,15 @@ class SharedMemoryBudget:
         requested_slot_count: int,
     ) -> SharedSlotReservation:
         """Reserve shared-memory capacity for a fixed-slot segment."""
-        usage = shutil.disk_usage(self._shm_path)
-        total_budget = int(usage.total * self._budget_fraction)
+        try:
+            usage = shutil.disk_usage(self._shm_path)
+            total_budget = int(usage.total * self._budget_fraction)
+        except FileNotFoundError:
+            # macOS without /dev/shm and without /tmp (extremely rare) —
+            # fall back to a generous fixed budget so allocations are
+            # bounded by the OS itself rather than this preflight check.
+            usage = None
+            total_budget = int(8 * 1024 * BYTES_PER_MIB * self._budget_fraction)
 
         with self._lock:
             remaining_budget = total_budget - self._reserved_bytes
@@ -95,6 +118,7 @@ class SharedMemoryBudget:
 
             reserved_bytes = self._reserved_bytes
 
+        shm_total_mib = (usage.total / BYTES_PER_MIB) if usage is not None else -1.0
         logger.debug(
             "Reserved shared-memory budget shm_name=%s slot_size=%.2fMiB "
             "requested_slot_count=%d actual_slot_count=%d allocated=%.2fMiB "
@@ -106,7 +130,7 @@ class SharedMemoryBudget:
             allocated_bytes / BYTES_PER_MIB,
             reserved_bytes / BYTES_PER_MIB,
             total_budget / BYTES_PER_MIB,
-            usage.total / BYTES_PER_MIB,
+            shm_total_mib,
         )
 
         return SharedSlotReservation(

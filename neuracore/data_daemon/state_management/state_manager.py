@@ -563,6 +563,16 @@ class StateManager:
                 recording_id,
                 last_error or "unknown error",
             )
+            try:
+                await self._store.set_recording_last_error(
+                    recording_id,
+                    f"expected-trace-count: {last_error or 'unknown error'}",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to persist expected-trace-count error for %s",
+                    recording_id,
+                )
             return False
         finally:
             self.expected_trace_count_reporting.pop(recording_id, None)
@@ -744,7 +754,10 @@ class StateManager:
     ) -> None:
         """Handle a progress report error event from an uploader.
 
-        Record an error for each trace associated with the recording.
+        Record an error for each trace associated with the recording AND
+        on the recording row itself, so recordings without per-trace rows
+        still surface a reason instead of accumulating silently with
+        progress_reported='pending'.
 
         Args:
             recording_id (str): Unique identifier for the recording.
@@ -757,6 +770,12 @@ class StateManager:
             recording_id,
             error_message,
         )
+        try:
+            await self._store.set_recording_last_error(recording_id, error_message)
+        except Exception:
+            logger.exception(
+                "Failed to persist recording-level error for %s", recording_id
+            )
         traces = await self._store.find_traces_by_recording_id(recording_id)
         if not traces:
             return

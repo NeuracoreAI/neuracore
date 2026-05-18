@@ -29,7 +29,11 @@ from neuracore.data_daemon.const import (
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
-from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
+from neuracore.data_daemon.lifecycle.daemon_os_control import (
+    DaemonLifecycleError,
+    acquire_pid_file,
+    management_socket_is_alive,
+)
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     cleanup_socket_files,
     cleanup_stale_shared_memory_buffers,
@@ -86,6 +90,18 @@ class DaemonRuntime:
     def _prepare_runtime_state(self, config: DaemonConfig) -> Path:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
+
+        # Even with MANAGE_PID=0 (the documented "embed-in-runner" mode),
+        # refuse to clobber a peer daemon that is actively serving the
+        # management socket. Without this, two daemons happily race for
+        # /tmp/ndd/management.sock and the client silently talks to
+        # whichever bound second.
+        for socket_path in self._socket_paths:
+            if management_socket_is_alive(socket_path):
+                raise DaemonLifecycleError(
+                    f"Another daemon is already listening on {socket_path}; "
+                    "refusing to start a second instance."
+                )
 
         cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
         if cleaned_shared_buffers:

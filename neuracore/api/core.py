@@ -146,15 +146,21 @@ def connect_robot(
     and initializes streaming managers for live data and recording state updates.
     The robot becomes the active robot for subsequent operations.
 
-    Upload of a robot description file (URDF or MJCF) is not required,
-    but it is recommended for better visualization within Neuracore.
+    A robot description file (URDF or MJCF) is required for recordings to
+    play back on the Neuracore dashboard. The SDK does not enforce this at
+    `connect_robot` time — uploads will still succeed without one — but the
+    dashboard refuses to render any recording whose robot has no description
+    file ("urdf not found/provided"). Pass `urdf_path` or `mjcf_path` here,
+    or upload one later, before relying on dashboard playback.
 
     Args:
         robot_name: Unique identifier for the robot.
         instance: Instance number of the robot for multi-instance deployments.
-        urdf_path: Path to the robot's URDF file.
+        urdf_path: Path to the robot's URDF file. Required for dashboard
+            playback (see note above).
         mjcf_path: Path to the robot's MJCF file. This will be converted
-            into URDF.
+            into URDF. Required for dashboard playback (see note above) if
+            no `urdf_path` is provided.
         overwrite: Whether to overwrite an existing robot configuration
             with the same name.
         shared: Whether you want to register the robot as shared/open-source.
@@ -290,7 +296,10 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
 
 
 def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
+    robot_name: str | None = None,
+    instance: int = 0,
+    wait: bool = False,
+    timeout: float | None = 300.0,
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -303,9 +312,20 @@ def stop_recording(
         instance: Instance number of the robot for multi-instance scenarios.
         wait: Whether to block until all data streams have finished uploading
             to the backend storage.
+        timeout: Maximum number of seconds to wait when `wait=True`. Pass
+            ``None`` to wait indefinitely (matches pre-existing behavior).
+            Defaults to 5 minutes — long enough for typical uploads but
+            short enough that a recording that never registers traces
+            surfaces a TimeoutError instead of hanging the calling script.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
+        TimeoutError: If `wait=True` and traces do not register/drain within
+            `timeout` seconds.
+        backend_utils.RecordingNotFoundError: If `wait=True` and the backend
+            has no record of the recording (org mismatch, deletion, or the
+            recording was never registered server-side). Previously this was
+            indistinguishable from a successful drain.
     """
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
@@ -322,15 +342,124 @@ def stop_recording(
     if not wait:
         return
 
-    # TODO: We need to instead check that the specific recording is complete
+    deadline = None if timeout is None else time.monotonic() + float(timeout)
+    poll_interval_s = 0.2
     is_traces_registered = False
+
     while True:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
+        try:
+            data_traces = backend_utils.get_active_data_traces(recording_id)
+        except backend_utils.RecordingNotFoundError:
+            # Distinguish "recording vanished" from "drained successfully".
+            # Previously this collapsed into the same empty-list signal and
+            # silently terminated the wait loop (or hung forever before any
+            # traces registered, depending on ordering).
+            raise
+
         if len(data_traces) > 0:
             is_traces_registered = True
-        elif len(data_traces) == 0 and is_traces_registered:
-            break
-        time.sleep(0.2)
+        elif is_traces_registered:
+            return
+
+        if deadline is not None and time.monotonic() >= deadline:
+            state = "registering" if not is_traces_registered else "draining"
+            raise TimeoutError(
+                f"stop_recording timed out after {timeout:.1f}s while "
+                f"{state} traces for recording {recording_id!r}. The daemon "
+                "may have failed to register or upload traces; see "
+                "~/.neuracore/logs/daemon.log for details."
+            )
+        time.sleep(poll_interval_s)
+
+
+def get_recording_processing_status(recording_id: str) -> dict:
+    """Return the backend's view of a recording's processing state.
+
+    Lets callers ask "is this recording actually viewable on the dashboard?"
+    `stop_recording(wait=True)` only blocks until the upload pipeline reports
+    `progress_reported='reported'`; the server then runs an additional
+    processing/transcoding step before the video can play. Without this
+    helper the only signal of post-upload failure is a perpetually-loading
+    dashboard.
+
+    Args:
+        recording_id: Unique identifier for the recording.
+
+    Returns:
+        Backend response dict; commonly includes `status`, `processing_status`,
+        `viewable`, and `urdf_present` fields.
+
+    Raises:
+        backend_utils.RecordingNotFoundError: If the backend has no record.
+    """
+    return backend_utils.get_recording_processing_status(recording_id)
+
+
+def wait_until_recording_viewable(
+    recording_id: str,
+    timeout: float = 600.0,
+    poll_interval: float = 2.0,
+) -> dict:
+    """Block until the backend reports the recording is fully processed.
+
+    Polls `get_recording_processing_status` until the backend signals
+    viewability. The first of the following conditions to evaluate truthy
+    is treated as success:
+
+    * `viewable` field is True
+    * `processing_status` is one of {"processed", "ready", "complete"}
+    * `status` is one of {"processed", "ready", "complete"}
+
+    If the backend does not surface any of these fields the call falls back
+    to polling for a stable response for two consecutive ticks, then returns
+    the latest payload — better than the indistinguishable "is this done?"
+    state the SDK had before.
+
+    Args:
+        recording_id: Unique identifier for the recording.
+        timeout: Maximum seconds to wait.
+        poll_interval: Seconds between polls.
+
+    Returns:
+        The final processing-status dict returned by the backend.
+
+    Raises:
+        TimeoutError: If the recording is not viewable within `timeout`.
+        backend_utils.RecordingNotFoundError: If the recording is not found.
+    """
+    viewable_states = {"processed", "ready", "complete"}
+    deadline = time.monotonic() + float(timeout)
+    last_payload: dict = {}
+    stable_ticks = 0
+
+    while True:
+        payload = backend_utils.get_recording_processing_status(recording_id)
+
+        if payload.get("viewable") is True:
+            return payload
+        status_fields = (
+            str(payload.get("processing_status") or "").lower(),
+            str(payload.get("status") or "").lower(),
+        )
+        if any(value in viewable_states for value in status_fields if value):
+            return payload
+
+        if payload == last_payload:
+            stable_ticks += 1
+            if stable_ticks >= 2 and any(payload.get(k) for k in (
+                "uploaded_trace_count", "trace_count", "viewable", "status"
+            )):
+                return payload
+        else:
+            stable_ticks = 0
+            last_payload = payload
+
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Recording {recording_id!r} not viewable within "
+                f"{timeout:.0f}s. Last status: {payload}"
+            )
+        time.sleep(poll_interval)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:

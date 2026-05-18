@@ -100,6 +100,7 @@ class SqliteStateStore(StateStore):
             await conn.run_sync(metadata.create_all)
             await self._ensure_recordings_trace_count_col(conn)
             await self._ensure_recordings_org_id_col(conn)
+            await self._ensure_recordings_last_error_cols(conn)
 
     async def _table_exists(self, conn: AsyncConnection, table_name: str) -> bool:
         """Return True when a SQLite table exists."""
@@ -388,6 +389,24 @@ class SqliteStateStore(StateStore):
             return
         logger.info("Adding missing recordings.org_id column")
         await conn.execute(text("ALTER TABLE recordings " "ADD COLUMN org_id TEXT"))
+
+    async def _ensure_recordings_last_error_cols(
+        self, conn: AsyncConnection
+    ) -> None:
+        """Add recordings.last_error / last_error_at for pre-column databases."""
+        if not await self._table_exists(conn, "recordings"):
+            return
+        recording_columns = await self._table_column_names(conn, "recordings")
+        if "last_error" not in recording_columns:
+            logger.info("Adding missing recordings.last_error column")
+            await conn.execute(
+                text("ALTER TABLE recordings ADD COLUMN last_error TEXT")
+            )
+        if "last_error_at" not in recording_columns:
+            logger.info("Adding missing recordings.last_error_at column")
+            await conn.execute(
+                text("ALTER TABLE recordings ADD COLUMN last_error_at DATETIME")
+            )
 
     @staticmethod
     def _recording_row_insert_query(recording_id: str, now: datetime) -> Any:
@@ -725,6 +744,29 @@ class SqliteStateStore(StateStore):
                 .where(recordings.c.org_id.is_(None))
                 .values(
                     org_id=org_id,
+                    last_updated=now,
+                )
+            )
+
+    async def set_recording_last_error(
+        self, recording_id: str, error_message: str
+    ) -> None:
+        """Persist a recording-wide error message and bump last_updated."""
+        now = _utc_now()
+        await self._ensure_recording_row(recording_id)
+        # Truncate to a sensible upper bound to keep the DB row small.
+        truncated = (
+            error_message
+            if len(error_message) <= 2048
+            else error_message[:2048] + "...[truncated]"
+        )
+        async with self._write_lock() as conn:
+            await conn.execute(
+                update(recordings)
+                .where(recordings.c.recording_id == recording_id)
+                .values(
+                    last_error=truncated,
+                    last_error_at=now,
                     last_updated=now,
                 )
             )

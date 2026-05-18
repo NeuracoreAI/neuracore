@@ -28,6 +28,11 @@ class ConfigManager:
     def __init__(self) -> None:
         """Initialise the config manager."""
         self._config: Config | None = None
+        # Track the source file's mtime so a long-lived process (e.g. the
+        # data daemon) picks up `nc login` / `nc set-org` changes without
+        # being restarted. Caching the parsed Config forever was the
+        # mechanism that let recordings get silently routed to a stale org.
+        self._loaded_mtime_ns: int | None = None
 
     @property
     def config(self) -> Config:
@@ -35,22 +40,38 @@ class ConfigManager:
 
         Attempts to load previously saved API key from the user's home
         directory configuration file. Provides a default config if not found.
+        The on-disk file is re-read whenever its mtime changes, so updates
+        made by other processes (CLI re-login, org switch) are visible to
+        already-running services such as the data daemon.
 
         Raises:
             ConfigError: If there is an error trying to access the saved config.
         """
-        if self._config:
+        config_file = CONFIG_DIR / CONFIG_FILE
+
+        if not config_file.exists():
+            if self._config is None or self._loaded_mtime_ns is not None:
+                self._config = Config()
+                self._loaded_mtime_ns = None
             return self._config
 
-        config_file = CONFIG_DIR / CONFIG_FILE
-        if not config_file.exists():
-            self._config = Config()
+        try:
+            current_mtime_ns = config_file.stat().st_mtime_ns
+        except OSError:
+            current_mtime_ns = None
+
+        if (
+            self._config is not None
+            and current_mtime_ns is not None
+            and current_mtime_ns == self._loaded_mtime_ns
+        ):
             return self._config
 
         try:
             with open(config_file, encoding=CONFIG_ENCODING) as f:
                 self._config = Config.model_validate_json(f.read())
-                return self._config
+            self._loaded_mtime_ns = current_mtime_ns
+            return self._config
         except ValidationError:
             raise ConfigError("Error loading config: invalid structure")
         except PermissionError:
@@ -92,6 +113,10 @@ class ConfigManager:
         try:
             with open(config_file, "w", encoding=CONFIG_ENCODING) as f:
                 f.write(self._config.model_dump_json())
+            try:
+                self._loaded_mtime_ns = config_file.stat().st_mtime_ns
+            except OSError:
+                self._loaded_mtime_ns = None
         except PermissionError:
             raise ConfigError("Error saving config: insufficient permissions")
         except OSError:

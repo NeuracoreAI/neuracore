@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import sqlite3
+import sys
 import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
@@ -18,12 +19,33 @@ from neuracore.data_daemon.state_management.state_store import StateStore
 
 logger = logging.getLogger(__name__)
 
-_SHARED_MEMORY_DIR = Path("/dev/shm")
-_NEURACORE_SHARED_SLOT_PREFIX = "neuracore-slots-"
+
+def _default_shared_memory_dir() -> Path:
+    """Return the directory used for POSIX shared-memory introspection.
+
+    Linux exposes shm as a real tmpfs at /dev/shm — we can query its free
+    space, list segments, and clean stale entries directly. macOS/BSD use
+    shm_open() with no user-visible directory; the OS manages it and the
+    Python `multiprocessing.shared_memory` API works without any path
+    fiddling. For capacity/budget purposes we fall back to /tmp on those
+    platforms (best-effort estimate, since macOS doesn't expose a query-
+    able shm limit).
+    """
+    if sys.platform.startswith("linux"):
+        return Path("/dev/shm")
+    return Path("/tmp")
+
+
+_SHARED_MEMORY_DIR = _default_shared_memory_dir()
+_HAS_DEV_SHM = sys.platform.startswith("linux") and Path("/dev/shm").exists()
+_NEURACORE_SHARED_SLOT_PREFIX = "ncs-"
+# Older daemons used the longer "neuracore-slots-" prefix; keep recognizing
+# it here so cleanup still reaps segments left over from upgraded installs.
+_NEURACORE_SHARED_SLOT_LEGACY_PREFIX = "neuracore-slots-"
 
 
 class SharedMemoryCapacityError(RuntimeError):
-    """Raised when /dev/shm lacks space for a new shared-memory allocation."""
+    """Raised when the shared-memory mount lacks space for a new allocation."""
 
 
 def _format_bytes(value: int) -> str:
@@ -44,8 +66,18 @@ def _format_bytes(value: int) -> str:
 
 
 def shared_memory_free_bytes(shm_dir: Path = _SHARED_MEMORY_DIR) -> int:
-    """Return currently available bytes on the POSIX shared-memory mount."""
-    usage = shutil.disk_usage(shm_dir)
+    """Return currently available bytes on the POSIX shared-memory mount.
+
+    On non-Linux platforms (macOS/BSD) /dev/shm does not exist and the
+    fallback uses /tmp as a coarse proxy. If even that path is missing we
+    report a large sentinel so callers do not pre-emptively fail capacity
+    checks — the OS will surface a real ENOMEM if the allocation actually
+    cannot be satisfied.
+    """
+    try:
+        usage = shutil.disk_usage(shm_dir)
+    except FileNotFoundError:
+        return 1 << 40  # 1 TiB sentinel; let the OS reject if it must
     return int(usage.free)
 
 
@@ -99,7 +131,10 @@ def cleanup_stale_shared_slot_segments(
     cleaned = 0
 
     for shm_path in shm_dir.iterdir():
-        if not shm_path.name.startswith(_NEURACORE_SHARED_SLOT_PREFIX):
+        if not (
+            shm_path.name.startswith(_NEURACORE_SHARED_SLOT_PREFIX)
+            or shm_path.name.startswith(_NEURACORE_SHARED_SLOT_LEGACY_PREFIX)
+        ):
             continue
 
         try:
