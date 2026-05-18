@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-import time
 import uuid
 from multiprocessing.shared_memory import SharedMemory
 from typing import Protocol
 
 import zmq
 
+from neuracore.data_daemon.const import SHARED_SLOT_SHM_PREFIX
 from neuracore.data_daemon.models import (
     CommandType,
     MessageEnvelope,
@@ -89,7 +89,7 @@ class SharedSlotDaemonHandler:
         if channel.shared_slot.shm_name is not None:
             self._cleanup_previous_shared_slots(channel, request.control_endpoint)
 
-        shm_name = f"neuracore-slots-{uuid.uuid4().hex}-{int(time.time() * 1000)}"
+        shm_name = f"{SHARED_SLOT_SHM_PREFIX}{uuid.uuid4().hex[:16]}"
 
         reservation = None
         shm: SharedMemory | None = None

@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from neuracore.data_daemon.const import DEFAULT_SHARED_MEMORY_SIZE
+from neuracore.data_daemon.const import (
+    DEFAULT_SHARED_MEMORY_SIZE,
+    SHARED_SLOT_SHM_PREFIX,
+)
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
     pid_is_running,
@@ -95,8 +98,8 @@ def test_cleanup_stale_shared_memory_buffers_removes_stale_shared_slot_segments(
     shm_dir.mkdir()
 
     stale_names = (
-        "neuracore-slots-stale-1",
-        "neuracore-slots-stale-2",
+        f"{SHARED_SLOT_SHM_PREFIX}stale-1",
+        f"{SHARED_SLOT_SHM_PREFIX}stale-2",
     )
     for buffer_name in stale_names:
         (shm_dir / buffer_name).write_bytes(b"shm")

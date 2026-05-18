@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from neuracore.data_daemon.communications_management.shared_transport.models import (
     SharedSlotReservation,
 )
+from neuracore.data_daemon.lifecycle.runtime_recovery import _default_shm_path
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +43,11 @@ class SharedMemoryBudget:
 
     def __init__(
         self,
-        shm_path: str = "/dev/shm",
+        shm_path: str | None = None,
         budget_fraction: float = 0.75,
     ) -> None:
         """Initialize budget state for future shared-memory reservations."""
-        self._shm_path = shm_path
+        self._shm_path = shm_path or _default_shm_path()
         self._budget_fraction = budget_fraction
         self._lock = threading.Lock()
         self._reserved_bytes = 0
