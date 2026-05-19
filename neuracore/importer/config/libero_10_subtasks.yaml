@@ -1,0 +1,114 @@
+# cspell:ignore agentview
+input_dataset_name: KeWangRobotics/libero_10_subtasks
+dataset_type: LEROBOT
+
+output_dataset:
+  name: LIBERO 10 Subtasks
+  tags: [panda, franka, libero, manipulation, subtask]
+  description: "LIBERO-10 manipulation demos on a Franka Panda robot, with
+  agentview and wrist cameras. Each timestep carries a high-level overall_task
+  instruction and a fine-grained subtask label."
+
+robot:
+  name: franka_panda
+  urdf_path: "panda.urdf"
+  overwrite_existing: true
+
+frequency: 10.0
+
+data_import_config:
+  RGB_IMAGES:
+    source: images
+    format:
+      image_convention: CHANNELS_FIRST
+      order_of_channels: RGB
+      normalized_pixel_values: true
+    mapping:
+      - name: agentview_rgb
+        source_name: agentview_rgb
+      - name: wrist_rgb
+        source_name: wrist_rgb
+
+  END_EFFECTOR_POSES:
+    source: state
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: EULER
+        euler_order: XYZ
+        angle_units: RADIANS
+    mapping:
+      - name: panda_hand_tcp
+        index_range:
+          start: 0
+          end: 6
+
+  JOINT_POSITIONS:
+    source: state
+    format:
+      joint_position_input_type: END_EFFECTOR
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: EULER
+        euler_order: XYZ
+        angle_units: RADIANS
+    mapping:
+      - name: panda_hand_tcp
+        source_name: panda_hand_tcp
+        index_range:
+          start: 0
+          end: 6
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: state
+    format:
+      normalize:
+        min: 0.0
+        max: 0.04
+    mapping:
+      - name: gripper_open_amount
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: state
+    format:
+      visual_joint_input_type: GRIPPER
+      normalize:
+        min: 0.0
+        max: 0.04
+    mapping:
+      - name: panda_finger_joint1
+        index: 6
+      - name: panda_finger_joint2
+        index: 6
+
+  JOINT_TARGET_POSITIONS:
+    source: actions
+    format:
+      action_type: RELATIVE
+      action_space: END_EFFECTOR
+      pose_type: POSITION_ORIENTATION
+      scale_position: 0.1
+      orientation:
+        type: AXIS_ANGLE
+        angle_units: RADIANS
+        align_frame_roll: 3.14159265
+    mapping:
+      - name: panda_hand_tcp
+        index_range:
+          start: 0
+          end: 6
+
+  LANGUAGE:
+    source: overall_task
+    format:
+      language_type: STRING
+    mapping:
+      - name: instruction
+
+  SUBTASK_LANGUAGE:
+    source: subtask
+    format:
+      language_type: STRING
+    mapping:
+      - name: subtask

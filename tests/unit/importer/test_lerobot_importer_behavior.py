@@ -236,6 +236,38 @@ def test_lerobot_record_step_supports_empty_source_path_for_language():
     )
 
 
+def test_lerobot_record_step_passes_subtask_language_string_unconverted():
+    """_record_step should pass SUBTASK_LANGUAGE strings without numpy conversion."""
+    importer = object.__new__(LeRobotDatasetImporter)
+    mapping_item = SimpleNamespace(
+        source_name="subtask",
+        index=None,
+        index_range=None,
+        name="subtask",
+    )
+    import_format = SimpleNamespace(language_type=LanguageConfig.STRING)
+    import_config = SimpleNamespace(
+        source="", mapping=[mapping_item], format=import_format
+    )
+    importer.dataset_config = SimpleNamespace(
+        data_import_config={DataType.SUBTASK_LANGUAGE: import_config}
+    )
+    importer.ordered_import_configs = [(DataType.SUBTASK_LANGUAGE, import_config)]
+    importer._log_data = MagicMock()
+
+    importer._record_step({"subtask": "Turn on flat_stove_1"}, timestamp=3.0)
+
+    importer._log_data.assert_called_once_with(
+        DataType.SUBTASK_LANGUAGE,
+        "Turn on flat_stove_1",
+        mapping_item,
+        import_format,
+        3.0,
+        extrinsics=None,
+        intrinsics=None,
+    )
+
+
 def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
     """LeRobot _record_step should read dotted keys and call numpy()."""
     importer = object.__new__(LeRobotDatasetImporter)

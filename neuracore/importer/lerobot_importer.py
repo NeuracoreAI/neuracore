@@ -333,7 +333,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                     )
 
                     if not (
-                        data_type == DataType.LANGUAGE
+                        data_type in (DataType.LANGUAGE, DataType.SUBTASK_LANGUAGE)
                         and import_config.format.language_type == LanguageConfig.STRING
                     ):
                         source_data = self._convert_source_data(

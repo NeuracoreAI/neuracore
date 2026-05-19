@@ -331,7 +331,7 @@ class NeuracoreDatasetImporter(ABC):
             validate_depth_images(data)
         elif data_type == DataType.POINT_CLOUDS:
             validate_point_clouds(data)
-        elif data_type == DataType.LANGUAGE:
+        elif data_type in (DataType.LANGUAGE, DataType.SUBTASK_LANGUAGE):
             validate_language(data, format)
         elif data_type == DataType.POSES or data_type == DataType.END_EFFECTOR_POSES:
             validate_poses(data, format)
@@ -615,8 +615,13 @@ class NeuracoreDatasetImporter(ABC):
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
-        elif data_type == DataType.LANGUAGE:
-            nc.log_language(
+        elif data_type in (DataType.LANGUAGE, DataType.SUBTASK_LANGUAGE):
+            log_language_fn = (
+                nc.log_subtask_language
+                if data_type == DataType.SUBTASK_LANGUAGE
+                else nc.log_language
+            )
+            log_language_fn(
                 name=name,
                 language=transformed_data,
                 robot_name=self.dataset_config.robot.name,

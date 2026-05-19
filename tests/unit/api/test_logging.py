@@ -142,6 +142,32 @@ def test_log_language(
     nc.log_language(name="sub_task", language="Move to the table")
 
 
+def test_log_subtask_language_creates_subtask_stream(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """log_subtask_language records on a SUBTASK_LANGUAGE-typed stream."""
+    from neuracore_types import DataType
+
+    from neuracore.api.core import _get_robot
+
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    nc.log_subtask_language(name="subtask", language="Turn on flat_stove_1")
+
+    robot = _get_robot("test_robot", 0)
+    stream = robot.get_data_stream(f"{DataType.SUBTASK_LANGUAGE.value}:subtask")
+    assert stream is not None
+    assert stream.data_type == DataType.SUBTASK_LANGUAGE
+    # Plain language must not collide with the subtask stream.
+    assert robot.get_data_stream(f"{DataType.LANGUAGE.value}:subtask") is None
+
+
 def test_log_custom_data(
     temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):

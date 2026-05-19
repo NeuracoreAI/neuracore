@@ -197,6 +197,21 @@ class TestValidateInputData:
         with pytest.raises(DataValidationError):
             importer._validate_input_data(DataType.LANGUAGE, data, format)
 
+    def test_validate_subtask_language_string(self, importer):
+        """Test subtask language validation with string type."""
+        format = DataFormat(language_type=LanguageConfig.STRING)
+        data = "Turn on flat_stove_1"
+
+        importer._validate_input_data(DataType.SUBTASK_LANGUAGE, data, format)
+
+    def test_validate_subtask_language_wrong_type(self, importer):
+        """Test subtask language validation with wrong type."""
+        format = DataFormat(language_type=LanguageConfig.STRING)
+        data = 123  # Not a string
+
+        with pytest.raises(DataValidationError):
+            importer._validate_input_data(DataType.SUBTASK_LANGUAGE, data, format)
+
     def test_validate_poses_matrix(self, importer):
         """Test pose validation with matrix type."""
         format = DataFormat(pose_type=PoseConfig.MATRIX)
@@ -401,6 +416,23 @@ class TestLogData:
 
         mock_mapping_item.transforms.assert_called_once_with(source_data)
         mock_nc.log_rgb.assert_called_once()
+
+    @patch("neuracore.importer.core.base.nc")
+    def test_log_data_subtask_language(self, mock_nc, importer, mock_mapping_item):
+        """Subtask language is logged through nc.log_subtask_language."""
+        format = DataFormat(language_type=LanguageConfig.STRING)
+
+        importer._log_data(
+            DataType.SUBTASK_LANGUAGE,
+            "Turn on flat_stove_1",
+            mock_mapping_item,
+            format,
+            1234567890.0,
+        )
+
+        mock_mapping_item.transforms.assert_called_once_with("Turn on flat_stove_1")
+        mock_nc.log_subtask_language.assert_called_once()
+        mock_nc.log_language.assert_not_called()
 
     def test_log_data_validation_error(self, importer, mock_mapping_item):
         """Test data logging with validation error."""

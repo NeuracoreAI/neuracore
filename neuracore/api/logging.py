@@ -1020,8 +1020,9 @@ def log_language(
     instance: int = 0,
     timestamp: float | None = None,
     dry_run: bool = False,
+    data_type: DataType = DataType.LANGUAGE,
 ) -> None:
-    """Log language annotation for a robot.
+    """Log a language annotation for a robot.
 
     Args:
         name: Name of the language annotation
@@ -1030,11 +1031,18 @@ def log_language(
         instance: Optional instance number of the robot
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
+        data_type: Language data type to record under. Defaults to
+            DataType.LANGUAGE; pass DataType.SUBTASK_LANGUAGE for subtask labels.
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
-        ValueError: If language is not a string
+        ValueError: If language is not a string, or data_type is not a language
+            data type
     """
+    if data_type not in (DataType.LANGUAGE, DataType.SUBTASK_LANGUAGE):
+        raise ValueError(
+            "data_type must be DataType.LANGUAGE or DataType.SUBTASK_LANGUAGE"
+        )
     if timestamp is None:
         timestamp = time.time()
     if not isinstance(language, str):
@@ -1045,12 +1053,10 @@ def log_language(
         return
 
     robot = _get_robot(robot_name, instance)
-    str_id = f"{DataType.LANGUAGE.value}:{name}"
+    str_id = f"{data_type.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
-        stream = JsonDataStream(
-            data_type=DataType.LANGUAGE, data_type_name=storage_name
-        )
+        stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
         robot.add_data_stream(str_id, stream)
     start_stream(robot, stream)
     assert isinstance(
@@ -1059,7 +1065,44 @@ def log_language(
 
     language_data = LanguageData(timestamp=timestamp, text=language)
     stream.log(language_data)
-    _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, language_data)
+    _publish_json_to_p2p(robot, str_id, data_type, language_data)
+
+
+def log_subtask_language(
+    name: str,
+    language: str,
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+    dry_run: bool = False,
+) -> None:
+    """Log a subtask language annotation for a robot.
+
+    Records a fine-grained subtask label on a SUBTASK_LANGUAGE-typed stream,
+    kept separate from the high-level LANGUAGE instruction. Thin wrapper around
+    log_language.
+
+    Args:
+        name: Name of the subtask annotation
+        language: A subtask language string associated with this timestep
+        robot_name: Optional robot ID. If not provided, uses the last initialized robot
+        instance: Optional instance number of the robot
+        timestamp: Optional timestamp
+        dry_run: If True, skip actual logging (validation only)
+
+    Raises:
+        RobotError: If no robot is active and no robot_name provided
+        ValueError: If language is not a string
+    """
+    log_language(
+        name=name,
+        language=language,
+        robot_name=robot_name,
+        instance=instance,
+        timestamp=timestamp,
+        dry_run=dry_run,
+        data_type=DataType.SUBTASK_LANGUAGE,
+    )
 
 
 def log_rgb(
