@@ -29,18 +29,28 @@ mapped to `LanguageData` / `LanguageDataImportConfig`). Four spots in the
 `neuracore` importer must be updated. All changes are additive and
 backward-compatible.
 
-1. **`neuracore/api/logging.py` — `log_language`**
-   Add parameter `data_type: DataType = DataType.LANGUAGE`. Use it for:
+1. **`neuracore/api/logging.py` — `log_language` + `log_subtask_language`**
+   Generalize `log_language` with parameter `data_type: DataType =
+   DataType.LANGUAGE`, used for:
    - the stream id: `f"{data_type.value}:{name}"`
    - the `JsonDataStream(data_type=data_type, ...)` constructor
    - the `_publish_json_to_p2p(robot, str_id, data_type, language_data)` call
    `LanguageData` is the payload class for both `LANGUAGE` and `SUBTASK_LANGUAGE`
-   (`DATA_TYPE_TO_NC_DATA_CLASS`), so no payload change is needed. Existing
-   callers that omit `data_type` keep current behavior.
+   (`DATA_TYPE_TO_NC_DATA_CLASS`); the *stream* carries the type, so no payload
+   change is needed. Existing callers that omit `data_type` keep current
+   behavior.
+
+   Then add a thin public wrapper `log_subtask_language(name, language,
+   robot_name=None, instance=0, timestamp=None, dry_run=False)` that simply
+   delegates to `log_language(..., data_type=DataType.SUBTASK_LANGUAGE)`. This
+   keeps a single implementation while giving the API a discoverable,
+   self-documenting entry point for subtask logging. Export it alongside
+   `log_language` (e.g. in `neuracore/__init__.py`).
 
 2. **`neuracore/importer/core/base.py` — `_log_data`**
    Change `elif data_type == DataType.LANGUAGE:` to match both `LANGUAGE` and
-   `SUBTASK_LANGUAGE`, and forward `data_type=data_type` to `nc.log_language`.
+   `SUBTASK_LANGUAGE`. Dispatch to `nc.log_subtask_language` when the data type
+   is `SUBTASK_LANGUAGE` and `nc.log_language` otherwise.
 
 3. **`neuracore/importer/core/base.py` — `_validate_input_data`**
    Include `SUBTASK_LANGUAGE` in the branch that calls `validate_language`.
