@@ -48,9 +48,26 @@ backward-compatible.
    `log_language` (e.g. in `neuracore/__init__.py`).
 
 2. **`neuracore/importer/core/base.py` — `_log_data`**
-   Change `elif data_type == DataType.LANGUAGE:` to match both `LANGUAGE` and
-   `SUBTASK_LANGUAGE`. Dispatch to `nc.log_subtask_language` when the data type
-   is `SUBTASK_LANGUAGE` and `nc.log_language` otherwise.
+   `SUBTASK_LANGUAGE` must travel the *same path through `_log_data` as
+   `LANGUAGE`*, differing only at the final dispatch. Concretely:
+   - The guard flags at the top of `_log_data` — `ik_requested`,
+     `fk_requested`, `absolute_action_requested`, `relative_action_requested` —
+     are all `False` for `SUBTASK_LANGUAGE` (they only trigger for
+     `JOINT_POSITIONS` / `END_EFFECTOR_POSES` / `JOINT_TARGET_POSITIONS`). No
+     change needed; confirm `SUBTASK_LANGUAGE` falls into the plain
+     validate → transform → dispatch path.
+   - Validation: it reaches `_validate_input_data` like `LANGUAGE` does — see
+     item 3.
+   - Transform: `transformed_data = item.transforms(source_data)` runs via the
+     language mapping item exactly as for `LANGUAGE` (string passthrough).
+   - Dispatch: change the `elif data_type == DataType.LANGUAGE:` branch to match
+     both `LANGUAGE` and `SUBTASK_LANGUAGE`; inside, call
+     `nc.log_subtask_language(name=name, language=transformed_data, ...)` when
+     `data_type == DataType.SUBTASK_LANGUAGE` and `nc.log_language(...)`
+     otherwise. All other call arguments (`name`, `robot_name`, `instance`,
+     `timestamp`, `dry_run`) are identical to the existing `LANGUAGE` call.
+   No other branch of `_log_data` references or special-cases language, so no
+   further edits there are required.
 
 3. **`neuracore/importer/core/base.py` — `_validate_input_data`**
    Include `SUBTASK_LANGUAGE` in the branch that calls `validate_language`.
