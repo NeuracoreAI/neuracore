@@ -1,4 +1,4 @@
-# Rust Rewrite of the Data Daemon — Architecture & Implementation Plan
+1# Rust Rewrite of the Data Daemon — Architecture & Implementation Plan
 
 <!-- cSpell:disable  -->
 ## Context
@@ -471,7 +471,7 @@ Eight phases. Each phase has a *deliverable* (what must exist), an *integration-
 | 5 — Encoding | Daemon side complete — sub-phases 5a–5f done; 5g (pytest integration gate) still deferred until 4h carries the full sequence/batch surface and the `_native_producer` cdylib ships inside the wheel. |
 | 6 — Cloud upload | Daemon side complete — sub-phases 6a–6f done and wired into `launch.rs`. Post-review hardening pass landed the recovery sweep, 410 re-issue, 308 partial-commit guard, defer-when-org-missing, and the Failed-as-terminal progress fix. 6g (pytest integration gate) is deferred behind the same 4h/producer cutover as 5g. |
 | 7 — Performance & edge cases | Daemon side complete — stale-writing sweep, `CancelRecording` envelope + dispatcher tear-down, per-frame storage-budget enforcement, tuned channel capacities, `systemd-inhibit`-backed wakelock. End-to-end pytest gate stays deferred behind the 4h/producer cutover. |
-| 8 — Hardening & rollout | Not started |
+| 8 — Hardening & rollout | Packaging + CI landed: `rust/scripts/build_wheel_artefacts.sh` bakes both Rust artefacts into the package tree, `setup.py` ships them via `package_data` with a platform-tagged wheel, `build-wheels.yaml` exercises the wheel build per Python version, and `integration-platform.yaml` gains a `daemon=rust` matrix axis that flips `NCD_RUST_DAEMON=1`. Long-soak still to run before merge. |
 
 ### Phase 1 — Scaffolding & CLI parity (2 days) — ✓ Done (commit `0b452b0`)
 
@@ -768,16 +768,19 @@ Two startup hooks make the pipeline crash-safe across restarts:
 
 ### Phase 8 — Hardening & rollout (2 days)
 
-**Build:**
-- Long-soak: run the 300 s 1080p performance case for ≥1 hour, watch RSS and FD count.
-- Packaging: `maturin develop` produces the Python wheel embedding the Rust binary. CI matrix for at least Linux x86_64 (and aarch64 if needed).
-- Replace [neuracore/data_daemon/__main__.py](neuracore/data_daemon/__main__.py) with the shim; gate behind a feature flag for staged rollout if desired.
-- Update CI to build the Rust binary as part of the wheel build.
-- ONBOARDING / README updates pointing at the new crate.
+**Built (this commit):**
+- Packaging: instead of the maturin build-backend swap, the rewrite ships via the existing setuptools surface — [rust/scripts/build_wheel_artefacts.sh](../rust/scripts/build_wheel_artefacts.sh) runs `cargo build --release` for both the `data-daemon` binary and the `data_daemon_producer` cdylib and drops them at `neuracore/data_daemon/bin/data-daemon` and `neuracore/data_daemon/_native_producer.so`. [setup.py](../setup.py) lists them in `package_data` and a `BinaryDistribution` subclass forces a platform-tagged wheel so pip cannot install a Linux .so onto macOS. This keeps the existing `python -m build` / `twine upload` release flow intact (no pyproject.toml migration) while still satisfying the deliverable that the wheel embeds both artefacts. [MANIFEST.in](../MANIFEST.in) ships the Rust sources in the sdist for downstream packagers.
+- `__main__.py` shim: [neuracore/data_daemon/__main__.py](../neuracore/data_daemon/__main__.py) re-exec's `bin/data-daemon` when [`rust_daemon_enabled()`](../neuracore/data_daemon/rust_selection.py) (i.e. `NCD_RUST_DAEMON` truthy) and the bundled binary is present; otherwise it falls through to the legacy Python CLI. The plan called for an unconditional `os.execv`; the staged-rollout gate is the explicitly-allowed variant from the same bullet and what every other rollout knob already keys off.
+- CI matrix: [.github/workflows/build-wheels.yaml](../.github/workflows/build-wheels.yaml) builds the wheel per Python 3.10 / 3.11 on Linux x86_64, installs the result in a fresh interpreter, and asserts the cdylib imports and the binary is present at the expected path. aarch64 is deferred until there's demand — the helper script is platform-agnostic; only the cross-compilation toolchain needs adding.
+- Existing workflows reworked: [.github/workflows/rust-data-daemon.yaml](../.github/workflows/rust-data-daemon.yaml) now exercises `cargo {fmt,clippy,test,build,doc}` across the whole workspace (was: `data_daemon` crate only), so the producer crate is gated on every PR that touches `rust/`. [.github/workflows/integration-platform.yaml](../.github/workflows/integration-platform.yaml) grows a `daemon: [python, rust]` matrix axis that, on the `rust` axis, runs the wheel-artefact script and flips `NCD_RUST_DAEMON=1` for the integration suite. `production` excludes the `rust` axis because the published wheel may pre-date the rollout; `staging` is the gate.
+- Docs: [docs/rust_data_daemon_development.md](rust_data_daemon_development.md) gains a `Packaging the wheel` section documenting the pipeline and the artefact layout. [README.md](../README.md) links the rust developer guide alongside the existing data-daemon doc.
+
+**Build (still to run before merge):**
+- Long-soak: run the 300 s 1080p performance case for ≥1 hour, watch RSS and FD count. Procedure documented under [§Verification — end-to-end test plan](#verification--end-to-end-test-plan) below — automation deferred (out of scope for this commit per the rollout discussion).
 
 **Deliverable:** wheels build green in CI on supported platforms; soak passes; ready to merge.
 
-**Test gate:** CI green on the full integration test job.
+**Test gate:** CI green on the full integration test job — flipped on via the new `daemon=rust` axis above.
 
 **Check:** PR opened; release notes drafted.
 

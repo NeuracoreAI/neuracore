@@ -1,0 +1,17 @@
+# Sources required to rebuild the bundled Rust artefacts from an sdist.
+# The artefacts themselves (neuracore/data_daemon/bin/data-daemon and
+# neuracore/data_daemon/_native_producer.so) are gitignored and only land
+# in the *wheel* — the sdist ships the Rust sources so a downstream
+# packager can run rust/scripts/build_wheel_artefacts.sh themselves.
+#
+# See docs/rust_data_daemon_development.md#packaging-the-wheel.
+
+include README.md
+include LICENSE
+
+recursive-include rust *.rs *.toml *.lock *.sql *.md *.sh
+recursive-include rust/data_daemon/migrations *.sql
+
+prune rust/target
+global-exclude __pycache__
+global-exclude *.py[cod]

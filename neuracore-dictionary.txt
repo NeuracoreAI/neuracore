@@ -96,6 +96,7 @@ devnull
 diaginertia
 dinov
 dinov2
+distclass
 distilbert
 docstrings
 dtype
@@ -304,10 +305,12 @@ proprio
 proprios
 PSNR
 pyav
+pycache
 pydantic
 pyfunction
 pymodule
 pygments
+pyo3
 pyquaternion
 pytest
 Qbcaa
@@ -348,6 +351,7 @@ rustup
 Safetensors
 schematypens
 SCTP
+sdist
 sdpa
 secho
 seqlen
