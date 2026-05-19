@@ -126,6 +126,11 @@ class DataStream(ABC):
 
         return producer_channel, stop_cutoff_sequence_number
 
+    def discard_recording_state(self) -> None:
+        """Clear local recording state when no producer cleanup is possible."""
+        self._recording = False
+        self._context = None
+
     def stop_recording(
         self,
         stop_cutoff_sequence_number: int,
@@ -135,7 +140,6 @@ class DataStream(ABC):
         self._recording = False
         self._context = None
         producer_channel = self._producer_channel
-        self._producer_channel = None
 
         if not isinstance(producer_channel, ProducerChannel):
             raise RuntimeError("Stream has no ProducerChannel")
@@ -147,9 +151,12 @@ class DataStream(ABC):
                     wait_for_slot_drain=wait_for_producer_drain,
                 )
         finally:
-            producer_channel.stop_producer_channel(
-                wait_for_slot_drain=wait_for_producer_drain,
-            )
+            try:
+                producer_channel.stop_producer_channel(
+                    wait_for_slot_drain=wait_for_producer_drain,
+                )
+            finally:
+                self._producer_channel = None
 
     def is_recording(self) -> bool:
         """Check if recording is active.

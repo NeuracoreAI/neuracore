@@ -368,6 +368,9 @@ class Robot:
 
         for stream_id, stream in self._data_streams.items():
             try:
+                if stream.get_producer_channel() is None:
+                    stream.discard_recording_state()
+                    continue
 
                 (producer_channel, stop_cutoff_sequence_number) = (
                     stream.prepare_recording_stopped()

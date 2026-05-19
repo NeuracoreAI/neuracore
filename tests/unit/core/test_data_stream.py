@@ -4,6 +4,7 @@ import json
 import struct
 
 import numpy as np
+import pytest
 from neuracore_types import DataType
 
 from neuracore.core.streaming.data_stream import DataRecordingContext, RGBDataStream
@@ -54,6 +55,7 @@ class _FakeProducerChannel:
         self.cleanup_wait_for_slot_drain_calls: list[bool] = []
         self.stop_wait_for_slot_drain_calls: list[bool] = []
         self.trace_id = None
+        self.raise_on_cleanup = False
         _FakeProducerChannel.instances.append(self)
 
     def start_recording_session(
@@ -110,6 +112,8 @@ class _FakeProducerChannel:
     ) -> None:
         del stop_cutoff_sequence_number
         self.cleanup_wait_for_slot_drain_calls.append(wait_for_slot_drain)
+        if self.raise_on_cleanup:
+            raise RuntimeError("cleanup failed")
         return
 
     def send_data_parts(self, **kwargs: object) -> None:
@@ -219,6 +223,29 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
 
     assert producer.cleanup_wait_for_slot_drain_calls == [False]
     assert producer.stop_wait_for_slot_drain_calls == [False]
+    assert stream.get_recording_context() is None
+    assert stream.get_producer_channel() is None
+    assert stream.is_recording() is False
+
+
+def test_stream_stop_attempts_producer_stop_when_cleanup_fails(monkeypatch) -> None:
+    _FakeProducerChannel.instances.clear()
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.ProducerChannel",
+        _FakeProducerChannel,
+    )
+
+    stream = RGBDataStream("front_camera", width=640, height=480)
+    stream.start_recording(_context())
+
+    producer = _FakeProducerChannel.instances[0]
+    producer.raise_on_cleanup = True
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        stream.stop_recording(stop_cutoff_sequence_number=0)
+
+    assert producer.cleanup_wait_for_slot_drain_calls == [True]
+    assert producer.stop_wait_for_slot_drain_calls == [True]
     assert stream.get_recording_context() is None
     assert stream.get_producer_channel() is None
     assert stream.is_recording() is False
