@@ -263,6 +263,10 @@ class PaliGemmaWithExpertModel(nn.Module):
         # Keep pretrained-compatible projection size for real models, but make
         # tiny variant align vision/text dims to avoid concat shape mismatch.
         if vlm_config.variant == "gemma_tiny":
+            paligemma_config.vision_config.hidden_size = vlm_config.width
+            paligemma_config.vision_config.num_hidden_layers = vlm_config.depth
+            paligemma_config.vision_config.intermediate_size = vlm_config.mlp_dim
+            paligemma_config.vision_config.num_attention_heads = vlm_config.num_heads
             paligemma_config.vision_config.projection_dim = vlm_config.width
         else:
             paligemma_config.vision_config.projection_dim = 2048
