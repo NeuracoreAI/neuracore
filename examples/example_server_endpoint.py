@@ -19,7 +19,7 @@ import time
 import neuracore as nc
 from neuracore import EndpointError
 
-ENDPOINT_NAME = "test_vx300" # Halid note: make this configuration from users
+ENDPOINT_NAME = "test_deploy" # Halid note: make this configuration from users
 CAMERA_NAMES = ["angle"]
 
 
@@ -66,6 +66,8 @@ def main():
             nc.log_joint_positions(positions=obs.qpos)
             t = time.time()
             
+            nc.log_joint_velocities(velocities=obs.qvel)
+
             # Halid Note: this is needed if
             nc.log_language(
                 name="instruction",
