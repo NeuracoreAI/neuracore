@@ -18,6 +18,7 @@ from neuracore_types import (
     DataType,
     NCDataStats,
 )
+from neuracore_types.nc_data import NCDataStatsUnion
 
 from neuracore.core.robot import Robot
 from neuracore.ml import BatchedTrainingSamples
@@ -317,7 +318,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         return self.load_sample(idx, 0)
 
     @property
-    def dataset_statistics(self) -> dict[DataType, list[NCDataStats]]:
+    def dataset_statistics(self) -> dict[DataType, list[NCDataStatsUnion]]:
         """Return the dataset description.
 
         Returns:
