@@ -1,4 +1,4 @@
-name: Integration Platform (Production)
+name: Integration Platform
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Commit SHA, tag, or branch to test. Leave empty to use the latest release tag."
+        description: "Commit SHA, tag, or branch to test. Leave empty to use the current branch (staging) and latest release tag (production)."
         required: false
         type: string
         default: ""
@@ -28,10 +28,18 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         python-version: ['3.11']
+        environment: [staging, production]
         ffmpeg: [true, false]
+        # daemon=python exercises the legacy daemon, daemon=rust exercises the
+        # bundled Rust binary + producer cdylib via NCD_RUST_DAEMON. Production
+        # only runs the python axis because the released wheel may pre-date the
+        # Rust rollout; the staging axis is the gate for the rewrite.
+        daemon: [python, rust]
+        exclude:
+          - environment: production
+            daemon: rust
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -65,11 +73,15 @@ jobs:
       env:
         INPUT_REF: ${{ inputs.ref }}
         RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
+        ENVIRONMENT: ${{ matrix.environment }}
+        BRANCH_REF: ${{ github.ref_name }}
       run: |
         if [ -n "$INPUT_REF" ]; then
           harness_ref="$INPUT_REF"
-        else
+        elif [ "$ENVIRONMENT" = "production" ]; then
           harness_ref="$RELEASE_TAG"
+        else
+          harness_ref="$BRANCH_REF"
         fi
         echo "harness_ref=$harness_ref" >> "$GITHUB_OUTPUT"
         echo "Resolved test harness ref: $harness_ref"
@@ -81,7 +93,7 @@ jobs:
         fetch-depth: 0
 
     - name: Verify production test harness ref
-      if: ${{ inputs.ref == '' }}
+      if: ${{ matrix.environment == 'production' && inputs.ref == '' }}
       run: |
         checked_out_ref="$(git describe --tags --exact-match HEAD)"
         expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
@@ -91,6 +103,7 @@ jobs:
         fi
 
     - name: Set up Python ${{ matrix.python-version }}
+      id: setup-python
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
@@ -102,6 +115,24 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y ffmpeg
 
+    - name: Install Rust toolchain
+      # Only needed for the daemon=rust axis; cargo isn't free on the runner
+      # but the install action is a cheap no-op when stable is already cached.
+      if: matrix.daemon == 'rust'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo build
+      if: matrix.daemon == 'rust'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
+    - name: Build bundled Rust artefacts
+      if: matrix.daemon == 'rust'
+      env:
+        PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+      run: ./rust/scripts/build_wheel_artefacts.sh
+
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
@@ -109,7 +140,7 @@ jobs:
 
     - name: Resolve test harness
       run: |
-        echo "Test harness environment: production"
+        echo "Test harness environment: ${{ matrix.environment }}"
         echo "Test harness ref: ${{ steps.harness-ref.outputs.harness_ref }}"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness paths:"
@@ -123,9 +154,9 @@ jobs:
 
     - name: Run Consume Stream Integration Test
       env:
-        NEURACORE_API_URL: https://api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
       continue-on-error: true
       run: |
         if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_consume_stream.py; then
@@ -134,7 +165,12 @@ jobs:
 
     - name: Run Data Daemon Integration Tests
       env:
-        NEURACORE_API_URL: https://api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
+        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+        # Empty string for the python axis leaves the env var unset, so
+        # rust_selection.rust_daemon_enabled() returns False and the SDK +
+        # CLI stay on the legacy Python daemon. The rust axis flips on the
+        # Rust binary handoff + native producer routing in one knob.
+        NCD_RUST_DAEMON: ${{ matrix.daemon == 'rust' && '1' || '' }}
       run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/data_daemon/

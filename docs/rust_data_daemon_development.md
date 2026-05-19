@@ -164,6 +164,60 @@ Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/
 
 ---
 
+## Packaging the wheel
+
+The Python wheel ships two Rust artefacts inside the `neuracore.data_daemon` package:
+
+| Artefact | Wheel location | Source crate | Imported / executed as |
+|---|---|---|---|
+| Daemon binary | `neuracore/data_daemon/bin/data-daemon` | `data-daemon` (bin) | Re-exec'd by [neuracore/data_daemon/__main__.py](../neuracore/data_daemon/__main__.py) when `NCD_RUST_DAEMON` is truthy |
+| Producer cdylib | `neuracore/data_daemon/_native_producer*.so` | `data_daemon_producer` (cdylib) | `import neuracore.data_daemon._native_producer` from the SDK producer shim |
+
+Both paths are inside the Python package tree, so vanilla setuptools `package_data` is enough to package them once they're built — there is no `pyproject.toml`/maturin build-backend migration. The trade-off is that each wheel build runs cargo twice (once per crate) before `python -m build` packages the result.
+
+### One-shot local build
+
+Use the helper script to compile both crates in release mode and copy the artefacts into the package tree at the locations the runtime expects:
+
+```bash
+./rust/scripts/build_wheel_artefacts.sh
+```
+
+What it does:
+
+1. `cargo build --release -p data-daemon` and copies the binary to [neuracore/data_daemon/bin/data-daemon](../neuracore/data_daemon/bin/data-daemon).
+2. `cargo build --release -p data_daemon_producer` and copies the cdylib to [neuracore/data_daemon/_native_producer.so](../neuracore/data_daemon/_native_producer.so) (renames `libdata_daemon_producer.so` → `_native_producer.so` so PyO3's `PyInit__native_producer` is discoverable).
+
+Both targets are gitignored (`neuracore/data_daemon/bin/` and `*.so`); the script is idempotent so re-running it after a `cargo` edit refreshes the in-tree copies. `pip install -e .` after the script picks the new artefacts up automatically via `package_data`.
+
+For day-to-day iteration on the producer crate only, prefer `maturin develop` from [rust/data_daemon_producer/](../rust/data_daemon_producer/) — it skips the binary build, only refreshes the cdylib, and is faster.
+
+### Building a wheel
+
+```bash
+./rust/scripts/build_wheel_artefacts.sh
+python -m build --wheel
+```
+
+The wheel is platform-tagged (Linux x86_64 today) because [setup.py](../setup.py) sets `Distribution.has_ext_modules` so setuptools tags the wheel for the host platform — without that hook setuptools would tag it `py3-none-any` and pip would happily install a Linux .so onto macOS. `package_data` ships both artefacts; `MANIFEST.in` ships the script and the `rust/` sources for the sdist.
+
+### CI
+
+The wheel job runs in [.github/workflows/build-wheels.yaml](../.github/workflows/build-wheels.yaml):
+
+1. Installs the Rust toolchain + ffmpeg (for unit tests).
+2. Runs the helper script above.
+3. Runs `python -m build --wheel` to produce the wheel.
+4. Uploads the wheel as an artefact for the release job to consume.
+
+The matrix is Linux x86_64 only for v1; aarch64 ships when there's demand (the script is platform-agnostic — only the cross-compilation toolchain would need to grow). Each wheel is one Python version × one platform, matching the cdylib's ABI.
+
+### Release path
+
+The [release workflow](../.github/workflows/release.yaml) wires the wheel job into its publish step: it depends on `build-wheels.yaml`, downloads the matrix of wheels, and `twine upload`s them alongside the sdist. The sdist remains useful as a portable fallback (users build the Rust artefacts themselves at install time) but is not the recommended install path — the bundled-binary wheel is.
+
+---
+
 ## SQLite state inspection
 
 The daemon stores its state at `NEURACORE_DAEMON_DB_PATH` (default `~/.neuracore/data_daemon/state.db`), opened in WAL mode. Migrations live in [rust/data_daemon/migrations/](../rust/data_daemon/migrations/) and run automatically on startup via `sqlx::migrate!`. To poke at the live DB:

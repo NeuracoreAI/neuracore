@@ -122,7 +122,9 @@ examples/test_streaming/
 
 .data_daemon_test_state/
 
-# Bundled rust daemon binary; built via `cargo build --release -p data-daemon`
-# and dropped in by the launch path. Wheel packaging (maturin / cibuildwheel)
-# will eventually bundle this — until then it stays a per-machine artefact.
+# Bundled rust artefacts built into the package tree by
+# `rust/scripts/build_wheel_artefacts.sh`. Both are per-machine and per-build,
+# so we never commit them; the wheel-build CI job recreates them on every run.
+# See docs/rust_data_daemon_development.md#packaging-the-wheel.
 neuracore/data_daemon/bin/
+neuracore/data_daemon/_native_producer*.so

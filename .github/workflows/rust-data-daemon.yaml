@@ -5,13 +5,13 @@ on:
     branches:
       - main
     paths:
-      - 'rust/data_daemon/**'
+      - 'rust/**'
       - '.github/workflows/rust-data-daemon.yaml'
   push:
     branches:
       - main
     paths:
-      - 'rust/data_daemon/**'
+      - 'rust/**'
       - '.github/workflows/rust-data-daemon.yaml'
 
 concurrency:
@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        working-directory: rust/data_daemon
+        working-directory: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -36,21 +36,37 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust/data_daemon
+          workspaces: rust
+
+      # PyO3 builds need a discoverable Python interpreter; the runner's default
+      # /usr/bin/python is fine, but actions/setup-python pins the version we
+      # test the cdylib against.
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Lint with clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Lint with clippy (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test --verbose
+      - name: Test (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo test --workspace --verbose
 
-      - name: Build release binary
-        run: cargo build --release --verbose
+      - name: Build release (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo build --release --workspace --verbose
 
       - name: Build documentation
         env:
           RUSTDOCFLAGS: -D warnings
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: cargo doc --no-deps --document-private-items
