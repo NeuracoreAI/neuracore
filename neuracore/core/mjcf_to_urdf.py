@@ -399,8 +399,8 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
             parentbody2childbody_pos + parentbody2childbody_Rot @ childbody2jnt_pos
         )
         parentbody2jnt_rpy = parentbody2childbody_rpy
+        _create_dummy_body(root, jnt_body_name)
         if decompose_ball:
-            _create_dummy_body(root, jnt_body_name)
             _connect_ball_joint_chain(
                 root,
                 jnt_name,
@@ -410,7 +410,6 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
                 parentbody2jnt_rpy,
             )
         else:
-            _create_dummy_body(root, jnt_body_name)
             _create_joint(
                 root,
                 jnt_name,
