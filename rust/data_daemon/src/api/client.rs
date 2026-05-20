@@ -92,7 +92,11 @@ impl ApiClient {
         options: ApiClientOptions,
         auth: Arc<dyn AuthProvider>,
     ) -> Result<Self, ApiClientError> {
-        let inner = Client::builder().timeout(options.timeout).build()?;
+        let inner = Client::builder()
+            .timeout(options.timeout)
+            .http2_adaptive_window(true)
+            .pool_max_idle_per_host(128)
+            .build()?;
         Ok(Self {
             inner,
             options,

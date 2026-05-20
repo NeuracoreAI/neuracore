@@ -28,12 +28,10 @@ use crate::state::{
 /// Maximum traces to register in a single call. Matches the
 /// `claim_traces_for_registration` size trigger.
 pub const BATCH_SIZE: usize = 50;
-/// Maximum age before flushing a partial batch. Matches the Python
-/// `RegistrationManager._max_wait_s` (1 s).
-pub const MAX_WAIT: Duration = Duration::from_secs(1);
-/// Poll interval the coordinator falls back to when the bus is quiet —
-/// matches the Python `poll_interval_s` default (2 s).
-pub const POLL_INTERVAL: Duration = Duration::from_secs(2);
+/// Maximum age before flushing a partial batch.
+pub const MAX_WAIT: Duration = Duration::from_millis(200);
+/// Poll interval the coordinator falls back to when the bus is quiet.
+pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Handle returned by [`spawn_registration`].
 pub struct RegistrationCoordinatorHandle {

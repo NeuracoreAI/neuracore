@@ -234,7 +234,10 @@ async fn handle_envelope(
                 handle_cancel_recording(store, context, routing, recording_traces, recording_id)
                     .await;
             }
-            _ => unreachable!("trace_key only returns None for recording-scoped envelopes"),
+            // `trace_key` also returns `None` for `BatchedFrames`, but the
+            // IPC listener expands that into per-trace `Frame`s before the
+            // dispatcher ever sees it — so it cannot reach this branch.
+            _ => unreachable!("only recording-scoped envelopes reach this branch"),
         }
         return None;
     };

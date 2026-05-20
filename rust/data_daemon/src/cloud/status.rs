@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::models::{TraceStatusUpdate, TraceStatusValue};
 use crate::api::ApiClient;
@@ -113,55 +113,83 @@ async fn run(
     // Per-recording pending batches keyed by recording_id; preserves the
     // last-seen update per trace (later updates supersede earlier ones).
     let mut pending: HashMap<String, RecordingBatch> = HashMap::new();
+    // Flush tasks running in the background — spawned by flush_due and the
+    // max-batch path so the select loop never blocks on HTTP round-trips.
+    let mut background_flushes: JoinSet<Option<RecordingBatch>> = JoinSet::new();
+    // Periodic flush ticker — fires every 100 ms regardless of inbox load.
+    let mut flush_ticker = interval(Duration::from_millis(100));
+    flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
-        // Decide how long to sleep before the next forced flush.
-        let next_deadline = pending
-            .values()
-            .map(RecordingBatch::deadline)
-            .min()
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
-        let sleep_for = next_deadline.saturating_duration_since(Instant::now());
-
         tokio::select! {
             biased;
             signal = shutdown_rx.recv() => {
                 tracing::debug!(?signal, "status updater shutting down");
-                // Flush whatever is pending one last time so partial
-                // progress isn't lost on a clean stop.
+                // Let in-flight flushes finish; re-queue any deferred batches
+                // so flush_all gets a chance to send them.
+                while let Some(flush_result) = background_flushes.join_next().await {
+                    if let Ok(Some(deferred_batch)) = flush_result {
+                        pending.insert(deferred_batch.recording_id.clone(), deferred_batch);
+                    }
+                }
                 flush_all(&store, &client, &mut pending).await;
                 break;
             }
+            // Drain completed background flush tasks without blocking the loop.
+            Some(flush_result) = background_flushes.join_next(),
+                if !background_flushes.is_empty() =>
+            {
+                match flush_result {
+                    Ok(Some(deferred_batch)) => {
+                        pending.insert(deferred_batch.recording_id.clone(), deferred_batch);
+                    }
+                    Ok(None) => {}
+                    Err(panic_err) => {
+                        tracing::warn!(?panic_err, "flush_batch task panicked");
+                    }
+                }
+            }
+            _ = flush_ticker.tick() => {
+                flush_due(&store, &client, &mut pending, &mut background_flushes);
+            }
             maybe_update = inbox.recv() => {
                 let Some(update) = maybe_update else { break };
+                let recording_id = update.recording_id.clone();
                 let batch = pending
                     .entry(update.recording_id.clone())
                     .or_insert_with(|| RecordingBatch::new(update.recording_id.clone()));
                 batch.add(update);
                 if batch.size() >= MAX_BATCH_SIZE {
-                    let recording_id = batch.recording_id.clone();
-                    flush_one(&store, &client, &mut pending, &recording_id).await;
+                    if let Some(batch) = pending.remove(&recording_id) {
+                        background_flushes.spawn(flush_batch(
+                            Arc::clone(&store),
+                            Arc::clone(&client),
+                            batch,
+                        ));
+                    }
                 }
-            }
-            _ = sleep(sleep_for) => {
-                flush_due(&store, &client, &mut pending).await;
             }
         }
     }
 }
 
-async fn flush_due(
+/// Spawn a background task for every batch whose deadline has passed.
+/// Synchronous — never blocks the select loop on HTTP I/O.
+fn flush_due(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
     pending: &mut HashMap<String, RecordingBatch>,
+    background_flushes: &mut JoinSet<Option<RecordingBatch>>,
 ) {
     let now = Instant::now();
-    let due: Vec<String> = pending
+    let due_ids: Vec<String> = pending
         .iter()
         .filter(|(_, batch)| now >= batch.deadline())
         .map(|(recording_id, _)| recording_id.clone())
         .collect();
-    for recording_id in due {
-        flush_one(store, client, pending, &recording_id).await;
+    for recording_id in &due_ids {
+        if let Some(batch) = pending.remove(recording_id) {
+            background_flushes.spawn(flush_batch(Arc::clone(store), Arc::clone(client), batch));
+        }
     }
 }
 
@@ -170,22 +198,28 @@ async fn flush_all(
     client: &Arc<ApiClient>,
     pending: &mut HashMap<String, RecordingBatch>,
 ) {
-    let recordings: Vec<String> = pending.keys().cloned().collect();
-    for recording_id in recordings {
-        flush_one(store, client, pending, &recording_id).await;
+    let mut tasks: JoinSet<Option<RecordingBatch>> = JoinSet::new();
+    for (_, batch) in pending.drain() {
+        tasks.spawn(flush_batch(Arc::clone(store), Arc::clone(client), batch));
+    }
+    while let Some(result) = tasks.join_next().await {
+        if let Err(panic_err) = result {
+            tracing::warn!(?panic_err, "flush_batch task panicked on shutdown");
+        }
+        // Deferred batches (missing org_id) are dropped on shutdown.
     }
 }
 
-async fn flush_one(
-    store: &Arc<SqliteStateStore>,
-    client: &Arc<ApiClient>,
-    pending: &mut HashMap<String, RecordingBatch>,
-    recording_id: &str,
-) {
-    let Some(mut batch) = pending.remove(recording_id) else {
-        return;
-    };
-    let org_id = match resolve_org(store, recording_id).await {
+/// Flush a single recording's batch. Returns the batch back if the recording's
+/// org_id isn't available yet (caller should re-insert with deferred deadline),
+/// or `None` when the flush was sent (or the batch was empty).
+async fn flush_batch(
+    store: Arc<SqliteStateStore>,
+    client: Arc<ApiClient>,
+    mut batch: RecordingBatch,
+) -> Option<RecordingBatch> {
+    let recording_id = batch.recording_id.clone();
+    let org_id = match resolve_org(&store, &recording_id).await {
         Some(org_id) => org_id,
         None => {
             // Re-queue with a fresh `opened_at` pushed
@@ -195,33 +229,30 @@ async fn flush_one(
             // `deadline()` permanently in the past and the select loop
             // becomes a busy-wait until the org appears.
             batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
-            pending.insert(recording_id.to_string(), batch);
-            return;
+            return Some(batch);
         }
     };
     let updates = batch.into_updates();
     if updates.is_empty() {
-        return;
+        return None;
     }
-    let updates_payload = updates
-        .iter()
-        .map(|(trace_id, update)| (trace_id.clone(), update.clone()))
-        .collect::<HashMap<_, _>>();
+    let updates_payload: HashMap<String, TraceStatusUpdate> = updates.into_iter().collect();
     match client
-        .batch_update_traces(&org_id, recording_id, &updates_payload)
+        .batch_update_traces(&org_id, &recording_id, &updates_payload)
         .await
     {
         Ok(()) => {
             tracing::debug!(
                 recording_id,
-                count = updates.len(),
+                count = updates_payload.len(),
                 "flushed status updates"
             );
         }
         Err(error) => {
-            tracing::warn!(%error, recording_id, count = updates.len(), "status batch update failed");
+            tracing::warn!(%error, recording_id, count = updates_payload.len(), "status batch update failed");
         }
     }
+    None
 }
 
 async fn resolve_org(store: &Arc<SqliteStateStore>, recording_id: &str) -> Option<String> {

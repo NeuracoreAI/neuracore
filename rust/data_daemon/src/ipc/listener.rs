@@ -1,18 +1,23 @@
-//! Tokio task that drains the iceoryx2 `commands` subscriber.
+//! Tokio task that drains the iceoryx2 `commands` and `frames` subscribers.
 //!
 //! iceoryx2 0.8 does not expose an `async`/`Notify`-style adaptor, so the
-//! listener polls the subscriber on a short tick. The cadence is fast enough
+//! listener polls both subscribers on a short tick. The cadence is fast enough
 //! for the phase 4 smoke test (a few hundred frames in ≤1 s) and slow enough
-//! to leave idle daemons effectively quiescent. Sub-phase 4h replaces the
-//! timer with a `WaitSet`-backed notifier when frame throughput matters and
-//! moves per-resolution frame traffic onto dedicated services.
+//! to leave idle daemons effectively quiescent. A future sub-phase replaces
+//! the timer with a `WaitSet`-backed notifier when frame throughput matters.
+//!
+//! `commands` is drained before `frames` each tick so that, within a tick, a
+//! trace's `StartTrace` (on `commands`) tends to reach the dispatcher ahead of
+//! its frames (on `frames`). Cross-service ordering is not guaranteed in
+//! general — the per-trace actor buffers frames that arrive before their
+//! `StartTrace` — but draining in this order keeps that buffer shallow.
 //!
 //! ## Send-safety
 //!
 //! iceoryx2's [`Subscriber`] is `Send` but `!Sync`, so a `&Subscriber` borrow
 //! held across an `await` would make this task's future `!Send` — tokio's
 //! multi-thread runtime would refuse to spawn it. The loop therefore drains
-//! the subscriber synchronously into a local `Vec<Envelope>` before awaiting
+//! the subscribers synchronously into a local `Vec<Envelope>` before awaiting
 //! the dispatcher.
 
 use std::time::Duration;
@@ -34,7 +39,7 @@ use crate::lifecycle::signals::ShutdownSignal;
 /// the listener loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Drain the iceoryx2 subscriber until a shutdown signal arrives.
+/// Drain the iceoryx2 subscribers until a shutdown signal arrives.
 ///
 /// Each successfully decoded envelope is forwarded to the dispatcher's
 /// [`mpsc::Sender`]. If the dispatcher's queue fills (the dispatcher has
@@ -51,6 +56,7 @@ pub async fn run(
 ) {
     tracing::info!(
         commands = data_daemon_ipc::service_name::COMMANDS,
+        frames = data_daemon_ipc::service_name::FRAMES,
         "ipc listener started"
     );
 
@@ -59,10 +65,13 @@ pub async fn run(
 
     loop {
         // -- Synchronous drain --------------------------------------------------
-        // The subscriber borrow MUST stay inside this block (no `.await` in
+        // The subscriber borrows MUST stay inside this block (no `.await` in
         // any of these calls). The local `batch` is `Send`, so it can survive
         // across the awaits below without infecting the task with !Send.
+        // `commands` is drained first so a trace's `StartTrace` is forwarded
+        // ahead of its frames within the same tick where possible.
         drain_subscriber(transport.commands_subscriber(), &mut batch, &mut counters);
+        drain_subscriber(transport.frames_subscriber(), &mut batch, &mut counters);
 
         // -- Async forward ------------------------------------------------------
         for envelope in batch.drain(..) {
@@ -112,6 +121,24 @@ fn drain_subscriber(
     loop {
         match subscriber.receive() {
             Ok(Some(sample)) => match Envelope::decode(sample.payload()) {
+                // A `BatchedFrames` envelope is a wire-only optimisation: the
+                // producer packs N joint samples into one iceoryx2 message.
+                // Unpack it here, at the transport boundary, so the dispatcher
+                // and per-trace actors only ever see standalone `Frame`s.
+                Ok(Envelope::BatchedFrames {
+                    timestamp_ns,
+                    timestamp_s,
+                    frames,
+                }) => {
+                    for item in frames {
+                        batch.push(Envelope::frame(
+                            item.trace_id,
+                            timestamp_ns,
+                            timestamp_s,
+                            item.payload,
+                        ));
+                    }
+                }
                 Ok(envelope) => batch.push(envelope),
                 Err(error) => {
                     counters.decode_failures = counters.decode_failures.saturating_add(1);
