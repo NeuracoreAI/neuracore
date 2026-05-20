@@ -5,6 +5,7 @@ including joint positions, camera images, point clouds, and custom data streams.
 All logging functions support optional robot identification and timestamping.
 """
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -51,6 +52,7 @@ from neuracore.data_daemon.models import (
     BatchedJointDataItemPayload,
     BatchedJointDataPayload,
 )
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -306,6 +308,7 @@ def _log_group_of_joint_data(
         return
 
     robot = _get_robot(robot_name, instance)
+    rust_mode = rust_daemon_enabled()
 
     # Hot path: at 1 kHz × N joints the per-iteration Python overhead
     # dominates. Hoist the robot-wide state out of the loop, look up cached
@@ -321,6 +324,11 @@ def _log_group_of_joint_data(
         None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
     )
 
+    # Under the Rust daemon the whole joint group is delivered in one call to
+    # the recording-scoped native session, addressed by joint name; under the
+    # legacy daemon each joint's per-stream channel contributes a trace_id to
+    # a `BatchedJointDataPayload`.
+    native_items: list[tuple[str, float]] = []
     batched_items: list[BatchedJointDataItemPayload] = []
     batch_transport_stream: JsonDataStream | None = None
 
@@ -347,6 +355,11 @@ def _log_group_of_joint_data(
                 data.model_dump(mode="json")
             )
 
+        if rust_mode:
+            if current_recording_id is not None:
+                native_items.append((binding.storage_name, joint_value))
+            continue
+
         producer_channel = joint_stream.get_producer_channel()
         if producer_channel is None or joint_stream.get_recording_context() is None:
             continue
@@ -362,6 +375,13 @@ def _log_group_of_joint_data(
                 value=joint_value,
             )
         )
+
+    if rust_mode:
+        if native_items:
+            robot._get_daemon_recording_context().log_joints(
+                data_type.value, timestamp, native_items
+            )
+        return
 
     if batch_transport_stream is None or not batched_items:
         return
@@ -475,6 +495,19 @@ def _log_camera_data(
     # camera_data_without_frame object to avoid serializing the frame to JSON
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
+
+    if rust_daemon_enabled() and robot.get_current_recording_id() is not None:
+        # Rust daemon: the recording-scoped native session owns the camera's
+        # trace lifecycle; hand it the raw frame bytes.
+        robot._get_daemon_recording_context().log_frame(
+            camera_type.value,
+            storage_name,
+            int(image.shape[1]),
+            int(image.shape[0]),
+            image.tobytes(),
+            camera_data_without_frame.timestamp,
+        )
+
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 
 
@@ -528,6 +561,15 @@ def log_custom_1d(
 
     custom_data = Custom1DData(timestamp=timestamp, data=data)
     stream.log(custom_data)
+
+    if rust_daemon_enabled() and robot.get_current_recording_id() is not None:
+        # Rust daemon: the recording-scoped native session owns the trace
+        # lifecycle; hand it the serialized sample.
+        payload = json.dumps(custom_data.model_dump(mode="json")).encode("utf-8")
+        robot._get_daemon_recording_context().log_scalar(
+            DataType.CUSTOM_1D.value, storage_name, payload, timestamp
+        )
+
     _publish_json_to_p2p(robot, str_id, DataType.CUSTOM_1D, custom_data)
 
 

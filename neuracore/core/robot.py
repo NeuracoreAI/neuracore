@@ -29,6 +29,7 @@ from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context,
 )
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -315,6 +316,17 @@ class Robot:
             ):
                 warn("This recording had already been started!")
 
+            if rust_daemon_enabled():
+                # Announce the recording to the Rust daemon once. The native
+                # layer is idempotent, so a repeated start is harmless.
+                self._get_daemon_recording_context().start_recording(
+                    recording_id=recording_id,
+                    robot_id=self.id,
+                    robot_name=self.name,
+                    dataset_id=dataset_id,
+                    dataset_name=None,
+                )
+
             get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
@@ -430,9 +442,12 @@ class Robot:
                     stream.prepare_recording_stopped()
                 )
 
-                producer_stop_sequence_numbers[producer_channel.channel_id] = (
-                    stop_cutoff_sequence_number
-                )
+                # Under the Rust daemon the stream owns no channel — there is
+                # no per-channel stop sequence to record.
+                if producer_channel is not None:
+                    producer_stop_sequence_numbers[producer_channel.channel_id] = (
+                        stop_cutoff_sequence_number
+                    )
 
                 stream.stop_recording(
                     stop_cutoff_sequence_number=stop_cutoff_sequence_number,
@@ -736,7 +751,11 @@ class Robot:
 
         end_time = time.time()
         self._stop_all_streams()
-        self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
+        daemon_context = self._get_daemon_recording_context()
+        if rust_daemon_enabled():
+            daemon_context.cancel_recording(recording_id=recording_id)
+        else:
+            daemon_context.stop_recording(recording_id=recording_id)
 
         try:
             session = thread_local_session()

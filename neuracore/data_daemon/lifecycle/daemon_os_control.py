@@ -191,7 +191,7 @@ def _start_daemon_subprocess(
     try:
         if background:
             stderr_target: int | IO[bytes] = (
-                debug_log_handle if debug_log_handle is not None else subprocess.PIPE
+                debug_log_handle if debug_log_handle is not None else subprocess.DEVNULL
             )
             process = subprocess.Popen(
                 _build_daemon_runner_command(),

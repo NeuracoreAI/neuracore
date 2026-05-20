@@ -48,7 +48,10 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PRODUCER_PER_THREAD,
     SCHEDULER_TOLERANCE_S,
     STOCHASTIC_JITTER_S,
+    STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+    STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
+    STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
 )
@@ -139,6 +142,41 @@ class ContextCaseSpec:
     video_fps: int
     wait: bool
     timestamp_mode: str
+
+    @property
+    def stop_recording_sla_s(self) -> float:
+        """Seconds allowed for the ``nc.stop_recording`` call.
+
+        ``wait=False`` is fire-and-forget — the call never blocks on the
+        upload pipeline — so it gets a flat constant. ``wait=True`` blocks
+        until every trace has uploaded, so its budget is the sum of the
+        joint-data and video-data upload costs: total joint samples
+        (``duration_sec * joint_count * joint_fps``) and total video pixels
+        (``duration_sec * video_fps * video_count * image_width *
+        image_height``), each times an observed per-unit upload cost. The
+        budget is floored at the duration-based overhead so short or
+        low-volume recordings keep a sane minimum.
+        """
+        if not self.wait:
+            return STOP_RECORDING_NO_WAIT_SLA_S
+        duration_floor = self.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC
+        joint_budget = (
+            self.duration_sec
+            * self.joint_count
+            * self.joint_fps
+            * STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S
+        )
+        video_budget = 0.0
+        if self.video_count and self.image_width and self.image_height:
+            video_budget = (
+                self.duration_sec
+                * self.video_fps
+                * self.video_count
+                * self.image_width
+                * self.image_height
+                * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
+            )
+        return max(duration_floor, joint_budget + video_budget)
 
 
 @dataclass(frozen=True, slots=True)
@@ -773,7 +811,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 marker_names = current_marker_names
 
             with Timer(
-                case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
+                case.stop_recording_sla_s,
                 label="nc.stop_recording",
                 always_log=True,
                 assert_deadline=spec.assert_deadline,
