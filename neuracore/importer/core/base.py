@@ -164,7 +164,7 @@ class NeuracoreDatasetImporter(ABC):
         self.urdf_path = urdf_path
         self.ik_init_config = ik_init_config
         self.robot_utils: RobotUtils | None = None
-        self.prev_ik_solution: list[float] | None = None
+        self.prev_ik_solution: dict[str, float] | list[float] | None = None
         self.curr_joint_positions: dict[str, float] = {}
         self.curr_end_effector_poses: dict[str, list[float]] = {}
         self.shared = shared
@@ -588,7 +588,7 @@ class NeuracoreDatasetImporter(ABC):
                     item.name,
                     self.prev_ik_solution,
                 )
-                self.prev_ik_solution = list(transformed_data.values())
+                self.prev_ik_solution = transformed_data
                 for name, position in transformed_data.items():
                     self._validate_joint_data(data_type, position, name)
             elif fk_requested:
@@ -648,7 +648,7 @@ class NeuracoreDatasetImporter(ABC):
                     transformed_data = self.robot_utils.end_effector_to_joint_positions(
                         transformed_data, item.name, self.prev_ik_solution
                     )
-                    self.prev_ik_solution = list(transformed_data.values())
+                    self.prev_ik_solution = transformed_data
                     for name, position in transformed_data.items():
                         if name in self.curr_joint_positions:
                             self._validate_joint_data(
