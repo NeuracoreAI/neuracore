@@ -20,6 +20,7 @@ CHUNK_HEADER_SIZE = struct.calcsize(CHUNK_HEADER_FORMAT)
 SHARED_MEMORY_RECORD_MAGIC = b"NCR1"
 SHARED_MEMORY_RECORD_HEADER_FORMAT = "!4sII"
 SHARED_MEMORY_RECORD_HEADER_SIZE = struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)
+SHARED_SLOT_SHM_PREFIX = "ncs-"
 
 # Shared transport sizing.
 # Keep these aligned with frontend/PFE expectations.

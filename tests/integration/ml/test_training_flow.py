@@ -100,6 +100,7 @@ CNNMLP_CONFIG = {
 }
 
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
+TRAINING_ERROR_LOG_MAX_ENTRIES = 10_000
 
 # A batch_size value that is not "auto" and not parseable as an integer.
 # It passes client-side validation (which only checks data types / algorithm
@@ -326,6 +327,44 @@ def _wait_for_all_training(
             time.time() < deadline
         ), f"Training job(s) {job_ids} did not finish within {timeout_minutes} minutes"
         time.sleep(TRAINING_POLL_SECONDS)
+
+
+def _format_training_log_entries(entries: list[dict]) -> str:
+    """Format VM log entries for pytest failure output."""
+    formatted_entries = []
+    for entry in entries:
+        timestamp = entry.get("timestamp", "<missing timestamp>")
+        severity = entry.get("severity", "<missing severity>")
+        message = entry.get("message", "<missing message>")
+        traceback = entry.get("traceback")
+        formatted_entry = f"[{timestamp}] {severity}: {message}"
+        if traceback:
+            formatted_entry = f"{formatted_entry}\n{traceback}"
+        formatted_entries.append(formatted_entry)
+    return "\n\n".join(formatted_entries)
+
+
+def _assert_no_training_log_errors(job_id: str, context: str) -> None:
+    """Fail if a training VM emitted ERROR or CRITICAL log entries."""
+    offending_entries: list[dict] = []
+    for severity in ("ERROR", "CRITICAL"):
+        logs = nc.get_training_job_logs(
+            job_id,
+            max_entries=TRAINING_ERROR_LOG_MAX_ENTRIES,
+            severity_filter=severity,
+        )
+        entries = logs.get("logs", [])
+        assert isinstance(entries, list), (
+            f"{context}: expected '{severity}' training logs response to contain "
+            f"a list under 'logs', got: {logs!r}"
+        )
+        offending_entries.extend(entries)
+
+    assert not offending_entries, (
+        f"{context}: training job {job_id} emitted "
+        f"{len(offending_entries)} ERROR/CRITICAL log entries:\n\n"
+        f"{_format_training_log_entries(offending_entries)}"
+    )
 
 
 def _wait_for_endpoint(
@@ -612,10 +651,10 @@ class TestTrainingFlow:
             assert isinstance(logs["total_entries"], int)
             for entry in logs["logs"]:
                 assert "message" in entry, f"Log entry missing 'message': {entry}"
-            filtered = nc.get_training_job_logs(
-                job_id=self.job_id, max_entries=10, severity_filter="ERROR"
+            _assert_no_training_log_errors(
+                job_id=self.job_id,
+                context="Step 4 (training logs while RUNNING)",
             )
-            assert "logs" in filtered
             logger.info(
                 f"[STEP 4] [PASSED] Retrieved {logs['total_entries']} Log Entries"
             )
@@ -626,6 +665,10 @@ class TestTrainingFlow:
         assert (
             final_status == "COMPLETED"
         ), f"Training ended with non-COMPLETED status: {final_status}"
+        _assert_no_training_log_errors(
+            job_id=self.job_id,
+            context="Step 5 (training completion)",
+        )
         logger.info(f"[STEP 5] [PASSED] Job {self.job_id} Completed")
 
     def test_step6_resume_training(self) -> None:
@@ -658,6 +701,10 @@ class TestTrainingFlow:
         assert (
             resumed_data.get("previous_training_time") is not None
         ), "Expected previous_training_time to be set after resume"
+        _assert_no_training_log_errors(
+            job_id=self.job_id,
+            context="Step 6 (resume training completion)",
+        )
         logger.info(
             f"[STEP 6] [PASSED] Resumed Job Completed At Epoch"
             f" {resumed_data.get('epoch')}"

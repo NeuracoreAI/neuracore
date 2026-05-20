@@ -165,6 +165,7 @@ class EventLoopManager:
         finally:
             # Cancel remaining tasks
             try:
+                loop.run_until_complete(asyncio.sleep(0))
                 tasks = [
                     task
                     for task in asyncio.all_tasks(self.general_loop)

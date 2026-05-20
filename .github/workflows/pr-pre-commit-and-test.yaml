@@ -83,7 +83,7 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          uv pip install ".[dev,import]"
+          uv pip install ".[dev,import]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
           if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
             uv pip install pytest-cov diff-cover
           fi

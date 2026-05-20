@@ -1,7 +1,9 @@
 import logging
+import tempfile
 import time
 from collections.abc import Generator
 from enum import Enum
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -112,20 +114,21 @@ def test_daemon_singleton_socket_enforced(zmq_context: zmq.Context) -> None:
 
 
 def test_create_producer_socket_returns_continues_without_daemon(
-    tmp_path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    socket_path = tmp_path / "ndd" / "management.sock"
-    monkeypatch.setattr(const_module, "SOCKET_PATH", socket_path)
-    monkeypatch.setattr(comms_module, "SOCKET_PATH", socket_path)
+    with tempfile.TemporaryDirectory(prefix="nc-", dir="/tmp") as tmp_path:
+        socket_path = Path(tmp_path) / "ndd" / "management.sock"
+        monkeypatch.setattr(const_module, "SOCKET_PATH", socket_path)
+        monkeypatch.setattr(comms_module, "SOCKET_PATH", socket_path)
 
-    comm = CommunicationsManager()
-    assert not socket_path.exists()
-    comm.create_producer_socket()
-    assert isinstance(comm._producer_socket, zmq.Socket)
-    assert (
-        comm._producer_socket.getsockopt(zmq.IMMEDIATE) == 1
-    ), "Socket should be setup in IMMEDIATE mode"
-    comm.cleanup_producer()
+        comm = CommunicationsManager()
+        assert not socket_path.exists()
+        comm.create_producer_socket()
+        assert isinstance(comm._producer_socket, zmq.Socket)
+        assert (
+            comm._producer_socket.getsockopt(zmq.IMMEDIATE) == 1
+        ), "Socket should be setup in IMMEDIATE mode"
+        comm.cleanup_producer()
 
 
 def test_message_envelope_round_trip_bytes() -> None:
