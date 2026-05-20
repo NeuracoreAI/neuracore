@@ -112,8 +112,8 @@ def _create_joint(
 ) -> ET.Element:
     """Create a URDF joint element connecting two links.
 
-    Supports fixed, revolute, prismatic, continuous, ball, and floating joints.
-    For ball (3-DoF rotational) and floating (6-DoF) joints, no axis or limits are added.
+    Supports fixed, revolute, prismatic, continuous, and floating joints.
+    For floating joints, no axis or limits are added (6-DoF free joint).
 
     Args:
         xml_root: Parent XML element to attach the new joint to.
@@ -125,13 +125,13 @@ def _create_joint(
         axis: Joint axis of rotation/translation [x, y, z].
         jnt_range: Joint limits [min, max].
         jnt_type: Type of joint ("fixed", "revolute", "prismatic",
-                  "continuous", "ball", or "floating").
+                  "continuous", or "floating").
 
     Returns:
         The created joint XML element.
     """
     # Basic validation of parameters vs joint type
-    if jnt_type in ("fixed", "floating", "ball"):
+    if jnt_type in ("fixed", "floating"):
         # These joint types should not have an axis or limits
         if axis is not None or jnt_range is not None:
             raise ValueError(
@@ -174,13 +174,52 @@ def _create_joint(
     return jnt_element
 
 
+def _connect_ball_joint_chain(
+    xml_root: ET.Element,
+    jnt_name: str,
+    parent_name: str,
+    jnt_body_name: str,
+    parentbody2jnt_pos: np.ndarray,
+    parentbody2jnt_rpy: np.ndarray,
+) -> None:
+    """Connect parent to joint body via three orthogonal continuous joints.
+
+    MuJoCo ball joints have 3 rotational DoF. URDF ``type="ball"`` is not parsed
+    by common consumers (e.g. Pinocchio's urdfdom). This chain approximates a
+    spherical joint with RX, RY, RZ continuous joints on intermediate dummy links.
+    """
+    rx_name = f"{jnt_name}_ball_rx"
+    ry_name = f"{jnt_name}_ball_ry"
+    zero_pos = np.zeros(3)
+    zero_rpy = np.zeros(3)
+    axes = [
+        (f"{jnt_name}_rx", parent_name, rx_name, parentbody2jnt_pos, parentbody2jnt_rpy, [1, 0, 0]),
+        (f"{jnt_name}_ry", rx_name, ry_name, zero_pos, zero_rpy, [0, 1, 0]),
+        (f"{jnt_name}_rz", ry_name, jnt_body_name, zero_pos, zero_rpy, [0, 0, 1]),
+    ]
+    _create_dummy_body(xml_root, rx_name)
+    _create_dummy_body(xml_root, ry_name)
+    for name, parent, child, pos, rpy, axis in axes:
+        _create_joint(
+            xml_root,
+            name,
+            parent,
+            child,
+            pos,
+            rpy,
+            axis,
+            None,
+            "continuous",
+        )
+
+
 def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> None:
     """Convert a MuJoCo MJCF file to URDF format.
 
     Performs a comprehensive conversion from MJCF to URDF including:
     - Kinematic structure and joint relationships
     - Mass and inertia properties
-    - Joint types and limits (revolute, prismatic, ball, fixed)
+    - Joint types and limits (revolute, prismatic, fixed; ball as 3x continuous)
     - Visual mesh geometries converted to STL format
     - Proper coordinate frame transformations
 
@@ -243,6 +282,7 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
 
         jntnum = model.body_jntnum[id]
         assert jntnum <= 1, "only one joint per body supported"
+        decompose_ball = False
 
         if jntnum == 1:
             # load joint info
@@ -268,11 +308,11 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
                 jnt_range = model.jnt_range[jntid]  # [min, max]
                 jnt_axis_childbody = model.jnt_axis[jntid]  # [x, y, z]
             elif jnt_type == mujoco.mjtJoint.mjJNT_BALL:
-                urdf_jnt_type = "ball"
+                decompose_ball = True
+                urdf_jnt_type = "fixed"  # unused; chain built in decompose path
             elif jnt_type == mujoco.mjtJoint.mjJNT_FREE:
                 urdf_jnt_type = "floating"
             else:
-                # raise a value error for unsupported joint types
                 raise ValueError(f"unsupported joint type: {jnt_type}")
 
             parentbody2jnt_axis = jnt_axis_childbody
@@ -280,6 +320,7 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
             # create a fixed joint instead
             jnt_name = f"{parent_name}2{child_name}_fixed"
             urdf_jnt_type = "fixed"
+            decompose_ball = False
             jnt_range = None
             childbody2jnt_pos = np.zeros(3)
             parentbody2jnt_axis = None
@@ -354,23 +395,33 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
 
         # create dummy body for joint
         jnt_body_name = f"{jnt_name}_jointbody"
-        _create_dummy_body(root, jnt_body_name)
-        # connect parent to joint body with appropriate joint type
         parentbody2jnt_pos = (
             parentbody2childbody_pos + parentbody2childbody_Rot @ childbody2jnt_pos
         )
         parentbody2jnt_rpy = parentbody2childbody_rpy
-        _create_joint(
-            root,
-            jnt_name,
-            parent_name,
-            jnt_body_name,
-            parentbody2jnt_pos,
-            parentbody2jnt_rpy,
-            parentbody2jnt_axis,
-            jnt_range,
-            urdf_jnt_type,
-        )
+        if decompose_ball:
+            _create_dummy_body(root, jnt_body_name)
+            _connect_ball_joint_chain(
+                root,
+                jnt_name,
+                parent_name,
+                jnt_body_name,
+                parentbody2jnt_pos,
+                parentbody2jnt_rpy,
+            )
+        else:
+            _create_dummy_body(root, jnt_body_name)
+            _create_joint(
+                root,
+                jnt_name,
+                parent_name,
+                jnt_body_name,
+                parentbody2jnt_pos,
+                parentbody2jnt_rpy,
+                parentbody2jnt_axis,
+                jnt_range,
+                urdf_jnt_type,
+            )
         # connect joint body to child body with fixed joint
         jnt2childbody_pos = -childbody2jnt_pos
         jnt2childbody_rpy = np.zeros(3)
