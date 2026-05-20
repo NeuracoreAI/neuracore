@@ -1,15 +1,21 @@
 import inspect
+import os
 import random
 from pathlib import Path
 from typing import cast
 
 import pytest
 import torch
-from neuracore_types import BatchedNCData, DataType, ModelInitDescription
+from neuracore_types import (
+    BatchedNCData,
+    CrossEmbodimentDescription,
+    DataType,
+    ModelInitDescription,
+)
+from ordered_set import OrderedSet
 from torch import nn
 from torch.utils.data import DataLoader
 
-from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.algorithms.diffusion_policy.diffusion_policy import DiffusionPolicy
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
@@ -19,51 +25,54 @@ from neuracore.ml.utils.validate import run_validation
 
 BS = 2
 DEVICE = get_default_device()
-OUTPUT_PREDICTION_HORIZON = 5
+OUTPUT_PREDICTION_HORIZON = 6
+
+INPUT_PARAMS = [
+    pytest.param(
+        OrderedSet([data_type]),
+        id="".join(w.capitalize() for w in data_type.value.split("_")),
+    )
+    for data_type in DiffusionPolicy.get_supported_input_data_types()
+]
+OUTPUT_PARAMS = [
+    pytest.param(
+        OrderedSet([data_type]),
+        id="".join(w.capitalize() for w in data_type.value.split("_")),
+    )
+    for data_type in DiffusionPolicy.get_supported_output_data_types()
+]
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def pytorch_dummy_dataset() -> PytorchDummyDataset:
     input_data_types = DiffusionPolicy.get_supported_input_data_types()
     output_data_types = DiffusionPolicy.get_supported_output_data_types()
-    input_cross_embodiment_description = {
+    input_cross_embodiment_description: CrossEmbodimentDescription = {
         "robot_1": {data_type: {} for data_type in input_data_types}
     }
-    output_cross_embodiment_description = {
+    output_cross_embodiment_description: CrossEmbodimentDescription = {
         "robot_1": {data_type: {} for data_type in output_data_types}
     }
-
-    dataset = PytorchDummyDataset(
+    return PytorchDummyDataset(
         num_samples=5,
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
-    return dataset
 
 
-@pytest.fixture
-def model_init_description(
-    pytorch_dummy_dataset: PytorchDummyDataset,
-) -> ModelInitDescription:
-    input_data_types = extract_data_types(
-        pytorch_dummy_dataset.input_cross_embodiment_description
-    )
-    output_data_types = extract_data_types(
-        pytorch_dummy_dataset.output_cross_embodiment_description
-    )
-    return ModelInitDescription(
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
-        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
-        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
-        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
-    )
+DIFFUSION_POLICY_TEST_ARGS: dict = {
+    "num_train_timesteps": 1,
+    "num_inference_steps": 1,
+    "hidden_dim": 64,
+    "unet_n_groups": 4,
+    "unet_down_dims": [128, 256],
+}
 
 
 @pytest.fixture
 def model_config() -> dict:
-    return {}
+    return DIFFUSION_POLICY_TEST_ARGS
 
 
 @pytest.fixture
@@ -94,25 +103,30 @@ def sample_training_batch(
         shuffle=True,
         collate_fn=pytorch_dummy_dataset.collate_fn,
     )
-    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
-    return sample
+    return cast(BatchedTrainingSamples, next(iter(dataloader)))
 
 
-def test_model_construction(
-    model_init_description: ModelInitDescription, model_config: dict
+@pytest.mark.parametrize("output_data_types", OUTPUT_PARAMS)
+@pytest.mark.parametrize("input_data_types", INPUT_PARAMS)
+def test_model_construction_forward_backward(
+    input_data_types: OrderedSet[DataType],
+    output_data_types: OrderedSet[DataType],
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_inference_batch: BatchedInferenceInputs,
+    sample_training_batch: BatchedTrainingSamples,
 ):
-    model = DiffusionPolicy(model_init_description, **model_config)
+    description = ModelInitDescription(
+        input_data_types=input_data_types,
+        output_data_types=output_data_types,
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    model = DiffusionPolicy(model_init_description=description, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
-
-def test_model_forward(
-    model_init_description: ModelInitDescription,
-    model_config: dict,
-    sample_inference_batch: BatchedInferenceInputs,
-):
-    model = DiffusionPolicy(model_init_description, **model_config)
-    model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
     assert isinstance(output, dict)
@@ -122,14 +136,6 @@ def test_model_forward(
         for tensor in tensors:
             assert isinstance(tensor, BatchedNCData)
 
-
-def test_model_backward(
-    model_init_description: ModelInitDescription,
-    model_config: dict,
-    sample_training_batch: BatchedTrainingSamples,
-):
-    model = DiffusionPolicy(model_init_description, **model_config)
-    model = model.to(DEVICE)
     sample_training_batch = sample_training_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
 
@@ -147,19 +153,14 @@ def test_model_backward(
 
 
 def test_run_validation(tmp_path: Path, mock_login):
+    os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "60"
     algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent
     _, error_msg = run_validation(
         output_dir=tmp_path,
         algorithm_dir=algorithm_dir,
         port=random.randint(10000, 20000),
-        algorithm_config={
-            "num_train_timesteps": 1,
-            "num_inference_steps": 1,
-            "hidden_dim": 64,
-            "unet_n_groups": 4,
-            "unet_down_dims": [128, 256],
-        },
         device=DEVICE,
+        algorithm_config=DIFFUSION_POLICY_TEST_ARGS,
     )
     if len(error_msg) > 0:
         raise RuntimeError(error_msg)

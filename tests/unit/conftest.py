@@ -16,6 +16,10 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 )
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: mark test as slow to run")
+
+
 @pytest.fixture
 def temp_config_dir(monkeypatch):
     """Fixture to create a temporary config directory."""

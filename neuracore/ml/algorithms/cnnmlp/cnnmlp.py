@@ -275,12 +275,20 @@ class CNNMLP(NeuracoreModel):
         mlp_input_dim = hidden_dim
 
         output_stats = []
+        self.output_dims: dict[DataType, tuple[int, int]] = {}
+        current_output_dim = 0
         for data_type in self.ordered_output_data_types:
             combined_stats = self._get_combined_output_stats(data_type)
             self.output_combined_stats[data_type] = combined_stats
             output_stats.append(combined_stats)
-            self.output_layout.append((data_type, len(combined_stats.mean)))
-        self.max_output_size = sum(width for _, width in self.output_layout)
+            output_width = len(combined_stats.mean)
+            self.output_layout.append((data_type, output_width))
+            self.output_dims[data_type] = (
+                current_output_dim,
+                current_output_dim + output_width,
+            )
+            current_output_dim += output_width
+        self.max_output_size = current_output_dim
 
         input_stats = []
         self.proprio_dims = {}
@@ -426,7 +434,17 @@ class CNNMLP(NeuracoreModel):
         # Concatenate all proprio data
         proprio_list = []
         for data_type in PROPRIO_DATA_TYPES:
+            if data_type not in self.input_data_types:
+                continue
             if data_type not in batch.inputs:
+                start_idx, end_idx = self.proprio_dims[data_type]
+                proprio_list.append(
+                    torch.zeros(
+                        (len(batch), end_idx - start_idx),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                )
                 continue
 
             batched_nc_data = batch.inputs[data_type]
@@ -483,7 +501,9 @@ class CNNMLP(NeuracoreModel):
         # Gives (B, num_poses, pose_dim)
         pose_data = torch.stack([bpd.pose[:, -1] for bpd in batched_pose_data], dim=1)
         masked_pose_data = pose_data * mask.unsqueeze(-1)
-        return encoder(masked_pose_data)  # (B, feat_dim)
+        # PoseEncoder expects flat (B, num_poses * pose_dim) input
+        batch_size = masked_pose_data.shape[0]
+        return encoder(masked_pose_data.reshape(batch_size, -1))  # (B, feat_dim)
 
     def _encode_point_cloud_data(
         self,
@@ -563,6 +583,8 @@ class CNNMLP(NeuracoreModel):
         for data_type, batched_nc_data in batch.inputs.items():
             # Skip proprio types since they're already handled
             if data_type in PROPRIO_DATA_TYPES:
+                continue
+            if data_type not in self.input_data_types:
                 continue
 
             mask = batch.inputs_mask[data_type]
@@ -648,14 +670,12 @@ class CNNMLP(NeuracoreModel):
         predictions = self.action_normalizer.unnormalize(action_preds)
 
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
-        start_slice_idx = 0
-        for data_type, output_width in self.output_layout:
-            end_slice_idx = start_slice_idx + output_width
-            dt_preds = predictions[
-                :, :, start_slice_idx:end_slice_idx
-            ]  # (B, T, dt_size)
+        for data_type in self.ordered_output_data_types:
+            start_idx, end_idx = self.output_dims[data_type]
+            output_width = end_idx - start_idx
+            dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
-                batched_outputs = []
+                batched_outputs: list[BatchedNCData] = []
                 for i in range(output_width):
                     joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
                     batched_outputs.append(BatchedJointData(value=joint_preds))
@@ -673,13 +693,12 @@ class CNNMLP(NeuracoreModel):
                 output_tensors[data_type] = batched_outputs
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
-            start_slice_idx = end_slice_idx
         return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
 
-        Predicts action sequences and computes mean squared error loss
+        Predicts action sequences and computes masked L1 loss
         against target actions.
 
         Args:
@@ -694,15 +713,23 @@ class CNNMLP(NeuracoreModel):
             batch_size=batch.batch_size,
         )
 
-        if set(batch.outputs.keys()) != set(self.output_data_types):
-            raise ValueError(
-                "Batch outputs do not match model output configuration."
-                f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
-            )
-
         action_targets = []
         for data_type in self.ordered_output_data_types:
-            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            start, end = self.output_dims[data_type]
+            dim = end - start
+            if data_type not in batch.outputs:
+                action_targets.append(
+                    torch.zeros(
+                        batch.batch_size,
+                        self.output_prediction_horizon,
+                        dim,
+                        device=self.device,
+                    )
+                )
+            elif data_type in [
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.JOINT_POSITIONS,
+            ]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
             elif data_type in [
@@ -716,7 +743,7 @@ class CNNMLP(NeuracoreModel):
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
 
-        action_data = torch.cat(action_targets, dim=-1)  # (B, 1, T * action_dim)
+        action_data = torch.cat(action_targets, dim=-1)
         action_data = action_data.view(
             batch.batch_size, self.output_prediction_horizon, -1
         )  # (B, T, action_dim)
@@ -727,7 +754,15 @@ class CNNMLP(NeuracoreModel):
         # channels in mixed-robot batches do not contribute to loss.
         action_mask = torch.cat(
             [
-                batch.outputs_mask[data_type]
+                (
+                    batch.outputs_mask[data_type]
+                    if data_type in batch.outputs_mask
+                    else torch.zeros(
+                        batch.batch_size,
+                        self.output_dims[data_type][1] - self.output_dims[data_type][0],
+                        device=self.device,
+                    )
+                )
                 for data_type in self.ordered_output_data_types
             ],
             dim=-1,

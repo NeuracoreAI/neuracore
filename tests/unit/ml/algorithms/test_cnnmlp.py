@@ -14,10 +14,10 @@ from neuracore_types import (
     DataType,
     ModelInitDescription,
 )
+from ordered_set import OrderedSet
 from torch import nn
 from torch.utils.data import DataLoader
 
-from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 from neuracore.ml import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.algorithms.cnnmlp.cnnmlp import CNNMLP
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
@@ -29,42 +29,40 @@ BS = 2
 DEVICE = get_default_device()
 OUTPUT_PREDICTION_HORIZON = 5
 
-
-def _split_dataset_statistics(
-    dataset: PytorchDummyDataset,
-) -> dict[str, dict[DataType, list]]:
-    input_data_types = extract_data_types(dataset.input_cross_embodiment_description)
-    output_data_types = extract_data_types(dataset.output_cross_embodiment_description)
-    return {
-        "input": {
-            data_type: deepcopy(dataset.dataset_statistics[data_type])
-            for data_type in input_data_types
-        },
-        "output": {
-            data_type: deepcopy(dataset.dataset_statistics[data_type])
-            for data_type in output_data_types
-        },
-    }
+INPUT_PARAMS = [
+    pytest.param(
+        OrderedSet([data_type]),
+        id="".join(w.capitalize() for w in data_type.value.split("_")),
+    )
+    for data_type in CNNMLP.get_supported_input_data_types()
+]
+OUTPUT_PARAMS = [
+    pytest.param(
+        OrderedSet([data_type]),
+        id="".join(w.capitalize() for w in data_type.value.split("_")),
+    )
+    for data_type in CNNMLP.get_supported_output_data_types()
+]
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def pytorch_dummy_dataset() -> PytorchDummyDataset:
-    input_data_types = CNNMLP.get_supported_input_data_types()
-    output_data_types = CNNMLP.get_supported_output_data_types()
     input_cross_embodiment_description: CrossEmbodimentDescription = {
-        "robot_1": {data_type: {} for data_type in input_data_types}
+        "robot_1": {
+            data_type: {} for data_type in CNNMLP.get_supported_input_data_types()
+        }
     }
     output_cross_embodiment_description: CrossEmbodimentDescription = {
-        "robot_1": {data_type: {} for data_type in output_data_types}
+        "robot_1": {
+            data_type: {} for data_type in CNNMLP.get_supported_output_data_types()
+        }
     }
-
-    dataset = PytorchDummyDataset(
+    return PytorchDummyDataset(
         num_samples=5,
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
-    return dataset
 
 
 @pytest.fixture
@@ -77,33 +75,46 @@ def pytorch_dummy_dataset_no_proprio() -> PytorchDummyDataset:
             data_type: {} for data_type in CNNMLP.get_supported_output_data_types()
         }
     }
-
-    dataset = PytorchDummyDataset(
+    return PytorchDummyDataset(
         num_samples=5,
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
         output_prediction_horizon=OUTPUT_PREDICTION_HORIZON,
     )
-    return dataset
+
+
+def _build_model_init_description(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    input_data_types: OrderedSet[DataType],
+    output_data_types: OrderedSet[DataType],
+) -> ModelInitDescription:
+    return ModelInitDescription(
+        input_data_types=input_data_types,
+        output_data_types=output_data_types,
+        input_dataset_statistics={
+            data_type: deepcopy(
+                pytorch_dummy_dataset.dataset_statistics["input"][data_type]
+            )
+            for data_type in input_data_types
+        },
+        output_dataset_statistics={
+            data_type: deepcopy(
+                pytorch_dummy_dataset.dataset_statistics["output"][data_type]
+            )
+            for data_type in output_data_types
+        },
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
 
 
 @pytest.fixture
 def model_init_description(
     pytorch_dummy_dataset: PytorchDummyDataset,
 ) -> ModelInitDescription:
-    input_data_types = extract_data_types(
-        pytorch_dummy_dataset.input_cross_embodiment_description
-    )
-    output_data_types = extract_data_types(
-        pytorch_dummy_dataset.output_cross_embodiment_description
-    )
-    split_dataset_statistics = _split_dataset_statistics(pytorch_dummy_dataset)
-    return ModelInitDescription(
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
-        input_dataset_statistics=split_dataset_statistics["input"],
-        output_dataset_statistics=split_dataset_statistics["output"],
-        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    return _build_model_init_description(
+        pytorch_dummy_dataset,
+        OrderedSet(CNNMLP.get_supported_input_data_types()),
+        OrderedSet(CNNMLP.get_supported_output_data_types()),
     )
 
 
@@ -111,21 +122,10 @@ def model_init_description(
 def model_init_description_no_proprio(
     pytorch_dummy_dataset_no_proprio: PytorchDummyDataset,
 ) -> ModelInitDescription:
-    input_data_types = extract_data_types(
-        pytorch_dummy_dataset_no_proprio.input_cross_embodiment_description
-    )
-    output_data_types = extract_data_types(
-        pytorch_dummy_dataset_no_proprio.output_cross_embodiment_description
-    )
-    split_dataset_statistics = _split_dataset_statistics(
-        pytorch_dummy_dataset_no_proprio
-    )
-    return ModelInitDescription(
-        input_data_types=input_data_types,
-        output_data_types=output_data_types,
-        input_dataset_statistics=split_dataset_statistics["input"],
-        output_dataset_statistics=split_dataset_statistics["output"],
-        output_prediction_horizon=pytorch_dummy_dataset_no_proprio.output_prediction_horizon,
+    return _build_model_init_description(
+        pytorch_dummy_dataset_no_proprio,
+        OrderedSet([DataType.RGB_IMAGES]),
+        OrderedSet(CNNMLP.get_supported_output_data_types()),
     )
 
 
@@ -153,24 +153,6 @@ def sample_inference_batch(
 
 
 @pytest.fixture
-def sample_inference_batch_no_proprio(
-    pytorch_dummy_dataset_no_proprio: PytorchDummyDataset,
-) -> BatchedInferenceInputs:
-    dataloader = DataLoader(
-        pytorch_dummy_dataset_no_proprio,
-        batch_size=BS,
-        shuffle=True,
-        collate_fn=pytorch_dummy_dataset_no_proprio.collate_fn,
-    )
-    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
-    return BatchedInferenceInputs(
-        inputs=sample.inputs,
-        inputs_mask=sample.inputs_mask,
-        batch_size=BS,
-    )
-
-
-@pytest.fixture
 def sample_training_batch(
     pytorch_dummy_dataset: PytorchDummyDataset,
 ) -> BatchedTrainingSamples:
@@ -180,8 +162,7 @@ def sample_training_batch(
         shuffle=True,
         collate_fn=pytorch_dummy_dataset.collate_fn,
     )
-    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
-    return sample
+    return cast(BatchedTrainingSamples, next(iter(dataloader)))
 
 
 @pytest.fixture
@@ -194,27 +175,28 @@ def sample_training_batch_no_proprio(
         shuffle=True,
         collate_fn=pytorch_dummy_dataset_no_proprio.collate_fn,
     )
-    sample = cast(BatchedTrainingSamples, next(iter(dataloader)))
-    return sample
+    return cast(BatchedTrainingSamples, next(iter(dataloader)))
 
 
-def test_model_construction(
-    model_init_description: ModelInitDescription, model_config: dict
+@pytest.mark.parametrize("output_data_types", OUTPUT_PARAMS)
+@pytest.mark.parametrize("input_data_types", INPUT_PARAMS)
+def test_model_construction_forward_backward(
+    input_data_types: OrderedSet[DataType],
+    output_data_types: OrderedSet[DataType],
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_inference_batch: BatchedInferenceInputs,
+    sample_training_batch: BatchedTrainingSamples,
 ):
-    assert model_init_description.input_dataset_statistics
-    assert model_init_description.output_dataset_statistics
-    model = CNNMLP(model_init_description, **model_config)
+    model_init_description = _build_model_init_description(
+        pytorch_dummy_dataset,
+        input_data_types,
+        output_data_types,
+    )
+    model = CNNMLP(model_init_description=model_init_description, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
 
-
-def test_model_forward(
-    model_init_description: ModelInitDescription,
-    model_config: dict,
-    sample_inference_batch: BatchedInferenceInputs,
-):
-    model = CNNMLP(model_init_description, **model_config)
-    model = model.to(DEVICE)
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
     assert isinstance(output, dict)
@@ -223,50 +205,15 @@ def test_model_forward(
         assert isinstance(tensors, list)
         for tensor in tensors:
             assert isinstance(tensor, BatchedNCData)
-
     expected_output_width = dict(model.output_layout)
     assert set(output.keys()) == set(model.ordered_output_data_types)
     for data_type, tensors in output.items():
         assert len(tensors) == expected_output_width[data_type]
 
-
-def test_model_forward_without_proprioception(
-    model_init_description_no_proprio: ModelInitDescription,
-    model_config: dict,
-    sample_inference_batch_no_proprio: BatchedInferenceInputs,
-):
-    model = CNNMLP(model_init_description_no_proprio, **model_config)
-    model = model.to(DEVICE)
-    sample_inference_batch_no_proprio = sample_inference_batch_no_proprio.to(DEVICE)
-    assert model.proprio_normalizer is None
-    output: dict[DataType, list[BatchedNCData]] = model(
-        sample_inference_batch_no_proprio
-    )
-    assert isinstance(output, dict)
-    for data_type, tensors in output.items():
-        assert isinstance(data_type, DataType)
-        assert isinstance(tensors, list)
-        for tensor in tensors:
-            assert isinstance(tensor, BatchedNCData)
-
-
-def test_model_backward(
-    model_init_description: ModelInitDescription,
-    model_config: dict,
-    sample_training_batch: BatchedTrainingSamples,
-):
-    model = CNNMLP(model_init_description, **model_config)
-    model = model.to(DEVICE)
     sample_training_batch = sample_training_batch.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
-
-    # Compute loss
     loss = output.losses["l1_loss"]
-
-    # Perform backward pass
     loss.backward()
-
-    # Check that gradients are computed
     for name, param in model.named_parameters():
         if param.requires_grad:
             assert param.grad is not None, f"Gradient for {name} is None"
@@ -278,7 +225,9 @@ def test_model_backward_without_proprioception(
     model_config: dict,
     sample_training_batch_no_proprio: BatchedTrainingSamples,
 ):
-    model = CNNMLP(model_init_description_no_proprio, **model_config)
+    model = CNNMLP(
+        model_init_description=model_init_description_no_proprio, **model_config
+    )
     model = model.to(DEVICE)
     sample_training_batch_no_proprio = sample_training_batch_no_proprio.to(DEVICE)
     output: BatchedTrainingOutputs = model.training_step(
@@ -307,13 +256,13 @@ def test_model_supports_input_output_count_divergence(
     }
     model_init = ModelInitDescription(
         input_data_types=model_init_description.input_data_types,
-        output_data_types={DataType.JOINT_TARGET_POSITIONS},
+        output_data_types=OrderedSet([DataType.JOINT_TARGET_POSITIONS]),
         input_dataset_statistics=input_stats,
         output_dataset_statistics=output_stats,
         output_prediction_horizon=model_init_description.output_prediction_horizon,
     )
 
-    model = CNNMLP(model_init)
+    model = CNNMLP(model_init_description=model_init)
 
     joint_encoder = cast(nn.Linear, model.encoders[DataType.JOINT_POSITIONS])
     assert joint_encoder.in_features == len(input_stats[DataType.JOINT_POSITIONS])
@@ -326,7 +275,7 @@ def test_training_step_uses_deterministic_output_order(
     sample_training_batch: BatchedTrainingSamples,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    model = CNNMLP(model_init_description).to(DEVICE)
+    model = CNNMLP(model_init_description=model_init_description).to(DEVICE)
     batch = sample_training_batch.to(DEVICE)
 
     reversed_output_types = list(reversed(list(batch.outputs.keys())))

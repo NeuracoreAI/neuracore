@@ -224,7 +224,7 @@ class PaliGemmaWithExpertModel(nn.Module):
 
         Creates a PaliGemma vision-language model alongside a separate Gemma
         action expert model. These models share attention computation during
-            forward passes for efficient multi-modal reasoning in the Pi05 architecture.
+        forward passes for efficient multi-modal reasoning in the Pi05 architecture.
 
         Args:
             vlm_config: Configuration for the vision-language model (PaliGemma),
