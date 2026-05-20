@@ -112,8 +112,8 @@ def _create_joint(
 ) -> ET.Element:
     """Create a URDF joint element connecting two links.
 
-    Supports fixed, revolute, prismatic, continuous, and floating joints.
-    For floating joints, no axis or limits are added (6-DoF free joint).
+    Supports fixed, revolute, prismatic, continuous, ball, and floating joints.
+    For ball (3-DoF rotational) and floating (6-DoF) joints, no axis or limits are added.
 
     Args:
         xml_root: Parent XML element to attach the new joint to.
@@ -125,13 +125,13 @@ def _create_joint(
         axis: Joint axis of rotation/translation [x, y, z].
         jnt_range: Joint limits [min, max].
         jnt_type: Type of joint ("fixed", "revolute", "prismatic",
-                  "continuous", or "floating").
+                  "continuous", "ball", or "floating").
 
     Returns:
         The created joint XML element.
     """
     # Basic validation of parameters vs joint type
-    if jnt_type in ("fixed", "floating"):
+    if jnt_type in ("fixed", "floating", "ball"):
         # These joint types should not have an axis or limits
         if axis is not None or jnt_range is not None:
             raise ValueError(
@@ -180,7 +180,7 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
     Performs a comprehensive conversion from MJCF to URDF including:
     - Kinematic structure and joint relationships
     - Mass and inertia properties
-    - Joint types and limits (revolute, prismatic, fixed)
+    - Joint types and limits (revolute, prismatic, ball, fixed)
     - Visual mesh geometries converted to STL format
     - Proper coordinate frame transformations
 
@@ -267,6 +267,8 @@ def convert(mjcf_file: str, urdf_file: Path, asset_file_prefix: str = "") -> Non
                 urdf_jnt_type = "prismatic"
                 jnt_range = model.jnt_range[jntid]  # [min, max]
                 jnt_axis_childbody = model.jnt_axis[jntid]  # [x, y, z]
+            elif jnt_type == mujoco.mjtJoint.mjJNT_BALL:
+                urdf_jnt_type = "ball"
             elif jnt_type == mujoco.mjtJoint.mjJNT_FREE:
                 urdf_jnt_type = "floating"
             else:
