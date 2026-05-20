@@ -26,41 +26,88 @@ use thiserror::Error;
 
 /// iceoryx2 service-name conventions shared by daemon and producer.
 pub mod service_name {
-    /// Pub/sub service carrying lifecycle envelopes
-    /// (`start_recording`, `start_trace`, `end_trace`, `stop_recording`,
-    /// `open_frame_stream`) and, in phase 4, every `frame` payload.
+    /// Pub/sub service carrying lifecycle envelopes (`start_recording`,
+    /// `start_trace`, `stop_recording`, `cancel_recording`) plus the
+    /// `frame` / `end_trace` envelopes of **non-video** traces (joints,
+    /// scalars, custom streams).
+    ///
+    /// Video traffic — `open_frame_stream`, `frame` and `end_trace` for any
+    /// trace that announced a resolution — travels on [`FRAMES`] instead, so
+    /// the deep lifecycle buffer here is never paired with multi-MiB payloads.
     pub const COMMANDS: &str = "neuracore/data_daemon/commands";
 
-    /// Maximum size of a single command-stream sample.
+    /// Pub/sub service carrying video-trace traffic: `open_frame_stream`,
+    /// the pixel-bearing `frame` envelopes, and the trace's `end_trace`.
+    ///
+    /// Split out from [`COMMANDS`] in sub-phase 4h. iceoryx2 sizes a
+    /// publisher's data segment as `max_subscribers × (buffer + borrowed) ×
+    /// initial_max_slice_len`; pairing the 1024-deep lifecycle buffer with the
+    /// 16 MiB video slice produced a 128 GiB segment whose retained-sample
+    /// resident pages exhausted `/dev/shm` (SIGBUS). A dedicated service lets
+    /// video use a small [`FRAMES_SUBSCRIBER_BUFFER_SIZE`] buffer that bounds
+    /// the retained-frame footprint to `buffer × frame_size`.
+    pub const FRAMES: &str = "neuracore/data_daemon/frames";
+
+    /// Maximum size of a single `commands`-service sample.
+    ///
+    /// `commands` now carries only lifecycle envelopes and non-video `frame`
+    /// payloads (joint / scalar / custom samples), so the cap no longer has to
+    /// fit a full RGB video frame — that lives on [`FRAMES`] under
+    /// [`FRAMES_MAX_PAYLOAD_BYTES`]. 1 MiB leaves generous headroom for the
+    /// largest scalar/custom payload plus postcard envelope scaffolding.
+    pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+
+    /// Maximum size of a single `frames`-service sample.
     ///
     /// Sized so a 1920×1080 RGB24 frame (6,220,800 bytes) plus the postcard
     /// envelope scaffolding fits comfortably while still under iceoryx2's slice
-    /// budget. Phase 4h ships per-resolution `frames/<WxH>` services for the
-    /// real video path; once that lands this cap can drop back to the
-    /// lifecycle-only footprint (~64 KiB).
-    // TODO(sub-phase 4h): drop this back to lifecycle-only once the
-    // per-resolution `frames/<WxH>` services take over the video path.
-    pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+    /// budget.
+    pub const FRAMES_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
     /// Subscriber buffer depth for the lifecycle service.
     ///
-    /// iceoryx2's default subscriber buffer is 2 samples with safe-overflow
-    /// enabled — fine for high-rate sensor streams where dropping old data is
-    /// the right answer, but catastrophic for lifecycle envelopes. A single
-    /// `nc.log_joint_positions` call publishes one `StartRecording` +
-    /// `StartTrace` per joint plus one `Frame` per joint via the native
-    /// producer (typically 14+ envelopes back-to-back); with the default the
-    /// listener only ever sees the trailing two, and the earlier `StartTrace`
-    /// envelopes are silently dropped — which would otherwise surface
-    /// downstream as missing per-trace state on disk because the per-trace
-    /// actor never learns the recording or data-type identifiers.
+    /// Lossless, in-order delivery is *not* a function of this depth: both
+    /// services are opened with `enable_safe_overflow(false)`, so a full
+    /// buffer makes the producer's `Block` strategy wait rather than silently
+    /// evict the oldest sample. (Were overflow left at iceoryx2's default the
+    /// oldest sample — typically a `StartTrace` — would be dropped, stranding
+    /// the per-trace actor.) The depth therefore only trades producer-blocking
+    /// frequency against memory.
     ///
-    /// 1024 covers the busiest burst observed in the data-integrity test
-    /// matrix (multi-camera multi-joint recordings at 1000 Hz joint logging)
-    /// with comfortable headroom; combined with iceoryx2's default
-    /// `Block`-on-unable-to-deliver strategy this provides reliable in-order
-    /// delivery for every lifecycle envelope.
-    pub const LIFECYCLE_SUBSCRIBER_BUFFER_SIZE: usize = 1024;
+    /// The depth is bounded from *above* by memory, not just throughput.
+    /// iceoryx2 sizes a publisher's data segment as
+    /// `max_subscribers × (buffer + borrowed) × initial_max_slice_len`, and
+    /// the resident footprint is `buffer × actual_sample_size`. The largest
+    /// `commands` sample is now a [`Envelope::BatchedFrames`] envelope — the
+    /// integration matrix's 1000-joint worst case encodes to ~90 KiB — so a
+    /// 1024-deep buffer would retain ~94 MiB of pages per publisher and
+    /// exhaust the 64 MiB devcontainer `/dev/shm`.
+    ///
+    /// 64 keeps that worst case at ~6 MiB per publisher while staying deep
+    /// enough for steady state: the daemon drains every 10 ms and batched
+    /// joint logging emits one envelope per timestep, so the buffer never
+    /// fills under normal load. The one-time `StartTrace` burst at recording
+    /// setup (one envelope per trace) briefly blocks the producer once the
+    /// buffer is full — acceptable for a setup-path cost.
+    ///
+    /// Reducing this from the historical 1024 is the follow-up the per-joint
+    /// `Frame` → `BatchedFrames` batching unlocked: a `log_joint_positions`
+    /// call is now a single envelope, not N back-to-back, so the deep buffer
+    /// sized to absorb per-joint bursts is no longer needed.
+    pub const LIFECYCLE_SUBSCRIBER_BUFFER_SIZE: usize = 64;
+
+    /// Subscriber buffer depth for the [`FRAMES`] video service.
+    ///
+    /// Unlike the lifecycle buffer this is deliberately *small*. iceoryx2
+    /// sizes a publisher's data segment proportional to the buffer depth, and
+    /// each `frames` chunk is [`FRAMES_MAX_PAYLOAD_BYTES`] (16 MiB); the
+    /// resident pages of retained (undrained) samples are what exhaust
+    /// `/dev/shm`. Capping the buffer at 16 bounds the worst-case retained
+    /// footprint to `16 × frame_size` per publisher (~3 MiB at 256×256,
+    /// ~96 MiB at 1080p). Video traces are low-rate (30–120 Hz) and the daemon
+    /// drains every 10 ms, so 16 samples is ample slack without risking the
+    /// `Block` strategy stalling the producer.
+    pub const FRAMES_SUBSCRIBER_BUFFER_SIZE: usize = 16;
 
     /// Maximum number of concurrent publishers per service.
     ///
@@ -79,6 +126,27 @@ pub mod service_name {
     /// party in (the daemon at startup) seeds the service with the larger
     /// cap and the producer's later open observes the same attribute set.
     pub const MAX_PUBLISHERS_PER_SERVICE: usize = 128;
+
+    /// Maximum number of concurrent subscribers per service.
+    ///
+    /// The daemon opens exactly one subscriber per service (`commands` and
+    /// `frames`); producers never subscribe. iceoryx2 sizes every publisher's
+    /// data segment as `max_subscribers × (buffer + borrowed) × slice`, so the
+    /// default of 8 inflates each segment 8× for subscribers that never exist.
+    /// Pinning this to 1 keeps the segment proportional to the real topology.
+    pub const MAX_SUBSCRIBERS_PER_SERVICE: usize = 1;
+
+    /// Maximum number of concurrent iceoryx2 nodes attached to any service.
+    ///
+    /// One node is built per **thread** (the `thread_local!` PRODUCER slot in
+    /// the native producer). The integration matrix fans to 8 parallel worker
+    /// subprocesses each running 5+ threads (main + RGB + joint roles), giving
+    /// 40+ nodes plus the daemon. 512 gives enough headroom that the cap is
+    /// never approached in any test configuration.
+    ///
+    /// The scalable fix (one node shared per process, not per thread) is tracked
+    /// separately and would reduce the live count to single digits.
+    pub const MAX_NODES_PER_SERVICE: usize = 512;
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -133,6 +201,32 @@ pub enum Envelope {
         /// length-prefix + raw bytes (no expansion).
         payload: Vec<u8>,
     },
+    /// Producer delivers one sample for each of several traces captured at
+    /// the same instant — used by scalar joint logging, where a robot's N
+    /// joints are sampled together.
+    ///
+    /// Collapsing N [`Envelope::Frame`] envelopes into one IPC message cuts
+    /// the per-call iceoryx2 publish count (and the pressure on the deep
+    /// lifecycle buffer) by a factor of N. The daemon's listener unpacks each
+    /// item into a standalone [`Envelope::Frame`] before dispatch, so nothing
+    /// downstream of the wire boundary has to know this variant exists.
+    ///
+    /// Joint payloads are tiny (a `{"timestamp":..,"value":..}` JSON object,
+    /// ~50 bytes) so even the integration matrix's 1000-joint worst case
+    /// encodes to ~90 KiB — comfortably inside [`COMMANDS_MAX_PAYLOAD_BYTES`].
+    ///
+    /// [`COMMANDS_MAX_PAYLOAD_BYTES`]: service_name::COMMANDS_MAX_PAYLOAD_BYTES
+    BatchedFrames {
+        /// Capture time in nanoseconds since the Unix epoch, shared by every
+        /// item in the batch.
+        timestamp_ns: i64,
+        /// Optional capture time in seconds since the Unix epoch, shared by
+        /// every item. See [`Envelope::Frame`]'s `timestamp_s` for the
+        /// bit-exactness contract postcard provides.
+        timestamp_s: Option<f64>,
+        /// Per-trace samples; each unpacks into one [`Envelope::Frame`].
+        frames: Vec<BatchedFrameItem>,
+    },
     /// Producer closes a trace; no further frames will follow.
     EndTrace {
         /// Trace identifier supplied earlier in [`Envelope::StartTrace`].
@@ -175,6 +269,20 @@ pub enum Envelope {
     },
 }
 
+/// One trace's sample inside an [`Envelope::BatchedFrames`] batch.
+///
+/// Carries only the fields that differ between items — the `timestamp_ns` /
+/// `timestamp_s` are hoisted onto the parent envelope because every joint in
+/// a batch is captured at the same instant.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BatchedFrameItem {
+    /// Trace this sample belongs to.
+    pub trace_id: String,
+    /// Opaque per-frame bytes. Transported length-prefix + raw, exactly as
+    /// [`Envelope::Frame`]'s `payload`.
+    pub payload: Vec<u8>,
+}
+
 impl Envelope {
     /// Convenience constructor for [`Envelope::Frame`].
     pub fn frame(
@@ -197,6 +305,7 @@ impl Envelope {
             Envelope::StartRecording { .. } => "start_recording",
             Envelope::StartTrace { .. } => "start_trace",
             Envelope::Frame { .. } => "frame",
+            Envelope::BatchedFrames { .. } => "batched_frames",
             Envelope::EndTrace { .. } => "end_trace",
             Envelope::StopRecording { .. } => "stop_recording",
             Envelope::CancelRecording { .. } => "cancel_recording",
@@ -299,6 +408,54 @@ mod tests {
         assert!(
             bytes.len() >= PAYLOAD_LEN,
             "wire form must contain the raw bytes"
+        );
+    }
+
+    #[test]
+    fn batched_frames_round_trips() {
+        let original = Envelope::BatchedFrames {
+            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_s: Some(1_700_000_000.5),
+            frames: vec![
+                BatchedFrameItem {
+                    trace_id: "joint-0".into(),
+                    payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
+                },
+                BatchedFrameItem {
+                    trace_id: "joint-1".into(),
+                    payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
+                },
+            ],
+        };
+        let bytes = original.encode().expect("encode");
+        let decoded = Envelope::decode(&bytes).expect("decode");
+        assert_eq!(original, decoded);
+        assert_eq!(original.kind(), "batched_frames");
+    }
+
+    #[test]
+    fn batched_frames_worst_case_fits_commands_slice() {
+        // The integration matrix's high-dimensionality case logs 1000 joints
+        // per call. Each joint payload is a small `{"timestamp":..,"value":..}`
+        // JSON object plus a UUID trace_id; the whole batch must fit inside a
+        // single `commands` sample so the producer can publish it in one go.
+        let frames: Vec<BatchedFrameItem> = (0..1000)
+            .map(|index| BatchedFrameItem {
+                trace_id: format!("11111111-2222-3333-4444-{index:012}"),
+                payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
+            })
+            .collect();
+        let envelope = Envelope::BatchedFrames {
+            timestamp_ns: 1_747_740_000_123_456_700,
+            timestamp_s: Some(1_747_740_000.123_456_7),
+            frames,
+        };
+        let bytes = envelope.encode().expect("encode");
+        assert!(
+            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+            "1000-joint batch ({} bytes) must fit the commands slice ({} bytes)",
+            bytes.len(),
+            service_name::COMMANDS_MAX_PAYLOAD_BYTES,
         );
     }
 

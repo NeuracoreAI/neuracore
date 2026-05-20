@@ -44,6 +44,7 @@
         "nostdin",
         "postcard",
         "pthread",
+        "SIGBUS",
         "sdecode",
         "sencode",
         "startcode",

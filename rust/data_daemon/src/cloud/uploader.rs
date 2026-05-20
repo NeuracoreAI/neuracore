@@ -8,10 +8,10 @@
 //! transitions. On completion the trace is marked `Uploaded` and the upload
 //! sub-system publishes `UploadComplete` for the status updater.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -21,9 +21,9 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_LENGTH, CON
 use reqwest::StatusCode;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
-use tokio::time::sleep;
+use tokio::sync::{broadcast, Semaphore};
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
 
 use crate::api::{ApiClient, ApiClientError};
 use crate::cloud::cloud_files::{content_type_for, ContentKind};
@@ -43,6 +43,15 @@ pub const CHUNK_SIZE: usize = 64 * 1024 * 1024;
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Maximum retries for a single chunk.
 pub const MAX_RETRIES: u32 = 5;
+/// Hard deadline for a single chunk PUT. Belt-and-braces over the reqwest
+/// client-level timeout, which can silently fail to fire for direct GCS
+/// resumable session URI uploads.
+const CHUNK_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+/// Maximum number of traces uploading concurrently. With 8 parallel contexts
+/// each queuing ~128 traces simultaneously (1024 total), 32 slots serialise
+/// into ~32 rounds × 300 ms ≈ 9.6 s. 128 slots cuts that to ~8 rounds ×
+/// 300 ms ≈ 2.4 s, giving ~6 s headroom against the 9 s stop-recording SLA.
+pub const MAX_CONCURRENT_UPLOADS: usize = 128;
 
 /// Handle returned by [`spawn_uploader`].
 pub struct UploaderHandle {
@@ -70,6 +79,16 @@ pub fn spawn_uploader(
     let mut subscriber = bus.subscribe();
     let store = Arc::new(store);
     let join = tokio::spawn(async move {
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+        let mut in_flight: JoinSet<String> = JoinSet::new();
+        // Tracks dispatched trace IDs to prevent a drain triggered by
+        // join_next from re-queuing a trace whose task hasn't yet run the
+        // DB update to mark itself Uploading.
+        let mut in_flight_ids: HashSet<String> = HashSet::new();
+        // Safety-net rescan: catch any traces that were skipped when the
+        // semaphore was full during a drain, without relying on bus events.
+        let mut rescan_tick = interval(Duration::from_secs(5));
+        rescan_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let mut connected = false;
         loop {
             tokio::select! {
@@ -78,19 +97,42 @@ pub fn spawn_uploader(
                     tracing::debug!(?signal, "uploader shutting down");
                     break;
                 }
+                // Reap a completed task immediately and chain the next drain
+                // so a finishing upload starts the next one without waiting
+                // for a bus event or the rescan tick.
+                Some(join_result) = in_flight.join_next(), if !in_flight.is_empty() => {
+                    match join_result {
+                        Ok(completed_trace_id) => { in_flight_ids.remove(&completed_trace_id); }
+                        Err(panic_err) => { tracing::warn!(?panic_err, "upload task panicked"); }
+                    }
+                    if connected {
+                        drain_ready_traces(
+                            &store,
+                            &bus,
+                            &client,
+                            &recordings_root,
+                            &status_tx,
+                            &semaphore,
+                            &mut in_flight,
+                            &mut in_flight_ids,
+                        )
+                        .await;
+                    }
+                }
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::ConnectionStateChanged(state)) => {
                             connected = matches!(state, ConnectionState::Up);
                             if connected {
-                                // Re-scan when the connection comes back so
-                                // queued/retrying traces resume promptly.
                                 drain_ready_traces(
                                     &store,
                                     &bus,
                                     &client,
                                     &recordings_root,
                                     &status_tx,
+                                    &semaphore,
+                                    &mut in_flight,
+                                    &mut in_flight_ids,
                                 )
                                 .await;
                             }
@@ -100,15 +142,17 @@ pub fn spawn_uploader(
                                 tracing::debug!(trace_id, "deferring upload until connection up");
                                 continue;
                             }
-                            upload_single(
+                            spawn_upload_task(
                                 &store,
                                 &bus,
                                 &client,
                                 &recordings_root,
                                 &status_tx,
-                                &trace_id,
-                            )
-                            .await;
+                                &semaphore,
+                                &mut in_flight,
+                                &mut in_flight_ids,
+                                trace_id,
+                            );
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -120,6 +164,9 @@ pub fn spawn_uploader(
                                     &client,
                                     &recordings_root,
                                     &status_tx,
+                                    &semaphore,
+                                    &mut in_flight,
+                                    &mut in_flight_ids,
                                 )
                                 .await;
                             }
@@ -127,18 +174,38 @@ pub fn spawn_uploader(
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
+                _ = rescan_tick.tick() => {
+                    if connected {
+                        drain_ready_traces(
+                            &store,
+                            &bus,
+                            &client,
+                            &recordings_root,
+                            &status_tx,
+                            &semaphore,
+                            &mut in_flight,
+                            &mut in_flight_ids,
+                        )
+                        .await;
+                    }
+                }
             }
         }
+        in_flight.shutdown().await;
     });
     UploaderHandle { join }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drain_ready_traces(
     store: &Arc<SqliteStateStore>,
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
+    semaphore: &Arc<Semaphore>,
+    in_flight: &mut JoinSet<String>,
+    in_flight_ids: &mut HashSet<String>,
 ) {
     let recordings = match store.list_recordings().await {
         Ok(rows) => rows,
@@ -163,18 +230,61 @@ async fn drain_ready_traces(
                 trace.upload_status,
                 TraceUploadStatus::Queued | TraceUploadStatus::Retrying
             ) {
-                upload_single(
+                spawn_upload_task(
                     store,
                     bus,
                     client,
                     recordings_root,
                     status_tx,
-                    &trace.trace_id,
-                )
-                .await;
+                    semaphore,
+                    in_flight,
+                    in_flight_ids,
+                    trace.trace_id,
+                );
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_upload_task(
+    store: &Arc<SqliteStateStore>,
+    bus: &EventBus,
+    client: &Arc<ApiClient>,
+    recordings_root: &Arc<PathBuf>,
+    status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
+    semaphore: &Arc<Semaphore>,
+    in_flight: &mut JoinSet<String>,
+    in_flight_ids: &mut HashSet<String>,
+    trace_id: String,
+) {
+    if in_flight_ids.contains(&trace_id) {
+        tracing::debug!(trace_id, "trace already dispatched; skipping duplicate");
+        return;
+    }
+    let Ok(permit) = Arc::clone(semaphore).try_acquire_owned() else {
+        tracing::debug!(trace_id, "upload semaphore full; will retry on next drain");
+        return;
+    };
+    in_flight_ids.insert(trace_id.clone());
+    let store = Arc::clone(store);
+    let bus = bus.clone();
+    let client = Arc::clone(client);
+    let recordings_root = Arc::clone(recordings_root);
+    let status_tx = status_tx.clone();
+    in_flight.spawn(async move {
+        upload_single(
+            &store,
+            &bus,
+            &client,
+            &recordings_root,
+            &status_tx,
+            &trace_id,
+        )
+        .await;
+        drop(permit);
+        trace_id
+    });
 }
 
 async fn upload_single(
@@ -220,6 +330,7 @@ async fn upload_single(
         )
         .await;
 
+    tracing::info!(trace_id, data_type = ?trace.data_type, "starting trace upload");
     let (Some(data_type), recording_id) = (trace.data_type.as_deref(), trace.recording_id.as_str())
     else {
         // No data_type means we never saw a `StartTrace` for this row, so we
@@ -465,6 +576,13 @@ async fn upload_one_file(
         return Err("recording has no org_id; cannot refresh session URI".to_string());
     };
 
+    tracing::info!(
+        trace_id,
+        path = %local_path.display(),
+        bytes = total_bytes,
+        "starting file upload"
+    );
+    let upload_started = Instant::now();
     while offset < total_bytes {
         let chunk_end = (offset + CHUNK_SIZE as u64).min(total_bytes) - 1;
         let chunk_len = (chunk_end - offset + 1) as usize;
@@ -586,6 +704,13 @@ async fn upload_one_file(
         }
     }
 
+    tracing::info!(
+        trace_id,
+        path = %local_path.display(),
+        bytes = total_bytes,
+        elapsed_ms = upload_started.elapsed().as_millis(),
+        "file upload complete"
+    );
     if let Some(expected) = server_md5_hex {
         let local_hex = hex_of(hasher.finalize().as_slice());
         if expected != local_hex {
@@ -678,17 +803,50 @@ async fn put_chunk(
             .body(chunk.clone())
             .build()
             .map_err(|error| format!("failed to build request: {error}"))?;
-        let response = match client.raw_client().execute(request).await {
-            Ok(response) => response,
-            Err(error) => {
-                if attempt + 1 >= MAX_RETRIES {
-                    return Err(format!("transport error: {error}"));
+        tracing::debug!(
+            attempt,
+            bytes = chunk.len(),
+            chunk_start,
+            chunk_end,
+            "sending upload chunk"
+        );
+        let chunk_started = Instant::now();
+        let response =
+            match timeout(CHUNK_UPLOAD_TIMEOUT, client.raw_client().execute(request)).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    if attempt + 1 >= MAX_RETRIES {
+                        return Err(format!("transport error: {error}"));
+                    }
+                    attempt += 1;
+                    tracing::warn!(%error, attempt, "upload chunk transport error; retrying");
+                    sleep(backoff(attempt)).await;
+                    continue;
                 }
-                attempt += 1;
-                sleep(backoff(attempt)).await;
-                continue;
-            }
-        };
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        attempt,
+                        timeout_secs = CHUNK_UPLOAD_TIMEOUT.as_secs(),
+                        bytes = chunk.len(),
+                        "upload chunk PUT timed out; retrying"
+                    );
+                    if attempt + 1 >= MAX_RETRIES {
+                        return Err(format!(
+                            "chunk PUT timed out after {}s ({MAX_RETRIES} attempts exhausted)",
+                            CHUNK_UPLOAD_TIMEOUT.as_secs()
+                        ));
+                    }
+                    attempt += 1;
+                    sleep(backoff(attempt)).await;
+                    continue;
+                }
+            };
+        tracing::debug!(
+            elapsed_ms = chunk_started.elapsed().as_millis(),
+            bytes = chunk.len(),
+            status = response.status().as_u16(),
+            "upload chunk response received"
+        );
 
         let status = response.status();
         let response_headers = response.headers().clone();

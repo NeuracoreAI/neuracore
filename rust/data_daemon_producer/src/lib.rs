@@ -35,11 +35,24 @@
 //! iceoryx2's [`Publisher`] uses an `Rc`-backed `ArcSyncPolicy` and is
 //! therefore neither `Send` nor `Sync`. We side-step that by parking the
 //! per-process state in a [`thread_local`]: each Python thread that calls into
-//! the module lazily builds its own iceoryx2 [`Node`] + [`Publisher`] pair on
-//! first use and reuses it for the rest of that thread's lifetime. This
-//! matches Python's threading model — the GIL serialises Python execution but
-//! does *not* prevent multiple OS threads from holding handles into the
-//! daemon's IPC namespace — and it keeps every PyO3 entry point lock-free.
+//! the module lazily builds its own iceoryx2 [`Node`] and a publisher per
+//! service on first use and reuses them for the rest of that thread's
+//! lifetime. This matches Python's threading model — the GIL serialises Python
+//! execution but does *not* prevent multiple OS threads from holding handles
+//! into the daemon's IPC namespace — and it keeps every PyO3 entry point
+//! lock-free.
+//!
+//! ## Service split
+//!
+//! Envelopes travel on one of two iceoryx2 services. Lifecycle envelopes and
+//! non-video `Frame`s ride [`COMMANDS`] (deep buffer, small slice); the
+//! pixel-bearing traffic of video traces — `OpenFrameStream`, `Frame` and
+//! `EndTrace` — rides [`FRAMES`] (small buffer, 16 MiB slice). A trace is
+//! classified video the moment `open_frame_stream` is called for it; the
+//! thread-local `VIDEO_TRACES` set records that so subsequent `Frame` /
+//! `EndTrace` envelopes route to the same service. Keeping the deep lifecycle
+//! buffer away from multi-MiB payloads bounds the publisher data segment's
+//! retained-sample footprint (see [`FRAMES_SUBSCRIBER_BUFFER_SIZE`]).
 //!
 //! ## Fork safety
 //!
@@ -53,15 +66,17 @@
 //! daemon's bookkeeping for the *parent's* still-live publisher.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::Once;
 
 use data_daemon_ipc::service_name::{
-    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
-    MAX_PUBLISHERS_PER_SERVICE,
+    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, FRAMES, FRAMES_MAX_PAYLOAD_BYTES,
+    FRAMES_SUBSCRIBER_BUFFER_SIZE, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
+    MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
 };
-use data_daemon_ipc::Envelope;
+use data_daemon_ipc::{BatchedFrameItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::prelude::{ipc, UnableToDeliverStrategy};
@@ -110,20 +125,80 @@ impl From<ProducerError> for PyErr {
 
 /// Per-thread iceoryx2 state.
 ///
-/// Held alongside its [`Node`] and [`PortFactory`] so the publisher's
-/// shared-memory descriptors stay live for the lifetime of the thread.
+/// Holds the per-thread [`Node`] and, for each service, the [`PortFactory`]
+/// handle alongside its [`Publisher`] so the publishers' shared-memory
+/// descriptors stay live for the lifetime of the thread.
 struct ProducerState {
     _node: Node<ipc::Service>,
-    _service: PortFactory<ipc::Service, [u8], ()>,
-    publisher: Publisher<ipc::Service, [u8], ()>,
+    _commands_service: PortFactory<ipc::Service, [u8], ()>,
+    commands_publisher: Publisher<ipc::Service, [u8], ()>,
+    _frames_service: PortFactory<ipc::Service, [u8], ()>,
+    frames_publisher: Publisher<ipc::Service, [u8], ()>,
+}
+
+/// Which iceoryx2 service an envelope is published on.
+#[derive(Clone, Copy)]
+enum Target {
+    /// The [`COMMANDS`] lifecycle service.
+    Commands,
+    /// The [`FRAMES`] video service.
+    Frames,
 }
 
 thread_local! {
-    /// One iceoryx2 publisher per OS thread. See the module-level note on
+    /// One iceoryx2 publisher set per OS thread. See the module-level note on
     /// threading for the rationale. Const-initialised so the slot is a plain
     /// TLS load — required for the `pthread_atfork` child handler to access
     /// it without invoking a lazy initializer in a post-fork context.
     static PRODUCER: RefCell<Option<ProducerState>> = const { RefCell::new(None) };
+
+    /// Trace ids known to be video traces (an `open_frame_stream` was seen).
+    /// Their `Frame` / `EndTrace` envelopes route to [`FRAMES`]; every other
+    /// trace stays on [`COMMANDS`]. Const-initialised as `None` for the same
+    /// post-fork reason as `PRODUCER`; the set is allocated on first use.
+    static VIDEO_TRACES: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
+}
+
+/// Classify an envelope's destination service, updating `VIDEO_TRACES` as a
+/// side effect: `OpenFrameStream` marks its trace video, `EndTrace` clears it.
+fn route_envelope(envelope: &Envelope) -> Target {
+    match envelope {
+        Envelope::OpenFrameStream { trace_id, .. } => {
+            VIDEO_TRACES.with(|cell| {
+                cell.borrow_mut()
+                    .get_or_insert_with(HashSet::new)
+                    .insert(trace_id.clone());
+            });
+            Target::Frames
+        }
+        Envelope::Frame { trace_id, .. } => VIDEO_TRACES.with(|cell| {
+            let is_video = cell
+                .borrow()
+                .as_ref()
+                .is_some_and(|set| set.contains(trace_id));
+            if is_video {
+                Target::Frames
+            } else {
+                Target::Commands
+            }
+        }),
+        Envelope::EndTrace { trace_id } => VIDEO_TRACES.with(|cell| {
+            let was_video = cell
+                .borrow_mut()
+                .as_mut()
+                .is_some_and(|set| set.remove(trace_id));
+            if was_video {
+                Target::Frames
+            } else {
+                Target::Commands
+            }
+        }),
+        Envelope::StartRecording { .. }
+        | Envelope::StartTrace { .. }
+        | Envelope::BatchedFrames { .. }
+        | Envelope::StopRecording { .. }
+        | Envelope::CancelRecording { .. } => Target::Commands,
+    }
 }
 
 /// Run `f` against this thread's producer state, lazily building it on first
@@ -155,36 +230,80 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
     let node = NodeBuilder::new()
         .create::<ipc::Service>()
         .map_err(|error| ProducerError::NodeCreate(error.to_string()))?;
-    let service_name = COMMANDS
+
+    let (commands_service, commands_publisher) = open_publisher(
+        &node,
+        COMMANDS,
+        LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
+        COMMANDS_MAX_PAYLOAD_BYTES,
+    )?;
+    let (frames_service, frames_publisher) = open_publisher(
+        &node,
+        FRAMES,
+        FRAMES_SUBSCRIBER_BUFFER_SIZE,
+        FRAMES_MAX_PAYLOAD_BYTES,
+    )?;
+
+    Ok(ProducerState {
+        _node: node,
+        _commands_service: commands_service,
+        commands_publisher,
+        _frames_service: frames_service,
+        frames_publisher,
+    })
+}
+
+/// Open (or attach to) one `[u8]` pub/sub service off `node` and build a
+/// publisher on it.
+///
+/// The service attributes are declared explicitly so a producer that races
+/// the daemon to `open_or_create` seeds the service with the same
+/// configuration the daemon expects rather than iceoryx2's defaults — both
+/// sides agree on these via the `data_daemon_ipc` constants.
+fn open_publisher(
+    node: &Node<ipc::Service>,
+    service_name: &str,
+    subscriber_buffer_size: usize,
+    max_slice_len: usize,
+) -> Result<
+    (
+        PortFactory<ipc::Service, [u8], ()>,
+        Publisher<ipc::Service, [u8], ()>,
+    ),
+    ProducerError,
+> {
+    let parsed_name = service_name
         .try_into()
         .map_err(|error| ProducerError::ServiceOpen(format!("invalid service name: {error}")))?;
-    // Declare the same `subscriber_max_buffer_size` and `max_publishers` the
-    // daemon configures so a producer that races the daemon to `open_or_create`
-    // doesn't seed the service with iceoryx2's default attributes (which would
-    // drop bursts of lifecycle envelopes and fail the integration matrix's
-    // ~32 worker threads).
     let service = node
-        .service_builder(&service_name)
+        .service_builder(&parsed_name)
         .publish_subscribe::<[u8]>()
-        .subscriber_max_buffer_size(LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)
+        // Disable iceoryx2's default safe-overflow. With overflow on, a full
+        // subscriber buffer silently evicts the oldest sample and the
+        // publisher's `Block` strategy below never fires; a dropped
+        // `StartTrace` then strands the daemon's per-trace actor. With
+        // overflow off a full buffer makes `Block` take effect instead, so
+        // delivery is lossless and in-order. Must match the daemon's
+        // `open_subscriber`, which sets the same flag.
+        .enable_safe_overflow(false)
+        .subscriber_max_buffer_size(subscriber_buffer_size)
         .max_publishers(MAX_PUBLISHERS_PER_SERVICE)
+        .max_subscribers(MAX_SUBSCRIBERS_PER_SERVICE)
+        .max_nodes(MAX_NODES_PER_SERVICE)
         .open_or_create()
         .map_err(|error| ProducerError::ServiceOpen(error.to_string()))?;
     let publisher = service
         .publisher_builder()
-        .initial_max_slice_len(COMMANDS_MAX_PAYLOAD_BYTES)
-        // Block on a full subscriber buffer instead of iceoryx2's default
-        // `DiscardSample`. Lifecycle envelopes must reach the daemon for the
-        // per-trace state machine to advance — silent drops surface in the
-        // integration matrix as recordings stuck in `writing` forever.
+        .initial_max_slice_len(max_slice_len)
+        // Block when the subscriber buffer is full (paired with
+        // `enable_safe_overflow(false)` above). Lifecycle envelopes must
+        // reach the daemon for the per-trace state machine to advance —
+        // silent drops surface in the integration matrix as recordings stuck
+        // in `writing` forever.
         .unable_to_deliver_strategy(UnableToDeliverStrategy::Block)
         .create()
         .map_err(|error| ProducerError::PublisherCreate(error.to_string()))?;
-    Ok(ProducerState {
-        _node: node,
-        _service: service,
-        publisher,
-    })
+    Ok((service, publisher))
 }
 
 /// Install the `pthread_atfork` child handler exactly once per process.
@@ -193,7 +312,7 @@ fn ensure_fork_handler_registered() {
     REGISTER.call_once(|| {
         // SAFETY: `pthread_atfork` is the standard libc primitive for
         // registering fork callbacks. `on_fork_in_child` is `extern "C"`,
-        // touches only a const-initialised TLS slot, and the only "work" it
+        // touches only const-initialised TLS slots, and the only "work" it
         // does is `mem::forget` — none of which can panic across the FFI
         // boundary, allocate, or take a lock that the parent could hold.
         let result = unsafe { libc::pthread_atfork(None, None, Some(on_fork_in_child)) };
@@ -210,10 +329,13 @@ fn ensure_fork_handler_registered() {
 ///
 /// Runs once in the post-fork child, in the single surviving thread (whichever
 /// called `fork`). Clears that thread's `PRODUCER` slot so the next call to
-/// [`with_producer`] rebuilds a fresh iceoryx2 node + publisher whose
-/// descriptors belong to the new process. The inherited `ProducerState` is
-/// `mem::forget`'d on purpose: running its `Drop` would notify the daemon's
-/// bookkeeping for the *parent's* still-live publisher, unregistering it.
+/// [`with_producer`] rebuilds fresh iceoryx2 publishers whose descriptors
+/// belong to the new process, and drops the `VIDEO_TRACES` routing set so the
+/// child starts with no inherited trace classifications. The inherited
+/// `ProducerState` / `HashSet` are `mem::forget`'d on purpose: running their
+/// `Drop` would notify the daemon's bookkeeping for the *parent's* still-live
+/// publishers, and freeing memory in a post-fork child risks an allocator lock
+/// the parent held at fork time.
 ///
 /// `thread_local!` slots owned by *other* threads at fork time are
 /// inaccessible from the child's surviving thread, but that is fine — those
@@ -225,19 +347,32 @@ extern "C" fn on_fork_in_child() {
             std::mem::forget(stale);
         }
     });
+    VIDEO_TRACES.with(|cell| {
+        if let Some(stale) = cell.borrow_mut().take() {
+            std::mem::forget(stale);
+        }
+    });
 }
 
 fn publish_envelope(envelope: &Envelope) -> Result<(), ProducerError> {
+    let target = route_envelope(envelope);
     let bytes = envelope.encode()?;
-    if bytes.len() > COMMANDS_MAX_PAYLOAD_BYTES {
+    let limit = match target {
+        Target::Commands => COMMANDS_MAX_PAYLOAD_BYTES,
+        Target::Frames => FRAMES_MAX_PAYLOAD_BYTES,
+    };
+    if bytes.len() > limit {
         return Err(ProducerError::PayloadTooLarge {
             actual: bytes.len(),
-            limit: COMMANDS_MAX_PAYLOAD_BYTES,
+            limit,
         });
     }
     with_producer(|state| {
-        let sample = state
-            .publisher
+        let publisher = match target {
+            Target::Commands => &state.commands_publisher,
+            Target::Frames => &state.frames_publisher,
+        };
+        let sample = publisher
             .loan_slice_uninit(bytes.len())
             .map_err(|error| ProducerError::Loan(error.to_string()))?;
         let sample = sample.write_from_slice(&bytes);
@@ -309,6 +444,7 @@ fn start_trace(
 #[pyfunction]
 #[pyo3(signature = (trace_id, payload, timestamp_ns = 0, timestamp_s = None))]
 fn send_data(
+    py: Python<'_>,
     trace_id: &str,
     payload: &[u8],
     timestamp_ns: i64,
@@ -322,59 +458,72 @@ fn send_data(
     // analysis can grep + awk the file for per-trace percentiles. When the
     // gate is off the whole block compiles to a single atomic-bool load.
     let log_enabled = producer_log_enabled();
-    let started = if log_enabled {
-        Some(std::time::Instant::now())
+    // Copy the payload into owned Rust memory while the GIL is held — the
+    // `&[u8]` borrows a Python buffer. Everything after this point (encode,
+    // the iceoryx2 publish) touches no Python state.
+    let owned_payload = payload.to_vec();
+    let payload_len = owned_payload.len();
+    let owned_trace_id = trace_id.to_string();
+    // The envelope below consumes `owned_trace_id`, so capture the log tail
+    // first. Costs an allocation only when the per-frame log is enabled.
+    let trace_tail = if log_enabled {
+        Some(trace_id_tail(&owned_trace_id).to_string())
     } else {
         None
     };
-    let envelope = Envelope::frame(
-        trace_id.to_string(),
-        timestamp_ns,
-        timestamp_s,
-        payload.to_vec(),
-    );
-    let encode_done = started.map(|t| t.elapsed());
-    publish_envelope(&envelope)?;
-    if let Some(start) = started {
-        let total = start.elapsed();
-        let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
-        let publish_us = total.as_micros().saturating_sub(encode_us);
-        // Log only every 100th call per thread to keep the file size
-        // sensible at 30k+ envelopes/sec, while still giving enough samples
-        // for a percentile read. Stats summary is bucketed by thread via the
-        // trace_id tail so different traces interleave cleanly.
-        let trace_tail = trace_id_tail(trace_id);
-        let count = increment_thread_call_counter();
-        if count.is_multiple_of(100) {
-            tracing::debug!(
-                trace_id = trace_tail,
-                payload_len = payload.len(),
-                encode_us,
-                publish_us,
-                total_us = total.as_micros() as u64,
-                call_count = count,
-                "send_data timing"
-            );
+    // Release the GIL for the encode + publish. `publish_envelope` blocks
+    // when the daemon's buffer is full (the `Block` unable-to-deliver
+    // strategy); holding the GIL across that stall would freeze every other
+    // Python producer thread (sibling cameras, joint streams, orchestrator).
+    py.allow_threads(|| -> PyResult<()> {
+        let started = if log_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let envelope = Envelope::frame(owned_trace_id, timestamp_ns, timestamp_s, owned_payload);
+        let encode_done = started.map(|t| t.elapsed());
+        publish_envelope(&envelope)?;
+        if let (Some(start), Some(trace_tail)) = (started, &trace_tail) {
+            let total = start.elapsed();
+            let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
+            let publish_us = total.as_micros().saturating_sub(encode_us);
+            // Log only every 100th call per thread to keep the file size
+            // sensible at 30k+ envelopes/sec, while still giving enough
+            // samples for a percentile read. Stats summary is bucketed by
+            // thread via the trace_id tail so different traces interleave
+            // cleanly.
+            let count = increment_thread_call_counter();
+            if count.is_multiple_of(100) {
+                tracing::debug!(
+                    trace_id = trace_tail.as_str(),
+                    payload_len,
+                    encode_us,
+                    publish_us,
+                    total_us = total.as_micros() as u64,
+                    call_count = count,
+                    "send_data timing"
+                );
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Send a batch of scalar joint samples in one PyO3 call.
 ///
-/// Each `(trace_id, value)` item becomes its own `Frame` envelope, but the
-/// JSON payload construction and iceoryx2 publishes all happen inside this
-/// single Rust call. Compared to the legacy per-item shim that crossed the
-/// PyO3 boundary and ran CPython `json.dumps` for every joint, this collapses:
+/// All `(trace_id, value)` items are packed into a single
+/// [`Envelope::BatchedFrames`] message and published with one iceoryx2
+/// loan/send. Compared to the legacy per-item shim that crossed the PyO3
+/// boundary and ran CPython `json.dumps` for every joint, this collapses:
 ///
-/// - 10× PyO3 boundary crossings → 1
-/// - 10× CPython `json.dumps` → 10× `write!` against a small `Vec<u8>`
-/// - 10× thread-local publisher lookup → 1 (the inner loop reuses the slot)
+/// - N× PyO3 boundary crossings → 1
+/// - N× CPython `json.dumps` → N× `serde_json` against a small `Vec<u8>`
+/// - N× iceoryx2 loan/write/send → 1
 ///
-/// Wire format is intentionally unchanged: the daemon still receives one
-/// `Frame` envelope per item carrying the same compact
-/// `{"timestamp":<f64>,"value":<f64>}` JSON the legacy shim produced, so no
-/// dispatcher or trace-actor changes are required.
+/// The daemon's IPC listener unpacks the batch back into one `Frame` per
+/// item before dispatch, so the on-disk format is unchanged: each joint
+/// still lands as a `{"timestamp":<f64>,"value":<f64>}` JSON entry.
 #[pyfunction]
 #[pyo3(signature = (items, timestamp_ns, timestamp_s = None))]
 fn send_batched_joint_data(
@@ -388,34 +537,30 @@ fn send_batched_joint_data(
     }
     // Fall back to ns→s if the caller omits timestamp_s so the per-frame
     // "timestamp" field still has a sensible value to write into trace.json.
-    let timestamp_for_json =
-        timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
+    let timestamp_for_json = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
     let log_enabled = producer_log_enabled();
 
-    // The JSON formatting and iceoryx2 publishes touch no Python state —
-    // releasing the GIL here lets the test's other producer threads (camera
-    // at 120 Hz, custom_1d at 3.1 kHz, the sibling joint streams) keep
-    // making progress while this thread is inside Rust. At 1 kHz × multiple
-    // joint streams the per-call GIL hold was costing the workload several
-    // hundred microseconds of avoidable serialisation each second.
-    // Pre-validate every trace_id before we publish anything. Without this
-    // check a malformed item N would leave items 0..N already on the wire
-    // and surface the error as an exception — leaving the daemon to
-    // process a partial batch the caller assumes it never sent. Hoisting
-    // the loop also keeps the validation cost paid once per batch rather
-    // than during the GIL-released hot path.
+    // Pre-validate every trace_id before we build the batch. Without this
+    // check a malformed item would only surface after the batch was already
+    // assembled; rejecting up front keeps the error deterministic and the
+    // hot path below free of per-item validation.
     if let Some(bad_index) = items.iter().position(|(trace_id, _)| trace_id.is_empty()) {
         return Err(PyValueError::new_err(format!(
             "trace_id must not be empty (item index {bad_index})"
         )));
     }
+    // The JSON formatting and the iceoryx2 publish touch no Python state —
+    // releasing the GIL here lets the test's other producer threads (camera
+    // at 120 Hz, custom_1d at 3.1 kHz, the sibling joint streams) keep making
+    // progress while this thread is inside Rust.
     py.allow_threads(|| -> PyResult<()> {
+        let started = if log_enabled {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+        let mut frames = Vec::with_capacity(items.len());
         for (trace_id, value) in &items {
-            let started = if log_enabled {
-                Some(std::time::Instant::now())
-            } else {
-                None
-            };
             // serde_json (via ryu) always emits at least one fractional
             // digit for f64 — so integer-valued joint values land on disk
             // as `1.0`, not `1`, matching Python's `json.dumps` shape and
@@ -425,32 +570,34 @@ fn send_batched_joint_data(
                 value: *value,
             })
             .map_err(|error| {
-                PyRuntimeError::new_err(format!(
-                    "failed to encode joint frame JSON: {error}"
-                ))
+                PyRuntimeError::new_err(format!("failed to encode joint frame JSON: {error}"))
             })?;
-            let payload_len = payload.len();
-            let envelope =
-                Envelope::frame(trace_id.clone(), timestamp_ns, timestamp_s, payload);
-            let encode_done = started.map(|t| t.elapsed());
-            publish_envelope(&envelope)?;
-            if let Some(start) = started {
-                let total = start.elapsed();
-                let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
-                let publish_us = total.as_micros().saturating_sub(encode_us);
-                let trace_tail = trace_id_tail(trace_id);
-                let count = increment_thread_call_counter();
-                if count.is_multiple_of(100) {
-                    tracing::debug!(
-                        trace_id = trace_tail,
-                        payload_len,
-                        encode_us,
-                        publish_us,
-                        total_us = total.as_micros() as u64,
-                        call_count = count,
-                        "send_data timing"
-                    );
-                }
+            frames.push(BatchedFrameItem {
+                trace_id: trace_id.clone(),
+                payload,
+            });
+        }
+        let envelope = Envelope::BatchedFrames {
+            timestamp_ns,
+            timestamp_s,
+            frames,
+        };
+        let encode_done = started.map(|t| t.elapsed());
+        publish_envelope(&envelope)?;
+        if let Some(start) = started {
+            let total = start.elapsed();
+            let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
+            let publish_us = total.as_micros().saturating_sub(encode_us);
+            let count = increment_thread_call_counter();
+            if count.is_multiple_of(100) {
+                tracing::debug!(
+                    joint_count = items.len(),
+                    encode_us,
+                    publish_us,
+                    total_us = total.as_micros() as u64,
+                    call_count = count,
+                    "send_batched_joint_data timing"
+                );
             }
         }
         Ok(())
@@ -530,10 +677,7 @@ fn install_producer_tracing() {
     let path: PathBuf = std::env::var_os("NCD_PRODUCER_LOG_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| std::env::temp_dir().join("ncd_producer.log"));
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path);
+    let file = OpenOptions::new().create(true).append(true).open(&path);
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
     let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)

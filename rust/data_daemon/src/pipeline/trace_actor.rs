@@ -50,9 +50,10 @@ const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 /// Cap on concurrent ffmpeg transcodes. Each ffmpeg child happily saturates a
 /// CPU core; without a cap N simultaneous `EndTrace` envelopes (the
 /// integration matrix's `parallel_contexts=8` × 3-camera setup hits 24
-/// trivially) starve the rest of the daemon. A small fixed value keeps the
-/// transcode tail responsive without pulling in `num_cpus`.
-pub(crate) const DEFAULT_FFMPEG_CONCURRENCY: usize = 4;
+/// trivially) starve the rest of the daemon. Set to 8 so a single-camera
+/// 8-context workload can transcode all video traces in parallel; raise
+/// further if multi-camera setups exhibit the same queueing bottleneck.
+pub(crate) const DEFAULT_FFMPEG_CONCURRENCY: usize = 8;
 
 /// Shared context passed to every per-trace actor.
 ///
@@ -130,7 +131,10 @@ pub fn trace_key(envelope: &Envelope) -> Option<TraceKey> {
         | Envelope::Frame { trace_id, .. }
         | Envelope::EndTrace { trace_id, .. }
         | Envelope::OpenFrameStream { trace_id, .. } => Some(trace_id.clone()),
-        Envelope::StartRecording { .. }
+        // `BatchedFrames` spans multiple traces and is expanded into
+        // per-trace `Frame`s by the IPC listener — it never reaches routing.
+        Envelope::BatchedFrames { .. }
+        | Envelope::StartRecording { .. }
         | Envelope::StopRecording { .. }
         | Envelope::CancelRecording { .. } => None,
     }
@@ -177,6 +181,14 @@ enum TraceWriter {
     },
 }
 
+/// Whether the actor should keep running after handling an envelope.
+enum Flow {
+    /// Continue receiving envelopes.
+    Continue,
+    /// Terminal envelope handled (`EndTrace`) — the actor should return.
+    Stop,
+}
+
 /// Run the per-trace actor until the dispatcher closes the inbox.
 pub async fn run(
     store: Arc<SqliteStateStore>,
@@ -188,50 +200,15 @@ pub async fn run(
 
     while let Some(message) = inbox.recv().await {
         match message {
-            TraceActorMessage::Envelope(envelope) => match envelope {
-                Envelope::StartTrace {
-                    recording_id,
-                    data_type,
-                    data_type_name,
-                    ..
-                } => {
-                    state
-                        .handle_start_trace(&store, recording_id, data_type, data_type_name)
-                        .await
-                }
-                Envelope::OpenFrameStream { width, height, .. } => {
-                    state.handle_open_frame_stream(width, height);
-                }
-                Envelope::Frame {
-                    timestamp_ns,
-                    timestamp_s,
-                    payload,
-                    ..
-                } => {
-                    state
-                        .handle_frame(&store, &context, timestamp_ns, timestamp_s, payload)
-                        .await
-                }
-                Envelope::EndTrace { trace_id } => {
-                    tracing::info!(trace_id, "end_trace envelope received by actor");
-                    state.handle_end_trace(&store, &context).await;
+            TraceActorMessage::Envelope(envelope) => {
+                if let Flow::Stop = state.accept_envelope(&store, &context, envelope).await {
                     // After end-of-trace there is nothing more for this
                     // actor to do; returning drops the receiver so the
                     // dispatcher's shutdown sweep is free of dangling
                     // senders.
                     return;
                 }
-                Envelope::StartRecording { .. }
-                | Envelope::StopRecording { .. }
-                | Envelope::CancelRecording { .. } => {
-                    // Recording-scoped envelopes never carry a trace_id, so
-                    // the dispatcher routes them through its own branch —
-                    // they can't reach a per-trace actor. The match arm
-                    // exists so adding a new recording-scoped variant is a
-                    // compile error here rather than a silent ignore.
-                    unreachable!("recording-scoped envelopes are filtered by trace_key");
-                }
-            },
+            }
             TraceActorMessage::Cancel => {
                 tracing::info!(trace_id = state.trace_id, "cancel received by actor");
                 state.handle_cancel(&store, &context).await;
@@ -270,6 +247,16 @@ struct ActorState {
     /// periodically so a runaway producer with no disk left doesn't drown
     /// the daemon log in identical warnings.
     dropped_over_budget: u64,
+    /// Envelopes received before `StartTrace`. A video trace's
+    /// `OpenFrameStream` / `Frame` / `EndTrace` ride the `frames` service
+    /// while its `StartTrace` rides `commands`; the two have no mutual
+    /// ordering guarantee, so the actor can be spawned by a frame envelope
+    /// before its `StartTrace` is drained. Such envelopes are buffered here in
+    /// arrival order and replayed once `StartTrace` lands.
+    pending: Vec<Envelope>,
+    /// Count of envelopes dropped because [`Self::pending`] hit its cap before
+    /// `StartTrace` arrived. Rate-limits the associated warning.
+    pending_overflow: u64,
 }
 
 impl ActorState {
@@ -284,7 +271,135 @@ impl ActorState {
             bytes_on_disk: 0,
             last_db_bytes: 0,
             dropped_over_budget: 0,
+            pending: Vec::new(),
+            pending_overflow: 0,
         }
+    }
+
+    /// Route one inbound envelope.
+    ///
+    /// Until `StartTrace` has been observed every other envelope is buffered
+    /// (see [`Self::pending`]); `StartTrace` itself is applied immediately and
+    /// then drains the buffer in arrival order. Once the trace is known every
+    /// envelope is applied directly.
+    async fn accept_envelope(
+        &mut self,
+        store: &Arc<SqliteStateStore>,
+        context: &Arc<TraceActorContext>,
+        envelope: Envelope,
+    ) -> Flow {
+        let is_start_trace = matches!(envelope, Envelope::StartTrace { .. });
+        if self.recording_id.is_none() && !is_start_trace {
+            self.buffer_pending(envelope);
+            return Flow::Continue;
+        }
+        let flow = self.apply_envelope(store, context, envelope).await;
+        if is_start_trace && matches!(flow, Flow::Continue) {
+            return self.replay_pending(store, context).await;
+        }
+        flow
+    }
+
+    /// Apply one envelope to the writer/state machine. Assumes ordering
+    /// constraints are already satisfied — callers gate pre-`StartTrace`
+    /// envelopes via [`Self::accept_envelope`].
+    async fn apply_envelope(
+        &mut self,
+        store: &Arc<SqliteStateStore>,
+        context: &Arc<TraceActorContext>,
+        envelope: Envelope,
+    ) -> Flow {
+        match envelope {
+            Envelope::StartTrace {
+                recording_id,
+                data_type,
+                data_type_name,
+                ..
+            } => {
+                self.handle_start_trace(store, recording_id, data_type, data_type_name)
+                    .await;
+                Flow::Continue
+            }
+            Envelope::OpenFrameStream { width, height, .. } => {
+                self.handle_open_frame_stream(width, height);
+                Flow::Continue
+            }
+            Envelope::Frame {
+                timestamp_ns,
+                timestamp_s,
+                payload,
+                ..
+            } => {
+                self.handle_frame(store, context, timestamp_ns, timestamp_s, payload)
+                    .await;
+                Flow::Continue
+            }
+            Envelope::EndTrace { trace_id } => {
+                tracing::info!(trace_id, "end_trace envelope received by actor");
+                self.handle_end_trace(store, context).await;
+                Flow::Stop
+            }
+            Envelope::StartRecording { .. }
+            | Envelope::StopRecording { .. }
+            | Envelope::CancelRecording { .. }
+            | Envelope::BatchedFrames { .. } => {
+                // Recording-scoped envelopes never carry a trace_id, so the
+                // dispatcher routes them through its own branch — they can't
+                // reach a per-trace actor. `BatchedFrames` is likewise never
+                // seen here: the IPC listener expands it into per-trace
+                // `Frame`s before dispatch. The match arm exists so adding a
+                // new non-trace envelope variant is a compile error here
+                // rather than a silent ignore.
+                unreachable!("non-trace envelopes are filtered by trace_key");
+            }
+        }
+    }
+
+    /// Buffer an envelope that arrived before `StartTrace`.
+    ///
+    /// Capped so a trace whose `StartTrace` is lost (or pathologically
+    /// delayed) cannot grow the buffer without bound; the oldest envelope is
+    /// dropped on overflow, which for an in-order frame stream means the
+    /// earliest frames — the least costly to lose.
+    fn buffer_pending(&mut self, envelope: Envelope) {
+        /// Upper bound on buffered pre-`StartTrace` envelopes. Generous
+        /// relative to the sub-tick `StartTrace` skew it exists to absorb.
+        const MAX_PENDING: usize = 512;
+        if self.pending.len() >= MAX_PENDING {
+            self.pending.remove(0);
+            self.pending_overflow = self.pending_overflow.saturating_add(1);
+            if self.pending_overflow == 1 || self.pending_overflow.is_multiple_of(256) {
+                tracing::warn!(
+                    trace_id = self.trace_id,
+                    dropped = self.pending_overflow,
+                    "pre-start_trace buffer full; dropping oldest envelope",
+                );
+            }
+        }
+        self.pending.push(envelope);
+    }
+
+    /// Replay buffered pre-`StartTrace` envelopes in arrival order. Called
+    /// immediately after `StartTrace` is applied.
+    async fn replay_pending(
+        &mut self,
+        store: &Arc<SqliteStateStore>,
+        context: &Arc<TraceActorContext>,
+    ) -> Flow {
+        let pending = std::mem::take(&mut self.pending);
+        if !pending.is_empty() {
+            tracing::debug!(
+                trace_id = self.trace_id,
+                buffered = pending.len(),
+                "replaying envelopes buffered before start_trace",
+            );
+        }
+        for envelope in pending {
+            if let Flow::Stop = self.apply_envelope(store, context, envelope).await {
+                return Flow::Stop;
+            }
+        }
+        Flow::Continue
     }
 
     async fn handle_start_trace(
@@ -1095,7 +1210,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frame_received_before_start_trace_is_dropped() {
+    async fn handle_frame_without_start_trace_is_a_noop() {
+        // `handle_frame`'s own guard: applied directly (bypassing the
+        // `accept_envelope` buffer) with no `StartTrace`, it drops the frame
+        // rather than opening an orphan writer.
         let tempdir = TempDir::new().unwrap();
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
@@ -1110,6 +1228,85 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         // No `StartTrace` ⇒ no row was created.
         assert!(store.get_trace("trace-1").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn envelopes_buffered_before_start_trace_replay_in_order() {
+        // A video trace's frames ride the `frames` service while its
+        // `StartTrace` rides `commands`; the actor can be spawned by a frame
+        // before `StartTrace` is drained. Those envelopes must be buffered and
+        // replayed in arrival order once `StartTrace` lands — not dropped.
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let context = test_context(&tempdir.path().join("recordings"));
+        let store_arc = Arc::new(store.clone());
+
+        let mut state = ActorState::new("trace-1".to_string());
+
+        // Two frames and the EndTrace all arrive before StartTrace.
+        for index in 0..2i64 {
+            let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
+            let flow = state
+                .accept_envelope(
+                    &store_arc,
+                    &context,
+                    Envelope::frame("trace-1".into(), index, None, payload),
+                )
+                .await;
+            assert!(matches!(flow, Flow::Continue));
+        }
+        let flow = state
+            .accept_envelope(
+                &store_arc,
+                &context,
+                Envelope::EndTrace {
+                    trace_id: "trace-1".into(),
+                },
+            )
+            .await;
+        assert!(
+            matches!(flow, Flow::Continue),
+            "EndTrace before StartTrace is buffered, not terminal"
+        );
+        assert_eq!(state.pending.len(), 3);
+        assert_eq!(
+            state.frame_count, 0,
+            "buffered envelopes are not applied yet"
+        );
+
+        // StartTrace lands — replay applies the two frames then the EndTrace,
+        // which finalises the trace and returns Stop.
+        let flow = state
+            .accept_envelope(
+                &store_arc,
+                &context,
+                Envelope::StartTrace {
+                    recording_id: "rec-1".into(),
+                    trace_id: "trace-1".into(),
+                    data_type: "joints".into(),
+                    data_type_name: None,
+                },
+            )
+            .await;
+        assert!(
+            matches!(flow, Flow::Stop),
+            "buffered EndTrace finalises the trace during replay"
+        );
+        assert!(state.pending.is_empty(), "buffer drained on start_trace");
+
+        let trace = store
+            .get_trace("trace-1")
+            .await
+            .expect("get trace")
+            .expect("trace exists");
+        assert_eq!(trace.write_status, TraceWriteStatus::Written);
+        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
+            .directory(context.recordings_root.as_path());
+        let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed, json!([{"i": 0}, {"i": 1}]));
     }
 
     #[tokio::test]
