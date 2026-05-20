@@ -3,6 +3,7 @@ acks
 adarms
 ADARMS
 addfinalizer
+addinivalue
 agentview
 agilex
 aiolimiter

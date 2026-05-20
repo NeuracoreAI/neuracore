@@ -156,6 +156,7 @@ class Pi05(NeuracoreModel):
             finetune_vision_encoder_and_action_expert
         )
         self.discrete_state_input = discrete_state_input
+
         self.prompt_tokenizer_name = "google/paligemma-3b-pt-224"
         self.prompt_tokenizer: PreTrainedTokenizerBase = _load_tokenizer(
             self.prompt_tokenizer_name
@@ -266,12 +267,15 @@ class Pi05(NeuracoreModel):
             name="actions", statistics=output_stats
         )
 
-        # Setup RGB cameras
-        if DataType.RGB_IMAGES in self.input_data_types:
-            stats = cast(
+        # Track RGB camera statistics for optional image conditioning.
+        self.rgb_input_statistics: list[CameraDataStats] = (
+            cast(
                 list[CameraDataStats],
                 self.input_dataset_statistics[DataType.RGB_IMAGES],
             )
+            if DataType.RGB_IMAGES in self.input_data_types
+            else []
+        )
 
         # Build Pi05 config
         self.config = PI05Config(
@@ -382,36 +386,51 @@ class Pi05(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
-            if data_type not in batch.inputs:
+            if data_type not in self.input_data_types:
                 continue
 
-            batched_nc_data = batch.inputs[data_type]
-            mask = batch.inputs_mask[data_type]
+            if data_type in batch.inputs:
+                batched_nc_data = batch.inputs[data_type]
+                mask = batch.inputs_mask[data_type]
 
-            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
-                batched_gripper_data = cast(
-                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
-                )
-                proprio_data = torch.cat(
-                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
-                )
-            elif data_type in [
-                DataType.JOINT_POSITIONS,
-                DataType.JOINT_VELOCITIES,
-                DataType.JOINT_TORQUES,
-            ]:
-                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
-                proprio_data = torch.cat(
-                    [bjd.value for bjd in batched_joint_data], dim=-1
-                )
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    batched_gripper_data = cast(
+                        list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                    )
+                    proprio_data = torch.cat(
+                        [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                    )
+                elif data_type in [
+                    DataType.JOINT_POSITIONS,
+                    DataType.JOINT_VELOCITIES,
+                    DataType.JOINT_TORQUES,
+                ]:
+                    batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                    proprio_data = torch.cat(
+                        [bjd.value for bjd in batched_joint_data], dim=-1
+                    )
 
-            last_proprio = proprio_data[:, -1, :]  # (B, horizon, num_features)
-            masked_proprio = last_proprio * mask
+                last_proprio = proprio_data[:, -1, :]  # (B, horizon, num_features)
+                masked_proprio = last_proprio * mask
+            else:
+                start_idx, end_idx = self.proprio_dims[data_type]
+                dim = end_idx - start_idx
+                masked_proprio = torch.zeros(
+                    (len(batch), dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             proprio_list.append(masked_proprio)
 
-        # If no proprioception data is available, return None
-        # This allows the algorithm to work with visual-only inputs
+        # If no proprioception data is available, return a masked zero vector
+        # when state-dependent tokenization is enabled, otherwise None.
         if not proprio_list:
+            if self.discrete_state_input:
+                return torch.zeros(
+                    (len(batch), self.max_state_dim),
+                    dtype=torch.float32,
+                    device=self.device,
+                )
             return None
 
         # Concatenate all proprio together: (B, total_proprio_dim)
@@ -447,8 +466,20 @@ class Pi05(NeuracoreModel):
             Tuple of (images, masks) where images is a list of tensors
             [B, C, H, W] per camera and masks is a list of [B] tensors.
         """
+        if DataType.RGB_IMAGES not in self.input_data_types:
+            return [], []
         if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("RGB images are required but not provided")
+            batch_size = len(batch)
+            black = torch.full(
+                (batch_size, 3, *IMAGE_RESIZE_SHAPE),
+                -1.0,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            num_cameras = len(self.rgb_input_statistics)
+            return [black] * num_cameras, [
+                torch.zeros(batch_size, device=self.device)
+            ] * num_cameras
 
         batched_rgb_data = cast(list[BatchedRGBData], batch.inputs[DataType.RGB_IMAGES])
         camera_mask = batch.inputs_mask[DataType.RGB_IMAGES]
@@ -492,7 +523,10 @@ class Pi05(NeuracoreModel):
             )
 
         task_texts: list[str]
-        if DataType.LANGUAGE not in batch.inputs:
+        if (
+            DataType.LANGUAGE not in self.input_data_types
+            or DataType.LANGUAGE not in batch.inputs
+        ):
             task_texts = [""] * batch_size
         else:
             batched_language_data = cast(
@@ -611,7 +645,7 @@ class Pi05(NeuracoreModel):
             Pi05 model with loaded pretrained weights.
         """
         model = PI05Policy.from_pretrained(pretrained_name_or_path, **kwargs)
-        obj = cls(model_init_description)
+        obj = cls(model_init_description=model_init_description)
         obj.model = model
         obj.config = model.config
         return obj
@@ -682,16 +716,24 @@ class Pi05(NeuracoreModel):
             inference_sample
         )
 
-        if set(batch.outputs.keys()) != set(self.output_data_types):
-            raise ValueError(
-                "Batch outputs do not match model output configuration."
-                f" Expected {self.output_data_types}, got {list(batch.outputs.keys())}"
-            )
-
-        # Concatenate all output actions
+        # Concatenate all output actions; zero-fill types absent from this batch
         action_targets = []
         for data_type in self.ordered_output_data_types:
-            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            start, end = self.output_dims[data_type]
+            dim = end - start
+            if data_type not in batch.outputs:
+                action_targets.append(
+                    torch.zeros(
+                        batch.batch_size,
+                        self.output_prediction_horizon,
+                        dim,
+                        device=self.device,
+                    )
+                )
+            elif data_type in [
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.JOINT_POSITIONS,
+            ]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
             elif data_type in [
@@ -705,6 +747,32 @@ class Pi05(NeuracoreModel):
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
 
+        # Per-sample, per-sensor mask: correctly handles robots with different
+        # sensor counts for the same type in the same batch.
+        action_mask = torch.cat(
+            [
+                (
+                    batch.outputs_mask[data_type]
+                    if data_type in batch.outputs_mask
+                    else torch.zeros(
+                        batch.batch_size,
+                        self.output_dims[data_type][1] - self.output_dims[data_type][0],
+                        device=self.device,
+                    )
+                )
+                for data_type in self.ordered_output_data_types
+            ],
+            dim=-1,
+        )  # (B, action_dim)
+        # Pad to max_action_dim to match padded target/prediction tensors
+        action_mask = torch.nn.functional.pad(
+            action_mask, (0, self.max_action_dim - action_mask.shape[-1])
+        )  # (B, max_action_dim)
+        n_valid = action_mask.sum() * self.output_prediction_horizon
+        action_mask = action_mask.unsqueeze(1).expand(
+            -1, self.output_prediction_horizon, -1
+        )  # (B, T, max_action_dim)
+
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, total_action_dim)
 
         target_actions = self.action_normalizer.normalize(data=action_data)
@@ -714,15 +782,10 @@ class Pi05(NeuracoreModel):
         mse_losses = self.model.forward(
             images, image_masks, lang_tokens, lang_masks, target_actions
         )
-        # Mask to the real action dims
-        loss = mse_losses[:, :, : self.action_dim].mean()
+        loss = (mse_losses * action_mask).sum() / torch.clamp(n_valid, min=1.0)
 
-        losses = {
-            "mse_loss": loss,
-        }
-        metrics = {
-            "mse_loss": loss,
-        }
+        losses = {"mse_loss": loss}
+        metrics = {"mse_loss": loss}
         return BatchedTrainingOutputs(
             losses=losses,
             metrics=metrics,

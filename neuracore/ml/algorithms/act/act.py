@@ -315,10 +315,11 @@ class ACT(NeuracoreModel):
         return mu
 
     def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
-        """Combine different types of joint state data.
+        """Combine proprioceptive inputs into a single normalized feature vector.
 
-        Concatenates joint positions, velocities, and torques into a single
-        feature vector, applying masks and normalization.
+        Types configured in self.input_data_types but absent from batch.inputs
+        are zero-filled to preserve positional alignment for cross-embodiment
+        batches. Returns None when no proprioceptive types are configured.
 
         Args:
             batch: Input batch containing joint state data
@@ -336,7 +337,17 @@ class ACT(NeuracoreModel):
             DataType.JOINT_TORQUES,
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         ]:
+            if data_type not in self.input_data_types:
+                continue
             if data_type not in batch.inputs:
+                start_idx, end_idx = self.proprio_dims[data_type]
+                proprio_list.append(
+                    torch.zeros(
+                        (len(batch), end_idx - start_idx),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                )
                 continue
 
             batched_nc_data = batch.inputs[data_type]
@@ -379,7 +390,7 @@ class ACT(NeuracoreModel):
 
     def _encode_latent(
         self,
-        state: torch.FloatTensor,
+        state: torch.FloatTensor | None,
         actions: torch.FloatTensor,
         actions_mask: torch.FloatTensor,
         actions_sequence_mask: torch.FloatTensor,
@@ -390,7 +401,9 @@ class ACT(NeuracoreModel):
         along with proprioceptive state into latent distribution parameters.
 
         Args:
-            state: Proprioceptive state features
+            state: Proprioceptive state features. When None the state slot is
+                omitted from the encoder input (n_prefix=1 instead of 2) and
+                the padding mask is adjusted accordingly.
             actions: Target action sequence
             actions_mask: Mask for valid action dimensions
             actions_sequence_mask: Mask for valid sequence positions
@@ -398,12 +411,15 @@ class ACT(NeuracoreModel):
         Returns:
             tuple[torch.FloatTensor, torch.FloatTensor]: Latent mean and log variance
         """
-        batch_size = state.shape[0]
+        # Use actions to get batch_size: state may be None for visual-only inputs
+        batch_size = actions.shape[0]
 
-        # Project joint positions and actions
+        # Project state and actions
         state_embed = (
-            self.state_embed(state) if self.state_embed is not None else None
-        )  # [B, H]
+            self.state_embed(state)
+            if (self.state_embed is not None and state is not None)
+            else None
+        )  # [B, H] or None
         action_embed = self.action_embed(
             actions * actions_mask.unsqueeze(1)
         )  # [B, T, H]
@@ -411,17 +427,22 @@ class ACT(NeuracoreModel):
         # Reshape to sequence first
         state_embed = (
             state_embed.unsqueeze(0) if state_embed is not None else None
-        )  # [1, B, H]
+        )  # [1, B, H] or None
         action_embed = action_embed.transpose(0, 1)  # [T, B, H]
 
-        # Concatenate [CLS, state_emb, action_embed]
+        # Concatenate [CLS, (state_emb,) action_embed]
         cls_token = self.cls_embed.expand(-1, batch_size, -1)  # [1, B, H]
-        encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
+        if state_embed is not None:
+            encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
+            n_prefix = 2  # CLS + state
+        else:
+            encoder_input = torch.cat([cls_token, action_embed], dim=0)
+            n_prefix = 1  # CLS only
 
-        # # Update padding mask
+        # Update padding mask to match prefix length
         if actions_sequence_mask is not None:
             cls_joint_pad = torch.zeros(
-                batch_size, 2, dtype=torch.bool, device=self.device
+                batch_size, n_prefix, dtype=torch.bool, device=self.device
             )
             actions_sequence_mask = torch.cat(
                 [cls_joint_pad, actions_sequence_mask], dim=1
@@ -462,7 +483,7 @@ class ACT(NeuracoreModel):
             torch.FloatTensor: Encoded visual and proprioceptive memory
         """
         batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
-        batch_size = states.shape[0]
+        batch_size = latent.shape[0]
 
         # Process images
         image_features = []
@@ -518,6 +539,43 @@ class ACT(NeuracoreModel):
 
         return memory
 
+    def _encode_proprio_only(
+        self,
+        states: torch.FloatTensor,
+        latent: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        """Encode proprio state and latent without visual input.
+
+        Used when no RGB images are available. Feeds latent and state features
+        directly into the transformer encoder as the memory sequence.
+
+        Args:
+            states: Proprioceptive state features (may be None)
+            latent: Latent features from action encoding
+
+        Returns:
+            torch.FloatTensor: Encoded memory for the decoder
+        """
+        batch_size = latent.shape[0]
+
+        if states is None:
+            state_features = torch.zeros_like(latent)
+        else:
+            state_features = (
+                self.state_embed(states)
+                if self.state_embed is not None
+                else torch.zeros_like(latent)
+            )  # [B, H]
+
+        additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
+        additional_pos = self.additional_pos_embed.expand(
+            -1, batch_size, -1
+        )  # [2, B, H]
+        src = additional_features + additional_pos
+
+        memory = self.transformer["encoder"](src)
+        return memory
+
     def _decode(
         self,
         latent: torch.FloatTensor,
@@ -563,6 +621,7 @@ class ACT(NeuracoreModel):
         mu: torch.FloatTensor,
         logvar: torch.FloatTensor,
         batch: BatchedInferenceInputs,
+        proprio_state: torch.FloatTensor | None = None,
     ) -> torch.FloatTensor:
         """Predict action sequence from latent distribution and observations.
 
@@ -570,6 +629,7 @@ class ACT(NeuracoreModel):
             mu: Mean of latent distribution
             logvar: Log variance of latent distribution
             batch: Input observations
+            proprio_state: Pre-computed proprio features; recomputed if None
 
         Returns:
             torch.FloatTensor: Predicted action sequence
@@ -580,17 +640,21 @@ class ACT(NeuracoreModel):
         # Project latent
         latent = self.latent_out_proj(latent_sample)  # [B, H]
 
-        if DataType.RGB_IMAGES not in batch.inputs:
-            raise ValueError("No RGB images in batch")
+        if proprio_state is None:
+            proprio_state = self._combine_proprio(batch)
 
-        # Encode visual features
-        proprio_state = self._combine_proprio(batch)
-        memory = self._encode_visual(
-            proprio_state,
-            batch.inputs[DataType.RGB_IMAGES],
-            batch.inputs_mask[DataType.RGB_IMAGES],
-            latent,
-        )
+        if (
+            DataType.RGB_IMAGES in self.input_data_types
+            and DataType.RGB_IMAGES in batch.inputs
+        ):
+            memory = self._encode_visual(
+                proprio_state,
+                batch.inputs[DataType.RGB_IMAGES],
+                batch.inputs_mask[DataType.RGB_IMAGES],
+                latent,
+            )
+        else:
+            memory = self._encode_proprio_only(proprio_state, latent)
 
         # Decode actions
         action_preds = self._decode(latent, memory)
@@ -617,15 +681,10 @@ class ACT(NeuracoreModel):
 
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
-        start_slice_idx = 0
         for data_type in self.ordered_output_data_types:
-            output_width = (
-                self.output_dims[data_type][1] - self.output_dims[data_type][0]
-            )
-            end_slice_idx = start_slice_idx + output_width
-            dt_preds = predictions[
-                :, :, start_slice_idx:end_slice_idx
-            ]  # (B, T, dt_size)
+            start_idx, end_idx = self.output_dims[data_type]
+            output_width = end_idx - start_idx
+            dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
 
             if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
                 batched_outputs = []
@@ -647,8 +706,6 @@ class ACT(NeuracoreModel):
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
 
-            start_slice_idx = end_slice_idx
-
         return output_tensors
 
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
@@ -669,10 +726,24 @@ class ACT(NeuracoreModel):
             batch_size=batch.batch_size,
         )
 
-        # Extract target actions
+        # Extract target actions; zero-fill types absent from this batch
         action_targets = []
         for data_type in self.ordered_output_data_types:
-            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+            start, end = self.output_dims[data_type]
+            dim = end - start
+            if data_type not in batch.outputs:
+                action_targets.append(
+                    torch.zeros(
+                        batch.batch_size,
+                        self.output_prediction_horizon,
+                        dim,
+                        device=self.device,
+                    )
+                )
+            elif data_type in [
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.JOINT_POSITIONS,
+            ]:
                 batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
                 action_targets.extend([bjd.value for bjd in batched_joints])
             elif data_type in [
@@ -680,21 +751,35 @@ class ACT(NeuracoreModel):
                 DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             ]:
                 grippers = cast(
-                    list[BatchedParallelGripperOpenAmountData], batch.outputs[data_type]
+                    list[BatchedParallelGripperOpenAmountData],
+                    batch.outputs[data_type],
                 )
                 action_targets.extend([gripper.open_amount for gripper in grippers])
             else:
                 raise ValueError(f"Unsupported output data type: {data_type}")
 
+        # Per-sample, per-sensor mask: correctly handles robots with different
+        # sensor counts for the same type in the same batch.
+        action_mask = torch.cat(
+            [
+                (
+                    batch.outputs_mask[data_type]
+                    if data_type in batch.outputs_mask
+                    else torch.zeros(
+                        batch.batch_size,
+                        self.output_dims[data_type][1] - self.output_dims[data_type][0],
+                        device=self.device,
+                    )
+                )
+                for data_type in self.ordered_output_data_types
+            ],
+            dim=-1,
+        )  # (B, max_output_size)
+
         action_data = torch.cat(action_targets, dim=-1)  # (B, T, action_dim)
 
-        # Get masks
-        pred_sequence_mask = torch.ones_like(
-            action_data[:, :, 0]
-        )  # All time steps valid
-        max_action_mask = torch.ones(
-            batch.batch_size, self.max_output_size, device=self.device
-        )  # All actions valid
+        # All time steps valid; action dims masked per-sample above
+        pred_sequence_mask = torch.ones_like(action_data[:, :, 0])
 
         proprio_state = self._combine_proprio(inference_sample)
 
@@ -704,15 +789,17 @@ class ACT(NeuracoreModel):
         mu, logvar = self._encode_latent(
             proprio_state,
             normalized_actions,
-            max_action_mask,
+            action_mask,
             pred_sequence_mask,
         )
 
-        action_preds = self._predict_action(mu, logvar, inference_sample)
+        action_preds = self._predict_action(mu, logvar, inference_sample, proprio_state)
         target_actions = self.action_normalizer.normalize(action_data)
 
         l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
-        l1_loss = (l1_loss_all * pred_sequence_mask.unsqueeze(-1)).mean()
+        l1_loss = (l1_loss_all * action_mask.unsqueeze(1)).sum() / torch.clamp(
+            action_mask.sum() * action_preds.shape[1], min=1.0
+        )
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
         loss = l1_loss + self.kl_weight * kl_loss
 
