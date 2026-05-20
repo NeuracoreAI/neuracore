@@ -9,67 +9,63 @@
 //! PyO3 producer client for the Neuracore data daemon.
 //!
 //! This crate ships as `neuracore.data_daemon._native_producer` inside the
-//! Python wheel. It exposes the small lifecycle surface the Python adaptor
-//! ([neuracore/data_daemon/communications_management/producer/producer_channel.py](../../../neuracore/data_daemon/communications_management/producer/producer_channel.py))
-//! needs to drive the daemon over iceoryx2:
+//! Python wheel. It exposes a small recording-scoped surface to the SDK's
+//! logging layer:
 //!
-//! - [`start_recording`](crate::start_recording) opens the iceoryx2 commands
-//!   service if necessary and publishes a
+//! - [`start_recording`](crate::start_recording) publishes one
 //!   [`StartRecording`](data_daemon_ipc::Envelope::StartRecording) envelope.
-//! - [`start_trace`](crate::start_trace) / [`end_trace`](crate::end_trace) frame
-//!   per-trace lifecycle.
-//! - [`send_data`](crate::send_data) publishes a
-//!   [`Frame`](data_daemon_ipc::Envelope::Frame) envelope for the supplied
-//!   trace. Callers manage `trace_id` themselves; the producer is intentionally
-//!   stateless so it can be invoked from multiple Python threads without
-//!   per-trace bookkeeping inside the Rust layer.
-//! - [`open_frame_stream`](crate::open_frame_stream) publishes an
-//!   [`OpenFrameStream`](data_daemon_ipc::Envelope::OpenFrameStream) envelope
-//!   to switch the daemon-side actor into the video-writer path before the
-//!   first pixel frame.
-//! - [`stop_recording`](crate::stop_recording) publishes a
-//!   [`StopRecording`](data_daemon_ipc::Envelope::StopRecording) envelope.
+//! - [`log_joints`](crate::log_joints) / [`log_frame`](crate::log_frame) /
+//!   [`log_scalar`](crate::log_scalar) deliver data. Each *lazily* mints a
+//!   trace the first time a stream is seen — publishing its
+//!   [`StartTrace`](data_daemon_ipc::Envelope::StartTrace) (and, for video,
+//!   [`OpenFrameStream`](data_daemon_ipc::Envelope::OpenFrameStream)) — then
+//!   publishes the sample.
+//! - [`stop_recording`](crate::stop_recording) ends every trace the recording
+//!   minted and publishes one
+//!   [`StopRecording`](data_daemon_ipc::Envelope::StopRecording).
+//! - [`cancel_recording`](crate::cancel_recording) publishes
+//!   [`CancelRecording`](data_daemon_ipc::Envelope::CancelRecording).
+//!
+//! The crate owns the entire trace lifecycle: trace ids are minted, tracked,
+//! and discarded here. Python never sees a trace id — it logs by recording id
+//! plus a `(data_type, name)` stream identity.
 //!
 //! ## Threading
 //!
 //! iceoryx2's [`Publisher`] uses an `Rc`-backed `ArcSyncPolicy` and is
 //! therefore neither `Send` nor `Sync`. We side-step that by parking the
-//! per-process state in a [`thread_local`]: each Python thread that calls into
-//! the module lazily builds its own iceoryx2 [`Node`] and a publisher per
-//! service on first use and reuses them for the rest of that thread's
-//! lifetime. This matches Python's threading model — the GIL serialises Python
-//! execution but does *not* prevent multiple OS threads from holding handles
-//! into the daemon's IPC namespace — and it keeps every PyO3 entry point
-//! lock-free.
+//! publishers in a [`thread_local`]: each Python thread that calls in lazily
+//! builds its own iceoryx2 [`Node`] and a publisher per service.
+//!
+//! The *trace registry* — which streams map to which trace ids — is shared
+//! across threads (a publisher thread and the `stop_recording` thread are
+//! usually different), so it lives in a process-wide [`Mutex`]
+//! ([`TRACE_REGISTRY`]). Publishers stay thread-local; only the small registry
+//! map is shared.
 //!
 //! ## Service split
 //!
 //! Envelopes travel on one of two iceoryx2 services. Lifecycle envelopes and
-//! non-video `Frame`s ride [`COMMANDS`] (deep buffer, small slice); the
-//! pixel-bearing traffic of video traces — `OpenFrameStream`, `Frame` and
-//! `EndTrace` — rides [`FRAMES`] (small buffer, 16 MiB slice). A trace is
-//! classified video the moment `open_frame_stream` is called for it; the
-//! thread-local `VIDEO_TRACES` set records that so subsequent `Frame` /
-//! `EndTrace` envelopes route to the same service. Keeping the deep lifecycle
-//! buffer away from multi-MiB payloads bounds the publisher data segment's
-//! retained-sample footprint (see [`FRAMES_SUBSCRIBER_BUFFER_SIZE`]).
+//! non-video data ride [`COMMANDS`] (deep buffer, small slice); the
+//! pixel-bearing traffic of video traces — `OpenFrameStream`'s sibling
+//! `Frame`s and their `EndTrace` — rides [`FRAMES`] (small buffer, 16 MiB
+//! slice). The destination is decided by *which* `log_*` function is called;
+//! the registry records whether each trace is video so `stop_recording` routes
+//! its `EndTrace` to the matching service.
 //!
 //! ## Fork safety
 //!
 //! iceoryx2's shared-memory descriptors are bound to the parent PID; a fork
-//! child that re-used them would silently drop every Frame envelope. We
-//! register a one-shot `pthread_atfork` child handler on first publisher
-//! construction (see [`ensure_fork_handler_registered`]). After a fork the
-//! child resumes in the single thread that called `fork`; the handler clears
-//! that thread's `PRODUCER` slot so the next publish rebuilds. The inherited
-//! `ProducerState` is `mem::forget`'d — running its `Drop` would notify the
-//! daemon's bookkeeping for the *parent's* still-live publisher.
+//! child that re-used them would silently drop every envelope. A one-shot
+//! `pthread_atfork` child handler clears the forking thread's `PRODUCER` slot
+//! so the next publish rebuilds. The process-wide [`TRACE_REGISTRY`] is healed
+//! lazily instead: it stores the owning PID and wipes itself on the first
+//! access from a process whose PID no longer matches (see [`with_registry`]),
+//! so a forked `multiprocessing` worker never inherits stale parent traces.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
-use std::fs::OpenOptions;
-use std::path::PathBuf;
-use std::sync::Once;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex, Once};
 
 use data_daemon_ipc::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, FRAMES, FRAMES_MAX_PAYLOAD_BYTES,
@@ -84,7 +80,7 @@ use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use thiserror::Error;
-use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 /// Errors raised while publishing envelopes to the daemon.
 #[derive(Debug, Error)]
@@ -92,17 +88,17 @@ enum ProducerError {
     /// Failed to build the iceoryx2 node.
     #[error("failed to create iceoryx2 node: {0}")]
     NodeCreate(String),
-    /// Failed to open or create the commands service.
-    #[error("failed to open commands service: {0}")]
+    /// Failed to open or create an iceoryx2 service.
+    #[error("failed to open service: {0}")]
     ServiceOpen(String),
     /// Failed to build the publisher port.
-    #[error("failed to create commands publisher: {0}")]
+    #[error("failed to create publisher: {0}")]
     PublisherCreate(String),
     /// Failed to loan a slice sample.
-    #[error("failed to loan command sample: {0}")]
+    #[error("failed to loan sample: {0}")]
     Loan(String),
     /// Failed to send the loaned sample.
-    #[error("failed to send command sample: {0}")]
+    #[error("failed to send sample: {0}")]
     Send(String),
     /// Failed to encode the envelope.
     #[error(transparent)]
@@ -145,60 +141,98 @@ enum Target {
     Frames,
 }
 
+/// One trace minted by the producer for a stream within a recording.
+struct TraceEntry {
+    /// Trace id sent to the daemon; never surfaced to Python.
+    trace_id: String,
+    /// `true` for video traces — their `Frame`/`EndTrace` ride [`FRAMES`].
+    is_video: bool,
+}
+
+/// Every trace the producer has minted for one recording, keyed by
+/// `stream_key` (`data_type` + `name`).
+#[derive(Default)]
+struct RecordingTraces {
+    traces: HashMap<String, TraceEntry>,
+}
+
+/// Process-wide trace registry.
+///
+/// `owner_pid` lets a forked `multiprocessing` worker detect that the map was
+/// inherited from its parent and wipe it on first use — see [`with_registry`].
+struct TraceRegistry {
+    owner_pid: u32,
+    recordings: HashMap<String, RecordingTraces>,
+}
+
+/// Process-wide registry of recordings → minted traces. Guarded by a `Mutex`
+/// because the publishing threads and the `stop_recording` thread differ;
+/// `LazyLock` because `HashMap::new` is not a `const fn`.
+static TRACE_REGISTRY: LazyLock<Mutex<TraceRegistry>> = LazyLock::new(|| {
+    Mutex::new(TraceRegistry {
+        owner_pid: 0,
+        recordings: HashMap::new(),
+    })
+});
+
 thread_local! {
     /// One iceoryx2 publisher set per OS thread. See the module-level note on
     /// threading for the rationale. Const-initialised so the slot is a plain
     /// TLS load — required for the `pthread_atfork` child handler to access
     /// it without invoking a lazy initializer in a post-fork context.
     static PRODUCER: RefCell<Option<ProducerState>> = const { RefCell::new(None) };
-
-    /// Trace ids known to be video traces (an `open_frame_stream` was seen).
-    /// Their `Frame` / `EndTrace` envelopes route to [`FRAMES`]; every other
-    /// trace stays on [`COMMANDS`]. Const-initialised as `None` for the same
-    /// post-fork reason as `PRODUCER`; the set is allocated on first use.
-    static VIDEO_TRACES: RefCell<Option<HashSet<String>>> = const { RefCell::new(None) };
 }
 
-/// Classify an envelope's destination service, updating `VIDEO_TRACES` as a
-/// side effect: `OpenFrameStream` marks its trace video, `EndTrace` clears it.
-fn route_envelope(envelope: &Envelope) -> Target {
-    match envelope {
-        Envelope::OpenFrameStream { trace_id, .. } => {
-            VIDEO_TRACES.with(|cell| {
-                cell.borrow_mut()
-                    .get_or_insert_with(HashSet::new)
-                    .insert(trace_id.clone());
-            });
-            Target::Frames
-        }
-        Envelope::Frame { trace_id, .. } => VIDEO_TRACES.with(|cell| {
-            let is_video = cell
-                .borrow()
-                .as_ref()
-                .is_some_and(|set| set.contains(trace_id));
-            if is_video {
-                Target::Frames
-            } else {
-                Target::Commands
-            }
-        }),
-        Envelope::EndTrace { trace_id } => VIDEO_TRACES.with(|cell| {
-            let was_video = cell
-                .borrow_mut()
-                .as_mut()
-                .is_some_and(|set| set.remove(trace_id));
-            if was_video {
-                Target::Frames
-            } else {
-                Target::Commands
-            }
-        }),
-        Envelope::StartRecording { .. }
-        | Envelope::StartTrace { .. }
-        | Envelope::BatchedFrames { .. }
-        | Envelope::StopRecording { .. }
-        | Envelope::CancelRecording { .. } => Target::Commands,
+/// Lock the trace registry and run `operation` against its recordings map.
+///
+/// Heals the registry across a fork: when the stored `owner_pid` no longer
+/// matches the current process the map was inherited from a pre-fork parent,
+/// so it is cleared before use. This runs during normal locked execution in
+/// the child (never inside the `pthread_atfork` handler), so taking the lock
+/// here is safe.
+fn with_registry<R>(operation: impl FnOnce(&mut HashMap<String, RecordingTraces>) -> R) -> R {
+    let mut registry = TRACE_REGISTRY
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pid = std::process::id();
+    if registry.owner_pid != pid {
+        registry.recordings.clear();
+        registry.owner_pid = pid;
     }
+    operation(&mut registry.recordings)
+}
+
+/// Build the `data_type`/`name` composite key used to identify a stream
+/// within a recording. The NUL separator cannot occur in either component, so
+/// the join is unambiguous.
+fn stream_key(data_type: &str, name: &str) -> String {
+    format!("{data_type}\u{0}{name}")
+}
+
+/// Register a recording in the trace registry.
+///
+/// Returns `true` when the recording was newly registered, `false` when it
+/// was already present — i.e. a repeated `start_recording`. This is the
+/// single source of truth that keeps `start, start` from emitting a duplicate
+/// `StartRecording`.
+fn register_recording(recording_id: &str) -> bool {
+    with_registry(|recordings| {
+        if recordings.contains_key(recording_id) {
+            false
+        } else {
+            recordings.insert(recording_id.to_string(), RecordingTraces::default());
+            true
+        }
+    })
+}
+
+/// Remove a recording from the registry, returning the traces it minted.
+///
+/// Returns `None` when the recording was not registered (already stopped, or
+/// never started) — which is what makes a repeated `stop_recording`, or a
+/// stray `stop` before `start`, a safe no-op.
+fn take_recording(recording_id: &str) -> Option<RecordingTraces> {
+    with_registry(|recordings| recordings.remove(recording_id))
 }
 
 /// Run `f` against this thread's producer state, lazily building it on first
@@ -312,7 +346,7 @@ fn ensure_fork_handler_registered() {
     REGISTER.call_once(|| {
         // SAFETY: `pthread_atfork` is the standard libc primitive for
         // registering fork callbacks. `on_fork_in_child` is `extern "C"`,
-        // touches only const-initialised TLS slots, and the only "work" it
+        // touches only a const-initialised TLS slot, and the only "work" it
         // does is `mem::forget` — none of which can panic across the FFI
         // boundary, allocate, or take a lock that the parent could hold.
         let result = unsafe { libc::pthread_atfork(None, None, Some(on_fork_in_child)) };
@@ -330,32 +364,24 @@ fn ensure_fork_handler_registered() {
 /// Runs once in the post-fork child, in the single surviving thread (whichever
 /// called `fork`). Clears that thread's `PRODUCER` slot so the next call to
 /// [`with_producer`] rebuilds fresh iceoryx2 publishers whose descriptors
-/// belong to the new process, and drops the `VIDEO_TRACES` routing set so the
-/// child starts with no inherited trace classifications. The inherited
-/// `ProducerState` / `HashSet` are `mem::forget`'d on purpose: running their
-/// `Drop` would notify the daemon's bookkeeping for the *parent's* still-live
-/// publishers, and freeing memory in a post-fork child risks an allocator lock
-/// the parent held at fork time.
+/// belong to the new process. The inherited `ProducerState` is `mem::forget`'d
+/// on purpose: running its `Drop` would notify the daemon's bookkeeping for
+/// the *parent's* still-live publisher, and freeing memory in a post-fork
+/// child risks an allocator lock the parent held at fork time.
 ///
-/// `thread_local!` slots owned by *other* threads at fork time are
-/// inaccessible from the child's surviving thread, but that is fine — those
-/// threads no longer exist in the child, and Rust's per-thread TLS allocation
-/// means no stale slot can ever be observed from the child.
+/// The process-wide [`TRACE_REGISTRY`] is deliberately *not* touched here —
+/// taking its lock in a fork handler could deadlock if a parent thread held it
+/// at fork time. It self-heals via the `owner_pid` check in [`with_registry`].
 extern "C" fn on_fork_in_child() {
     PRODUCER.with(|cell| {
         if let Some(stale) = cell.borrow_mut().take() {
             std::mem::forget(stale);
         }
     });
-    VIDEO_TRACES.with(|cell| {
-        if let Some(stale) = cell.borrow_mut().take() {
-            std::mem::forget(stale);
-        }
-    });
 }
 
-fn publish_envelope(envelope: &Envelope) -> Result<(), ProducerError> {
-    let target = route_envelope(envelope);
+/// Encode `envelope` and publish it on `target`'s iceoryx2 service.
+fn publish(target: Target, envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
     let limit = match target {
         Target::Commands => COMMANDS_MAX_PAYLOAD_BYTES,
@@ -383,227 +409,6 @@ fn publish_envelope(envelope: &Envelope) -> Result<(), ProducerError> {
     })
 }
 
-/// Announce the start of a recording session.
-#[pyfunction]
-#[pyo3(signature = (recording_id, robot_id = None, robot_name = None, dataset_id = None, dataset_name = None))]
-fn start_recording(
-    recording_id: &str,
-    robot_id: Option<String>,
-    robot_name: Option<String>,
-    dataset_id: Option<String>,
-    dataset_name: Option<String>,
-) -> PyResult<()> {
-    if recording_id.is_empty() {
-        return Err(PyValueError::new_err("recording_id must not be empty"));
-    }
-    let envelope = Envelope::StartRecording {
-        recording_id: recording_id.to_string(),
-        robot_id,
-        robot_name,
-        dataset_id,
-        dataset_name,
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
-}
-
-/// Open a new trace inside an active recording.
-///
-/// The Python adaptor publishes this once per `(recording_id, trace_id)` pair
-/// before the first [`send_data`] for that trace, matching the per-trace state
-/// machine described in §5 of the rewrite plan.
-#[pyfunction]
-#[pyo3(signature = (recording_id, trace_id, data_type, data_type_name = None))]
-fn start_trace(
-    recording_id: &str,
-    trace_id: &str,
-    data_type: &str,
-    data_type_name: Option<String>,
-) -> PyResult<()> {
-    if recording_id.is_empty() || trace_id.is_empty() || data_type.is_empty() {
-        return Err(PyValueError::new_err(
-            "recording_id, trace_id and data_type must not be empty",
-        ));
-    }
-    let envelope = Envelope::StartTrace {
-        recording_id: recording_id.to_string(),
-        trace_id: trace_id.to_string(),
-        data_type: data_type.to_string(),
-        data_type_name: data_type_name.filter(|value| !value.is_empty()),
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
-}
-
-/// Send one frame/sample for a trace.
-///
-/// `trace_id` is caller-supplied so the producer stays stateless; the Python
-/// adaptor allocates trace IDs (typically once per recording) and keeps the
-/// mapping. The adaptor must have already published an
-/// [`Envelope::StartTrace`] for `trace_id` before the first frame.
-#[pyfunction]
-#[pyo3(signature = (trace_id, payload, timestamp_ns = 0, timestamp_s = None))]
-fn send_data(
-    py: Python<'_>,
-    trace_id: &str,
-    payload: &[u8],
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
-) -> PyResult<()> {
-    if trace_id.is_empty() {
-        return Err(PyValueError::new_err("trace_id must not be empty"));
-    }
-    // Diagnostic per-frame log. Only fires when `NCD_PRODUCER_LOG` is set;
-    // the log carries each call's wall-clock duration so producer-throughput
-    // analysis can grep + awk the file for per-trace percentiles. When the
-    // gate is off the whole block compiles to a single atomic-bool load.
-    let log_enabled = producer_log_enabled();
-    // Copy the payload into owned Rust memory while the GIL is held — the
-    // `&[u8]` borrows a Python buffer. Everything after this point (encode,
-    // the iceoryx2 publish) touches no Python state.
-    let owned_payload = payload.to_vec();
-    let payload_len = owned_payload.len();
-    let owned_trace_id = trace_id.to_string();
-    // The envelope below consumes `owned_trace_id`, so capture the log tail
-    // first. Costs an allocation only when the per-frame log is enabled.
-    let trace_tail = if log_enabled {
-        Some(trace_id_tail(&owned_trace_id).to_string())
-    } else {
-        None
-    };
-    // Release the GIL for the encode + publish. `publish_envelope` blocks
-    // when the daemon's buffer is full (the `Block` unable-to-deliver
-    // strategy); holding the GIL across that stall would freeze every other
-    // Python producer thread (sibling cameras, joint streams, orchestrator).
-    py.allow_threads(|| -> PyResult<()> {
-        let started = if log_enabled {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let envelope = Envelope::frame(owned_trace_id, timestamp_ns, timestamp_s, owned_payload);
-        let encode_done = started.map(|t| t.elapsed());
-        publish_envelope(&envelope)?;
-        if let (Some(start), Some(trace_tail)) = (started, &trace_tail) {
-            let total = start.elapsed();
-            let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
-            let publish_us = total.as_micros().saturating_sub(encode_us);
-            // Log only every 100th call per thread to keep the file size
-            // sensible at 30k+ envelopes/sec, while still giving enough
-            // samples for a percentile read. Stats summary is bucketed by
-            // thread via the trace_id tail so different traces interleave
-            // cleanly.
-            let count = increment_thread_call_counter();
-            if count.is_multiple_of(100) {
-                tracing::debug!(
-                    trace_id = trace_tail.as_str(),
-                    payload_len,
-                    encode_us,
-                    publish_us,
-                    total_us = total.as_micros() as u64,
-                    call_count = count,
-                    "send_data timing"
-                );
-            }
-        }
-        Ok(())
-    })
-}
-
-/// Send a batch of scalar joint samples in one PyO3 call.
-///
-/// All `(trace_id, value)` items are packed into a single
-/// [`Envelope::BatchedFrames`] message and published with one iceoryx2
-/// loan/send. Compared to the legacy per-item shim that crossed the PyO3
-/// boundary and ran CPython `json.dumps` for every joint, this collapses:
-///
-/// - N× PyO3 boundary crossings → 1
-/// - N× CPython `json.dumps` → N× `serde_json` against a small `Vec<u8>`
-/// - N× iceoryx2 loan/write/send → 1
-///
-/// The daemon's IPC listener unpacks the batch back into one `Frame` per
-/// item before dispatch, so the on-disk format is unchanged: each joint
-/// still lands as a `{"timestamp":<f64>,"value":<f64>}` JSON entry.
-#[pyfunction]
-#[pyo3(signature = (items, timestamp_ns, timestamp_s = None))]
-fn send_batched_joint_data(
-    py: Python<'_>,
-    items: Vec<(String, f64)>,
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
-) -> PyResult<()> {
-    if items.is_empty() {
-        return Ok(());
-    }
-    // Fall back to ns→s if the caller omits timestamp_s so the per-frame
-    // "timestamp" field still has a sensible value to write into trace.json.
-    let timestamp_for_json = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
-    let log_enabled = producer_log_enabled();
-
-    // Pre-validate every trace_id before we build the batch. Without this
-    // check a malformed item would only surface after the batch was already
-    // assembled; rejecting up front keeps the error deterministic and the
-    // hot path below free of per-item validation.
-    if let Some(bad_index) = items.iter().position(|(trace_id, _)| trace_id.is_empty()) {
-        return Err(PyValueError::new_err(format!(
-            "trace_id must not be empty (item index {bad_index})"
-        )));
-    }
-    // The JSON formatting and the iceoryx2 publish touch no Python state —
-    // releasing the GIL here lets the test's other producer threads (camera
-    // at 120 Hz, custom_1d at 3.1 kHz, the sibling joint streams) keep making
-    // progress while this thread is inside Rust.
-    py.allow_threads(|| -> PyResult<()> {
-        let started = if log_enabled {
-            Some(std::time::Instant::now())
-        } else {
-            None
-        };
-        let mut frames = Vec::with_capacity(items.len());
-        for (trace_id, value) in &items {
-            // serde_json (via ryu) always emits at least one fractional
-            // digit for f64 — so integer-valued joint values land on disk
-            // as `1.0`, not `1`, matching Python's `json.dumps` shape and
-            // keeping the cloud-side data verification happy.
-            let payload = serde_json::to_vec(&ScalarFrameEntry {
-                timestamp: timestamp_for_json,
-                value: *value,
-            })
-            .map_err(|error| {
-                PyRuntimeError::new_err(format!("failed to encode joint frame JSON: {error}"))
-            })?;
-            frames.push(BatchedFrameItem {
-                trace_id: trace_id.clone(),
-                payload,
-            });
-        }
-        let envelope = Envelope::BatchedFrames {
-            timestamp_ns,
-            timestamp_s,
-            frames,
-        };
-        let encode_done = started.map(|t| t.elapsed());
-        publish_envelope(&envelope)?;
-        if let Some(start) = started {
-            let total = start.elapsed();
-            let encode_us = encode_done.map(|d| d.as_micros()).unwrap_or(0);
-            let publish_us = total.as_micros().saturating_sub(encode_us);
-            let count = increment_thread_call_counter();
-            if count.is_multiple_of(100) {
-                tracing::debug!(
-                    joint_count = items.len(),
-                    encode_us,
-                    publish_us,
-                    total_us = total.as_micros() as u64,
-                    call_count = count,
-                    "send_batched_joint_data timing"
-                );
-            }
-        }
-        Ok(())
-    })
-}
-
 /// Per-item JSON shape written to `trace.json` for scalar joint streams.
 ///
 /// Field order matches the legacy `BATCHED_JOINT_DATA` zmq path
@@ -615,165 +420,352 @@ struct ScalarFrameEntry {
     value: f64,
 }
 
-thread_local! {
-    /// Per-thread monotonic counter of `send_data` calls. Used to decimate
-    /// the diagnostic log to one line per 100 calls without locking. Lives
-    /// alongside the `PRODUCER` slot so it shares the same thread lifetime.
-    static THREAD_CALL_COUNTER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
-
-fn increment_thread_call_counter() -> u64 {
-    THREAD_CALL_COUNTER.with(|cell| {
-        let next = cell.get().saturating_add(1);
-        cell.set(next);
-        next
+/// Announce the start of a recording session.
+///
+/// Idempotent: a second call for an already-registered `recording_id` is a
+/// no-op, so a mistaken `start, start` sequence emits no duplicate
+/// `StartRecording` and leaves any minted traces intact.
+#[pyfunction]
+#[pyo3(signature = (recording_id, robot_id = None, robot_name = None, dataset_id = None, dataset_name = None))]
+fn start_recording(
+    py: Python<'_>,
+    recording_id: &str,
+    robot_id: Option<String>,
+    robot_name: Option<String>,
+    dataset_id: Option<String>,
+    dataset_name: Option<String>,
+) -> PyResult<()> {
+    if recording_id.is_empty() {
+        return Err(PyValueError::new_err("recording_id must not be empty"));
+    }
+    let recording_id = recording_id.to_string();
+    py.allow_threads(|| -> PyResult<()> {
+        if !register_recording(&recording_id) {
+            return Ok(());
+        }
+        publish(
+            Target::Commands,
+            &Envelope::StartRecording {
+                recording_id,
+                robot_id,
+                robot_name,
+                dataset_id,
+                dataset_name,
+            },
+        )?;
+        Ok(())
     })
 }
 
-/// Tail of a trace UUID for log readability. The integration test logs the
-/// same suffix on the daemon side, so the two timelines join on the same
-/// label without a full 36-char UUID per line.
-fn trace_id_tail(trace_id: &str) -> &str {
-    let len = trace_id.len();
-    if len <= 8 {
-        trace_id
-    } else {
-        &trace_id[len - 8..]
+/// Resolve a trace id for `(data_type, name)` within `recording`, minting a
+/// fresh one when the stream has not been seen yet. Returns the trace id and
+/// whether it was newly minted (so the caller can publish its `StartTrace`).
+fn resolve_trace(
+    recording: &mut RecordingTraces,
+    data_type: &str,
+    name: &str,
+    is_video: bool,
+) -> (String, bool) {
+    let key = stream_key(data_type, name);
+    match recording.traces.get(&key) {
+        Some(entry) => (entry.trace_id.clone(), false),
+        None => {
+            let trace_id = Uuid::new_v4().to_string();
+            recording.traces.insert(
+                key,
+                TraceEntry {
+                    trace_id: trace_id.clone(),
+                    is_video,
+                },
+            );
+            (trace_id, true)
+        }
     }
 }
 
-/// Returns true once `NCD_PRODUCER_LOG=1` (or any non-empty value other than
-/// `0`/`false`) has been observed *and* the tracing subscriber has been
-/// installed. The first call initialises the subscriber against a file path
-/// taken from `NCD_PRODUCER_LOG_FILE` (default `/tmp/ncd_producer.log`); the
-/// subscriber is shared across all Python threads in the process.
-fn producer_log_enabled() -> bool {
-    static INIT: Once = Once::new();
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        let raw = std::env::var("NCD_PRODUCER_LOG").unwrap_or_default();
-        let enabled = !raw.is_empty() && raw != "0" && !raw.eq_ignore_ascii_case("false");
-        if enabled {
-            INIT.call_once(install_producer_tracing);
+/// Log one scalar sample for each of several joints captured at the same
+/// instant. Joints not seen before in this recording have a trace minted (and
+/// a `StartTrace` published) before the batch is sent as one `BatchedFrames`.
+#[pyfunction]
+#[pyo3(signature = (recording_id, data_type, items, timestamp_ns, timestamp_s = None))]
+fn log_joints(
+    py: Python<'_>,
+    recording_id: &str,
+    data_type: &str,
+    items: Vec<(String, f64)>,
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<()> {
+    if recording_id.is_empty() || data_type.is_empty() {
+        return Err(PyValueError::new_err(
+            "recording_id and data_type must not be empty",
+        ));
+    }
+    if items.is_empty() {
+        return Ok(());
+    }
+    if let Some(bad_index) = items.iter().position(|(name, _)| name.is_empty()) {
+        return Err(PyValueError::new_err(format!(
+            "joint name must not be empty (item index {bad_index})"
+        )));
+    }
+    let recording_id = recording_id.to_string();
+    let data_type = data_type.to_string();
+    // Fall back to ns→s when the caller omits timestamp_s so the per-frame
+    // "timestamp" field still has a sensible value to write into trace.json.
+    let timestamp_for_json = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
+    py.allow_threads(|| -> PyResult<()> {
+        // Resolve a trace id for every joint, collecting the ones minted now.
+        let mut new_traces: Vec<(String, String)> = Vec::new();
+        let mut trace_ids: Vec<String> = Vec::with_capacity(items.len());
+        with_registry(|recordings| {
+            let recording = recordings.entry(recording_id.clone()).or_default();
+            for (name, _) in &items {
+                let (trace_id, is_new) = resolve_trace(recording, &data_type, name, false);
+                if is_new {
+                    new_traces.push((trace_id.clone(), name.clone()));
+                }
+                trace_ids.push(trace_id);
+            }
+        });
+        // A StartTrace for each newly minted trace, ahead of the data batch.
+        for (trace_id, name) in new_traces {
+            publish(
+                Target::Commands,
+                &Envelope::StartTrace {
+                    recording_id: recording_id.clone(),
+                    trace_id,
+                    data_type: data_type.clone(),
+                    data_type_name: Some(name),
+                },
+            )?;
         }
-        enabled
+        // Pack every joint sample into one BatchedFrames envelope.
+        let mut frames = Vec::with_capacity(items.len());
+        for ((_, value), trace_id) in items.iter().zip(trace_ids) {
+            // serde_json (via ryu) always emits at least one fractional digit
+            // for f64 — so integer-valued joint values land on disk as `1.0`,
+            // not `1`, matching Python's `json.dumps` shape.
+            let payload = serde_json::to_vec(&ScalarFrameEntry {
+                timestamp: timestamp_for_json,
+                value: *value,
+            })
+            .map_err(|error| {
+                PyRuntimeError::new_err(format!("failed to encode joint frame JSON: {error}"))
+            })?;
+            frames.push(BatchedFrameItem { trace_id, payload });
+        }
+        publish(
+            Target::Commands,
+            &Envelope::BatchedFrames {
+                timestamp_ns,
+                timestamp_s,
+                frames,
+            },
+        )?;
+        Ok(())
     })
 }
 
-/// Install a `tracing-subscriber` that writes to the file named by
-/// `NCD_PRODUCER_LOG_FILE` (defaults to `<temp-dir>/ncd_producer.log`,
-/// resolved via `std::env::temp_dir` so the path is portable across
-/// Linux/macOS/Windows hosts).
-///
-/// Installing a global subscriber from a cdylib is normally a footgun
-/// because the embedding process loses control of formatting. We accept
-/// that cost here because this code is gated entirely behind
-/// `NCD_PRODUCER_LOG`: the subscriber is only constructed when the
-/// operator explicitly opts in to per-frame producer diagnostics, and
-/// `try_init` short-circuits when the embedder has already installed
-/// their own subscriber — our events route through the embedder's
-/// subscriber in that case and the file write is a no-op.
-fn install_producer_tracing() {
-    let path: PathBuf = std::env::var_os("NCD_PRODUCER_LOG_FILE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("ncd_producer.log"));
-    let file = OpenOptions::new().create(true).append(true).open(&path);
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .with_ansi(false);
-    let result = match file {
-        Ok(handle) => builder
-            .with_writer(std::sync::Mutex::new(handle))
-            .try_init(),
-        Err(_) => builder.with_writer(std::io::stderr).try_init(),
-    };
-    // If `try_init` returns Err the host already installed a subscriber and
-    // our events will use it; nothing more to do.
-    let _ = result;
-}
-
-/// Announce the resolution of an upcoming video trace.
-///
-/// The daemon-side trace actor uses the presence of this envelope to switch
-/// the per-trace writer from JSON to the NUT video pipeline. The producer
-/// must send this before the first [`Envelope::Frame`] payload carrying pixel
-/// bytes, otherwise the early frames will be wrapped into the JSON sidecar
-/// instead of spooled to the muxer.
+/// Log one video frame for a camera. The first frame for a camera mints its
+/// trace and publishes `StartTrace` + `OpenFrameStream`; every frame rides the
+/// [`FRAMES`] service.
 #[pyfunction]
-#[pyo3(signature = (trace_id, width, height))]
-fn open_frame_stream(trace_id: &str, width: u32, height: u32) -> PyResult<()> {
-    if trace_id.is_empty() {
-        return Err(PyValueError::new_err("trace_id must not be empty"));
+#[pyo3(signature = (recording_id, data_type, name, width, height, payload, timestamp_ns, timestamp_s = None))]
+#[allow(clippy::too_many_arguments)]
+fn log_frame(
+    py: Python<'_>,
+    recording_id: &str,
+    data_type: &str,
+    name: &str,
+    width: u32,
+    height: u32,
+    payload: &[u8],
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<()> {
+    if recording_id.is_empty() || data_type.is_empty() || name.is_empty() {
+        return Err(PyValueError::new_err(
+            "recording_id, data_type and name must not be empty",
+        ));
     }
     if width == 0 || height == 0 {
         return Err(PyValueError::new_err("width and height must be non-zero"));
     }
-    let envelope = Envelope::OpenFrameStream {
-        trace_id: trace_id.to_string(),
-        width,
-        height,
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
+    let recording_id = recording_id.to_string();
+    let data_type = data_type.to_string();
+    let name = name.to_string();
+    // Copy the payload into owned Rust memory while the GIL is held — the
+    // `&[u8]` borrows a Python buffer.
+    let owned_payload = payload.to_vec();
+    py.allow_threads(|| -> PyResult<()> {
+        let (trace_id, is_new) = with_registry(|recordings| {
+            let recording = recordings.entry(recording_id.clone()).or_default();
+            resolve_trace(recording, &data_type, &name, true)
+        });
+        if is_new {
+            publish(
+                Target::Commands,
+                &Envelope::StartTrace {
+                    recording_id: recording_id.clone(),
+                    trace_id: trace_id.clone(),
+                    data_type,
+                    data_type_name: Some(name),
+                },
+            )?;
+            publish(
+                Target::Commands,
+                &Envelope::OpenFrameStream {
+                    trace_id: trace_id.clone(),
+                    width,
+                    height,
+                },
+            )?;
+        }
+        publish(
+            Target::Frames,
+            &Envelope::frame(trace_id, timestamp_ns, timestamp_s, owned_payload),
+        )?;
+        Ok(())
+    })
 }
 
-/// Close a previously opened trace.
+/// Log one scalar/custom sample (e.g. `log_custom_1d`). The first sample for a
+/// stream mints its trace and publishes `StartTrace`; the payload is delivered
+/// verbatim as a `Frame` on the [`COMMANDS`] service.
 #[pyfunction]
-#[pyo3(signature = (trace_id))]
-fn end_trace(trace_id: &str) -> PyResult<()> {
-    if trace_id.is_empty() {
-        return Err(PyValueError::new_err("trace_id must not be empty"));
+#[pyo3(signature = (recording_id, data_type, name, payload, timestamp_ns, timestamp_s = None))]
+fn log_scalar(
+    py: Python<'_>,
+    recording_id: &str,
+    data_type: &str,
+    name: &str,
+    payload: &[u8],
+    timestamp_ns: i64,
+    timestamp_s: Option<f64>,
+) -> PyResult<()> {
+    if recording_id.is_empty() || data_type.is_empty() || name.is_empty() {
+        return Err(PyValueError::new_err(
+            "recording_id, data_type and name must not be empty",
+        ));
     }
-    let envelope = Envelope::EndTrace {
-        trace_id: trace_id.to_string(),
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
+    let recording_id = recording_id.to_string();
+    let data_type = data_type.to_string();
+    let name = name.to_string();
+    let owned_payload = payload.to_vec();
+    py.allow_threads(|| -> PyResult<()> {
+        let (trace_id, is_new) = with_registry(|recordings| {
+            let recording = recordings.entry(recording_id.clone()).or_default();
+            resolve_trace(recording, &data_type, &name, false)
+        });
+        if is_new {
+            publish(
+                Target::Commands,
+                &Envelope::StartTrace {
+                    recording_id: recording_id.clone(),
+                    trace_id: trace_id.clone(),
+                    data_type,
+                    data_type_name: Some(name),
+                },
+            )?;
+        }
+        publish(
+            Target::Commands,
+            &Envelope::frame(trace_id, timestamp_ns, timestamp_s, owned_payload),
+        )?;
+        Ok(())
+    })
 }
 
-/// Announce that a recording session has finished.
+/// End every trace the recording minted, then announce the recording stopped.
+///
+/// Idempotent: if the recording is not registered it was already stopped (or
+/// never started), so a mistaken `stop, stop` — or a stray `stop` before
+/// `start` — is a no-op that publishes no duplicate `StopRecording`.
 #[pyfunction]
 #[pyo3(signature = (recording_id))]
-fn stop_recording(recording_id: &str) -> PyResult<()> {
+fn stop_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
     if recording_id.is_empty() {
         return Err(PyValueError::new_err("recording_id must not be empty"));
     }
-    let envelope = Envelope::StopRecording {
-        recording_id: recording_id.to_string(),
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
+    let recording_id = recording_id.to_string();
+    py.allow_threads(|| -> PyResult<()> {
+        let Some(recording) = take_recording(&recording_id) else {
+            return Ok(());
+        };
+        for entry in recording.traces.into_values() {
+            let target = if entry.is_video {
+                Target::Frames
+            } else {
+                Target::Commands
+            };
+            publish(
+                target,
+                &Envelope::EndTrace {
+                    trace_id: entry.trace_id,
+                },
+            )?;
+        }
+        publish(Target::Commands, &Envelope::StopRecording { recording_id })?;
+        Ok(())
+    })
 }
 
-/// Cancel a recording — discard any in-flight per-trace actors and their
-/// on-disk artefacts on the daemon side and skip the upload pipeline for
-/// every trace this recording owns. Mirrors the SDK's
-/// `nc.cancel_recording(...)` entry point.
+/// Cancel a recording — the daemon discards every in-flight trace and its
+/// on-disk artefacts. The producer drops its trace registry entry (no
+/// `EndTrace` is needed; `CancelRecording` supersedes them).
 #[pyfunction]
 #[pyo3(signature = (recording_id))]
-fn cancel_recording(recording_id: &str) -> PyResult<()> {
+fn cancel_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
     if recording_id.is_empty() {
         return Err(PyValueError::new_err("recording_id must not be empty"));
     }
-    let envelope = Envelope::CancelRecording {
-        recording_id: recording_id.to_string(),
-    };
-    publish_envelope(&envelope)?;
-    Ok(())
+    let recording_id = recording_id.to_string();
+    py.allow_threads(|| -> PyResult<()> {
+        take_recording(&recording_id);
+        publish(
+            Target::Commands,
+            &Envelope::CancelRecording { recording_id },
+        )?;
+        Ok(())
+    })
 }
 
 /// Python module entrypoint registered as `neuracore.data_daemon._native_producer`.
 #[pymodule]
 fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
-    module.add_function(wrap_pyfunction!(start_trace, module)?)?;
-    module.add_function(wrap_pyfunction!(send_data, module)?)?;
-    module.add_function(wrap_pyfunction!(send_batched_joint_data, module)?)?;
-    module.add_function(wrap_pyfunction!(open_frame_stream, module)?)?;
-    module.add_function(wrap_pyfunction!(end_trace, module)?)?;
+    module.add_function(wrap_pyfunction!(log_joints, module)?)?;
+    module.add_function(wrap_pyfunction!(log_frame, module)?)?;
+    module.add_function(wrap_pyfunction!(log_scalar, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mistaken lifecycle sequences must degrade to no-ops, never panic or
+    /// emit duplicate envelopes. `register_recording` returning `false` is
+    /// what suppresses a duplicate `StartRecording`; `take_recording`
+    /// returning `None` is what suppresses a duplicate `StopRecording`.
+    #[test]
+    fn registry_tolerates_repeated_and_out_of_order_lifecycle() {
+        // Unique id so the process-wide registry can't collide with a
+        // sibling test running in parallel.
+        let recording_id = "rec-lifecycle-test-001";
+
+        // start, start -> only the first registers.
+        assert!(register_recording(recording_id));
+        assert!(!register_recording(recording_id));
+
+        // stop, stop -> only the first drains the registry.
+        assert!(take_recording(recording_id).is_some());
+        assert!(take_recording(recording_id).is_none());
+
+        // A stray stop for a recording that never started is a no-op.
+        assert!(take_recording("rec-never-started-test-001").is_none());
+    }
 }

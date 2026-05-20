@@ -4,17 +4,9 @@ import json
 import struct
 
 import numpy as np
-import pytest
 from neuracore_types import DataType
 
-from neuracore.core.streaming.data_stream import (
-    DataRecordingContext,
-    JsonDataStream,
-    RGBDataStream,
-)
-from neuracore.data_daemon.communications_management.producer import (
-    native_producer_channel as native_adaptor,
-)
+from neuracore.core.streaming.data_stream import DataRecordingContext, RGBDataStream
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     producer_transport_args_for_data_type,
 )
@@ -22,12 +14,6 @@ from neuracore.data_daemon.const import (
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     DEFAULT_VIDEO_SLOT_SIZE,
-)
-from tests.unit.data_daemon.communications_management.conftest import (
-    NativeProducerStub as _NativeProducerStub,
-)
-from tests.unit.data_daemon.communications_management.conftest import (
-    install_native_stub,
 )
 
 
@@ -238,81 +224,34 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
     assert stream.is_recording() is False
 
 
-@pytest.fixture
-def native_runtime(monkeypatch: pytest.MonkeyPatch):
-    """Force the data-stream module to pick the native producer this test."""
-    stub = _NativeProducerStub()
-    install_native_stub(monkeypatch, stub)
+def test_rgb_stream_owns_no_channel_under_rust_daemon(monkeypatch) -> None:
+    """Under the rust daemon a stream owns no producer channel — the daemon
+    interface lives at the logging layer (RecordingContext), not the stream."""
+    _FakeProducerChannel.instances.clear()
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.ProducerChannel",
+        _FakeProducerChannel,
+    )
     monkeypatch.setattr(
         "neuracore.core.streaming.data_stream.rust_daemon_enabled",
         lambda: True,
     )
-    yield stub
-    monkeypatch.setattr(native_adaptor, "_NATIVE_MODULE", None)
 
-
-def test_rgb_stream_uses_native_producer_when_rust_daemon_enabled(
-    native_runtime: _NativeProducerStub,
-) -> None:
     width, height = 4, 3
     stream = RGBDataStream("front_camera", width=width, height=height)
     stream.start_recording(_context())
 
-    sequence = [call[0] for call in native_runtime.calls]
-    assert sequence == ["start_recording", "start_trace", "open_frame_stream"]
+    # No legacy channel is created, yet the stream tracks recording state.
+    assert _FakeProducerChannel.instances == []
+    assert stream.get_producer_channel() is None
+    assert stream.is_recording() is True
 
-    start_trace_args = native_runtime.calls[1][1]
-    assert start_trace_args[2] == DataType.RGB_IMAGES.value
-    open_args = native_runtime.calls[2][1]
-    assert open_args[1:] == (width, height)
-
-
-def test_rgb_stream_native_log_sends_only_raw_frame_bytes(
-    native_runtime: _NativeProducerStub,
-) -> None:
-    width, height = 4, 3
-    stream = RGBDataStream("front_camera", width=width, height=height)
-    stream.start_recording(_context())
-
+    # Logging only updates the local latest-data cache; no channel I/O.
     frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
     stream.log(_DummyCameraData(timestamp=1.0), frame)
-
-    send_calls = [call for call in native_runtime.calls if call[0] == "send_data"]
-    assert len(send_calls) == 1
-    _, payload, _, _ = send_calls[0][1]
-    assert payload == bytes(frame)
-
-
-def test_json_stream_native_log_publishes_serialized_payload(
-    native_runtime: _NativeProducerStub,
-) -> None:
-    class _Payload:
-        def model_dump(self, mode: str = "json"):
-            del mode
-            return {"value": 1.5}
-
-    stream = JsonDataStream(
-        data_type=DataType.JOINT_POSITIONS, data_type_name="joint_x"
-    )
-    stream.start_recording(_context())
-
-    stream.log(_Payload())
-
-    send_calls = [call for call in native_runtime.calls if call[0] == "send_data"]
-    assert len(send_calls) == 1
-    _, payload, _, _ = send_calls[0][1]
-    assert json.loads(payload.decode("utf-8")) == {"value": 1.5}
-
-
-def test_native_stream_stop_recording_emits_end_trace(
-    native_runtime: _NativeProducerStub,
-) -> None:
-    stream = JsonDataStream(
-        data_type=DataType.JOINT_POSITIONS, data_type_name="joint_x"
-    )
-    stream.start_recording(_context())
-    stream.stop_recording(stop_cutoff_sequence_number=0)
-
-    assert any(call[0] == "end_trace" for call in native_runtime.calls)
     assert stream.get_producer_channel() is None
+
+    # Stop is clean even though there was never a channel to tear down.
+    stream.stop_recording(stop_cutoff_sequence_number=0)
     assert stream.is_recording() is False
+    assert stream.get_recording_context() is None

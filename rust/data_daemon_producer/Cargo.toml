@@ -29,7 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-# Opt-in tracing subscriber for the diagnostic per-frame log. Only initialises
-# when `NCD_PRODUCER_LOG` is set so Python imports don't pay for it in normal
-# operation.
-tracing-subscriber.workspace = true
+# Trace ids are minted Rust-side now (the producer owns trace lifecycle). v4
+# UUIDs keep the wire/DB/backend format identical to the ids the Python layer
+# used to generate via `uuid.uuid4()`.
+uuid.workspace = true

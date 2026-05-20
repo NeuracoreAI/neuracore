@@ -330,10 +330,13 @@ impl SqliteStateStore {
         self.pool.close().await;
     }
 
-    async fn upsert_recording_locked(
+    /// Insert the recording row if it does not exist. Cheap counterpart to
+    /// [`Self::upsert_recording_locked`] for callers (e.g. `create_trace`)
+    /// that only need the row to *exist*, not to read it back.
+    async fn ensure_recording_locked(
         conn: &mut SqliteConnection,
         recording_id: &str,
-    ) -> Result<RecordingRow, sqlx::Error> {
+    ) -> Result<(), sqlx::Error> {
         let now = Utc::now().naive_utc();
         sqlx::query(
             "INSERT INTO recordings (recording_id, created_at, last_updated) \
@@ -344,6 +347,14 @@ impl SqliteStateStore {
         .bind(now)
         .execute(&mut *conn)
         .await?;
+        Ok(())
+    }
+
+    async fn upsert_recording_locked(
+        conn: &mut SqliteConnection,
+        recording_id: &str,
+    ) -> Result<RecordingRow, sqlx::Error> {
+        Self::ensure_recording_locked(conn, recording_id).await?;
 
         let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
             .bind(recording_id)
@@ -420,7 +431,7 @@ impl StateStore for SqliteStateStore {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
 
-        Self::upsert_recording_locked(&mut tx, recording_id).await?;
+        Self::ensure_recording_locked(&mut tx, recording_id).await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
@@ -434,19 +445,6 @@ impl StateStore for SqliteStateStore {
         .bind(TraceWriteStatus::Initializing.as_str())
         .bind(data_type)
         .bind(data_type_name)
-        .bind(now)
-        .execute(&mut *tx)
-        .await?;
-
-        // Keep the parent recording's trace_count in step with what we observe
-        // so the upload coordinator can read it without a `COUNT(*)` later.
-        sqlx::query(
-            "UPDATE recordings \
-                SET trace_count = (SELECT COUNT(*) FROM traces WHERE recording_id = ?1), \
-                    last_updated = ?2 \
-              WHERE recording_id = ?1",
-        )
-        .bind(recording_id)
         .bind(now)
         .execute(&mut *tx)
         .await?;
@@ -1007,12 +1005,12 @@ mod tests {
         assert_eq!(trace.write_status, TraceWriteStatus::Initializing);
         assert_eq!(trace.data_type.as_deref(), Some("video"));
 
-        let recording = store
+        // The parent recording row is created alongside the trace.
+        store
             .get_recording("rec-1")
             .await
             .expect("get_recording")
             .expect("recording row");
-        assert_eq!(recording.trace_count, 1);
 
         // Creating the same trace twice is a no-op (write_status preserved).
         let again = store

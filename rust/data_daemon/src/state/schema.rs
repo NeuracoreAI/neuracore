@@ -150,8 +150,6 @@ pub struct RecordingRow {
     pub expected_trace_count: Option<i64>,
     /// `1` once the expected trace count has been reported to the backend.
     pub expected_trace_count_reported: i64,
-    /// Total traces observed so far.
-    pub trace_count: i64,
     /// Traces that have reached the `uploaded` terminal state.
     pub uploaded_trace_count: i64,
     /// Progress-report lifecycle for this recording.
@@ -177,7 +175,6 @@ impl RecordingRow {
             org_id: row.try_get("org_id")?,
             expected_trace_count: row.try_get("expected_trace_count")?,
             expected_trace_count_reported: row.try_get("expected_trace_count_reported")?,
-            trace_count: row.try_get("trace_count")?,
             uploaded_trace_count: row.try_get("uploaded_trace_count")?,
             progress_reported,
             stopped_at: row.try_get("stopped_at")?,

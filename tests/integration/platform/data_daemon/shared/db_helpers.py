@@ -42,7 +42,6 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_ID,
     COLUMN_REGISTRATION_STATUS,
     COLUMN_STOPPED_AT,
-    COLUMN_TRACE_COUNT,
     COLUMN_TRACE_ID,
     COLUMN_UPLOAD_STATUS,
     COLUMN_WRITE_STATUS,
@@ -768,14 +767,6 @@ def wait_for_all_traces_written(
             for recording_id in recording_ids
         )
         if not all_have_traces:
-            _sleep_for_next_poll(progress_made=progress_made)
-            continue
-
-        counts_match = all(
-            row[COLUMN_TRACE_COUNT] == len(traces_by_recording.get(recording_id, []))
-            for recording_id, row in recordings.items()
-        )
-        if not counts_match:
             _sleep_for_next_poll(progress_made=progress_made)
             continue
 
