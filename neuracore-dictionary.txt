@@ -381,3 +381,9 @@ ylabel
 yourdfpy
 ZBWs
 znear
+eigenpy
+cmeel
+urdfdom
+tinyxml
+assimp
+octomap
