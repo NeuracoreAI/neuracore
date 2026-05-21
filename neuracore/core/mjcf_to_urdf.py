@@ -193,7 +193,14 @@ def _connect_ball_joint_chain(
     zero_pos = np.zeros(3)
     zero_rpy = np.zeros(3)
     axes = [
-        (f"{jnt_name}_rx", parent_name, rx_name, parentbody2jnt_pos, parentbody2jnt_rpy, [1, 0, 0]),
+        (
+            f"{jnt_name}_rx",
+            parent_name,
+            rx_name,
+            parentbody2jnt_pos,
+            parentbody2jnt_rpy,
+            [1, 0, 0],
+        ),
         (f"{jnt_name}_ry", rx_name, ry_name, zero_pos, zero_rpy, [0, 1, 0]),
         (f"{jnt_name}_rz", ry_name, jnt_body_name, zero_pos, zero_rpy, [0, 0, 1]),
     ]

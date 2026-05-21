@@ -359,6 +359,7 @@ unnormalization
 unpackb
 upserts
 URDF
+urdfdom
 usefixtures
 utaustin
 Vaswani
