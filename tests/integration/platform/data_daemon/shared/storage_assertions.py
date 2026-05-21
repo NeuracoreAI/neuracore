@@ -7,6 +7,7 @@ neuracore helpers, stdlib, and test constants.
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 
 from neuracore.data_daemon.helpers import (
     get_daemon_db_path,
@@ -23,8 +24,8 @@ def assert_db_absent() -> None:
     db_path = get_daemon_db_path()
     for candidate in (
         db_path,
-        db_path.with_suffix(db_path.suffix + ".wal"),
-        db_path.with_suffix(db_path.suffix + ".shm"),
+        Path(str(db_path) + "-wal"),
+        Path(str(db_path) + "-shm"),
     ):
         assert (
             not candidate.exists()

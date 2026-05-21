@@ -187,9 +187,9 @@ def apply_storage_state_action(storage_state_action: str) -> None:
             shutil.rmtree(recordings_root, ignore_errors=True)
 
     if storage_state_action in {STORAGE_STATE_EMPTY, STORAGE_STATE_DELETE}:
-        for suffix in (".shm", ".wal"):
+        for suffix in ("-shm", "-wal"):
             try:
-                db_path.with_suffix(db_path.suffix + suffix).unlink(missing_ok=True)
+                Path(str(db_path) + suffix).unlink(missing_ok=True)
             except OSError:
                 pass
 
