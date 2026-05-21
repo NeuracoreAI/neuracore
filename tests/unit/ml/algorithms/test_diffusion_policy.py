@@ -152,6 +152,41 @@ def test_model_construction_forward_backward(
             assert torch.isfinite(param.grad).all()
 
 
+@pytest.mark.parametrize("process_type", ["diffusion", "flow_matching"])
+def test_process_type_forward_backward(
+    process_type: str,
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_inference_batch: BatchedInferenceInputs,
+    sample_training_batch: BatchedTrainingSamples,
+):
+    """Both diffusion and flow matching construct, infer, and backward pass."""
+    description = ModelInitDescription(
+        input_data_types=OrderedSet([DataType.JOINT_POSITIONS]),
+        output_data_types=OrderedSet([DataType.JOINT_TARGET_POSITIONS]),
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    config = {**model_config, "process_type": process_type}
+    model = DiffusionPolicy(model_init_description=description, **config).to(DEVICE)
+
+    inference_batch = sample_inference_batch.to(DEVICE)
+    output = model(inference_batch)
+    assert isinstance(output, dict)
+
+    training_batch = sample_training_batch.to(DEVICE)
+    train_output = model.training_step(training_batch)
+    loss = train_output.losses["mse_loss"]
+    assert torch.isfinite(loss)
+
+    loss.backward()
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"Gradient for {name} is None"
+            assert torch.isfinite(param.grad).all()
+
+
 def test_run_validation(tmp_path: Path, mock_login):
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "60"
     algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent
