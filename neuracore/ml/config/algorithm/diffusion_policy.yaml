@@ -14,16 +14,21 @@ algorithm:
   spatial_softmax_num_keypoints: 32       # Number of keypoints for spatial softmax pooling
   use_pretrained_weights: true            # Load pretrained ResNet weights
 
-  # Noise scheduler
+  # Generative process
+  process_type: "diffusion"               # "diffusion" or "flow_matching"
+
+  # Diffusion process (ignored when process_type == "flow_matching")
   noise_scheduler_type: "DDPM"            # Noise scheduler type ("DDPM" or "DDIM")
   num_train_timesteps: 100                # Number of diffusion timesteps for training
-  num_inference_steps: 100                # Number of diffusion timesteps for inference
   prediction_type: "epsilon"              # Prediction target ("epsilon" or "sample")
   beta_start: 0.0001                      # Starting beta value for noise schedule
   beta_end: 0.02                          # Ending beta value for noise schedule
   beta_schedule: "squaredcos_cap_v2"      # Beta schedule type
-  clip_sample: true                       # Whether to clip denoised samples
-  clip_sample_range: 1.0                  # Clip range for denoised samples
+
+  # Sampling (both processes; flow matching integrates via forward Euler)
+  num_inference_steps: 100                # Sampling steps (use ~10 for flow_matching)
+  clip_sample: true                       # Whether to clip samples each step
+  clip_sample_range: 1.0                  # Clip range for samples
 
   # Learning rates
   lr: 1e-4                                # Learning rate for main parameters

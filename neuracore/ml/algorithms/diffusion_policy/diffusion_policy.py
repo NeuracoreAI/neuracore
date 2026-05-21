@@ -63,12 +63,13 @@ class DiffusionPolicy(NeuracoreModel):
         unet_use_film_scale_modulation: bool = True,
         use_pretrained_weights: bool = True,
         use_resnet_stats: bool = True,
-        noise_scheduler_type: str = "DDPM",
-        num_train_timesteps: int = 100,
+        process_type: str = "diffusion",
+        noise_scheduler_type: str = "DDPM",  # diffusion only
+        num_train_timesteps: int = 100,  # diffusion only
         num_inference_steps: int = 100,
-        beta_start: float = 0.0001,
-        beta_end: float = 0.02,
-        beta_schedule: str = "squaredcos_cap_v2",
+        beta_start: float = 0.0001,  # diffusion only
+        beta_end: float = 0.02,  # diffusion only
+        beta_schedule: str = "squaredcos_cap_v2",  # diffusion only
         clip_sample: bool = True,
         clip_sample_range: float = 1.0,
         lr: float = 1e-4,
@@ -77,7 +78,7 @@ class DiffusionPolicy(NeuracoreModel):
         weight_decay: float = 1e-6,
         optimizer_betas: tuple[float, float] = (0.9, 0.999),
         optimizer_eps: float = 1e-8,
-        prediction_type: str = "epsilon",
+        prediction_type: str = "epsilon",  # diffusion only
         lr_scheduler_type: str = "cosine",
         lr_scheduler_num_warmup_steps: int = 500,
     ):
@@ -94,14 +95,19 @@ class DiffusionPolicy(NeuracoreModel):
             unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
             use_pretrained_weights: Whether to load pretrained ResNet weights.
             use_resnet_stats: Whether to use ResNet normalization statistics.
+            process_type: Generative process to use, "diffusion" (default) or
+                "flow_matching". See the note below for which parameters apply.
             noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
-            num_train_timesteps: Number of timesteps for training.
-            num_inference_steps: Number of timesteps for inference.
-            beta_start: Starting beta value for noise schedule.
-            beta_end: Ending beta value for noise schedule.
-            beta_schedule: Beta schedule type.
-            clip_sample: Whether to clip samples.
-            clip_sample_range: Range for clipping samples.
+                (diffusion only)
+            num_train_timesteps: Number of timesteps for training. (diffusion only)
+            num_inference_steps: Number of sampling steps at inference. For flow
+                matching this is the number of Euler integration steps
+                (typically ~10).
+            beta_start: Starting beta value for noise schedule. (diffusion only)
+            beta_end: Ending beta value for noise schedule. (diffusion only)
+            beta_schedule: Beta schedule type. (diffusion only)
+            clip_sample: Whether to clip samples (both processes).
+            clip_sample_range: Range for clipping samples (both processes).
             lr: Learning rate for main parameters.
             freeze_backbone: Whether to freeze image encoder backbone
             lr_backbone: Learning rate for backbone parameters.
@@ -109,6 +115,7 @@ class DiffusionPolicy(NeuracoreModel):
             optimizer_betas: Betas for optimizer.
             optimizer_eps: Epsilon for optimizer.
             prediction_type: Type of prediction ("epsilon" or "sample").
+                (diffusion only)
             lr_scheduler_type: Type of the learning rate scheduler
                 ("cosine", "linear", etc.).
             lr_scheduler_num_warmup_steps: Number of warmup steps for the scheduler.
@@ -125,6 +132,16 @@ class DiffusionPolicy(NeuracoreModel):
         self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
         self.prediction_type = prediction_type
         self.num_inference_steps = num_inference_steps
+
+        if process_type not in ("diffusion", "flow_matching"):
+            raise ValueError(
+                f"Unsupported process_type {process_type!r}; "
+                "expected 'diffusion' or 'flow_matching'."
+            )
+        self.process_type = process_type
+        # Used by both processes (flow matching clamps each Euler step).
+        self.clip_sample = clip_sample
+        self.clip_sample_range = clip_sample_range
 
         data_stats: dict[DataType, DataItemStats] = {}
 
@@ -248,19 +265,24 @@ class DiffusionPolicy(NeuracoreModel):
             use_film_scale_modulation=unet_use_film_scale_modulation,
         )
 
-        kwargs: dict[str, Any] = {
-            "num_train_timesteps": num_train_timesteps,
-            "beta_start": beta_start,
-            "beta_end": beta_end,
-            "beta_schedule": beta_schedule,
-            "clip_sample": clip_sample,
-            "clip_sample_range": clip_sample_range,
-            "prediction_type": prediction_type,
-        }
-
-        self.noise_scheduler = self._make_noise_scheduler(
-            noise_scheduler_type, **kwargs
-        )
+        # Flow matching integrates a learned velocity field directly and needs no
+        # diffusers scheduler; only build one for the diffusion process.
+        self.noise_scheduler: DDPMScheduler | DDIMScheduler | None
+        if self.process_type == "diffusion":
+            kwargs: dict[str, Any] = {
+                "num_train_timesteps": num_train_timesteps,
+                "beta_start": beta_start,
+                "beta_end": beta_end,
+                "beta_schedule": beta_schedule,
+                "clip_sample": clip_sample,
+                "clip_sample_range": clip_sample_range,
+                "prediction_type": prediction_type,
+            }
+            self.noise_scheduler = self._make_noise_scheduler(
+                noise_scheduler_type, **kwargs
+            )
+        else:
+            self.noise_scheduler = None
 
         # Setup parameter groups
         self._setup_optimizer_param_groups()
@@ -374,6 +396,7 @@ class DiffusionPolicy(NeuracoreModel):
             torch.Tensor: Sampled action sequence with shape
             (B, prediction_horizon, action_dim)
         """
+        # Both processes start from a Gaussian prior.
         sample = torch.randn(
             size=(
                 batch_size,
@@ -385,6 +408,10 @@ class DiffusionPolicy(NeuracoreModel):
             generator=generator,
         )
 
+        if self.process_type == "flow_matching":
+            return self._flow_matching_sample(sample, global_cond)
+
+        assert self.noise_scheduler is not None
         self.noise_scheduler.set_timesteps(self.num_inference_steps)
 
         for t in self.noise_scheduler.timesteps:
@@ -399,6 +426,39 @@ class DiffusionPolicy(NeuracoreModel):
                 model_output, t, sample, generator=generator
             ).prev_sample
 
+        return sample
+
+    def _flow_matching_sample(
+        self,
+        sample: torch.Tensor,
+        global_cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Integrate the learned velocity field from noise (t=0) to data (t=1).
+
+        Uses a forward-Euler ODE solver: starting from the Gaussian prior, it
+        repeatedly steps ``x <- x + dt * v(x, t)`` over ``num_inference_steps``
+        equal steps with ``dt = 1 / num_inference_steps``, optionally clamping
+        each step to ``clip_sample_range``.
+
+        Args:
+            sample: Initial Gaussian sample, shape (B, prediction_horizon,
+                action_dim).
+            global_cond: Global conditioning tensor.
+
+        Returns:
+            torch.Tensor: Integrated action sequence, same shape as ``sample``.
+        """
+        dt = 1.0 / self.num_inference_steps
+        for k in range(self.num_inference_steps):
+            # Continuous time shared across the batch, ascending from 0 to 1.
+            t = torch.full(
+                sample.shape[:1], k * dt, dtype=torch.float32, device=sample.device
+            )
+            sample = sample + dt * self.unet(sample, t, global_cond=global_cond)
+            if self.clip_sample:
+                sample = torch.clamp(
+                    sample, -self.clip_sample_range, self.clip_sample_range
+                )
         return sample
 
     def _prepare_global_conditioning(
@@ -554,11 +614,88 @@ class DiffusionPolicy(NeuracoreModel):
 
         return output_tensors
 
+    def _diffusion_pred_target(
+        self,
+        target_actions: torch.Tensor,
+        global_cond: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute the diffusion prediction and its regression target.
+
+        Samples a discrete timestep per item, adds the scheduler's noise to the
+        trajectory, runs the network, and returns the prediction together with
+        the target selected by ``prediction_type`` ("epsilon" or "sample").
+
+        Args:
+            target_actions: Normalized action trajectory (B, T, action_dim).
+            global_cond: Global conditioning tensor.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: (network prediction, target).
+        """
+        assert self.noise_scheduler is not None
+        # Sample noise to add to the trajectory.
+        eps = torch.randn(target_actions.shape, device=target_actions.device)
+        # Sample a random noising timestep for each item in the batch.
+        timesteps = torch.randint(
+            low=0,
+            high=self.noise_scheduler.config.num_train_timesteps,
+            size=(target_actions.shape[0],),
+            device=target_actions.device,
+        ).long()
+        # Add noise to the clean trajectories according to the noise magnitude
+        # at each timestep.
+        noisy_trajectory = self.noise_scheduler.add_noise(
+            target_actions, eps, timesteps
+        )
+        # Run the denoising network (that might denoise the trajectory, or
+        # attempt to predict the noise).
+        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+
+        # The target is either the original trajectory, or the noise.
+        if self.prediction_type == "epsilon":
+            target = eps
+        elif self.prediction_type == "sample":
+            target = target_actions
+        else:
+            raise ValueError(f"Unsupported prediction type {self.prediction_type}")
+        return pred, target
+
+    def _flow_matching_pred_target(
+        self,
+        target_actions: torch.Tensor,
+        global_cond: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute the flow-matching prediction and its target velocity.
+
+        Samples a continuous time t ~ U(0, 1) per item, forms the point
+        ``x_t = (1 - t) * noise + t * action`` on the straight-line path from
+        noise to data, runs the network, and returns the prediction together
+        with the constant target velocity ``action - noise``.
+
+        Args:
+            target_actions: Normalized action trajectory (B, T, action_dim).
+            global_cond: Global conditioning tensor.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: (predicted velocity, target
+            velocity).
+        """
+        noise = torch.randn(target_actions.shape, device=target_actions.device)
+        # Continuous timestep in [0, 1) sampled uniformly per item in the batch.
+        timesteps = torch.rand(target_actions.shape[0], device=target_actions.device)
+        t = timesteps[:, None, None]
+        noisy_trajectory = (1 - t) * noise + t * target_actions
+        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
+        target = target_actions - noise
+        return pred, target
+
     def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
         """Perform a single training step.
 
-        Given certain timesteps, add corresponding noise to the target actions, and
-        predict the added noise or the target actions, and computes mse loss.
+        Adds noise to the target actions and computes the masked MSE between the
+        network output and its target. The noising scheme and the target depend
+        on ``process_type``: diffusion predicts the added noise or the clean
+        actions, while flow matching predicts the straight-line path velocity.
 
         Args:
             batch: Training batch with inputs and targets
@@ -646,32 +783,12 @@ class DiffusionPolicy(NeuracoreModel):
 
         target_actions = self.action_normalizer.normalize(action_data)
 
-        # Sample noise to add to the trajectory.
-        eps = torch.randn(target_actions.shape, device=target_actions.device)
-        # Sample a random noising timestep for each item in the batch.
-        timesteps = torch.randint(
-            low=0,
-            high=self.noise_scheduler.config.num_train_timesteps,
-            size=(target_actions.shape[0],),
-            device=target_actions.device,
-        ).long()
-        # Add noise to the clean trajectories according to the noise magnitude
-        # at each timestep.
-        noisy_trajectory = self.noise_scheduler.add_noise(
-            target_actions, eps, timesteps
-        )
-        # Run the denoising network (that might denoise the trajectory, or
-        # attempt to predict the noise).
-        pred = self.unet(noisy_trajectory, timesteps, global_cond=global_cond)
-
-        # Compute the loss.
-        # The target is either the original trajectory, or the noise.
-        if self.prediction_type == "epsilon":
-            target = eps
-        elif self.prediction_type == "sample":
-            target = target_actions
+        # Compute the network prediction and its regression target for the
+        # selected generative process.
+        if self.process_type == "flow_matching":
+            pred, target = self._flow_matching_pred_target(target_actions, global_cond)
         else:
-            raise ValueError(f"Unsupported prediction type {self.prediction_type}")
+            pred, target = self._diffusion_pred_target(target_actions, global_cond)
 
         loss = F.mse_loss(pred, target, reduction="none")
         loss = (loss * action_mask.unsqueeze(1)).sum() / torch.clamp(
