@@ -789,6 +789,45 @@ def test_shared_slot_timeout_clock_starts_after_socket_send() -> None:
         shm.unlink()
 
 
+def test_shared_slot_unhealthy_error_includes_reason_and_state() -> None:
+    registry = SharedSlotRegistry(
+        slot_size=2048,
+        slot_count=2,
+        ack_timeout_s=0.01,
+        allocate_timeout_s=0.01,
+    )
+    shm_name = f"test-{uuid4().hex[:6]}"
+    shm = SharedMemory(name=shm_name, create=True, size=2048 * 2)
+
+    try:
+        registry._apply_ready_message(
+            SharedSlotReadyModel(
+                shm_name=shm_name,
+                slot_size=2048,
+                slot_count=2,
+            )
+        )
+        slot_id, _offset = registry.allocate_slot()
+        sequence_id = registry.mark_in_flight(slot_id=slot_id, sequence_id=1)
+        registry.mark_sent(sequence_id)
+        time.sleep(0.03)
+
+        with registry._condition:
+            registry._check_for_timeouts_locked()
+
+        with pytest.raises(RuntimeError) as exc_info:
+            registry.ensure_healthy()
+
+        message = str(exc_info.value)
+        assert "reason=credit_stall(sequence_id=1,slot_id=0)" in message
+        assert f"shm_name={shm_name}" in message
+        assert "ack_timeout_count=1" in message
+    finally:
+        registry.close()
+        shm.close()
+        shm.unlink()
+
+
 def test_shared_slot_registry_runtime_starts_and_stops_cleanly() -> None:
     registry = SharedSlotRegistry(
         slot_size=2048,
@@ -1179,6 +1218,37 @@ def test_cleanup_keeps_stale_shared_memory_channel_with_pending_descriptor(
     assert daemon._closed_producers.contains(producer_id) is False
 
 
+def test_abandoned_shared_slot_sequences_unblock_pending_recording_state(
+    emitter,
+) -> None:
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
+    )
+    producer_id = "producer-1"
+    sequence_number = 5
+
+    daemon._trace_lifecycle.mark_shared_slot_sequence_pending(
+        SharedSlotSequenceProgressRequest(
+            producer_id=producer_id,
+            sequence_number=sequence_number,
+        )
+    )
+
+    assert daemon._trace_lifecycle.has_pending_shared_slot_sequences_at_or_before(
+        producer_id,
+        sequence_number,
+    )
+
+    daemon._handle_abandoned_shared_slot_sequences(producer_id, [sequence_number])
+
+    assert not daemon._trace_lifecycle.has_pending_shared_slot_sequences_at_or_before(
+        producer_id,
+        sequence_number,
+    )
+
+
 def test_closed_producer_drops_stale_messages_until_reopened(
     emitter, monkeypatch
 ) -> None:
@@ -1195,7 +1265,7 @@ def test_closed_producer_drops_stale_messages_until_reopened(
     monkeypatch.setattr(
         daemon._shared_slot_handler,
         "handle_open",
-        lambda channel, _payload: open_calls.append(channel.producer_id),
+        lambda channel, _payload, **_kwargs: open_calls.append(channel.producer_id),
     )
     daemon._command_handlers[CommandType.HEARTBEAT] = (
         lambda channel, _message: heartbeat_calls.append(channel.producer_id)

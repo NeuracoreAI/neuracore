@@ -3,6 +3,10 @@ import pytest
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     ProducerChannel,
 )
+from neuracore.data_daemon.communications_management.shared_transport.registry import (
+    SharedSlotUnhealthyError,
+)
+from neuracore.data_daemon.models import DataType
 
 
 class _FakeSharedSlotTransport:
@@ -254,3 +258,101 @@ def test_end_trace_keeps_trace_state_when_trace_end_not_sent() -> None:
 
     assert channel.trace_id == "trace-1"
     assert channel.recording_id == "recording-1"
+
+
+def _shared_slot_channel_for_send_tests() -> ProducerChannel:
+    channel = object.__new__(ProducerChannel)
+    channel._stop_cutoff_sequence_number = None
+    channel.trace_id = "trace-1"
+    channel.recording_id = "recording-1"
+    channel.chunk_size = 1024
+    channel._use_shared_slot_transport = True
+    return channel
+
+
+def test_send_data_parts_resets_shared_slot_transport_and_retries_once() -> None:
+    channel = _shared_slot_channel_for_send_tests()
+    send_calls: list[int] = []
+    reset_calls: list[str] = []
+
+    def fake_send(*_args, **_kwargs) -> None:
+        send_calls.append(len(send_calls))
+        if len(send_calls) == 1:
+            raise SharedSlotUnhealthyError("stale shared slot")
+
+    channel._send_data_parts_shared_slots = fake_send
+    channel._ping_daemon_for_shared_slot_recovery = lambda timeout_s=2.0: True
+    channel._reset_shared_slot_transport_for_recovery = lambda: reset_calls.append(
+        "reset"
+    )
+
+    ProducerChannel.send_data_parts(
+        channel,
+        (b"frame",),
+        data_type=DataType.RGB_IMAGES,
+        robot_instance=0,
+        data_type_name="camera",
+        robot_name="robot",
+        dataset_name="dataset",
+    )
+
+    assert send_calls == [0, 1]
+    assert reset_calls == ["reset"]
+
+
+def _raise_stale_shared_slot(*_args, **_kwargs) -> None:
+    raise SharedSlotUnhealthyError("stale shared slot")
+
+
+def test_send_data_parts_stops_shared_slot_logging_when_ping_fails() -> None:
+    channel = _shared_slot_channel_for_send_tests()
+    stop_calls: list[str] = []
+    reset_calls: list[str] = []
+
+    channel._send_data_parts_shared_slots = _raise_stale_shared_slot
+    channel._ping_daemon_for_shared_slot_recovery = lambda timeout_s=2.0: False
+    channel._reset_shared_slot_transport_for_recovery = lambda: reset_calls.append(
+        "reset"
+    )
+    channel._stop_shared_slot_logging_after_failure = lambda: stop_calls.append("stop")
+
+    with pytest.raises(RuntimeError, match="daemon did not respond"):
+        ProducerChannel.send_data_parts(
+            channel,
+            (b"frame",),
+            data_type=DataType.RGB_IMAGES,
+            robot_instance=0,
+            data_type_name="camera",
+            robot_name="robot",
+            dataset_name="dataset",
+        )
+
+    assert stop_calls == ["stop"]
+    assert reset_calls == []
+
+
+def test_send_data_parts_stops_shared_slot_logging_when_retry_fails() -> None:
+    channel = _shared_slot_channel_for_send_tests()
+    stop_calls: list[str] = []
+    reset_calls: list[str] = []
+
+    channel._send_data_parts_shared_slots = _raise_stale_shared_slot
+    channel._ping_daemon_for_shared_slot_recovery = lambda timeout_s=2.0: True
+    channel._reset_shared_slot_transport_for_recovery = lambda: reset_calls.append(
+        "reset"
+    )
+    channel._stop_shared_slot_logging_after_failure = lambda: stop_calls.append("stop")
+
+    with pytest.raises(RuntimeError, match="remained unhealthy"):
+        ProducerChannel.send_data_parts(
+            channel,
+            (b"frame",),
+            data_type=DataType.RGB_IMAGES,
+            robot_instance=0,
+            data_type_name="camera",
+            robot_name="robot",
+            dataset_name="dataset",
+        )
+
+    assert reset_calls == ["reset"]
+    assert stop_calls == ["stop"]

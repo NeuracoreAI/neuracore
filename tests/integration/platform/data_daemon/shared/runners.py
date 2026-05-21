@@ -12,6 +12,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 import neuracore as nc
+from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
 from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_daemon_cleanup,
@@ -48,7 +49,7 @@ def offline_daemon_running() -> Generator[None, None, None]:
     with scoped_offline_profile():
         try:
             assert_daemon_cleanup()
-            ensure_daemon_running(timeout_s=10.0)
+            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
                 nc.login()
             yield
@@ -61,9 +62,8 @@ def offline_daemon_running() -> Generator[None, None, None]:
 def online_daemon_running() -> Generator[None, None, None]:
     """Run the daemon in online mode for the duration of the block.
 
-    Asserts clean process/socket state before starting the daemon and again
-    after it stops, so tests do not need to call :func:`assert_daemon_cleanup`
-    themselves.
+    Stops any suite-owned leftover daemon, asserts clean process/socket state,
+    then starts a fresh daemon and asserts cleanup again after it stops.
 
     Forces ``NCD_OFFLINE=0`` and clears ``NEURACORE_DAEMON_PROFILE`` so
     callers cannot inherit a temporary offline profile from prior tests.
@@ -74,9 +74,9 @@ def online_daemon_running() -> Generator[None, None, None]:
     """
     with scoped_online_mode():
         try:
-            assert_daemon_cleanup()
             stop_daemon()
-            ensure_daemon_running(timeout_s=10.0)
+            assert_daemon_cleanup()
+            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
 
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
                 nc.login()

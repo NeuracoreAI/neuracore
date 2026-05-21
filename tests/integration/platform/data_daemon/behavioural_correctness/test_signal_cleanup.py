@@ -18,7 +18,7 @@ and that teardown can recover from the unclean state.
 from __future__ import annotations
 
 import logging
-import threading
+import multiprocessing
 import time
 
 import pytest
@@ -389,28 +389,61 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
     with online_daemon_running():
         pid_first = assert_exactly_one_daemon_pid()
         specs = build_context_specs(case=case)
-        # Kick off the recording workload in a background thread so we can
-        # kill the daemon while it is actively writing.
-        worker_exc: list[BaseException] = []
 
         def _run() -> None:
-            try:
-                run_case_contexts(case, specs=specs)
-            except Exception as exc:  # noqa: BLE001
-                worker_exc.append(exc)
+            run_case_contexts(case, specs=specs)
 
-        thread = threading.Thread(target=_run, daemon=True)
-        thread.start()
-        # Give the recording a moment to start before killing.
+        # Run the producer workload in a child process so a SIGKILL at any point
+        # cannot leave an uninterruptible background thread in this test process.
+        worker = multiprocessing.Process(target=_run, name="sigkill-recording-worker")
+        worker.start()
+        # The point of this test is restartability after an unclean daemon death;
+        # the kill may land during setup, active logging, or stop cleanup.
         time.sleep(max(1.0, case.duration_sec / 4))
 
-        logger.info("SIGKILL daemon pid=%d mid-recording", pid_first)
-        stop_daemon(method="sigkill")
-        thread.join(timeout=10.0)
+        logger.info("SIGKILL daemon pid=%d during recording workload", pid_first)
+        stop_daemon(method=STOP_METHOD_SIGKILL)
 
         assert not pid_is_running(
             pid_first
         ), f"pid_is_running still True for killed daemon pid={pid_first}"
+
+        worker.join(timeout=10.0)
+        if worker.is_alive():
+            logger.warning(
+                "Recording workload process still running after daemon SIGKILL; "
+                "terminating producer process pid=%s",
+                worker.pid,
+            )
+            worker.terminate()
+            worker.join(timeout=5.0)
+        if worker.is_alive():
+            logger.warning(
+                "Recording workload process ignored SIGTERM; killing pid=%s",
+                worker.pid,
+            )
+            worker.kill()
+            worker.join(timeout=5.0)
+
+        assert (
+            not worker.is_alive()
+        ), "Recording workload process did not exit after daemon SIGKILL"
+        if worker.exitcode not in (0, -15, -9):
+            logger.info(
+                "Interrupted recording workload exited with expected code %s",
+                worker.exitcode,
+            )
+
+        # Depending on where SIGKILL lands, the interrupted workload may have
+        # auto-started a replacement daemon through nc.* calls. Remove it before
+        # online_daemon_running() performs its isolation check.
+        replacement_pids = get_runner_pids()
+        if replacement_pids:
+            logger.info(
+                "Cleaning up daemon PIDs started by interrupted workload: %s",
+                sorted(replacement_pids),
+            )
+            stop_daemon(method=STOP_METHOD_SIGKILL)
 
     with online_daemon_running():
         pid_second = assert_exactly_one_daemon_pid()

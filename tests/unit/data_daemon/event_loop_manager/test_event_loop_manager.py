@@ -216,15 +216,18 @@ def test_shutdown_waits_for_tasks(running_loop_manager: EventLoopManager):
 
 def test_shutdown_cancels_tasks(running_loop_manager: EventLoopManager):
     cancellation_flag = []
+    task_started = threading.Event()
 
     async def task_that_handles_cancellation():
         try:
+            task_started.set()
             await asyncio.sleep(10.0)
         except asyncio.CancelledError:
             cancellation_flag.append("cancelled")
             raise
 
     running_loop_manager.schedule_on_general_loop(task_that_handles_cancellation())
+    assert task_started.wait(timeout=1.0)
 
     start = time.time()
     running_loop_manager.stop(timeout=0.5)

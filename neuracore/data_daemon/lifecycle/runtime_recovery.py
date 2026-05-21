@@ -10,7 +10,7 @@ import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-from neuracore.data_daemon.const import SHARED_SLOT_SHM_PREFIX
+from neuracore.data_daemon.const import ACK_BASE_DIR, SHARED_SLOT_SHM_PREFIX
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
     remove_pid_file,
@@ -87,16 +87,7 @@ def shared_memory_required_bytes(
     return int(total_payload_bytes) + int(metadata_size)
 
 
-def cleanup_stale_shared_memory_buffers(
-    *,
-    shm_dir: Path = _SHARED_MEMORY_DIR,
-) -> int:
-    """Backward-compatible alias for stale shared-slot cleanup."""
-    return cleanup_stale_shared_slot_segments(shm_dir=shm_dir)
-
-
 def cleanup_stale_shared_slot_segments(
-    *,
     shm_dir: Path = _SHARED_MEMORY_DIR,
 ) -> int:
     """Remove stale daemon-owned shared-slot segments from /dev/shm."""
@@ -124,6 +115,31 @@ def cleanup_stale_shared_slot_segments(
     return cleaned
 
 
+def cleanup_stale_shared_slot_control_sockets(
+    ack_dir: Path = ACK_BASE_DIR,
+) -> int:
+    """Remove stale shared-slot ACK control socket files."""
+    if not ack_dir.exists():
+        return 0
+
+    cleaned = 0
+
+    for socket_path in ack_dir.glob("slot_control_*.ipc"):
+        try:
+            socket_path.unlink()
+            cleaned += 1
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove shared-slot ACK socket %s: %s",
+                socket_path,
+                exc,
+            )
+
+    return cleaned
+
+
 def cleanup_socket_files(paths: Iterable[Path]) -> None:
     """Remove socket files that exist on disk."""
     for socket_path in paths:
@@ -136,6 +152,15 @@ def cleanup_socket_files(paths: Iterable[Path]) -> None:
                     socket_path,
                     exc,
                 )
+
+
+def cleanup_stale_runtime_state(
+    socket_paths: Iterable[Path],
+) -> None:
+    """Clean stale daemon-owned runtime files from previous processes."""
+    cleanup_stale_shared_slot_segments()
+    cleanup_stale_shared_slot_control_sockets()
+    cleanup_socket_files(socket_paths)
 
 
 def validate_or_recover_sqlite(db_path: Path, *, recover: bool = True) -> bool:
@@ -247,20 +272,20 @@ async def reconcile_state_with_filesystem(
 
 
 def shutdown(
-    *,
     pid_path: Path,
     socket_paths: Iterable[Path],
     db_path: Path,
 ) -> None:
     """Run shutdown steps and cleanup."""
     checkpoint_sqlite(db_path)
-    cleanup_socket_files(socket_paths)
+    cleanup_stale_runtime_state(socket_paths)
     remove_pid_file(pid_path)
 
 
 __all__ = [
     "checkpoint_sqlite",
-    "cleanup_stale_shared_memory_buffers",
+    "cleanup_stale_runtime_state",
+    "cleanup_stale_shared_slot_control_sockets",
     "cleanup_stale_shared_slot_segments",
     "cleanup_socket_files",
     "ensure_shared_memory_capacity",

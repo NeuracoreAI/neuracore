@@ -31,9 +31,7 @@ from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.helpers import is_debug_mode
 from neuracore.data_daemon.lifecycle.daemon_os_control import acquire_pid_file
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
-    cleanup_socket_files,
-    cleanup_stale_shared_memory_buffers,
-    cleanup_stale_shared_slot_segments,
+    cleanup_stale_runtime_state,
     reconcile_state_with_filesystem,
     shared_memory_free_bytes,
     shared_memory_required_bytes,
@@ -87,21 +85,7 @@ class DaemonRuntime:
         if self._manage_pid:
             acquire_pid_file(self._pid_path)
 
-        cleaned_shared_buffers = cleanup_stale_shared_memory_buffers()
-        if cleaned_shared_buffers:
-            logger.info(
-                "Recovered %d stale shared-memory allocation(s) from /dev/shm",
-                cleaned_shared_buffers,
-            )
-
-        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
-        if cleaned_shared_slots:
-            logger.info(
-                "Recovered %d stale shared-slot segment(s) from /dev/shm",
-                cleaned_shared_slots,
-            )
-
-        cleanup_socket_files(self._socket_paths)
+        cleanup_stale_runtime_state(self._socket_paths)
 
         sqlite_ok = validate_or_recover_sqlite(self._db_path, recover=True)
         if not sqlite_ok:
@@ -390,12 +374,7 @@ class DaemonRuntime:
         self._daemon = None
         self._context = None
 
-        cleaned_shared_slots = cleanup_stale_shared_slot_segments()
-        if cleaned_shared_slots:
-            logger.info(
-                "Cleaned %d shared-slot segment(s) during daemon shutdown",
-                cleaned_shared_slots,
-            )
+        cleanup_stale_runtime_state(self._socket_paths)
 
         logger.info("Daemon runtime shutdown complete")
 

@@ -14,7 +14,10 @@ from typing import cast
 
 import filelock
 
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.const import (
+    DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
+    SOCKET_PATH,
+)
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 
 # cspell:ignore WNOHANG waitpid
@@ -92,17 +95,13 @@ def cleanup_stale_client_state(
     if existing_pid is None and not pid_file_present and not sockets_present:
         return
 
-    from neuracore.data_daemon.lifecycle.runtime_recovery import (
-        cleanup_stale_shared_slot_segments,
-        shutdown,
-    )
+    from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
 
     shutdown(
         pid_path=pid_path,
         socket_paths=tuple(Path(path) for path in socket_paths),
         db_path=db_path,
     )
-    cleanup_stale_shared_slot_segments()
 
 
 def _build_daemon_runner_command() -> list[str]:
@@ -131,7 +130,6 @@ def _build_daemon_launch_env(
 
 
 def _start_daemon_subprocess(
-    *,
     pid_path: Path,
     db_path: Path,
     background: bool,
@@ -174,11 +172,10 @@ def _start_daemon_subprocess(
 
 
 def launch_daemon_subprocess(
-    *,
     pid_path: Path,
     db_path: Path,
     background: bool = True,
-    timeout_s: float = 10.0,
+    timeout_s: float = DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
     env_overrides: dict[str, str] | None = None,
     stdout: int | None = None,
     stderr: int | None = None,
@@ -222,11 +219,10 @@ def launch_daemon_subprocess(
 
 
 def launch_new_daemon_subprocess(
-    *,
     pid_path: Path,
     db_path: Path,
     background: bool,
-    timeout_s: float = 10.0,
+    timeout_s: float = DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
     env_overrides: dict[str, str] | None = None,
     stdout: int | None = None,
     stderr: int | None = None,
@@ -258,8 +254,7 @@ def launch_new_daemon_subprocess(
 
 
 def ensure_daemon_running(
-    *,
-    timeout_s: float = 10.0,
+    timeout_s: float = DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
     env_overrides: dict[str, str] | None = None,
 ) -> int:
     """Ensure the data daemon is running and ready to accept connections."""
