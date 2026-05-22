@@ -3,9 +3,8 @@
 //! Centralises the auth header, retry policy, timeouts, and base URL so each
 //! coordinator (registration, uploader, status updater, progress reporter)
 //! talks to the backend through a single configured instance. The retry
-//! policy matches the Python `BACKEND_API_*` constants in `const.py`: max 3
-//! attempts on `{408, 425, 429, 500..504}`, exponential backoff capped at
-//! 30 s.
+//! policy is max 3 attempts on `{408, 425, 429, 500..504}`, with exponential
+//! backoff capped at 30 s.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -151,8 +150,7 @@ impl ApiClient {
 
     /// `HEAD /status/health` — used by the connection monitor.
     ///
-    /// Returns `true` when the backend reports any non-5xx status, matching
-    /// the Python `ConnectionManager._check_connectivity` semantics.
+    /// Returns `true` when the backend reports any non-5xx status.
     pub async fn health_check(&self) -> Result<bool, ApiClientError> {
         let request = self.inner.head(self.url("/status/health")).build()?;
         let response = self.inner.execute(request).await?;
@@ -239,8 +237,7 @@ impl ApiClient {
     ///
     /// Tells the backend how many traces to expect for this recording so it
     /// can promote the recording into its parent dataset once all traces are
-    /// uploaded. Mirrors the Python `state_manager._set_expected_trace_count`
-    /// flow — without this the recording stays hidden from
+    /// uploaded. Without this the recording stays hidden from
     /// `nc.get_dataset(...)` indefinitely even after every trace is uploaded.
     pub async fn put_expected_trace_count(
         &self,

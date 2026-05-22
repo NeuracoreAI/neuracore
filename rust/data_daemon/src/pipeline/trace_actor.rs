@@ -1,20 +1,17 @@
 //! Per-trace actor task.
 //!
-//! Owns the SQLite lifecycle and the on-disk encoders for one trace. Sub-phase
-//! 5f wires the encoders in: scalar / sensor traces stream into a
-//! [`JsonTraceWriter`]; video traces (signalled by an [`Envelope::OpenFrameStream`])
-//! spool raw RGB frames through a [`NutWriter`], then on `EndTrace` shell out
-//! to [`VideoEncoder`] for the dual-output transcode and flush the
-//! [`VideoMetadataAccumulator`] sidecar.
+//! Owns the SQLite lifecycle and the on-disk encoders for one trace: scalar /
+//! sensor traces stream into a [`JsonTraceWriter`]; video traces (signalled by
+//! an [`Envelope::OpenFrameStream`]) spool raw RGB frames through a
+//! [`NutWriter`], then on `EndTrace` shell out to [`VideoEncoder`] for the
+//! dual-output transcode and flush the [`VideoMetadataAccumulator`] sidecar.
 //!
-//! Database writes are debounced — the per-frame `bytes_written` UPDATE that
-//! Phase 4 left in place was useful for proving the wiring but is wasteful at
-//! 200+ Hz scalar ingestion. We now flush a counter every
+//! Database writes are debounced — a per-frame `bytes_written` UPDATE is
+//! wasteful at 200+ Hz scalar ingestion, so a counter is flushed every
 //! [`BYTES_WRITTEN_DEBOUNCE_FRAMES`] frames during ingestion and always on
-//! finalise, matching the policy described in `docs/data-daemon-rewrite.md`
-//! §5f. The encoding tail of the state machine — `initializing → writing →
-//! pending_metadata → written` — is still driven from this actor; the
-//! registration coordinator (Phase 6) keys off the terminal `written` state.
+//! finalise. The encoding tail of the state machine — `initializing → writing
+//! → pending_metadata → written` — is driven from this actor; the
+//! registration coordinator keys off the terminal `written` state.
 
 use std::sync::Arc;
 
@@ -77,9 +74,8 @@ pub struct TraceActorContext {
     pub ffmpeg_permits: Arc<Semaphore>,
     /// Optional daemon event bus. When present, the trace actor publishes a
     /// [`crate::state::DaemonEvent::TraceWritten`] on finalise so the
-    /// registration coordinator can wake immediately. Optional to keep the
-    /// pre-Phase-6 unit tests, which exercise the actor without a bus,
-    /// running unchanged.
+    /// registration coordinator can wake immediately. Optional so unit tests
+    /// can exercise the actor without standing up a bus.
     pub event_bus: Option<crate::state::EventBus>,
 }
 
@@ -166,12 +162,11 @@ enum TraceWriter {
     /// metadata buffers in memory.
     ///
     /// PTS is derived from `timestamp_ns` (microsecond ticks, relative to the
-    /// first frame), matching the Python encoder's PTS contract in
-    /// `disk_video_encoder.py::_compute_pts`. The container's time-base is
-    /// `1/1_000_000`; sliding `pts_origin_us` to the first frame keeps PTS
-    /// values small (avoids ffmpeg quirks with absolute nanosecond PTS) while
-    /// preserving inter-frame spacing exactly. `last_pts` enforces strict
-    /// monotonicity for the rare duplicate-timestamp case.
+    /// first frame). The container's time-base is `1/1_000_000`; sliding
+    /// `pts_origin_us` to the first frame keeps PTS values small (avoids
+    /// ffmpeg quirks with absolute nanosecond PTS) while preserving
+    /// inter-frame spacing exactly. `last_pts` enforces strict monotonicity
+    /// for the rare duplicate-timestamp case.
     Video {
         nut_writer: NutWriter,
         metadata: VideoMetadataAccumulator,
@@ -482,7 +477,7 @@ impl ActorState {
             return;
         };
 
-        // Phase 7 — the storage budget gates every frame, not just the
+        // The storage budget gates every frame, not just the
         // writer-open path. Refusing here keeps the on-disk artefact
         // bounded; the producer sees no error (the SDK contract is
         // best-effort delivery for sensor data), but the dropped count is
@@ -540,9 +535,9 @@ impl ActorState {
     /// against the currently open writer. Returns `true` when the write is
     /// allowed; emits a (rate-limited) warning and bumps the
     /// `dropped_over_budget` counter when it isn't. Best-effort failures
-    /// (a `statvfs` error, an inaccessible parent directory) default to
-    /// "allow" so a transient kernel hiccup doesn't drop sample data —
-    /// matches the python implementation's fail-open frame ingestion path.
+    /// (a `statvfs` error, an inaccessible parent directory) fail open — they
+    /// default to "allow" so a transient kernel hiccup doesn't drop sample
+    /// data.
     fn budget_allows_frame(&mut self, budget: &Arc<StorageBudget>, payload_len: usize) -> bool {
         match budget.check(payload_len as u64) {
             Ok(check) if check.is_available() => true,
@@ -593,9 +588,7 @@ impl ActorState {
         let trace_dir = self.trace_directory(recording_id, data_type, context);
 
         if let Some((width, height)) = self.video_config {
-            // Time-base 1/1_000_000 (microsecond ticks) matches the Python
-            // encoder's `PTS_FRACT = 1_000_000` so the on-disk PTS contract
-            // is the same across both implementations. Frame PTS is derived
+            // Time-base 1/1_000_000 (microsecond ticks). Frame PTS is derived
             // in `append_frame` as `(timestamp_ns - origin_ns) / 1000`.
             let config = NutVideoConfig {
                 width,
@@ -716,9 +709,9 @@ impl ActorState {
                 nut_writer.write_frame(pts, payload)?;
                 *last_pts = Some(pts);
                 let mut entry = serde_json::Map::new();
-                // Match the Python writer's per-frame metadata shape:
-                // `timestamp` is seconds (float), `width`/`height` set when
-                // present. Prefer the producer-supplied `timestamp_s` (a real
+                // Per-frame metadata shape: `timestamp` is seconds (float),
+                // `width`/`height` set when present. Prefer the
+                // producer-supplied `timestamp_s` (a real
                 // f64 carrying the SDK's intended capture time) over the
                 // nanosecond integer round-trip, which would truncate to
                 // microsecond granularity and break the manual-timestamp
@@ -806,8 +799,8 @@ impl ActorState {
     ) -> Result<u64, FrameAppendError> {
         match writer {
             TraceWriter::Pending => {
-                // Empty trace — no encoder was ever opened. Match the Python
-                // writers, which leave a single empty `trace.json` behind.
+                // Empty trace — no encoder was ever opened. Leave a single
+                // empty `trace.json` behind so the artefact set is complete.
                 let trace_dir = self.trace_directory(recording_id, data_type, context);
                 let json = JsonTraceWriter::open(&trace_dir)?;
                 let total = json.finish()?;
@@ -848,7 +841,7 @@ impl ActorState {
 
                 // Sidecar metadata is the *last* thing on disk so a partial
                 // transcode failure leaves a recognisable "no sidecar"
-                // signature for the recovery sweep that lands in Phase 7.
+                // signature for the recovery sweep.
                 let metadata_bytes = flush_metadata_blocking(metadata, trace_dir.clone()).await?;
 
                 Ok(outcome

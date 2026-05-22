@@ -15,11 +15,9 @@
 //! schema is forward-compatible: postcard's enum representation tags variants
 //! with a u32 discriminant, so new envelope variants append cleanly.
 //!
-//! Phase 4 carries every lifecycle message — including the frame payloads used
-//! by the smoke-test deliverable — over the single `[u8]` slice `commands`
-//! service. Phase 5 introduces typed per-resolution `frames/<WxH>` zero-copy
-//! services for real video traffic; that addition does not require a breaking
-//! change to the existing command/lifecycle messages.
+//! Lifecycle messages and non-video `frame` payloads travel over the
+//! `commands` service; video traffic travels over the dedicated `frames`
+//! service. See [`service_name`] for the split.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -39,8 +37,8 @@ pub mod service_name {
     /// Pub/sub service carrying video-trace traffic: `open_frame_stream`,
     /// the pixel-bearing `frame` envelopes, and the trace's `end_trace`.
     ///
-    /// Split out from [`COMMANDS`] in sub-phase 4h. iceoryx2 sizes a
-    /// publisher's data segment as `max_subscribers × (buffer + borrowed) ×
+    /// Kept separate from [`COMMANDS`] because iceoryx2 sizes a publisher's
+    /// data segment as `max_subscribers × (buffer + borrowed) ×
     /// initial_max_slice_len`; pairing the 1024-deep lifecycle buffer with the
     /// 16 MiB video slice produced a 128 GiB segment whose retained-sample
     /// resident pages exhausted `/dev/shm` (SIGBUS). A dedicated service lets
@@ -151,7 +149,7 @@ pub mod service_name {
 
 /// A single message exchanged between the producer and the daemon.
 ///
-/// Variants mirror the lifecycle described in §4 of the rewrite plan.
+/// Variants cover the full recording / trace lifecycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Envelope {
     /// Producer announces a new recording session.
@@ -185,8 +183,7 @@ pub enum Envelope {
     /// Producer delivers one frame/sample for a trace.
     ///
     /// The payload is opaque to the IPC layer; the per-trace actor parses it
-    /// according to `data_type`. Phase 4 only counts frames in the database;
-    /// phase 5 wires the bytes into the JSON / NUT writers.
+    /// according to `data_type` and writes it through the JSON / NUT writers.
     Frame {
         /// Trace this frame belongs to.
         trace_id: String,
@@ -255,10 +252,8 @@ pub enum Envelope {
     /// `(width, height)` for `trace_id`.
     ///
     /// Sent on the [`COMMANDS`](service_name::COMMANDS) service so the daemon
-    /// can lazily open the matching per-resolution iceoryx2 service before
-    /// the first frame arrives. In phase 4 the frame payloads also travel
-    /// over `COMMANDS`; phase 4h moves them onto dedicated zero-copy
-    /// services keyed by resolution.
+    /// can lazily open the [`FRAMES`](service_name::FRAMES) service before the
+    /// first video frame arrives.
     OpenFrameStream {
         /// Trace these frames belong to.
         trace_id: String,

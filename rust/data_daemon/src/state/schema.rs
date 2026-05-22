@@ -1,10 +1,8 @@
 //! Strongly-typed rows and lifecycle enums for the daemon's SQLite tables.
 //!
-//! The enum string values match the Python implementation
-//! (`neuracore/data_daemon/models.py`) because they are part of the
-//! integration-test contract: helpers under
-//! `tests/integration/platform/data_daemon/shared/db_helpers.py` read the
-//! string columns directly.
+//! The enum string values are part of the integration-test contract: helpers
+//! under `tests/integration/platform/data_daemon/shared/db_helpers.py` read
+//! the string columns directly, so the stored spellings must stay stable.
 
 use std::str::FromStr;
 
@@ -67,8 +65,8 @@ macro_rules! string_enum {
 }
 
 /// Returned when a status string read from SQLite does not match any known
-/// variant. Mirrors the Python store's defensive `ValueError` raise path —
-/// surfaced as a `StateStoreError::Decode` by the store implementation.
+/// variant. Surfaced as a `StateStoreError::Decode` by the store
+/// implementation.
 #[derive(Debug, Clone, Error)]
 #[error("invalid {kind} value: '{value}'")]
 pub struct ParseEnumError {

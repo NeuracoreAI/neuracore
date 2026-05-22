@@ -1,15 +1,9 @@
 //! Incremental JSON-array writer for scalar / sensor traces.
 //!
-//! Mirrors `recording_encoding_disk_manager/encoding/json_trace.py`. The
-//! Python implementation buffers entries in memory, opens the file lazily on
-//! the first frame, and flushes whole `CHUNK_SIZE` chunks to disk. We follow
-//! the same shape so the on-disk byte layout (a single JSON array with one
-//! entry per frame, comma-separated, no whitespace) matches byte-for-byte —
-//! the integration tests parse `trace.json` back with `serde_json` and
-//! compare entry counts.
-//!
-//! Sub-phase 5b of the rewrite plan. The trace actor wires this writer in
-//! during sub-phase 5f.
+//! Entries are buffered in memory, the file is opened lazily on the first
+//! frame, and whole `CHUNK_SIZE` chunks are flushed to disk. The on-disk byte
+//! layout is a single JSON array with one entry per frame, comma-separated,
+//! no whitespace.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
@@ -19,8 +13,8 @@ use serde::Serialize;
 
 use crate::storage::paths::TRACE_JSON_FILENAME;
 
-/// Default flush threshold, matching Python `const.py::DEFAULT_FLUSH_BYTES`
-/// (4 MiB).
+/// Default flush threshold: buffered entries are written to disk once they
+/// reach 4 MiB.
 pub const DEFAULT_FLUSH_BYTES: usize = 4 * 1024 * 1024;
 
 /// Errors raised by [`JsonTraceWriter`].
@@ -53,8 +47,8 @@ pub enum JsonTraceError {
 ///
 /// Entries are buffered in memory until either the buffer reaches
 /// `flush_threshold` bytes or [`finish`](Self::finish) is called. Each entry
-/// is rendered with the same `(",", ":")` separators the Python writer uses,
-/// so the on-disk file is the exact same byte sequence.
+/// is rendered with compact `(",", ":")` separators, so the on-disk file
+/// carries no insignificant whitespace.
 pub struct JsonTraceWriter {
     path: PathBuf,
     writer: BufWriter<File>,
@@ -182,7 +176,7 @@ impl JsonTraceWriter {
     /// Finalise the file: append `]`, flush, and close the buffered writer.
     ///
     /// An empty trace (no `add_entry` calls) is still finalised as `[]` so
-    /// the file is always valid JSON — same behaviour as the Python writer.
+    /// the file is always valid JSON.
     pub fn finish(mut self) -> Result<u64, JsonTraceError> {
         if !self.started {
             self.buffer.extend_from_slice(b"[]");

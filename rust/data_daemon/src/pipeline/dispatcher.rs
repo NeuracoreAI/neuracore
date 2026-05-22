@@ -27,12 +27,11 @@ use crate::state::{SqliteStateStore, StateStore};
 
 /// Bounded per-trace queue size.
 ///
-/// Phase 7 raised this from 64 to 256 after the high-dimensionality
-/// performance case (1000-channel scalar trace at ~3 kHz) revealed the old
-/// cap acted as a forced flush throttle: a brief SQLite write stall on the
-/// trace_actor would back-propagate through the listener and stutter
-/// every other trace running in the same daemon. 256 absorbs 4× the burst
-/// at the cost of ~10 KiB extra of `Envelope` headers per trace, still
+/// Sized for the high-dimensionality case (1000-channel scalar trace at
+/// ~3 kHz): a smaller cap acts as a forced flush throttle, where a brief
+/// SQLite write stall on the trace_actor back-propagates through the listener
+/// and stutters every other trace running in the same daemon. 256 absorbs the
+/// burst at the cost of ~10 KiB extra of `Envelope` headers per trace, still
 /// comfortably below the iceoryx2 publisher's `Block`-on-full strategy.
 const TRACE_QUEUE_CAPACITY: usize = 256;
 
@@ -104,10 +103,9 @@ pub fn spawn(
 
 /// Spawn the dispatcher with an explicit [`DispatcherContext`].
 ///
-/// Phase 6 introduces side-effects keyed by the local org_id and the event
-/// bus; this variant accepts both so production code can wire them in while
-/// the legacy unit-test surface (without an event bus / org_id) continues to
-/// work via [`spawn`].
+/// The cloud coordinators need side-effects keyed by the local org_id and the
+/// event bus; this variant accepts both, while [`spawn`] supplies defaults for
+/// tests that do not need an event bus or org_id.
 pub fn spawn_with_context(
     store: SqliteStateStore,
     actor_context: Arc<TraceActorContext>,

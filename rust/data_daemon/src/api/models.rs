@@ -1,7 +1,6 @@
 //! Request and response shapes for the Neuracore backend.
 //!
-//! Mirrors the seven endpoints called out in §8 of the rewrite plan. The
-//! daemon's serde types are kept thin: only fields the daemon writes or
+//! The daemon's serde types are kept thin: only fields the daemon writes or
 //! reads are modelled, so a schema change on a field the daemon ignores does
 //! not break the client.
 
@@ -92,10 +91,8 @@ pub enum TraceStatusValue {
 
 /// One per-trace update inside a batch-update request body.
 ///
-/// Modelled to match the `TraceStatusUpdates` pydantic class.  Fields are
-/// `Option`-wrapped and skip when null so the wire body only carries fields
-/// the caller actually wants to change — mirroring the Python
-/// `model_dump(mode="json", exclude_defaults=True)` call site.
+/// Fields are `Option`-wrapped and skipped when null so the wire body only
+/// carries fields the caller actually wants to change.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct TraceStatusUpdate {
     /// Lifecycle status.

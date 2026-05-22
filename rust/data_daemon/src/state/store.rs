@@ -1,11 +1,8 @@
 //! SQLite-backed implementation of the daemon's [`StateStore`].
 //!
-//! Phase 3 establishes the persistence layer: schema migration via `sqlx`, WAL
-//! pragmas on every connection, and the core CRUD operations the per-trace
-//! actors and registration coordinator need in Phase 4+. The trait surface is
-//! intentionally narrower than today's Python `StateStore` Protocol; methods
-//! get added as later phases need them, and the schema may evolve in lockstep
-//! (see `docs/data-daemon-rewrite.md` §5: "Schema is flexible.").
+//! The persistence layer: schema migration via `sqlx`, WAL pragmas on every
+//! connection, and the CRUD operations the per-trace actors and registration
+//! coordinator rely on.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,8 +22,7 @@ use crate::state::schema::{
 /// Embedded migrations, applied on every [`SqliteStateStore::open`].
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-/// Busy timeout applied to every connection, matching the Python
-/// `PRAGMA busy_timeout=1000` in `state_store_sqlite.py::_apply_pragmas`.
+/// Busy timeout (`PRAGMA busy_timeout`) applied to every connection.
 const BUSY_TIMEOUT_MS: u32 = 1000;
 
 /// Errors surfaced by [`StateStore`] operations.
@@ -51,10 +47,9 @@ pub enum StateStoreError {
 
 /// Persistence interface for daemon state.
 ///
-/// Phase 3 implements the slice of the Python `StateStore` protocol needed for
-/// the dispatcher + per-trace actor bring-up in Phase 4. Additional methods —
-/// upload bookkeeping, retry scheduling, reconciliation — are added in the
-/// phases that need them.
+/// Covers the operations the dispatcher, per-trace actors, and cloud
+/// coordinators need: recording / trace lifecycle transitions, upload
+/// bookkeeping, and reconciliation queries.
 #[async_trait]
 pub trait StateStore: Send + Sync {
     /// Insert a recording row if one does not already exist.
@@ -79,9 +74,8 @@ pub trait StateStore: Send + Sync {
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state.
     ///
-    /// The parent recording is created on demand to mirror the Python
-    /// `state_manager` behaviour where a `START_TRACE` may race ahead of any
-    /// explicit recording creation.
+    /// The parent recording is created on demand, since a `StartTrace` may
+    /// race ahead of any explicit recording creation.
     async fn create_trace(
         &self,
         recording_id: &str,
@@ -115,8 +109,7 @@ pub trait StateStore: Send + Sync {
     ///
     /// Traces are eligible immediately when at least `limit` are ready (size
     /// trigger) or when their `last_updated` is older than `max_wait_secs`
-    /// (age trigger) — matching the Python registration coordinator's
-    /// debounce policy described in §4 of the rewrite plan.
+    /// (age trigger) — the registration coordinator's debounce policy.
     ///
     /// Claimed rows are transitioned to
     /// [`TraceRegistrationStatus::Registering`] atomically inside a single
@@ -601,9 +594,9 @@ impl StateStore for SqliteStateStore {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
 
-        // Count ready traces first so the size-vs-age policy from §4 of the
-        // plan stays explicit. SQLite's transactional snapshot means this
-        // count is stable across the subsequent SELECT.
+        // Count ready traces first so the size-vs-age policy stays explicit.
+        // SQLite's transactional snapshot means this count is stable across
+        // the subsequent SELECT.
         let ready_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM traces \
               WHERE write_status = ?1 AND registration_status = ?2",

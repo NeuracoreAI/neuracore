@@ -47,12 +47,9 @@ pub fn spawn_connection_monitor(
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> MonitorHandle {
     let join = tokio::spawn(async move {
-        // Publish the initial Down state from inside the task. Previously
-        // this fired *before* spawn — at which point no spawn-after
-        // subscriber could possibly observe it — so the "definite initial
-        // state" was a fiction. Doing it here means any task that calls
-        // `bus.subscribe()` between launch and the next yield point sees
-        // the seed event before the first probe runs.
+        // Publish the initial Down state from inside the task so that any
+        // task calling `bus.subscribe()` between launch and the next yield
+        // point sees the seed event before the first probe runs.
         let mut state = ConnectionState::Down;
         bus.publish(DaemonEvent::ConnectionStateChanged(state));
         let mut ticker = interval(HEALTH_CHECK_INTERVAL);

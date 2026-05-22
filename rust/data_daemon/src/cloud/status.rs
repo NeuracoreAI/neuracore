@@ -1,9 +1,8 @@
 //! Debounced trace status updater.
 //!
-//! Phase 6e. The uploader pushes [`StatusUpdate`] entries onto an unbounded
-//! mpsc; the updater coalesces them into per-recording batches and flushes
-//! when one of the following becomes true (matching
-//! `trace_status_updater.py:168` policy):
+//! The uploader pushes [`StatusUpdate`] entries onto an unbounded mpsc; the
+//! updater coalesces them into per-recording batches and flushes when one of
+//! the following becomes true:
 //!
 //! - `MAX_BATCH_SIZE` (50) traces are queued.
 //! - `IN_PROGRESS_MAX_WAIT` (4 s) elapsed since the batch opened.

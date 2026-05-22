@@ -1,20 +1,13 @@
 //! Storage-budget tracking for the per-trace writers.
 //!
-//! Mirrors `recording_encoding_disk_manager/core/storage_budget.py`. Two
-//! independent limits gate every write:
+//! Two independent limits gate every write:
 //!
 //! - The configured `storage_limit_bytes` (from the active profile) caps how
 //!   much room the daemon may consume under `recordings_root`. The tracker
 //!   keeps an estimate that is refreshed by a full directory scan no more
 //!   often than `refresh_seconds`.
 //! - `min_free_disk_bytes` is the safety margin the daemon keeps free on the
-//!   underlying filesystem. Defaults to `MIN_FREE_DISK_BYTES = 32 MiB` from
-//!   the Python `const.py`.
-//!
-//! Phase 5a only exposes the policy + outcome enum used by the trace actor
-//! when it lands in 5f; the storage-budget refresh loop and the warning event
-//! it emits onto the daemon event bus are wired up in phase 6 alongside the
-//! upload coordinator.
+//!   underlying filesystem. Defaults to `MIN_FREE_DISK_BYTES = 32 MiB`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,10 +15,10 @@ use std::time::{Duration, Instant};
 
 use super::paths::directory_bytes;
 
-/// Safety margin matching Python `const.py::MIN_FREE_DISK_BYTES`.
+/// Free-disk safety margin the daemon keeps available at all times.
 pub const MIN_FREE_DISK_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Refresh interval matching Python `const.py::STORAGE_REFRESH_SECONDS`.
+/// Minimum interval between full directory rescans of the used-bytes estimate.
 pub const STORAGE_REFRESH_SECONDS: f64 = 5.0;
 
 /// Storage-budget configuration.
@@ -55,9 +48,8 @@ impl Default for StoragePolicy {
 
 /// Outcome of a budget check.
 ///
-/// Mirrors the binary "may I write" decision the Python `StorageBudget`
-/// exposes via `reserve` / `has_free_disk_for_write`, but folds in the reason
-/// so the per-trace actor can emit a useful tracing log line and the upload
+/// A binary "may I write" decision that also folds in the reason, so the
+/// per-trace actor can emit a useful tracing log line and the upload
 /// coordinator can pick the right backpressure response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BudgetCheck {
@@ -109,8 +101,7 @@ pub enum BudgetError {
 /// Each method is thread-safe; internal state lives behind a `Mutex` so the
 /// per-trace actors can reserve from a single shared instance without an
 /// async hop. The estimate is updated optimistically on `reserve` and
-/// reconciled by [`refresh_if_stale`](Self::refresh_if_stale) — the same
-/// pattern as the Python implementation.
+/// reconciled by [`refresh_if_stale`](Self::refresh_if_stale).
 pub struct StorageBudget {
     recordings_root: PathBuf,
     policy: StoragePolicy,
@@ -212,8 +203,8 @@ impl StorageBudget {
     /// internal estimate when the result is [`BudgetCheck::Available`] so
     /// repeated calls add up across writers. The filesystem free-byte check
     /// is best-effort: when it fails (e.g. `statvfs` reports a transient
-    /// error) the reservation is denied as if the disk were full, mirroring
-    /// the Python `has_free_disk_for_write` fail-closed behaviour.
+    /// error) the reservation fails closed — it is denied as if the disk were
+    /// full.
     pub fn reserve(&self, bytes_to_write: u64) -> Result<BudgetCheck, BudgetError> {
         let check = self.check(bytes_to_write)?;
         if let BudgetCheck::Available = check {
@@ -233,9 +224,9 @@ impl StorageBudget {
 
 /// Free bytes available on the filesystem holding `path`.
 ///
-/// Walks up the directory tree until it finds an existing ancestor, which
-/// matches the Python helper's `try: ... except FileNotFoundError: mkdir(...)`
-/// safety net without actually creating directories.
+/// Walks up the directory tree until it finds an existing ancestor, so the
+/// probe succeeds even before the recordings directory has been created
+/// (without itself creating any directories).
 fn free_disk_bytes(path: &Path) -> Result<u64, BudgetError> {
     let mut probe = path.to_path_buf();
     loop {

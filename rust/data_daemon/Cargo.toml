@@ -3,7 +3,7 @@ name = "data-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Neuracore data daemon — Rust rewrite (see docs/data-daemon-rewrite.md)."
+description = "Neuracore data daemon."
 
 [[bin]]
 name = "data-daemon"
@@ -25,9 +25,8 @@ nix.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 # `preserve_order` keeps `serde_json::Map` insertion-ordered (via IndexMap)
-# so the video-trace sidecar serialises with the same key ordering as the
-# Python `json.dumps(dict, ...)` it replaces — required for byte-identical
-# diffs against the legacy fixtures.
+# so the video-trace sidecar serialises with a stable, predictable key
+# ordering.
 serde_json = { workspace = true, features = ["preserve_order"] }
 serde_yaml.workspace = true
 sqlx.workspace = true

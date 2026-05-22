@@ -1,8 +1,8 @@
 //! `status` subcommand handler.
 //!
 //! Reads `NEURACORE_DAEMON_PID_PATH` and reports whether the daemon process
-//! it points at is alive. Mirrors the Python `run_status` output shape so
-//! existing scripts continue to parse it.
+//! it points at is alive. The output shape is a stable contract so external
+//! scripts can parse it.
 
 use anyhow::Result;
 

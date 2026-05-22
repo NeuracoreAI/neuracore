@@ -2,10 +2,8 @@
 
 By default this runs the Python data daemon CLI. When the
 ``NCD_RUST_DAEMON`` environment variable is truthy and the bundled Rust
-data-daemon binary is present, execution is handed off to it instead — the
-Rust binary is the eventual replacement for this package (see
-``docs/data-daemon-rewrite.md``). The flag keeps the Python daemon available
-throughout the rollout window.
+data-daemon binary is present, execution is handed off to it instead. The
+flag keeps the Python daemon available throughout the rollout window.
 """
 
 from __future__ import annotations

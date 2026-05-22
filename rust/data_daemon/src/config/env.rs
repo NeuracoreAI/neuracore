@@ -64,13 +64,9 @@ pub fn parse_bytes(value: &str) -> Result<i64, String> {
 /// Serde deserializer for byte-valued config fields that accepts either a
 /// plain integer or a unit-suffixed string (e.g. `1G`).
 ///
-/// Mirrors the `parse_bytes` fix-up `ProfileManager.get_profile` applies to
-/// `storage_limit` / `bandwidth_limit` when loading a profile YAML file, with
-/// one intentional divergence: Python silently *skips* a malformed string and
-/// leaves the raw value in the dict (pydantic then rejects it during
-/// `DaemonConfig(**data)` validation, surfacing a less precise error). We
-/// surface the parse failure directly here, which gives a clearer error
-/// message but trips slightly sooner than the Python path.
+/// Applies to byte-valued profile fields such as `storage_limit` and
+/// `bandwidth_limit`. A malformed unit-suffixed string surfaces the parse
+/// failure directly as a deserialization error.
 pub fn deserialize_optional_bytes<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -92,8 +88,7 @@ where
 }
 
 /// Read an environment variable, returning `None` when it is unset or holds
-/// non-UTF-8 bytes. An empty value is returned as `Some("")`, matching
-/// Python's `os.getenv`.
+/// non-UTF-8 bytes. An empty value is returned as `Some("")`.
 fn env_var(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -146,8 +141,8 @@ pub fn env_config_overrides() -> DaemonConfig {
 
 /// Home directory, used as the root for `~/.neuracore` paths.
 ///
-/// Mirrors Python's `Path.home()`. Panics only if the home directory cannot be
-/// determined at all, which also fails the Python daemon.
+/// Panics only if the home directory cannot be determined at all, in which
+/// case the daemon cannot resolve any of its on-disk paths.
 pub(crate) fn home_dir() -> PathBuf {
     dirs::home_dir().expect("could not determine the user's home directory")
 }

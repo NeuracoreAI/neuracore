@@ -1,8 +1,8 @@
 //! Cloud-side coordinators: batch registration, resumable uploads,
 //! debounced status updates, and the periodic progress reporter.
 //!
-//! Phase 6 of the rewrite. Every coordinator is spawned by the daemon launch
-//! routine and subscribes to the broadcast event bus. The flow is:
+//! Every coordinator is spawned by the daemon launch routine and subscribes
+//! to the broadcast event bus. The flow is:
 //!
 //! 1. Per-trace actor finishes writing → emits `TraceWritten`.
 //! 2. Registration coordinator buffers up to 50 traces / 1 s, batch-registers,

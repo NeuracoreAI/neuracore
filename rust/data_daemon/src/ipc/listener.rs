@@ -2,9 +2,8 @@
 //!
 //! iceoryx2 0.8 does not expose an `async`/`Notify`-style adaptor, so the
 //! listener polls both subscribers on a short tick. The cadence is fast enough
-//! for the phase 4 smoke test (a few hundred frames in ≤1 s) and slow enough
-//! to leave idle daemons effectively quiescent. A future sub-phase replaces
-//! the timer with a `WaitSet`-backed notifier when frame throughput matters.
+//! to keep frame latency low and slow enough to leave idle daemons
+//! effectively quiescent.
 //!
 //! `commands` is drained before `frames` each tick so that, within a tick, a
 //! trace's `StartTrace` (on `commands`) tends to reach the dispatcher ahead of
@@ -35,8 +34,7 @@ use crate::lifecycle::signals::ShutdownSignal;
 /// How often the listener polls the iceoryx2 subscriber.
 ///
 /// Picked to bound wake-up latency to ~10 ms — well below the 1 s registration
-/// debounce in §4 of the rewrite plan, so the trace lifecycle isn't gated on
-/// the listener loop.
+/// debounce, so the trace lifecycle isn't gated on the listener loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Drain the iceoryx2 subscribers until a shutdown signal arrives.

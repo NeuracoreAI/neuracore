@@ -1,18 +1,15 @@
 //! Per-trace `ffmpeg` transcoder.
 //!
-//! Sub-phase 5d of the rewrite plan (see `docs/data-daemon-rewrite.md`). The
-//! trace actor spools captured frames into a `raw.nut` file via
+//! The trace actor spools captured frames into a `raw.nut` file via
 //! [`crate::encoding::nut_writer`]; once the trace ends, this module hands the
 //! file to a supervised `ffmpeg` child that produces two mp4s:
 //!
 //! - `lossy.mp4` — `libx264` `-pix_fmt yuv420p -preset ultrafast -qp 23` for
 //!   fast playback.
 //! - `lossless.mp4` — `libx264` `-pix_fmt yuv444p10le -preset ultrafast -qp 0`
-//!   for mathematically-lossless archival. The Python implementation in
-//!   `recording_encoding_disk_manager/encoding/video_trace.py` uses the same
-//!   settings; `ffv1` was originally pencilled into the rewrite plan but is
-//!   incompatible with the `.mp4` container the on-disk layout contract
-//!   requires.
+//!   for mathematically-lossless archival. `ffv1` would be the natural codec
+//!   for this but is incompatible with the `.mp4` container the on-disk
+//!   layout contract requires.
 //!
 //! Both outputs are verified non-empty before the source `raw.nut` is unlinked;
 //! a failed encode leaves the spool intact so the upload coordinator can either
@@ -35,9 +32,9 @@ pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 pub struct VideoEncodeRequest {
     /// Source NUT spool produced by [`crate::encoding::nut_writer::NutWriter`].
     pub raw_nut: PathBuf,
-    /// Destination for the H.264 lossy output (matches Python `lossy.mp4`).
+    /// Destination for the H.264 lossy output (`lossy.mp4`).
     pub lossy_mp4: PathBuf,
-    /// Destination for the FFV1 lossless output (matches Python `lossless.mp4`).
+    /// Destination for the lossless output (`lossless.mp4`).
     pub lossless_mp4: PathBuf,
 }
 

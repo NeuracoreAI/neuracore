@@ -1,11 +1,8 @@
 //! Derive the cloud-file list for a trace from its data-type label.
 //!
-//! Mirrors `registration_manager.py::get_cloud_file_list` and the
-//! `DATA_TYPE_CONTENT_MAPPING` table that backs it. The Python type system
-//! parses the wire string into the `DataType` enum and then looks up
-//! `JSON` vs `RGB` against a mapping — here we keep the same partition but
-//! work directly off the wire string so a new data type the Python enum
-//! grows doesn't make the daemon refuse to register it.
+//! The data type partitions into `JSON` vs `RGB` content. The classification
+//! works directly off the wire string so an unrecognised data type still
+//! registers (as JSON) rather than being refused.
 
 use crate::api::models::CloudFile;
 
@@ -18,8 +15,7 @@ pub const TRACE_FILE: &str = "trace.json";
 
 /// Wire-side classification used to build the cloud-file list. The set of
 /// data types that produce video is small and stable, so a hard-coded match
-/// on the wire string is good enough — and avoids pulling in
-/// `neuracore_types` from Python land.
+/// on the wire string is good enough.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentKind {
     /// JSON-only payload (scalar / sensor / event traces).
@@ -30,16 +26,12 @@ pub enum ContentKind {
 
 /// Classify a data-type wire label.
 ///
-/// The label set comes from `DATA_TYPE_CONTENT_MAPPING` in
-/// `neuracore_types`. Anything we don't recognise is treated as JSON, which
-/// matches the Python fallback for unknown types.
+/// Anything not recognised is treated as JSON.
 ///
-/// `DEPTH_IMAGES` is intentionally mapped to `Rgb` — the Python mapping
-/// table classifies depth as `"RGB"` content too, because the upload
-/// pipeline uses the same `lossy.mp4` + `lossless.mp4` artefact pair to
-/// carry depth frames packed into RGB channels. Diverging here would
-/// register a different cloud-file set than the Python writer produces and
-/// break wire compatibility with the existing backend.
+/// `DEPTH_IMAGES` is intentionally mapped to `Rgb`: the upload pipeline uses
+/// the same `lossy.mp4` + `lossless.mp4` artefact pair to carry depth frames
+/// packed into RGB channels. Diverging here would register a different
+/// cloud-file set than the backend expects and break wire compatibility.
 pub fn content_type_for(data_type: &str) -> ContentKind {
     match data_type {
         "RGB_IMAGES" | "DEPTH_IMAGES" => ContentKind::Rgb,
@@ -49,9 +41,9 @@ pub fn content_type_for(data_type: &str) -> ContentKind {
 
 /// Build the cloud-file list for a trace.
 ///
-/// `data_type` is the wire label (matching Python's `DataType.value`).
-/// `data_type_name` is the producer-supplied alias (e.g. camera name); when
-/// missing we fall back to a single underscore so the path is well-formed.
+/// `data_type` is the wire label. `data_type_name` is the producer-supplied
+/// alias (e.g. camera name); when missing we fall back to a single underscore
+/// so the path is well-formed.
 pub fn cloud_file_list(data_type: &str, data_type_name: Option<&str>) -> Vec<CloudFile> {
     let prefix = format!("{data_type}/{}", data_type_name.unwrap_or("_"));
     let mut files = Vec::with_capacity(3);

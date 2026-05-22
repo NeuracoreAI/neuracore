@@ -1,11 +1,10 @@
 //! `launch` subcommand handler.
 //!
-//! Phase 2 wires the daemon lifecycle (PID file, signal handling, optional
-//! background detachment) on top of the Phase 1 configuration resolution. The
-//! daemon main loop installed here is intentionally minimal — it owns the
-//! single-instance lock and waits for SIGTERM/SIGINT to broadcast a shutdown.
-//! Per-trace pipelines, encoding, and the iceoryx2 IPC bring-up land in later
-//! phases; see `docs/data-daemon-rewrite.md`.
+//! Resolves configuration, then wires the daemon lifecycle: the PID-file
+//! single-instance lock, signal handling, and optional background
+//! detachment. The daemon main loop brings up the iceoryx2 IPC listener, the
+//! per-trace pipeline, and the cloud coordinators, then waits for
+//! SIGTERM/SIGINT to broadcast a graceful shutdown.
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -207,8 +206,6 @@ fn run_daemon(
     let db_path = runtime_env.db_path.clone();
     let recordings_root = runtime_env.recordings_root.clone();
     let storage_policy = StoragePolicy {
-        // Profile-driven storage cap arrives in Phase 7's quota tightening
-        // pass; for now we honour only the free-disk safety margin.
         storage_limit_bytes: config
             .storage_limit
             .and_then(|value| u64::try_from(value).ok()),
@@ -224,7 +221,7 @@ fn run_daemon(
         // Re-arm rows stuck in transient `registering` / `uploading` states
         // from a previous unclean exit — the claim/drain queries that drive
         // the coordinators only scan terminal-or-pending rows, so without
-        // this sweep a SIGKILL during phase 6 would leak traces.
+        // this sweep a SIGKILL mid-upload would leak traces.
         match state_store.reset_stale_pipeline_states().await {
             Ok(0) => {}
             Ok(count) => tracing::info!(count, "re-armed stale pipeline rows from prior run"),
@@ -232,7 +229,7 @@ fn run_daemon(
                 tracing::warn!(%error, "failed to reset stale pipeline states (continuing)")
             }
         }
-        // Phase 7 — burn trace rows the previous daemon left mid-write.
+        // Burn trace rows the previous daemon left mid-write.
         // Those rows can never reach `written` (the actor that owned them
         // is gone) and would otherwise pin their recording in the
         // "all traces written" gate the progress reporter waits on. The
@@ -312,7 +309,7 @@ fn run_daemon(
                 }
             };
 
-            // Phase 7 — hold a wakelock while at least one trace is queued
+            // Hold a wakelock while at least one trace is queued
             // for upload. Spawned regardless of `offline` so a profile
             // configured "online but flaky network" still keeps the host
             // awake when traces queue up locally; the wakelock task does
@@ -480,9 +477,8 @@ fn init_tracing(debug: bool, log_file: Option<&Path>) -> Result<()> {
             .with_ansi(false)
             .try_init();
     } else {
-        // Write to stderr so the parent's stdout=DEVNULL plumbing (used by
-        // the python launcher in background mode) does not silently swallow
-        // structured log output.
+        // Write to stderr so the parent's stdout=DEVNULL plumbing in
+        // background mode does not silently swallow structured log output.
         let _ = builder.with_writer(std::io::stderr).try_init();
     }
     Ok(())
@@ -495,7 +491,7 @@ fn ensure_default_profile_exists(profiles: &ProfileManager) -> Result<(), Profil
     }
 }
 
-/// Bundle of handles for the Phase 6 cloud coordinators.
+/// Bundle of handles for the cloud coordinators.
 struct CloudHandles {
     connection: crate::connection::MonitorHandle,
     registration: crate::cloud::RegistrationCoordinatorHandle,

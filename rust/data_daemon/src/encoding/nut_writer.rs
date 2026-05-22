@@ -1,8 +1,7 @@
 //! Minimal NUT-container muxer for a single raw-RGB24 video stream.
 //!
-//! Sub-phase 5c of the rewrite plan (see `docs/data-daemon-rewrite.md`). The
-//! video trace actor spools captured frames into a `raw.nut` file with this
-//! writer; phase 5d hands the file off to an `ffmpeg` transcoder.
+//! The video trace actor spools captured frames into a `raw.nut` file with
+//! this writer; the file is then handed off to an `ffmpeg` transcoder.
 //!
 //! The output is intentionally the bare minimum NUT spec elements needed for
 //! `ffprobe` to report the stream geometry: file id string, main header,
