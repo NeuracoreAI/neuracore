@@ -24,9 +24,9 @@ pub const RAW_NUT_FILENAME: &str = "raw.nut";
 
 /// Key for an on-disk trace directory.
 ///
-/// The three components map directly to the path segments described in
-/// `docs/data-daemon-rewrite.md` §4 — `recording_id` and `trace_id` come from
-/// the producer, `data_type` is the wire label carried in `StartTrace`.
+/// The three components map directly to the on-disk path segments:
+/// `recording_id` and `trace_id` come from the producer, `data_type` is the
+/// wire label carried in `StartTrace`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TracePath {
     /// Recording the trace belongs to.
@@ -83,11 +83,9 @@ impl TracePath {
 
 /// Sum the byte count of every regular file beneath `root`.
 ///
-/// Returns 0 when `root` does not exist (mirrors the Python helper
-/// `scan_used_bytes` which short-circuits when the recordings tree has not
-/// been created yet). Unreadable entries are silently skipped — the budget
-/// tracker treats them as zero, matching the Python implementation's
-/// `try/except OSError: continue`.
+/// Returns 0 when `root` does not exist, which is the expected state before
+/// the recordings tree has been created. Unreadable entries are silently
+/// skipped — the budget tracker treats them as zero.
 pub fn directory_bytes(root: &Path) -> u64 {
     let mut total: u64 = 0;
     walk(root, &mut |entry| {

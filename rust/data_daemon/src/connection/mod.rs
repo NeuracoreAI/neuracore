@@ -1,6 +1,6 @@
 //! Connection-state monitoring for the daemon.
 //!
-//! Phase 6b — runs a 10 s `HEAD /status/health` tick and publishes
+//! Runs a 10 s `HEAD /status/health` tick and publishes
 //! [`DaemonEvent::ConnectionState`] transitions to the broadcast bus so the
 //! upload coordinator can pause / resume on persistent network failures.
 

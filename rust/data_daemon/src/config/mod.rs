@@ -1,8 +1,5 @@
 //! Daemon configuration: the `DaemonConfig` model, profile storage, and the
 //! profile + environment + CLI override merge.
-//!
-//! Mirrors `neuracore/data_daemon/config_manager/` — see that package for the
-//! authoritative behaviour this Phase 1 port reproduces.
 
 pub mod env;
 pub mod profile;
@@ -26,10 +23,9 @@ const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 
 /// Configuration options for a Neuracore data daemon instance.
 ///
-/// Mirrors the Python `DaemonConfig` pydantic model: every field is optional
-/// so partial profiles (e.g. a YAML file containing only `offline: true`) and
-/// partial overrides round-trip cleanly. Field order matches the Python model
-/// so that `profile get`'s JSON output is byte-compatible.
+/// Every field is optional so partial profiles (e.g. a YAML file containing
+/// only `offline: true`) and partial overrides round-trip cleanly. Field
+/// order is fixed so that `profile get`'s JSON output is stable.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DaemonConfig {
     /// Maximum storage the daemon may use locally, in bytes.
@@ -55,10 +51,8 @@ pub struct DaemonConfig {
 impl DaemonConfig {
     /// Overlay `other`'s set fields on top of `self`.
     ///
-    /// Mirrors pydantic's `model_copy(update=...)` as used by the Python
-    /// `ConfigManager` and `ProfileManager`: a field is overwritten only when
-    /// `other` provides a value for it, so `None` never clears an existing
-    /// setting.
+    /// A field is overwritten only when `other` provides a value for it, so
+    /// `None` never clears an existing setting.
     pub fn overlay(&mut self, other: &DaemonConfig) {
         if other.storage_limit.is_some() {
             self.storage_limit = other.storage_limit;
@@ -118,7 +112,7 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
 }
 
 /// Free bytes available to an unprivileged user on the filesystem holding
-/// `path`, matching Python's `shutil.disk_usage(path).free`.
+/// `path`.
 fn free_disk_bytes(path: &Path) -> std::io::Result<u64> {
     let stats = nix::sys::statvfs::statvfs(path).map_err(std::io::Error::from)?;
     let blocks_available: u64 = stats.blocks_available();

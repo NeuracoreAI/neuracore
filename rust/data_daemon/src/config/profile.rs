@@ -13,8 +13,8 @@ use thiserror::Error;
 
 use crate::config::{build_default_daemon_config, DaemonConfig};
 
-/// Errors raised while managing profiles. The `Display` strings match the
-/// Python exception messages (`!r` quoting) so CLI output stays identical.
+/// Errors raised while managing profiles. The `Display` strings are surfaced
+/// verbatim in CLI output, so their wording is part of the CLI contract.
 #[derive(Debug, Error)]
 pub enum ProfileError {
     /// The requested profile file does not exist.
@@ -117,8 +117,7 @@ impl ProfileManager {
             Err(error) => return Err(error.into()),
         };
 
-        // An empty file parses to an all-default config, matching the Python
-        // `yaml.safe_load(...) or {}` fallback.
+        // An empty file parses to an all-default config.
         if contents.trim().is_empty() {
             return Ok(DaemonConfig::default());
         }

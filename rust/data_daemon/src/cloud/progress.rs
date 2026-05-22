@@ -1,6 +1,6 @@
 //! Periodic progress reporter.
 //!
-//! Phase 6f. Every [`PROGRESS_REPORT_INTERVAL`] ticks the reporter walks the
+//! Every [`PROGRESS_REPORT_INTERVAL`] ticks the reporter walks the
 //! recordings table and, for every stopped recording whose traces have all
 //! reached `Uploaded` (and whose `progress_reported` is still `Pending`),
 //! POSTs `/org/{org}/recording/{rec}/traces-metadata` with the bytes-
@@ -193,9 +193,8 @@ async fn report_progress(
 ) {
     // Treat Failed as terminal alongside Uploaded so a single bad trace
     // doesn't pin the recording in `progress_reported = pending` forever.
-    // The backend receives `bytes_uploaded = 0` for failed entries, which
-    // matches the Python progress-report semantics (the snapshot includes
-    // every trace's `total_bytes`, even if the actual upload bytes are 0).
+    // The backend receives `bytes_uploaded = 0` for failed entries; the
+    // snapshot still includes every trace's `total_bytes`.
     let all_settled = traces.iter().all(|trace| {
         matches!(
             trace.upload_status,

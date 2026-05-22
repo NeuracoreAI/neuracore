@@ -1,10 +1,8 @@
 //! Command-line interface.
 //!
-//! The `clap` command tree mirrors the Python `typer` CLI in
-//! `neuracore/data_daemon/main.py` and `config_manager/args_handler.py`
-//! exactly — same commands, flag names, aliases, and help strings — so that
-//! `python -m neuracore.data_daemon <cmd>` behaves identically once the shim
-//! hands off to this binary.
+//! The `clap` command tree — commands, flag names, aliases, and help strings
+//! — is part of the daemon's public contract: `python -m neuracore.data_daemon
+//! <cmd>` execs this binary, so the surface here must stay stable.
 
 mod launch;
 mod profile;
@@ -133,12 +131,10 @@ pub fn run() -> Result<()> {
         Command::Stop => stop::run(),
         Command::Status => status::run(),
         Command::Install => {
-            // Preserves the Python stub behaviour for parity.
             println!("Install command is not implemented yet.");
             Ok(())
         }
         Command::Uninstall => {
-            // Preserves the Python stub behaviour for parity.
             println!("Uninstall command is not implemented yet.");
             Ok(())
         }

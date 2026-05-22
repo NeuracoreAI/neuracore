@@ -2,9 +2,7 @@
 //!
 //! Reads the daemon's PID from `NEURACORE_DAEMON_PID_PATH`, sends SIGTERM,
 //! waits up to 10 s for graceful exit, and escalates to SIGKILL if the
-//! daemon is still alive at the deadline. Mirrors the Python
-//! `daemon_os_control.{terminate_pid,wait_for_exit,force_kill}` sequence
-//! used by `run_stop`.
+//! daemon is still alive at the deadline.
 
 use std::path::Path;
 use std::time::{Duration, Instant};

@@ -1,6 +1,6 @@
 //! Resumable file uploader coordinator.
 //!
-//! Phase 6d. Subscribes to [`DaemonEvent::ReadyForUpload`] (and re-scans the
+//! Subscribes to [`DaemonEvent::ReadyForUpload`] (and re-scans the
 //! state store on startup for any traces already in the registered/queued
 //! state). For each on-disk artefact the coordinator PUTs 64 MiB chunks to
 //! the GCS resumable session URI persisted by the registration coordinator,
@@ -36,8 +36,7 @@ use crate::state::{
 };
 use crate::storage::paths::TracePath;
 
-/// Chunk size used for resumable uploads — matches
-/// `ResumableFileUploader.CHUNK_SIZE` in the Python implementation.
+/// Chunk size used for resumable uploads.
 pub const CHUNK_SIZE: usize = 64 * 1024 * 1024;
 /// Cap on the exponential backoff for transient upload failures.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);

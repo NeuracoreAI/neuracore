@@ -1,6 +1,6 @@
 //! Batch registration coordinator.
 //!
-//! Phase 6c. Subscribes to [`DaemonEvent::TraceWritten`], buffers up to
+//! Subscribes to [`DaemonEvent::TraceWritten`], buffers up to
 //! `BATCH_SIZE` traces (or up to `MAX_WAIT`) and POSTs them to
 //! `/org/{org}/recording/traces/batch-register`. Successful registrations
 //! persist the returned resumable session URIs on the trace row and emit

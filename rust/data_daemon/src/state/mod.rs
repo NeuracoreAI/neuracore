@@ -1,14 +1,12 @@
 //! Daemon state management: SQLite persistence and the broadcast event bus.
 //!
-//! Phase 3 of the rewrite (see `docs/data-daemon-rewrite.md`). Defines the
-//! [`StateStore`] trait, its [`SqliteStateStore`] implementation, and the
-//! [`DaemonEvent`] broadcast bus subscribers will use in Phase 4+.
+//! Defines the [`StateStore`] trait, its [`SqliteStateStore`] implementation,
+//! and the [`DaemonEvent`] broadcast bus that the dispatcher, trace actors,
+//! and cloud coordinators subscribe to.
 //!
-//! The trait surface and broadcast variants are populated ahead of their first
-//! caller — the dispatcher, registration coordinator, and friends land in
-//! Phase 4. The `#[allow(dead_code)]` on the sub-modules silences the
-//! corresponding "never used" warnings until then; remove it once Phase 4
-//! wires the consumers in.
+//! The trait surface and broadcast variants include items not reachable from
+//! every build configuration; the `#[allow(dead_code)]` on the sub-modules
+//! keeps the compile clean without hiding the typed surface from doctests.
 
 #[allow(dead_code)]
 pub mod events;

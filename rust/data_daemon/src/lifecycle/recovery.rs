@@ -2,8 +2,8 @@
 //!
 //! After SIGKILL or a host crash, on-disk artefacts from the previous daemon
 //! run can be left behind: a stale PID file containing a PID that is no longer
-//! running, partially-written recordings, and (once Phase 4 lands)
-//! iceoryx2 dead-node files. This module exposes the small surface needed by
+//! running, partially-written recordings, and iceoryx2 dead-node files. This
+//! module exposes the small surface needed by
 //! `cli::launch` to bring the host into a consistent state before the new
 //! daemon starts.
 
@@ -135,10 +135,10 @@ mod tests {
     #[test]
     fn cleanup_stale_ipc_is_safe_on_a_clean_host() {
         // Smoke test: the call must return even when there are no dead
-        // nodes to reclaim. The real reclamation path is exercised by
-        // `test_signal_cleanup.py` once Phase 4 lands end-to-end; reproducing
-        // a SIGKILL'd iceoryx2 node from inside a cargo test would require
-        // spawning a child binary, which is out of scope here.
+        // nodes to reclaim. The real reclamation path is exercised by the
+        // end-to-end signal-cleanup integration test; reproducing a SIGKILL'd
+        // iceoryx2 node from inside a cargo test would require spawning a
+        // child binary, which is out of scope here.
         //
         // We can't assert the exact count because a parallel cargo test
         // process could be creating nodes; we just check the call returned.

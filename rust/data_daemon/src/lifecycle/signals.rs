@@ -1,11 +1,9 @@
 //! Async SIGTERM / SIGINT handling, fanned out to subscribers over a
 //! `tokio::sync::broadcast`.
 //!
-//! Mirrors the Python `install_signal_handlers` which raises
-//! `KeyboardInterrupt` from the signal — Tokio's equivalent is the broadcast
-//! channel the daemon's main loop awaits. SIGHUP is intentionally not handled
-//! at this phase; the Python implementation uses it for reload, which is not
-//! exercised by the integration tests and can be added later if needed.
+//! Both signals trigger a graceful shutdown: the broadcast channel is the
+//! notification the daemon's main loop awaits. SIGHUP is intentionally not
+//! handled.
 
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::broadcast;

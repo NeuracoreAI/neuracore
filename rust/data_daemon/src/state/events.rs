@@ -1,9 +1,8 @@
 //! Broadcast event bus driving cross-actor coordination.
 //!
-//! Mirrors the `tokio::sync::broadcast::channel(256)` described in section 5
-//! of the rewrite plan. Phase 3 establishes the variants and the bus type;
-//! later phases attach the dispatcher, registration coordinator, upload
-//! coordinator, status updater, and progress reporter as subscribers.
+//! A `tokio::sync::broadcast::channel(256)` whose subscribers are the
+//! dispatcher, registration coordinator, upload coordinator, status updater,
+//! and progress reporter.
 
 use tokio::sync::broadcast;
 
@@ -15,7 +14,7 @@ use tokio::sync::broadcast;
 /// store on the next tick.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-/// Connection state reported by the network monitor (phase 6b).
+/// Connection state reported by the network monitor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
     /// Backend reachable.

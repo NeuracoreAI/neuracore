@@ -1,21 +1,15 @@
 //! Sidecar `trace.json` for video traces.
 //!
-//! Sub-phase 5e of the rewrite plan (see `docs/data-daemon-rewrite.md`).
-//! Mirrors `recording_encoding_disk_manager/encoding/video_trace.py` —
-//! specifically the metadata-accumulation half: each frame's metadata
-//! dictionary is captured as it arrives, and on finalize the writer flushes a
-//! compact JSON array alongside the mp4 outputs.
+//! Each frame's metadata dictionary is captured as it arrives, and on finalize
+//! the writer flushes a compact JSON array alongside the mp4 outputs.
 //!
-//! Byte layout matches the Python writer so the upload coordinator and any
-//! offline diff tooling treat both implementations as interchangeable:
+//! On-disk byte layout:
 //!
-//! - One JSON array; `serde_json` default rendering (no whitespace) matches
-//!   `json.dumps(separators=(",", ":"))`.
+//! - One JSON array; `serde_json` default rendering, no whitespace.
 //! - On finish, each entry gets `"frame_idx": <index>` and `"frame": null`
 //!   added/overwritten — `frame_idx` is the 0-based position in the list and
-//!   `frame` is the spot where the Python writer would have inlined a base64
-//!   frame thumbnail (always null in the current pipeline, kept for forward
-//!   compatibility with the dashboard schema).
+//!   `frame` is a base64 thumbnail slot the dashboard schema expects (always
+//!   null in the current pipeline, kept for forward compatibility).
 //! - Map insertion order is preserved (enabled by `preserve_order` on
 //!   `serde_json` in `data_daemon`'s `Cargo.toml`).
 
@@ -56,9 +50,9 @@ pub enum MetadataError {
 /// Accumulator for per-frame metadata dictionaries.
 ///
 /// Construction is allocation-only; the file isn't touched until
-/// [`finish`](Self::finish) runs, mirroring the Python implementation which
-/// writes the sidecar in one shot after both mp4 encoders close. Buffering in
-/// memory is acceptable here because video metadata is tiny relative to the
+/// [`finish`](Self::finish) runs, which writes the sidecar in one shot after
+/// both mp4 encoders close. Buffering in memory is acceptable here because
+/// video metadata is tiny relative to the
 /// raw frame payloads — a 30 minute capture at 30 fps caps out around 50 K
 /// entries with a handful of small numeric fields each.
 #[derive(Debug, Default)]
@@ -85,8 +79,7 @@ impl VideoMetadataAccumulator {
     /// Record one frame's metadata. The supplied map is taken by value so the
     /// caller cannot accidentally mutate it after recording, and so we avoid
     /// an extra clone on the hot path. The `"frame"` slot is initialised to
-    /// `null` immediately (matching the Python writer's first pass over the
-    /// metadata); `finish` re-stamps it alongside `frame_idx`.
+    /// `null` immediately; `finish` re-stamps it alongside `frame_idx`.
     pub fn record_frame(&mut self, mut entry: Map<String, Value>) {
         entry.insert("frame".to_string(), Value::Null);
         self.entries.push(entry);
@@ -94,8 +87,7 @@ impl VideoMetadataAccumulator {
 
     /// Convenience: record a frame whose metadata is provided as a
     /// `serde_json::Value`. Non-object values (numbers, strings, arrays) are
-    /// dropped silently — the Python writer behaves the same way via
-    /// `if not isinstance(obj, dict): return`.
+    /// dropped silently.
     pub fn record_value(&mut self, value: Value) {
         match value {
             Value::Object(map) => self.record_frame(map),
@@ -132,11 +124,10 @@ impl VideoMetadataAccumulator {
         let path = output_dir.join(filename);
 
         for (index, entry) in self.entries.iter_mut().enumerate() {
-            // `frame_idx` is the 0-based position; `frame` is the legacy
-            // base64 thumbnail slot the dashboard still expects but the
-            // pipeline no longer populates. Stamping both here keeps the
-            // sidecar identical to the Python writer's output even when the
-            // producer omitted them upstream.
+            // `frame_idx` is the 0-based position; `frame` is the base64
+            // thumbnail slot the dashboard schema expects but the pipeline
+            // does not populate. Stamping both here keeps the sidecar
+            // well-formed even when the producer omitted them upstream.
             entry.insert("frame_idx".to_string(), Value::from(index as u64));
             entry.insert("frame".to_string(), Value::Null);
         }
@@ -189,12 +180,11 @@ mod tests {
     }
 
     #[test]
-    fn fixture_matches_python_video_trace_output() {
-        // Hand-rolled fixture mirroring the bytes a Python `VideoTrace.finish`
-        // would produce for the same inputs. The Python writer:
-        //   - calls `json.dumps(separators=(",", ":"), ensure_ascii=False)`
-        //   - on every entry: `entry["frame_idx"] = i; entry["frame"] = None`
-        //   - preserves dict insertion order (Python 3.7+)
+    fn fixture_matches_expected_video_trace_output() {
+        // Pins the exact sidecar byte layout:
+        //   - compact JSON (no whitespace, non-ASCII left unescaped)
+        //   - on every entry: `frame_idx` is the index, `frame` is null
+        //   - object insertion order is preserved
         //
         // Inputs intentionally exercise: integer + float timestamps, string
         // values, nested objects, and an entry whose `frame` key was already
@@ -212,8 +202,8 @@ mod tests {
         entry_b.insert("timestamp".to_string(), json!(2));
         entry_b.insert("source".to_string(), json!("rgb-camera"));
         entry_b.insert("extra".to_string(), json!({"sequence": 17, "flag": true}));
-        // Pre-existing `frame` payload — the Python writer overwrites it with
-        // null on the second pass; this test confirms we do too.
+        // Pre-existing `frame` payload — `finish` must overwrite it with null;
+        // this test confirms that.
         entry_b.insert("frame".to_string(), json!("stale"));
         accumulator.record_frame(entry_b);
 
@@ -223,7 +213,7 @@ mod tests {
         let expected = br#"[{"timestamp":1.5,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
         assert_eq!(
             actual, expected,
-            "metadata sidecar bytes diverged from Python writer fixture"
+            "metadata sidecar bytes diverged from expected fixture"
         );
         assert_eq!(written_bytes, expected.len() as u64);
     }
@@ -252,9 +242,9 @@ mod tests {
 
     #[test]
     fn record_value_flattens_array_payloads() {
-        // Python's `_handle_metadata` recurses through list payloads — the
-        // producer is allowed to batch several frames into one envelope. The
-        // accumulator must record each contained dict as its own entry.
+        // The producer is allowed to batch several frames into one envelope,
+        // so a list payload must be flattened: the accumulator records each
+        // contained dict as its own entry.
         let tempdir = TempDir::new().unwrap();
         let mut accumulator = VideoMetadataAccumulator::new();
         accumulator.record_value(json!([

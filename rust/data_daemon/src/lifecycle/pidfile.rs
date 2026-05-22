@@ -6,12 +6,10 @@
 //! value is dropped — either explicitly on graceful shutdown or implicitly on
 //! process exit — the kernel releases the lock and the file is unlinked.
 //!
-//! Compared to the Python `acquire_pid_file` in
-//! `lifecycle/daemon_os_control.py` this gives us atomic single-instance
-//! semantics across crash, SIGKILL, and parallel launches without a separate
-//! `filelock`-based door lock: a stale PID file from a SIGKILL'd daemon has no
-//! active flock holder, so the next launcher's `flock` immediately succeeds and
-//! the launcher overwrites the contents with its own PID.
+//! The `flock` gives atomic single-instance semantics across crash, SIGKILL,
+//! and parallel launches: a stale PID file from a SIGKILL'd daemon has no
+//! active flock holder, so the next launcher's `flock` immediately succeeds
+//! and the launcher overwrites the contents with its own PID.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -45,7 +43,7 @@ impl PidFile {
     /// it. Returns an [`PidFileError::AlreadyRunning`] if another daemon
     /// already holds the lock.
     ///
-    /// Parent directories are created if missing, mirroring the Python helper.
+    /// Parent directories are created if missing.
     pub fn acquire(path: impl Into<PathBuf>) -> Result<Self, PidFileError> {
         let path = path.into();
         if let Some(parent) = path.parent() {
@@ -135,10 +133,9 @@ fn read_pid_from_open_file(file: &File) -> Option<i32> {
 /// Return `true` when `pid` is a live, non-zombie process the current user can
 /// signal.
 ///
-/// Mirrors `daemon_os_control.pid_is_running`: `kill(pid, 0)` probes
-/// existence, and (on Linux) `/proc/<pid>/stat` is consulted to exclude
-/// zombies. On non-Linux targets the zombie filter is a no-op — the daemon is
-/// Linux-first per the rewrite plan.
+/// `kill(pid, 0)` probes existence, and (on Linux) `/proc/<pid>/stat` is
+/// consulted to exclude zombies. On non-Linux targets the zombie filter is a
+/// no-op — the daemon is Linux-first.
 pub fn pid_is_running(pid: i32) -> bool {
     match nix::sys::signal::kill(Pid::from_raw(pid), None) {
         Ok(()) => !is_zombie(pid),

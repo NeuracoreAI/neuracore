@@ -411,9 +411,8 @@ fn publish(target: Target, envelope: &Envelope) -> Result<(), ProducerError> {
 
 /// Per-item JSON shape written to `trace.json` for scalar joint streams.
 ///
-/// Field order matches the legacy `BATCHED_JOINT_DATA` zmq path
-/// ([data_bridge.py:508](../../../neuracore/data_daemon/communications_management/consumer/data_bridge.py#L508))
-/// so byte-level diffs against historical recordings stay stable.
+/// Field order is fixed (`timestamp` before `value`) so byte-level diffs of
+/// `trace.json` against historical recordings stay stable.
 #[derive(serde::Serialize)]
 struct ScalarFrameEntry {
     timestamp: f64,
@@ -545,7 +544,7 @@ fn log_joints(
         for ((_, value), trace_id) in items.iter().zip(trace_ids) {
             // serde_json (via ryu) always emits at least one fractional digit
             // for f64 — so integer-valued joint values land on disk as `1.0`,
-            // not `1`, matching Python's `json.dumps` shape.
+            // not `1`, keeping the column consistently typed as a float.
             let payload = serde_json::to_vec(&ScalarFrameEntry {
                 timestamp: timestamp_for_json,
                 value: *value,

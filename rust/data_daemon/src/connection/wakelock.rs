@@ -1,8 +1,8 @@
 //! Hold a wakelock while uploads are in flight.
 //!
-//! Phase 7. When `NCD_KEEP_WAKELOCK_WHILE_UPLOAD=1` the daemon should
-//! prevent the host from idling into suspend or hitting a session-idle
-//! inhibitor while a recording upload is still going. On Linux this is best
+//! When `NCD_KEEP_WAKELOCK_WHILE_UPLOAD=1` the daemon prevents the host from
+//! idling into suspend or hitting a session-idle inhibitor while a recording
+//! upload is still going. On Linux this is best
 //! expressed through `systemd-inhibit`, which holds the inhibitor for as
 //! long as its child process keeps running. The wakelock task:
 //!
@@ -17,7 +17,7 @@
 //! Hosts without `systemd-inhibit` on `$PATH` log a single warning and
 //! degrade to a no-op — the upload path itself is untouched. macOS / BSDs
 //! would need a per-platform shim (the macOS-equivalent stay-awake CLI);
-//! the rewrite plan explicitly scopes this to Linux for v1.
+//! this feature is Linux-only.
 
 use std::collections::HashSet;
 use std::process::{Child, Command, Stdio};

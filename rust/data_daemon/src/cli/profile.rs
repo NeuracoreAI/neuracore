@@ -50,9 +50,9 @@ pub fn run(command: ProfileCommand) {
     }
 }
 
-/// Collapse a `--flag` / `--no-flag` pair into the tri-state the Python CLI
-/// expresses with `bool | None`: unset stays `None`, otherwise the flag that
-/// `clap` left set (last one wins) decides the value.
+/// Collapse a `--flag` / `--no-flag` pair into a tri-state `Option<bool>`:
+/// unset stays `None`, otherwise the flag that `clap` left set (last one
+/// wins) decides the value.
 fn tristate(enabled: bool, disabled: bool) -> Option<bool> {
     if enabled {
         Some(true)

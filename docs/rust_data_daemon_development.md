@@ -1,6 +1,6 @@
 # Rust Data Daemon — Developer Guide
 <!-- cspell:disable -->
-This guide is for developers working on the Rust rewrite of the data daemon under [rust/](../rust/). For the end-user CLI (profiles, launch, stop, troubleshooting) see [data_daemon.md](data_daemon.md). For the architecture and phased plan see [data-daemon-rewrite.md](data-daemon-rewrite.md).
+This guide is for developers working on the Rust data daemon under [rust/](../rust/). For the end-user CLI (profiles, launch, stop, troubleshooting) see [data_daemon.md](data_daemon.md).
 
 ---
 
@@ -160,7 +160,7 @@ export NCD_RUST_DAEMON=1
 python your_script.py
 ```
 
-Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. See [data-daemon-rewrite.md §Phase 4i](data-daemon-rewrite.md) for the rollout details and the small shim that bridges to the Python `ProducerChannel` contract.
+Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. A small shim bridges the native producer to the Python `ProducerChannel` contract.
 
 ---
 
@@ -227,7 +227,7 @@ sqlite3 "$NEURACORE_DAEMON_DB_PATH" ".tables"
 sqlite3 "$NEURACORE_DAEMON_DB_PATH" "SELECT trace_id, write_status, registration_status, upload_status FROM traces;"
 ```
 
-Schema overview is in [data-daemon-rewrite.md §5](data-daemon-rewrite.md).
+The schema is defined by the `sqlx` migrations under [rust/data_daemon/migrations/](../rust/data_daemon/migrations/).
 
 ---
 
@@ -249,6 +249,5 @@ Run `pre-commit run --all-files` from the repo root to exercise the full hook ch
 
 ## Further reading
 
-- [data-daemon-rewrite.md](data-daemon-rewrite.md) — full architecture, phase plan, and status snapshot.
 - [data_daemon.md](data_daemon.md) — end-user CLI, profiles, environment variables, troubleshooting.
 - [contribution_guide.md](contribution_guide.md) — repo-wide contribution flow, release process, PR conventions.
