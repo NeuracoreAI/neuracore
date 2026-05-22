@@ -176,6 +176,7 @@ def connect_robot(
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     get_recording_state_manager()
+    robot._register_remote_stop_handler()
     return robot
 
 

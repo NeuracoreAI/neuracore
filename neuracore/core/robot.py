@@ -6,6 +6,7 @@ URDF/MJCF model uploads, data stream management, and coordinates recording
 state across multiple robot instances.
 """
 
+import functools
 import io
 import logging
 import os
@@ -336,13 +337,8 @@ class Robot:
         get_recording_state_manager().recording_stopped(
             robot_id=self.id, instance=self.instance, recording_id=recording_id
         )
-        producer_stop_sequence_numbers = self._stop_all_streams(
-            wait_for_producer_drain=wait_for_producer_drain
-        )
-
-        self._get_daemon_recording_context().stop_recording(
-            recording_id=recording_id,
-            producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+        self._drain_streams_and_notify_daemon(
+            recording_id, wait_for_producer_drain=wait_for_producer_drain
         )
 
         try:
@@ -367,6 +363,35 @@ class Robot:
             )
         except requests.exceptions.RequestException as e:
             raise RobotError(f"Failed to stop recording: {str(e)}")
+
+    def _drain_streams_and_notify_daemon(
+        self, recording_id: str, *, wait_for_producer_drain: bool
+    ) -> None:
+        """Stop all streams and send the recording-stopped IPC message to the daemon."""
+        try:
+            producer_stop_sequence_numbers = self._stop_all_streams(
+                wait_for_producer_drain=wait_for_producer_drain
+            )
+            self._get_daemon_recording_context().stop_recording(
+                recording_id=recording_id,
+                producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to stop streams and notify daemon for recording_id=%s",
+                recording_id,
+            )
+
+    def _register_remote_stop_handler(self) -> None:
+        """Register a callback to drain streams when a remote stop arrives."""
+        assert self.id is not None
+        get_recording_state_manager().register_remote_stop_handler(
+            robot_id=self.id,
+            instance=self.instance,
+            callback=functools.partial(
+                self._drain_streams_and_notify_daemon, wait_for_producer_drain=False
+            ),
+        )
 
     def _stop_all_streams(
         self,
@@ -731,6 +756,10 @@ class Robot:
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()
+        if self.id is not None:
+            get_recording_state_manager().deregister_remote_stop_handler(
+                self.id, self.instance
+            )
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None
