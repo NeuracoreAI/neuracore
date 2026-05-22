@@ -7,6 +7,7 @@ from pathlib import Path
 
 import typer
 
+from neuracore.core.exceptions import AuthenticationError
 from neuracore.data_daemon.config_manager.cli_options import (
     ApiKeyOption,
     BackgroundOption,
@@ -32,6 +33,7 @@ from neuracore.data_daemon.config_manager.profiles import (
 )
 from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME, SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.auth_preflight import ensure_daemon_auth_ready
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
     cleanup_stale_client_state,
@@ -209,6 +211,8 @@ def run_launch(
         env_overrides["NDD_DEBUG"] = "true"
 
     try:
+        ensure_daemon_auth_ready(env_overrides)
+
         daemon_process = launch_new_daemon_subprocess(
             pid_path=pid_path,
             db_path=db_path,
@@ -219,6 +223,9 @@ def run_launch(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
     except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+    except AuthenticationError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=1)
 

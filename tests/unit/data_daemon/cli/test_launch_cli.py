@@ -31,6 +31,7 @@ def test_launch_background_exits_if_pid_is_running(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
 
     def fake_launch(**_: object) -> FakePopen:
         raise ah.DaemonLifecycleError("Daemon already running (pid=12345).")
@@ -55,6 +56,7 @@ def test_launch_background_propagates_runtime_error(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
 
     def fake_launch(**_: object) -> FakePopen:
         raise RuntimeError("Daemon failed to start.")
@@ -78,6 +80,7 @@ def test_launch_background_passes_expected_args(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
 
     captured_kwargs: dict[str, object] = {}
 
@@ -106,6 +109,7 @@ def test_launch_foreground_passes_background_false(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
 
     captured_kwargs: dict[str, object] = {}
 
@@ -131,6 +135,7 @@ def test_launch_foreground_waits_and_sends_sigint_on_keyboard_interrupt(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
 
     popen_obj = FakePopen(pid=66666)
 
@@ -164,6 +169,7 @@ def test_launch_with_profile_sets_env_and_validates_profile_exists(
 
     monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
     monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(ah, "ensure_daemon_auth_ready", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(ah.profile_manager, "get_profile", lambda name: object())
 
     captured_kwargs: dict[str, object] = {}

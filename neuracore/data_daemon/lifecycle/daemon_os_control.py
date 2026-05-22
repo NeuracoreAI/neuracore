@@ -19,6 +19,7 @@ from neuracore.data_daemon.const import (
     SOCKET_PATH,
 )
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.lifecycle.auth_preflight import ensure_daemon_auth_ready
 
 # cspell:ignore WNOHANG waitpid
 
@@ -230,6 +231,8 @@ def launch_new_daemon_subprocess(
     """Launch a new daemon subprocess, rejecting an already-running daemon."""
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_file_lock = str(pid_path) + ".lock"
+
+    ensure_daemon_auth_ready(env_overrides)
 
     with filelock.FileLock(pid_file_lock):
         existing_pid = read_pid_from_file(pid_path)
