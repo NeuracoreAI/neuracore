@@ -261,6 +261,9 @@ class Dataset:
     def get_by_name(name: str, non_exist_ok: bool = False) -> Optional["Dataset"]:
         """Retrieve an existing dataset by name.
 
+        Also looks in shared datasets, prioritizing org datasets if there are
+        name conflicts.
+
         Args:
             name: Name of the dataset to retrieve.
             non_exist_ok: If True, returns None when dataset is not found
