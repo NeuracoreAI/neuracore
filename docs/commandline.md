@@ -10,6 +10,8 @@ The `neuracore` command helps you authenticate, choose an organization, monitor 
   `neuracore select-org --org-name "<ORG_NAME>"`
 - Config is stored at `~/.neuracore/config.json`. Override the backend with `NEURACORE_API_URL=https://staging.api.neuracore.com/api` if needed.
 
+Training commands require `neuracore[ml]` (`pip install "neuracore[ml]"`).
+
 ## 10-minute journey: sign in → monitor → inspect → serve
 1) **Sign in and pick your org**  
    (Run this once per machine; re-run if you switch orgs.)
@@ -18,17 +20,26 @@ neuracore login
 neuracore select-org --org-name "<ORG_NAME>"
 ```
 
-2) **List recent training runs** (cloud by default)  
+2) **List recent training runs** (cloud and local by default)  
 ```bash
-neuracore training list --cloud --limit 5
+neuracore training list --limit 5
 # Expected: a table plus plain-text rows like:
 # run-2024-08-12 | Yes | diffusion_policy | <DATASET_ID>
+
+# Cloud only:
+neuracore training list --cloud --limit 5
+# Local only:
+neuracore training list --local --limit 5
 ```
 
 3) **Inspect a run**
 ```bash
+# Cloud (default)
 neuracore training inspect --training-name <RUN_NAME_OR_ID>
 # Add --config to print algorithm config, or --json for raw JSON.
+
+# Local
+neuracore training inspect --local --training-name <RUN_NAME>
 ```
 
 4) **Launch a local policy server to sanity-check inference**
@@ -56,6 +67,8 @@ neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
   - Status examples: `PENDING`, `RUNNING`, `COMPLETED`.
 - `neuracore training inspect --training-name <RUN> [--cloud | --local] [--root <DIR>] [--config] [--json]`  
   - Cloud is the default; add `--local` to read `training_run.json` from a local run directory.
+- `neuracore training monitor [--training-name <RUN>] [--root <DIR>] [--port <PORT>] [--host <HOST>] [--bind-all]`  
+  - Launches TensorBoard for local runs. With `--training-name`, opens that run’s `tensorboard/` logs; without it, opens all runs under `--root` for comparison. Requires the `tensorboard` executable on PATH (`neuracore[ml]`).
 - `neuracore training delete --training-name <RUN> [--cloud | --local] [--root <DIR>] [--yes]`  
   - Cloud is the default; add `--local` to remove a run directory under `--root`. Prompts unless `--yes` is used.
 - `neuracore training start` — currently a placeholder; use the SDK to launch training and return here to monitor.
@@ -66,12 +79,18 @@ neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
 ## Troubleshooting
 - `Authentication failed. Please run 'neuracore login' first.`  
   - Re-run `neuracore login`; confirm `~/.neuracore/config.json` exists and contains an API key.
+- `Training commands require optional ML dependencies` / import errors on `neuracore training`.  
+  - Install with `pip install "neuracore[ml]"`.
 - No runs show up but you know they exist.  
   - Ensure you selected the right org (`neuracore select-org`) and used the correct `--status` filter.
 - `Invalid status filter` when listing runs.  
   - Use one of `PENDING`, `RUNNING`, `COMPLETED`, `FAILED`, `CANCELLED`.
 - Local inspect fails with missing `training_run.json`.  
   - Point `--root` to the directory where your Hydra runs live (default `~/.neuracore/training/runs`).
+- `TensorBoard executable not found` when running `training monitor`.  
+  - Install `neuracore[ml]`. If you see `No module named 'pkg_resources'`, run `pip install "setuptools<82"`.
+- `TensorBoard log directory not found` when running `training monitor`.  
+  - Confirm the run finished at least one logging step, or use the correct `--training-name` / `--root`.
 - `launch-server` JSON errors.  
   - Ensure the JSON strings use double quotes and DataType keys match your model (`"RGB_IMAGES"`, `"JOINT_TARGET_POSITIONS"`, etc.).
 
@@ -79,4 +98,5 @@ neuracore training delete --training-name <RUN_NAME_OR_ID> --yes
 - **Where is CLI config stored?** `~/.neuracore/config.json` (API key and current org).  
 - **How do I switch API environments?** Set `NEURACORE_API_URL` before running commands.  
 - **Where are local runs written?** `~/.neuracore/training/runs` (override with `--root`).  
+- **How do I view local training metrics?** `neuracore training monitor --training-name <RUN_NAME>`.  
 - **Can the CLI upload datasets or start training?** Not yet. Dataset creation/upload and training launch are available through the Python API; `neuracore training start` is a placeholder today.

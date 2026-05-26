@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import sys
 from collections.abc import Iterable
 from datetime import datetime
@@ -461,6 +462,80 @@ def inspect_training(
             _render_local_inspect(metadata)
     except (AuthenticationError, ConfigError, TrainingRunError) as exc:
         typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1)
+
+
+@training_app.command("monitor")
+def monitor_training(
+    training_name: str | None = typer.Option(
+        None,
+        "--training-name",
+        "-t",
+        help=(
+            "Local training run name to launch TensorBoard for. If omitted, "
+            "launches TensorBoard for all local runs under --root."
+        ),
+    ),
+    root: Path = typer.Option(
+        LOCAL_RUNS_ROOT,
+        "--root",
+        "-r",
+        help="Root directory containing local training runs.",
+        exists=False,
+        file_okay=False,
+        dir_okay=True,
+        writable=False,
+        readable=True,
+        resolve_path=True,
+    ),
+    port: int = typer.Option(6006, "--port", "-p", help="TensorBoard port."),
+    host: str = typer.Option("127.0.0.1", "--host", help="TensorBoard host."),
+    bind_all: bool = typer.Option(
+        False,
+        "--bind-all",
+        help="Bind to 0.0.0.0 (overrides --host).",
+    ),
+) -> None:
+    """Launch TensorBoard for a local training run."""
+    tensorboard_exe = shutil.which("tensorboard")
+    if not tensorboard_exe:
+        typer.echo(
+            "TensorBoard executable not found. Install neuracore[ml] (or tensorboard) "
+            "and ensure the 'tensorboard' command is on PATH.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if training_name:
+        run_path = _resolve_local_run_path(training_name, root)
+        logdir = run_path / "tensorboard"
+    else:
+        # Useful for comparing multiple runs in one UI.
+        logdir = root
+
+    if not logdir.exists():
+        typer.echo(f"TensorBoard log directory not found: {logdir}", err=True)
+        raise typer.Exit(code=1)
+
+    resolved_host = "0.0.0.0" if bind_all else host
+    cmd = [
+        tensorboard_exe,
+        "--logdir",
+        str(logdir),
+        "--port",
+        str(port),
+        "--host",
+        resolved_host,
+    ]
+
+    typer.echo(f"Launching TensorBoard with logdir: {logdir}")
+    typer.echo("Press Ctrl+C to stop.")
+    try:
+        subprocess.run(cmd, check=False)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=0)
+    except OSError as exc:
+        typer.echo(f"Failed to launch TensorBoard: {exc}", err=True)
         raise typer.Exit(code=1)
 
 

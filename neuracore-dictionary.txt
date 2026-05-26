@@ -186,6 +186,7 @@ linalg
 listconfig
 llava
 Llava
+logdir
 loglik
 logsigmoid
 logvar
@@ -312,6 +313,7 @@ secho
 seqlen
 sess
 setsid
+setuptools
 shadowsize
 siglip
 Siglip
@@ -326,6 +328,7 @@ subdirs
 targetbody
 TDVB
 teleop
+tensorboard
 temb
 tfds
 TFDS
