@@ -17,12 +17,14 @@
 //! - [`log_joints`](crate::log_joints) / [`log_frame`](crate::log_frame) /
 //!   [`log_scalar`](crate::log_scalar) deliver data. Each *lazily* mints a
 //!   trace the first time a stream is seen — publishing its
-//!   [`StartTrace`](data_daemon_ipc::Envelope::StartTrace) (and, for video,
-//!   [`OpenFrameStream`](data_daemon_ipc::Envelope::OpenFrameStream)) — then
-//!   publishes the sample.
-//! - [`stop_recording`](crate::stop_recording) ends every trace the recording
-//!   minted and publishes one
-//!   [`StopRecording`](data_daemon_ipc::Envelope::StopRecording).
+//!   [`StartTrace`](data_daemon_ipc::Envelope::StartTrace) — then publishes
+//!   the sample. Video frames are spooled to per-trace NUT chunk files on
+//!   local disk and announced with
+//!   [`VideoChunkReady`](data_daemon_ipc::Envelope::VideoChunkReady) once a
+//!   chunk fills.
+//! - [`stop_recording`](crate::stop_recording) flushes any tail chunk for
+//!   each video trace, ends every trace the recording minted, and publishes
+//!   one [`StopRecording`](data_daemon_ipc::Envelope::StopRecording).
 //! - [`cancel_recording`](crate::cancel_recording) publishes
 //!   [`CancelRecording`](data_daemon_ipc::Envelope::CancelRecording).
 //!
@@ -34,42 +36,47 @@
 //!
 //! iceoryx2's [`Publisher`] uses an `Rc`-backed `ArcSyncPolicy` and is
 //! therefore neither `Send` nor `Sync`. We side-step that by parking the
-//! publishers in a [`thread_local`]: each Python thread that calls in lazily
-//! builds its own iceoryx2 [`Node`] and a publisher per service.
+//! publisher in a [`thread_local`]: each Python thread that calls in lazily
+//! builds its own iceoryx2 [`Node`] and a publisher on the commands service.
 //!
-//! The *trace registry* — which streams map to which trace ids — is shared
-//! across threads (a publisher thread and the `stop_recording` thread are
-//! usually different), so it lives in a process-wide [`Mutex`]
-//! ([`TRACE_REGISTRY`]). Publishers stay thread-local; only the small registry
-//! map is shared.
+//! The *trace registry* — which streams map to which trace ids — and the
+//! *video chunk registry* are shared across threads (a publisher thread and
+//! the `stop_recording` thread are usually different), so they live in
+//! process-wide [`Mutex`]es. Publishers stay thread-local; only the small
+//! registry maps are shared.
 //!
-//! ## Service split
+//! ## Video chunk spooling
 //!
-//! Envelopes travel on one of two iceoryx2 services. Lifecycle envelopes and
-//! non-video data ride [`COMMANDS`] (deep buffer, small slice); the
-//! pixel-bearing traffic of video traces — `OpenFrameStream`'s sibling
-//! `Frame`s and their `EndTrace` — rides [`FRAMES`] (small buffer, 16 MiB
-//! slice). The destination is decided by *which* `log_*` function is called;
-//! the registry records whether each trace is video so `stop_recording` routes
-//! its `EndTrace` to the matching service.
+//! Raw video pixels never travel on the IPC bus. The producer writes each
+//! camera's frames into a sequence of [`NutWriter`] chunk files at
+//! `{recordings_root}/{recording_id}/{data_type}/{trace_id}/chunks/chunk_NNNN.nut`.
+//! When a chunk crosses [`CHUNK_FLUSH_BYTES`] the writer is finished and the
+//! producer publishes a [`VideoChunkReady`](data_daemon_ipc::Envelope::VideoChunkReady)
+//! envelope carrying the per-frame `timestamp_s` values; the daemon then
+//! transcodes the file to a sealed MP4 segment. On `EndTrace` the daemon
+//! concatenates the per-chunk segments into the final `lossy.mp4` /
+//! `lossless.mp4`.
 //!
 //! ## Fork safety
 //!
 //! iceoryx2's shared-memory descriptors are bound to the parent PID; a fork
 //! child that re-used them would silently drop every envelope. A one-shot
 //! `pthread_atfork` child handler clears the forking thread's `PRODUCER` slot
-//! so the next publish rebuilds. The process-wide [`TRACE_REGISTRY`] is healed
-//! lazily instead: it stores the owning PID and wipes itself on the first
-//! access from a process whose PID no longer matches (see [`with_registry`]),
-//! so a forked `multiprocessing` worker never inherits stale parent traces.
+//! so the next publish rebuilds. The process-wide [`TRACE_REGISTRY`] and
+//! [`VIDEO_CHUNKS`] are healed lazily instead: they store the owning PID and
+//! wipe themselves on the first access from a process whose PID no longer
+//! matches, so a forked `multiprocessing` worker never inherits stale parent
+//! state.
+
+pub mod nut_writer;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, Once};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 
 use data_daemon_ipc::service_name::{
-    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, FRAMES, FRAMES_MAX_PAYLOAD_BYTES,
-    FRAMES_SUBSCRIBER_BUFFER_SIZE, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
+    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
     MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
 };
 use data_daemon_ipc::{BatchedFrameItem, Envelope};
@@ -81,6 +88,21 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::nut_writer::{NutVideoConfig, NutWriter};
+
+/// Bytes after which the producer rotates to a fresh NUT chunk file.
+///
+/// Each chunk pays a fixed per-encode cost on the daemon side: ffmpeg
+/// fork+exec + libx264 init for two output codecs is ~100-200ms regardless
+/// of chunk size. With 22-frame 1080p chunks at the previous 128 MiB
+/// threshold that fixed cost was ~15-25% of the per-chunk wall time —
+/// observable as transient backpressure on the producer-side iceoryx2
+/// publish when an encode stretched past the chunk-arrival interval.
+/// Doubling to 256 MiB halves the fork+exec churn for the same encode
+/// throughput. The threshold is checked *after* each frame, so the on-disk
+/// file can exceed it by at most one frame.
+const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Errors raised while publishing envelopes to the daemon.
 #[derive(Debug, Error)]
@@ -121,32 +143,19 @@ impl From<ProducerError> for PyErr {
 
 /// Per-thread iceoryx2 state.
 ///
-/// Holds the per-thread [`Node`] and, for each service, the [`PortFactory`]
-/// handle alongside its [`Publisher`] so the publishers' shared-memory
-/// descriptors stay live for the lifetime of the thread.
+/// Holds the per-thread [`Node`] alongside the commands publisher so the
+/// publisher's shared-memory descriptors stay live for the lifetime of the
+/// thread.
 struct ProducerState {
     _node: Node<ipc::Service>,
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
     commands_publisher: Publisher<ipc::Service, [u8], ()>,
-    _frames_service: PortFactory<ipc::Service, [u8], ()>,
-    frames_publisher: Publisher<ipc::Service, [u8], ()>,
-}
-
-/// Which iceoryx2 service an envelope is published on.
-#[derive(Clone, Copy)]
-enum Target {
-    /// The [`COMMANDS`] lifecycle service.
-    Commands,
-    /// The [`FRAMES`] video service.
-    Frames,
 }
 
 /// One trace minted by the producer for a stream within a recording.
 struct TraceEntry {
     /// Trace id sent to the daemon; never surfaced to Python.
     trace_id: String,
-    /// `true` for video traces — their `Frame`/`EndTrace` ride [`FRAMES`].
-    is_video: bool,
 }
 
 /// Every trace the producer has minted for one recording, keyed by
@@ -175,6 +184,115 @@ static TRACE_REGISTRY: LazyLock<Mutex<TraceRegistry>> = LazyLock::new(|| {
     })
 });
 
+/// In-progress video chunk state for one trace.
+///
+/// The `NutWriter` is lazy per-chunk: it is created when the first frame of
+/// a chunk arrives and consumed by [`flush_chunk`] once the chunk fills (or
+/// the trace ends). All other fields persist across chunks for the trace's
+/// lifetime.
+struct VideoChunkState {
+    /// Recording the trace belongs to. Stamped onto every
+    /// [`Envelope::VideoChunkReady`] so the daemon can resolve the on-disk
+    /// path without a roundtrip through `StartTrace`.
+    recording_id: String,
+    /// Frame width in pixels (constant across a trace's chunks).
+    width: u32,
+    /// Frame height in pixels (constant across a trace's chunks).
+    height: u32,
+    /// `{recordings_root}/{recording_id}/{data_type}/{trace_id}/chunks/`.
+    chunks_dir: PathBuf,
+    /// Active NUT writer for the in-progress chunk. `None` between chunks
+    /// (i.e. immediately after a flush, before the next frame arrives).
+    nut_writer: Option<NutWriter>,
+    /// Zero-based index of the next chunk to flush.
+    chunk_index: u32,
+    /// Frames already written into the in-progress chunk.
+    frame_count: u32,
+    /// Per-trace PTS origin, microseconds since the Unix epoch. Set on the
+    /// first frame and kept constant across chunks so PTS values are
+    /// comparable across the whole trace.
+    pts_origin_us: Option<i64>,
+    /// Last PTS written to *any* chunk for the trace; enforces strict
+    /// monotonicity even across chunk boundaries.
+    last_pts_us: Option<u64>,
+    /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
+    /// Drained into the `VideoChunkReady` envelope on flush.
+    frame_timestamps_s: Vec<f64>,
+}
+
+/// Process-wide registry of in-progress per-trace video chunk state.
+///
+/// The outer [`Mutex`] guards only the `HashMap` shape — inserts when a new
+/// video trace starts, removes when it stops, get-or-create on each frame.
+/// Per-trace state lives behind its own [`Arc<Mutex<VideoChunkState>>`] so
+/// the multi-megabyte NUT write for camera A does **not** block camera B's
+/// concurrent write. Camera-A's `log_frame` holds the registry lock only
+/// long enough to clone the `Arc`, then releases it and does the actual
+/// write under its private per-trace mutex.
+///
+/// Mirrors [`TRACE_REGISTRY`]: shared between publishing threads (which add
+/// frames) and the `stop_recording` thread (which flushes the tail chunk),
+/// healed across a fork via [`with_video_chunks`].
+type VideoChunkSlot = Arc<Mutex<VideoChunkState>>;
+
+struct VideoChunkRegistry {
+    owner_pid: u32,
+    traces: HashMap<String, VideoChunkSlot>,
+}
+
+static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
+    Mutex::new(VideoChunkRegistry {
+        owner_pid: 0,
+        traces: HashMap::new(),
+    })
+});
+
+/// Recordings root, resolved once per process. Mirrors the daemon's
+/// `recordings_root_path()` (`config/env.rs`): `NEURACORE_DAEMON_RECORDINGS_ROOT`
+/// when set, otherwise `<NEURACORE_DAEMON_DB_PATH parent>/recordings`,
+/// otherwise `~/.neuracore/data_daemon/recordings`.
+static RECORDINGS_ROOT: LazyLock<PathBuf> = LazyLock::new(resolve_recordings_root);
+
+fn resolve_recordings_root() -> PathBuf {
+    if let Ok(value) = std::env::var("NEURACORE_DAEMON_RECORDINGS_ROOT") {
+        if !value.is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    default_recordings_root()
+}
+
+fn default_recordings_root() -> PathBuf {
+    let db_path = match std::env::var("NEURACORE_DAEMON_DB_PATH") {
+        Ok(value) if !value.is_empty() => expand_user(&value),
+        _ => home_dir()
+            .join(".neuracore")
+            .join("data_daemon")
+            .join("state.db"),
+    };
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("recordings")
+}
+
+fn home_dir() -> PathBuf {
+    // The daemon's `home_dir()` panics if unresolved; the producer is
+    // identically constrained — every on-disk path the SDK writes derives
+    // from `$HOME` when no override is set.
+    dirs::home_dir().expect("could not determine the user's home directory")
+}
+
+fn expand_user(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        return home_dir().join(stripped);
+    }
+    if path == "~" {
+        return home_dir();
+    }
+    PathBuf::from(path)
+}
+
 thread_local! {
     /// One iceoryx2 publisher set per OS thread. See the module-level note on
     /// threading for the rationale. Const-initialised so the slot is a plain
@@ -202,11 +320,50 @@ fn with_registry<R>(operation: impl FnOnce(&mut HashMap<String, RecordingTraces>
     operation(&mut registry.recordings)
 }
 
+/// Lock the video chunk registry and run `operation` against its traces map.
+///
+/// The lock is intentionally short-lived — the registry only guards the
+/// `HashMap`'s shape, not the per-trace state inside the `Arc<Mutex<...>>`
+/// entries. Callers that need to *use* per-trace state (write a frame,
+/// flush a chunk) should clone the [`VideoChunkSlot`] under this lock and
+/// then release it before doing any blocking work, so concurrent cameras
+/// don't serialise on each other.
+///
+/// Heals on fork the same way [`with_registry`] does.
+fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSlot>) -> R) -> R {
+    let mut registry = VIDEO_CHUNKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let pid = std::process::id();
+    if registry.owner_pid != pid {
+        registry.traces.clear();
+        registry.owner_pid = pid;
+    }
+    operation(&mut registry.traces)
+}
+
 /// Build the `data_type`/`name` composite key used to identify a stream
 /// within a recording. The NUL separator cannot occur in either component, so
 /// the join is unambiguous.
 fn stream_key(data_type: &str, name: &str) -> String {
     format!("{data_type}\u{0}{name}")
+}
+
+/// Build the path to a trace's chunks directory. Mirrors
+/// `storage::paths::TracePath::chunks_dir` on the daemon side; the two must
+/// agree byte-for-byte so the daemon picks up exactly what the producer
+/// wrote.
+fn trace_chunks_dir(recording_id: &str, data_type: &str, trace_id: &str) -> PathBuf {
+    RECORDINGS_ROOT
+        .join(recording_id)
+        .join(data_type)
+        .join(trace_id)
+        .join("chunks")
+}
+
+/// Filename for chunk `index` — must match `storage::paths::chunk_filename`.
+fn chunk_filename(index: u32) -> String {
+    format!("chunk_{index:04}.nut")
 }
 
 /// Register a recording in the trace registry.
@@ -271,19 +428,11 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
         COMMANDS_MAX_PAYLOAD_BYTES,
     )?;
-    let (frames_service, frames_publisher) = open_publisher(
-        &node,
-        FRAMES,
-        FRAMES_SUBSCRIBER_BUFFER_SIZE,
-        FRAMES_MAX_PAYLOAD_BYTES,
-    )?;
 
     Ok(ProducerState {
         _node: node,
         _commands_service: commands_service,
         commands_publisher,
-        _frames_service: frames_service,
-        frames_publisher,
     })
 }
 
@@ -369,9 +518,10 @@ fn ensure_fork_handler_registered() {
 /// the *parent's* still-live publisher, and freeing memory in a post-fork
 /// child risks an allocator lock the parent held at fork time.
 ///
-/// The process-wide [`TRACE_REGISTRY`] is deliberately *not* touched here —
-/// taking its lock in a fork handler could deadlock if a parent thread held it
-/// at fork time. It self-heals via the `owner_pid` check in [`with_registry`].
+/// The process-wide [`TRACE_REGISTRY`] and [`VIDEO_CHUNKS`] are deliberately
+/// *not* touched here — taking their locks in a fork handler could deadlock
+/// if a parent thread held them at fork time. They self-heal via the
+/// `owner_pid` check in [`with_registry`] / [`with_video_chunks`].
 extern "C" fn on_fork_in_child() {
     PRODUCER.with(|cell| {
         if let Some(stale) = cell.borrow_mut().take() {
@@ -380,24 +530,17 @@ extern "C" fn on_fork_in_child() {
     });
 }
 
-/// Encode `envelope` and publish it on `target`'s iceoryx2 service.
-fn publish(target: Target, envelope: &Envelope) -> Result<(), ProducerError> {
+/// Encode `envelope` and publish it on the commands service.
+fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
-    let limit = match target {
-        Target::Commands => COMMANDS_MAX_PAYLOAD_BYTES,
-        Target::Frames => FRAMES_MAX_PAYLOAD_BYTES,
-    };
-    if bytes.len() > limit {
+    if bytes.len() > COMMANDS_MAX_PAYLOAD_BYTES {
         return Err(ProducerError::PayloadTooLarge {
             actual: bytes.len(),
-            limit,
+            limit: COMMANDS_MAX_PAYLOAD_BYTES,
         });
     }
     with_producer(|state| {
-        let publisher = match target {
-            Target::Commands => &state.commands_publisher,
-            Target::Frames => &state.frames_publisher,
-        };
+        let publisher = &state.commands_publisher;
         let sample = publisher
             .loan_slice_uninit(bytes.len())
             .map_err(|error| ProducerError::Loan(error.to_string()))?;
@@ -442,16 +585,13 @@ fn start_recording(
         if !register_recording(&recording_id) {
             return Ok(());
         }
-        publish(
-            Target::Commands,
-            &Envelope::StartRecording {
-                recording_id,
-                robot_id,
-                robot_name,
-                dataset_id,
-                dataset_name,
-            },
-        )?;
+        publish(&Envelope::StartRecording {
+            recording_id,
+            robot_id,
+            robot_name,
+            dataset_id,
+            dataset_name,
+        })?;
         Ok(())
     })
 }
@@ -459,12 +599,7 @@ fn start_recording(
 /// Resolve a trace id for `(data_type, name)` within `recording`, minting a
 /// fresh one when the stream has not been seen yet. Returns the trace id and
 /// whether it was newly minted (so the caller can publish its `StartTrace`).
-fn resolve_trace(
-    recording: &mut RecordingTraces,
-    data_type: &str,
-    name: &str,
-    is_video: bool,
-) -> (String, bool) {
+fn resolve_trace(recording: &mut RecordingTraces, data_type: &str, name: &str) -> (String, bool) {
     let key = stream_key(data_type, name);
     match recording.traces.get(&key) {
         Some(entry) => (entry.trace_id.clone(), false),
@@ -474,7 +609,6 @@ fn resolve_trace(
                 key,
                 TraceEntry {
                     trace_id: trace_id.clone(),
-                    is_video,
                 },
             );
             (trace_id, true)
@@ -520,7 +654,7 @@ fn log_joints(
         with_registry(|recordings| {
             let recording = recordings.entry(recording_id.clone()).or_default();
             for (name, _) in &items {
-                let (trace_id, is_new) = resolve_trace(recording, &data_type, name, false);
+                let (trace_id, is_new) = resolve_trace(recording, &data_type, name);
                 if is_new {
                     new_traces.push((trace_id.clone(), name.clone()));
                 }
@@ -529,15 +663,12 @@ fn log_joints(
         });
         // A StartTrace for each newly minted trace, ahead of the data batch.
         for (trace_id, name) in new_traces {
-            publish(
-                Target::Commands,
-                &Envelope::StartTrace {
-                    recording_id: recording_id.clone(),
-                    trace_id,
-                    data_type: data_type.clone(),
-                    data_type_name: Some(name),
-                },
-            )?;
+            publish(&Envelope::StartTrace {
+                recording_id: recording_id.clone(),
+                trace_id,
+                data_type: data_type.clone(),
+                data_type_name: Some(name),
+            })?;
         }
         // Pack every joint sample into one BatchedFrames envelope.
         let mut frames = Vec::with_capacity(items.len());
@@ -554,21 +685,20 @@ fn log_joints(
             })?;
             frames.push(BatchedFrameItem { trace_id, payload });
         }
-        publish(
-            Target::Commands,
-            &Envelope::BatchedFrames {
-                timestamp_ns,
-                timestamp_s,
-                frames,
-            },
-        )?;
+        publish(&Envelope::BatchedFrames {
+            timestamp_ns,
+            timestamp_s,
+            frames,
+        })?;
         Ok(())
     })
 }
 
 /// Log one video frame for a camera. The first frame for a camera mints its
-/// trace and publishes `StartTrace` + `OpenFrameStream`; every frame rides the
-/// [`FRAMES`] service.
+/// trace and publishes `StartTrace`; the frame is appended to the trace's
+/// in-progress NUT chunk on local disk. When the chunk crosses
+/// [`CHUNK_FLUSH_BYTES`] a [`Envelope::VideoChunkReady`] is published so the
+/// daemon can encode the chunk to a sealed MP4 segment.
 #[pyfunction]
 #[pyo3(signature = (recording_id, data_type, name, width, height, payload, timestamp_ns, timestamp_s = None))]
 #[allow(clippy::too_many_arguments)]
@@ -597,35 +727,196 @@ fn log_frame(
     // Copy the payload into owned Rust memory while the GIL is held — the
     // `&[u8]` borrows a Python buffer.
     let owned_payload = payload.to_vec();
+    // Resolve `timestamp_s` once. Fall back to ns→s so the chunk envelope's
+    // per-frame timestamp matches the integration matrix's exact-match
+    // sidecar assertion even when the SDK omitted the f64.
+    let resolved_timestamp_s =
+        timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
     py.allow_threads(|| -> PyResult<()> {
         let (trace_id, is_new) = with_registry(|recordings| {
             let recording = recordings.entry(recording_id.clone()).or_default();
-            resolve_trace(recording, &data_type, &name, true)
+            resolve_trace(recording, &data_type, &name)
         });
         if is_new {
-            publish(
-                Target::Commands,
-                &Envelope::StartTrace {
-                    recording_id: recording_id.clone(),
-                    trace_id: trace_id.clone(),
-                    data_type,
-                    data_type_name: Some(name),
-                },
-            )?;
-            publish(
-                Target::Commands,
-                &Envelope::OpenFrameStream {
-                    trace_id: trace_id.clone(),
+            publish(&Envelope::StartTrace {
+                recording_id: recording_id.clone(),
+                trace_id: trace_id.clone(),
+                data_type: data_type.clone(),
+                data_type_name: Some(name),
+            })?;
+        }
+        record_video_frame(
+            &recording_id,
+            &data_type,
+            &trace_id,
+            width,
+            height,
+            &owned_payload,
+            timestamp_ns,
+            resolved_timestamp_s,
+        )
+    })
+}
+
+/// Append one frame to the trace's in-progress NUT chunk. Opens the chunk
+/// file lazily on the first call for a trace (or after a flush), enforces
+/// strict PTS monotonicity, and triggers [`flush_chunk_locked`] once the
+/// chunk crosses [`CHUNK_FLUSH_BYTES`].
+///
+/// NUT-write errors are logged and the frame is dropped — they do not
+/// propagate to Python. The producer SDK contract is best-effort delivery
+/// for sensor data; a disk write failure in the middle of a recording must
+/// not crash the user's training loop.
+#[allow(clippy::too_many_arguments)]
+fn record_video_frame(
+    recording_id: &str,
+    data_type: &str,
+    trace_id: &str,
+    width: u32,
+    height: u32,
+    payload: &[u8],
+    timestamp_ns: i64,
+    timestamp_s: f64,
+) -> PyResult<()> {
+    // The registry lock guards only the HashMap shape; we grab (or create)
+    // the per-trace slot and immediately drop it so the actual NUT write
+    // runs under the per-trace mutex without serialising other cameras.
+    let slot: VideoChunkSlot = with_video_chunks(|traces| {
+        traces
+            .entry(trace_id.to_string())
+            .or_insert_with(|| {
+                Arc::new(Mutex::new(VideoChunkState {
+                    recording_id: recording_id.to_string(),
                     width,
                     height,
-                },
-            )?;
+                    chunks_dir: trace_chunks_dir(recording_id, data_type, trace_id),
+                    nut_writer: None,
+                    chunk_index: 0,
+                    frame_count: 0,
+                    pts_origin_us: None,
+                    last_pts_us: None,
+                    frame_timestamps_s: Vec::new(),
+                }))
+            })
+            .clone()
+    });
+
+    // The flush envelope is built under the per-trace lock (it consumes the
+    // chunk's accumulated state) but published outside it — publish() blocks
+    // the calling thread when the daemon falls behind, and holding any
+    // per-trace mutex across that block would stall this camera's next
+    // frame.
+    let flush_envelope = {
+        let mut state = slot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Compute PTS first; if monotonicity logic rejects the frame we want
+        // to bail out before opening the file. Producer-side mirror of the
+        // logic previously living in the daemon's trace_actor.
+        let origin_us = *state.pts_origin_us.get_or_insert(timestamp_ns / 1_000);
+        let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
+        let mut pts = relative_us as u64;
+        if let Some(previous) = state.last_pts_us {
+            if pts <= previous {
+                pts = previous.saturating_add(1);
+            }
         }
-        publish(
-            Target::Frames,
-            &Envelope::frame(trace_id, timestamp_ns, timestamp_s, owned_payload),
-        )?;
-        Ok(())
+
+        // Open the chunk writer lazily — the first frame of every chunk
+        // pays the syscall cost so the rest only see appends.
+        if state.nut_writer.is_none() {
+            let chunk_path = state.chunks_dir.join(chunk_filename(state.chunk_index));
+            let config = NutVideoConfig {
+                width: state.width,
+                height: state.height,
+                time_base_num: 1,
+                time_base_den: 1_000_000,
+            };
+            match NutWriter::create(&chunk_path, config) {
+                Ok(writer) => state.nut_writer = Some(writer),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        trace_id,
+                        path = %chunk_path.display(),
+                        "failed to open NUT chunk; dropping frame"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        let bytes_after_write = {
+            let writer = state.nut_writer.as_mut().expect("opened immediately above");
+            if let Err(error) = writer.write_frame(pts, payload) {
+                tracing::warn!(
+                    %error,
+                    trace_id,
+                    "failed to write video frame to NUT chunk; dropping frame"
+                );
+                return Ok(());
+            }
+            writer.bytes_written()
+        };
+        state.last_pts_us = Some(pts);
+        state.frame_count = state.frame_count.saturating_add(1);
+        state.frame_timestamps_s.push(timestamp_s);
+
+        if bytes_after_write >= CHUNK_FLUSH_BYTES {
+            flush_chunk_locked(trace_id, &mut state)
+        } else {
+            None
+        }
+    };
+
+    if let Some(envelope) = flush_envelope {
+        publish(&envelope)?;
+    }
+    Ok(())
+}
+
+/// Seal the in-progress chunk and return the envelope to publish.
+///
+/// The caller must hold the per-trace [`VideoChunkState`] lock. Returns
+/// `None` when the trace has no open chunk writer (no frames seen since the
+/// last flush, or the writer was never opened) — there's nothing to
+/// announce in that case.
+fn flush_chunk_locked(trace_id: &str, state: &mut VideoChunkState) -> Option<Envelope> {
+    let writer = state.nut_writer.take()?;
+    let byte_count = match writer.finish() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                trace_id,
+                "failed to finalise NUT chunk; dropping chunk"
+            );
+            // Reset chunk-local state so the next frame opens a fresh chunk
+            // — the broken file stays on disk for the recovery sweep to
+            // collect.
+            state.frame_count = 0;
+            state.frame_timestamps_s.clear();
+            state.chunk_index = state.chunk_index.saturating_add(1);
+            return None;
+        }
+    };
+    let chunk_index = state.chunk_index;
+    let frame_count = state.frame_count;
+    let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
+
+    state.frame_count = 0;
+    state.chunk_index = state.chunk_index.saturating_add(1);
+
+    Some(Envelope::VideoChunkReady {
+        recording_id: state.recording_id.clone(),
+        trace_id: trace_id.to_string(),
+        chunk_index,
+        width: state.width,
+        height: state.height,
+        byte_count,
+        frame_count,
+        frame_timestamps_s,
     })
 }
 
@@ -655,28 +946,32 @@ fn log_scalar(
     py.allow_threads(|| -> PyResult<()> {
         let (trace_id, is_new) = with_registry(|recordings| {
             let recording = recordings.entry(recording_id.clone()).or_default();
-            resolve_trace(recording, &data_type, &name, false)
+            resolve_trace(recording, &data_type, &name)
         });
         if is_new {
-            publish(
-                Target::Commands,
-                &Envelope::StartTrace {
-                    recording_id: recording_id.clone(),
-                    trace_id: trace_id.clone(),
-                    data_type,
-                    data_type_name: Some(name),
-                },
-            )?;
+            publish(&Envelope::StartTrace {
+                recording_id: recording_id.clone(),
+                trace_id: trace_id.clone(),
+                data_type,
+                data_type_name: Some(name),
+            })?;
         }
-        publish(
-            Target::Commands,
-            &Envelope::frame(trace_id, timestamp_ns, timestamp_s, owned_payload),
-        )?;
+        publish(&Envelope::frame(
+            trace_id,
+            timestamp_ns,
+            timestamp_s,
+            owned_payload,
+        ))?;
         Ok(())
     })
 }
 
 /// End every trace the recording minted, then announce the recording stopped.
+///
+/// For each video trace with a partial chunk in [`VIDEO_CHUNKS`] the tail
+/// chunk is flushed (and its `VideoChunkReady` published) *before* the
+/// trace's `EndTrace` lands, so the in-order delivery contract on the
+/// commands service guarantees the daemon sees the chunk first.
 ///
 /// Idempotent: if the recording is not registered it was already stopped (or
 /// never started), so a mistaken `stop, stop` — or a stray `stop` before
@@ -693,26 +988,34 @@ fn stop_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
             return Ok(());
         };
         for entry in recording.traces.into_values() {
-            let target = if entry.is_video {
-                Target::Frames
-            } else {
-                Target::Commands
-            };
-            publish(
-                target,
-                &Envelope::EndTrace {
-                    trace_id: entry.trace_id,
-                },
-            )?;
+            // Drain the trace's chunk state — even if there's no partial
+            // chunk we want to drop the slot so a re-used trace id (post
+            // restart) doesn't inherit stale book-keeping. Removing under
+            // the registry lock and flushing under the per-trace lock keeps
+            // the global lock short.
+            let slot = with_video_chunks(|traces| traces.remove(&entry.trace_id));
+            let flush_envelope = slot.and_then(|slot| {
+                let mut state = slot
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                flush_chunk_locked(&entry.trace_id, &mut state)
+            });
+            if let Some(envelope) = flush_envelope {
+                publish(&envelope)?;
+            }
+            publish(&Envelope::EndTrace {
+                trace_id: entry.trace_id,
+            })?;
         }
-        publish(Target::Commands, &Envelope::StopRecording { recording_id })?;
+        publish(&Envelope::StopRecording { recording_id })?;
         Ok(())
     })
 }
 
 /// Cancel a recording — the daemon discards every in-flight trace and its
-/// on-disk artefacts. The producer drops its trace registry entry (no
-/// `EndTrace` is needed; `CancelRecording` supersedes them).
+/// on-disk artefacts. The producer drops its trace registry entry and any
+/// in-progress video chunk state without flushing (the daemon's
+/// `CancelRecording` handler removes the trace dir).
 #[pyfunction]
 #[pyo3(signature = (recording_id))]
 fn cancel_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
@@ -721,11 +1024,18 @@ fn cancel_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
     }
     let recording_id = recording_id.to_string();
     py.allow_threads(|| -> PyResult<()> {
-        take_recording(&recording_id);
-        publish(
-            Target::Commands,
-            &Envelope::CancelRecording { recording_id },
-        )?;
+        if let Some(recording) = take_recording(&recording_id) {
+            with_video_chunks(|traces| {
+                for entry in recording.traces.values() {
+                    // Drop without flushing — the in-progress chunk file
+                    // (and any earlier chunks the daemon hasn't yet
+                    // encoded) gets removed by the daemon's recording
+                    // cancellation sweep.
+                    traces.remove(&entry.trace_id);
+                }
+            });
+        }
+        publish(&Envelope::CancelRecording { recording_id })?;
         Ok(())
     })
 }

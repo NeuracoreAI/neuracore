@@ -31,9 +31,32 @@ from neuracore.core.streaming.base_sse_consumer import (
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
+from neuracore.data_daemon.communications_management.shared_transport import (
+    recording_context as _recording_context,
+)
 from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_native_producer_of_expiry(recording_id: str) -> None:
+    """Tell the Rust producer a recording has been locally auto-expired.
+
+    Calls the native ``stop_recording`` so the producer flushes any
+    in-progress NUT chunk and publishes ``EndTrace`` / ``StopRecording``.
+    The native layer is idempotent, so a later explicit
+    ``nc.stop_recording`` that races this is a no-op. Failures are logged
+    and swallowed: the local expiry must always succeed, even if the
+    native module fails to load.
+    """
+    try:
+        _recording_context._load_native().stop_recording(recording_id)
+    except Exception:
+        logger.exception(
+            "Failed to notify native producer of recording %s expiry",
+            recording_id,
+        )
 
 
 class RecordingStateManager(BaseSSEConsumer):
@@ -239,6 +262,8 @@ class RecordingStateManager(BaseSSEConsumer):
         if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
+        if rust_daemon_enabled():
+            _notify_native_producer_of_expiry(recording_id)
         self._cancel_recording_timers(recording_id)
 
     def updated_recording_state(

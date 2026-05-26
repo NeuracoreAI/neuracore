@@ -28,7 +28,9 @@ use crate::ipc::listener;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::daemonize::{daemonize, DaemonizeOutcome, Readiness, ReadinessReporter};
 use crate::lifecycle::pidfile::{PidFile, PidFileError};
-use crate::lifecycle::recovery::{cleanup_stale_ipc, reclaim_stale_pid_file, PidReclaim};
+use crate::lifecycle::recovery::{
+    cleanup_stale_ipc, reclaim_stale_pid_file, sweep_partial_recordings, PidReclaim,
+};
 use crate::lifecycle::signals::{install_shutdown_handler, ShutdownSignal};
 use crate::pipeline::dispatcher::{self, DispatcherContext};
 use crate::pipeline::trace_actor::TraceActorContext;
@@ -244,6 +246,23 @@ fn run_daemon(
             Ok(count) => tracing::info!(count, "marked stale writing traces as failed"),
             Err(error) => {
                 tracing::warn!(%error, "failed to mark stale writing traces failed (continuing)")
+            }
+        }
+        // Purge any recording the prior daemon left mid-write. Producer-side
+        // chunk spooling means we may have stranded NUT chunks, half-encoded
+        // segments, and partial concat outputs on disk; mid-encode resume is
+        // intentionally out of scope so anything not in the `written`
+        // terminal state at startup is removed and the recording marked
+        // cancelled.
+        match sweep_partial_recordings(&state_store, &recordings_root).await {
+            Ok(report) if report == Default::default() => {}
+            Ok(report) => tracing::info!(
+                purged = report.recordings_purged,
+                preserved = report.recordings_preserved,
+                "partial-recording sweep completed",
+            ),
+            Err(error) => {
+                tracing::warn!(%error, "partial-recording sweep failed (continuing)")
             }
         }
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));

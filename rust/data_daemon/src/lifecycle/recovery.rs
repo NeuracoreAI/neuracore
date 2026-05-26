@@ -14,6 +14,7 @@ use iceoryx2::node::Node;
 use iceoryx2::prelude::ipc;
 
 use crate::lifecycle::pidfile::{pid_is_running, read_pid_from_file};
+use crate::state::{SqliteStateStore, StateStore, StateStoreError, TraceWriteStatus};
 
 /// Outcome of [`reclaim_stale_pid_file`], surfaced for logging.
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +52,93 @@ pub fn reclaim_stale_pid_file(pid_path: &Path) -> std::io::Result<PidReclaim> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(PidReclaim::Absent),
         Err(error) => Err(error),
     }
+}
+
+/// Outcome counters for [`sweep_partial_recordings`], surfaced for logging.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PartialSweepReport {
+    /// Number of recordings whose on-disk artefacts were removed because at
+    /// least one trace had not reached the `written` terminal state.
+    pub recordings_purged: usize,
+    /// Number of recordings inspected and left untouched (either every trace
+    /// was `written`, or the recording was already cancelled and has no
+    /// further state to clean up).
+    pub recordings_preserved: usize,
+}
+
+/// Sweep partial recordings left behind by a previous daemon run.
+///
+/// Producer-side chunk spooling means a SIGKILL between two
+/// `VideoChunkReady` envelopes can leave the recording with on-disk
+/// artefacts (NUT chunks, half-encoded segments, partial concat outputs)
+/// that no current actor will pick up. Mid-encode resume is intentionally
+/// out of scope — keeping the lifecycle simple is the point of the
+/// per-chunk design — so anything not in the `written` terminal state at
+/// startup is purged.
+///
+/// For each recording:
+/// - Already-cancelled recordings are skipped; the dispatcher's cancel
+///   handler removed their on-disk state when the cancel originally fired.
+/// - Recordings where every trace is `written` are left alone — the upload
+///   path picks them up via the existing `TraceWritten` / pending-upload
+///   gate.
+/// - Anything else: the recording's directory is recursively removed and
+///   the recording row is `cancel_recording`'d so the registration /
+///   upload / progress coordinators ignore it (and so the in-flight trace
+///   rows are burned to terminal `failed`).
+pub async fn sweep_partial_recordings(
+    store: &SqliteStateStore,
+    recordings_root: &Path,
+) -> Result<PartialSweepReport, StateStoreError> {
+    let mut report = PartialSweepReport::default();
+    let recordings = store.list_recordings().await?;
+    for recording in recordings {
+        if recording.cancelled_at.is_some() {
+            // The original dispatcher cancel handler removed the on-disk
+            // state when the cancel fired; if anything is left behind on
+            // disk it was the cancel handler that failed, not a partial
+            // write — and re-cancelling would be a no-op. Leave it.
+            report.recordings_preserved += 1;
+            continue;
+        }
+        let traces = store
+            .list_traces_for_recording(&recording.recording_id)
+            .await?;
+        let any_non_written = traces
+            .iter()
+            .any(|trace| trace.write_status != TraceWriteStatus::Written);
+        if !any_non_written && !traces.is_empty() {
+            // Every trace finished writing — the upload coordinator owns
+            // it now.
+            report.recordings_preserved += 1;
+            continue;
+        }
+
+        let dir = recordings_root.join(&recording.recording_id);
+        match std::fs::remove_dir_all(&dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    recording_id = %recording.recording_id,
+                    path = %dir.display(),
+                    "failed to purge partial recording directory; continuing"
+                );
+            }
+        }
+
+        if let Err(error) = store.cancel_recording(&recording.recording_id).await {
+            tracing::warn!(
+                %error,
+                recording_id = %recording.recording_id,
+                "failed to mark partial recording cancelled in state store; continuing"
+            );
+        }
+
+        report.recordings_purged += 1;
+    }
+    Ok(report)
 }
 
 /// Reap stale iceoryx2 node files left by a SIGKILL'd daemon.
@@ -130,6 +218,94 @@ mod tests {
         let outcome = reclaim_stale_pid_file(&path).unwrap();
         assert_eq!(outcome, PidReclaim::StillRunning(our_pid));
         assert!(path.exists());
+    }
+
+    use crate::state::store::TraceUpdate;
+    use crate::storage::paths::TracePath;
+
+    #[tokio::test]
+    async fn partial_recording_is_removed_on_startup() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let recordings_root = dir.path().join("recordings");
+
+        store.create_recording("rec-1").await.unwrap();
+        store
+            .create_trace("rec-1", "trace-1", Some("RGB"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Writing),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Synthesise leftover on-disk state the previous daemon would have
+        // produced — a chunks/ dir and a half-encoded segment.
+        let trace_dir = TracePath::new("rec-1", "RGB", "trace-1").directory(&recordings_root);
+        let chunks_dir = trace_dir.join("chunks");
+        std::fs::create_dir_all(&chunks_dir).unwrap();
+        std::fs::write(chunks_dir.join("chunk_0000.nut"), b"stale-bytes").unwrap();
+        std::fs::write(trace_dir.join("chunk_0000_lossy.mp4"), b"halfway").unwrap();
+
+        let report = sweep_partial_recordings(&store, &recordings_root)
+            .await
+            .expect("sweep");
+        assert_eq!(report.recordings_purged, 1);
+        assert_eq!(report.recordings_preserved, 0);
+        assert!(!recordings_root.join("rec-1").exists(),);
+
+        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        assert!(recording.cancelled_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn completed_recording_is_preserved_for_upload() {
+        let dir = tempdir().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let recordings_root = dir.path().join("recordings");
+
+        store.create_recording("rec-2").await.unwrap();
+        store
+            .create_trace("rec-2", "trace-2", Some("RGB"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "trace-2",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    total_bytes: Some(1024),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let trace_dir = TracePath::new("rec-2", "RGB", "trace-2").directory(&recordings_root);
+        std::fs::create_dir_all(&trace_dir).unwrap();
+        std::fs::write(trace_dir.join("lossy.mp4"), b"keep-me").unwrap();
+        std::fs::write(trace_dir.join("lossless.mp4"), b"keep-me-too").unwrap();
+
+        let report = sweep_partial_recordings(&store, &recordings_root)
+            .await
+            .expect("sweep");
+        assert_eq!(report.recordings_purged, 0);
+        assert_eq!(report.recordings_preserved, 1);
+        assert!(trace_dir.join("lossy.mp4").exists());
+        assert!(trace_dir.join("lossless.mp4").exists());
+
+        let recording = store.get_recording("rec-2").await.unwrap().unwrap();
+        assert!(recording.cancelled_at.is_none());
     }
 
     #[test]

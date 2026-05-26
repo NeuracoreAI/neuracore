@@ -18,9 +18,31 @@ pub const LOSSY_VIDEO_FILENAME: &str = "lossy.mp4";
 /// Filename for the FFV1 lossless MP4. Matches `video_trace.py::LOSSLESS_VIDEO_NAME`.
 pub const LOSSLESS_VIDEO_FILENAME: &str = "lossless.mp4";
 
-/// Filename for the raw NUT spool written by the per-trace actor before
-/// ffmpeg transcodes it.
-pub const RAW_NUT_FILENAME: &str = "raw.nut";
+/// Directory name (inside a video trace's directory) that holds the
+/// producer-spooled NUT chunks awaiting daemon-side encoding.
+pub const CHUNKS_DIRNAME: &str = "chunks";
+
+/// Build the filename for a video chunk at `chunk_index` — `chunk_NNNN.nut`.
+///
+/// The producer writes directly to this final path; no `.tmp` staging is
+/// needed because the daemon only acts on a chunk once the producer has
+/// published its [`Envelope::VideoChunkReady`], which happens after the NUT
+/// writer has been finished and flushed.
+///
+/// [`Envelope::VideoChunkReady`]: data_daemon_ipc::Envelope::VideoChunkReady
+pub fn chunk_filename(chunk_index: u32) -> String {
+    format!("chunk_{chunk_index:04}.nut")
+}
+
+/// Build the filename for a per-chunk encoded lossy mp4 segment.
+pub fn chunk_lossy_filename(chunk_index: u32) -> String {
+    format!("chunk_{chunk_index:04}_lossy.mp4")
+}
+
+/// Build the filename for a per-chunk encoded lossless mp4 segment.
+pub fn chunk_lossless_filename(chunk_index: u32) -> String {
+    format!("chunk_{chunk_index:04}_lossless.mp4")
+}
 
 /// Key for an on-disk trace directory.
 ///
@@ -75,9 +97,12 @@ impl TracePath {
             .join(LOSSLESS_VIDEO_FILENAME)
     }
 
-    /// Resolve the `raw.nut` spool path for this trace.
-    pub fn raw_nut(&self, recordings_root: &Path) -> PathBuf {
-        self.directory(recordings_root).join(RAW_NUT_FILENAME)
+    /// Resolve the per-trace `chunks/` directory used by the producer to
+    /// spool NUT chunks before the daemon encodes them. Both producer and
+    /// daemon agree on the layout via this helper so a daemon recovery sweep
+    /// can find the producer's leftovers.
+    pub fn chunks_dir(&self, recordings_root: &Path) -> PathBuf {
+        self.directory(recordings_root).join(CHUNKS_DIRNAME)
     }
 }
 
@@ -141,9 +166,18 @@ mod tests {
             PathBuf::from("/var/data/recordings/rec-1/joints/trace-1/lossless.mp4")
         );
         assert_eq!(
-            path.raw_nut(root),
-            PathBuf::from("/var/data/recordings/rec-1/joints/trace-1/raw.nut")
+            path.chunks_dir(root),
+            PathBuf::from("/var/data/recordings/rec-1/joints/trace-1/chunks")
         );
+    }
+
+    #[test]
+    fn chunk_filenames_are_zero_padded() {
+        assert_eq!(chunk_filename(0), "chunk_0000.nut");
+        assert_eq!(chunk_filename(7), "chunk_0007.nut");
+        assert_eq!(chunk_filename(1234), "chunk_1234.nut");
+        assert_eq!(chunk_lossy_filename(5), "chunk_0005_lossy.mp4");
+        assert_eq!(chunk_lossless_filename(5), "chunk_0005_lossless.mp4");
     }
 
     #[test]
