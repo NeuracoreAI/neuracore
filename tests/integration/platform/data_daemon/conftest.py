@@ -5,7 +5,6 @@ from collections.abc import Callable
 
 import pytest
 
-import neuracore as nc
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
@@ -32,11 +31,6 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
-
-
-@pytest.fixture(autouse=True)
-def daemon_disable_live_data():
-    nc.stop_live_data()
 
 
 @pytest.fixture(autouse=True)
