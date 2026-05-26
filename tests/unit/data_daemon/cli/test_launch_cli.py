@@ -6,6 +6,8 @@ import pytest
 import typer
 
 import neuracore.data_daemon.config_manager.args_handler as ah
+from neuracore.data_daemon.const import DEFAULT_PROFILE_NAME
+from neuracore.data_daemon.lifecycle import auth_preflight as ap
 
 
 class FakePopen:
@@ -208,3 +210,38 @@ def test_launch_with_missing_profile_exits(
 
     assert e.value.exit_code == 1
     assert "Profile 'missing-prof' not found." in capsys.readouterr().err
+
+
+def test_auth_preflight_creates_default_profile_before_resolving_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_profiles: list[str] = []
+
+    class FakeConfig:
+        offline = True
+        api_key = None
+
+    class FakeProfileManager:
+        def create_profile(self, name: str) -> None:
+            created_profiles.append(name)
+
+        def get_profile(self, name: str) -> FakeConfig:
+            return FakeConfig()
+
+    class FakeConfigManager:
+        def __init__(
+            self, profile_manager: FakeProfileManager, profile: str | None = None
+        ) -> None:
+            self.profile_manager = profile_manager
+            self.profile = profile
+
+        def resolve_effective_config(self) -> FakeConfig:
+            return self.profile_manager.get_profile(self.profile)
+
+    monkeypatch.delenv("NEURACORE_DAEMON_PROFILE", raising=False)
+    monkeypatch.setattr(ap, "ProfileManager", FakeProfileManager)
+    monkeypatch.setattr(ap, "ConfigManager", FakeConfigManager)
+
+    ap.ensure_daemon_auth_ready()
+
+    assert created_profiles == [DEFAULT_PROFILE_NAME]
