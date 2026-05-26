@@ -8,6 +8,8 @@ state and remote recording triggers.
 
 import asyncio
 import logging
+import threading
+from collections.abc import Callable
 from concurrent.futures import Future
 
 from aiohttp import ClientSession
@@ -18,7 +20,6 @@ from neuracore_types import (
     RecordingStartPayload,
     RobotInstanceIdentifier,
 )
-from pyee.asyncio import AsyncIOEventEmitter
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -35,17 +36,12 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_runn
 logger = logging.getLogger(__name__)
 
 
-class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
+class RecordingStateManager(BaseSSEConsumer):
     """Manages recording state across robot instances with real-time notifications.
 
     Provides centralized tracking of recording sessions for multiple robot instances,
-    with automatic synchronization via Server-Sent Events and event emission for
-    state changes.
+    with automatic synchronization via Server-Sent Events.
     """
-
-    RECORDING_STARTED = "RECORDING_STARTED"
-    RECORDING_STOPPED = "RECORDING_STOPPED"
-    RECORDING_SAVED = "RECORDING_SAVED"
 
     RECORDING_EXPIRY_WARNING = 60 * 4.5  # 4.5 minutes
     MAX_RECORDING_DURATION_S = 60 * 5  # 5 minutes
@@ -89,6 +85,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
+        self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
@@ -136,8 +133,8 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
     ) -> None:
         """Handle recording start for a robot instance.
 
-        Updates internal state and emits RECORDING_STARTED event. If the robot
-        was already recording with a different ID, stops the previous recording first.
+        Updates internal state. If the robot was already recording with a different
+        ID, stops the previous recording first.
 
         Args:
             robot_id: Robot ID
@@ -162,13 +159,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
 
         self.recording_robot_instances[instance_key] = recording_id
         self._schedule_recording_timers(
-            robot_id=robot_id,
-            instance=instance,
-            recording_id=recording_id,
-        )
-
-        self.emit(
-            self.RECORDING_STARTED,
             robot_id=robot_id,
             instance=instance,
             recording_id=recording_id,
@@ -233,8 +223,8 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
     ) -> None:
         """Handle recording stop for a robot instance.
 
-        Updates internal state and emits RECORDING_STOPPED event. Only processes
-        the stop if the recording ID matches the current recording.
+        Updates internal state. Only processes the stop if the recording ID
+        matches the current recording.
 
         Args:
             robot_id: Robot ID
@@ -249,12 +239,6 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             return
         self.recording_robot_instances.pop(instance_key, None)
         self._cancel_recording_timers(recording_id)
-        self.emit(
-            self.RECORDING_STOPPED,
-            robot_id=robot_id,
-            instance=instance,
-            recording_id=recording_id,
-        )
 
     def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
@@ -308,12 +292,32 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
             instance_key = RobotInstanceIdentifier(
                 robot_id=robot_id, robot_instance=instance
             )
+            callback = self._drain_callbacks.get(instance_key)
+            if callback:
+                threading.Thread(
+                    target=callback,
+                    args=(recording_id,),
+                    daemon=True,
+                    name=f"remote-stop-{recording_id[:8]}",
+                ).start()
             self.active_dataset_ids.pop(instance_key, None)
             self.recording_stopped(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
             )
+
+    def register_remote_stop_handler(
+        self, robot_id: str, instance: int, callback: Callable[[str], None]
+    ) -> None:
+        """Register a callback to drain streams when a web-initiated stop arrives."""
+        key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
+        self._drain_callbacks[key] = callback
+
+    def deregister_remote_stop_handler(self, robot_id: str, instance: int) -> None:
+        """Remove the drain callback for a robot instance."""
+        key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
+        self._drain_callbacks.pop(key, None)
 
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
@@ -337,9 +341,7 @@ class RecordingStateManager(BaseSSEConsumer, AsyncIOEventEmitter):
         """
         message = RecordingNotification.model_validate_json(message_data)
         # Python 3.9 compatibility: replace match/case with if/elif
-        if message.type == RecordingNotificationType.SAVED:
-            self.emit(self.RECORDING_SAVED, **message.payload.model_dump())
-        elif message.type == RecordingNotificationType.START:
+        if message.type == RecordingNotificationType.START:
             self.updated_recording_state(is_recording=True, details=message.payload)
 
         elif message.type in (
