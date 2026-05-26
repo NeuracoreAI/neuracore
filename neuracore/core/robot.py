@@ -37,6 +37,8 @@ from .utils.http_errors import extract_error_detail
 logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
 
+_ROBOTS_LIST_PAGE_SIZE = 30
+
 
 @dataclass
 class JointLimits:
@@ -913,14 +915,31 @@ def list_organization_robots(
         raise RobotError(
             "Invalid robot list mode. Please use 'current', 'archived', or 'mixed'."
         )
+    robots: list[dict] = []
+    start_after: dict | None = None
     try:
-        with Session() as session:
-            response = session.get(
-                f"{API_URL}/org/{org_id}/robots?is_shared={is_shared}&mode={mode}",
-                headers=get_auth().get_headers(),
-            )
-            response.raise_for_status()
-            return response.json()
+        while True:
+            with Session() as session:
+                response = session.post(
+                    f"{API_URL}/org/{org_id}/robots/list",
+                    headers=get_auth().get_headers(),
+                    params={
+                        "is_shared": str(is_shared).lower(),
+                        "mode": mode,
+                        "limit": str(_ROBOTS_LIST_PAGE_SIZE),
+                    },
+                    json=start_after,
+                )
+                response.raise_for_status()
+                page = response.json()
+
+            batch = page.get("data", [])
+            robots.extend(batch)
+            total = page.get("total", len(robots))
+            if not batch or len(robots) >= total:
+                break
+            start_after = batch[-1]
+        return robots
     except requests.exceptions.ConnectionError:
         raise RobotError(
             "Failed to connect to neuracore server, "
@@ -949,23 +968,10 @@ def get_robot_id_from_name(robot_name: str, org_id: str | None = None) -> str:
     if org_id is None:
         org_id = get_current_org()
 
-    with Session() as session:
-        response_private = session.get(
-            f"{API_URL}/org/{org_id}/robots",
-            headers=get_auth().get_headers(),
-            params={"is_shared": False},
-        )
+    private_robots = list_organization_robots(org_id, is_shared=False)
+    shared_robots = list_organization_robots(org_id, is_shared=True)
+    robots = private_robots + shared_robots
 
-        response_shared = session.get(
-            f"{API_URL}/org/{org_id}/robots",
-            headers=get_auth().get_headers(),
-            params={"is_shared": True},
-        )
-
-    response_private.raise_for_status()
-    response_shared.raise_for_status()
-
-    robots = response_private.json() + response_shared.json()
     # There is a change the same name can exist in both private and shared,
     # we will return the private first in this case
     for robot in robots:
