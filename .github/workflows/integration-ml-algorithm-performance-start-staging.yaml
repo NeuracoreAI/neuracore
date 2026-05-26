@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Performance - Start Training
+name: Integration ML Algorithm Performance - Start Training (Staging)
 
 on:
   schedule:
@@ -9,52 +9,27 @@ jobs:
   discover-algorithms:
     runs-on: ubuntu-latest
     outputs:
-      latest_release_tag: ${{ steps.release-tag.outputs.latest_release_tag }}
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
     - uses: actions/checkout@v4
       with:
-        fetch-depth: 0
-    - name: Resolve latest release tag
-      id: release-tag
-      run: |
-        latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
-        if [ -z "$latest_release_tag" ]; then
-          echo "::error::No release tag matching v* found"
-          exit 1
-        fi
-        echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
-        echo "Latest release tag: $latest_release_tag"
+        ref: ${{ github.ref_name }}
     - name: List algorithm names
       id: list
       env:
-        LATEST_RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
         STAGING_BRANCH: ${{ github.ref_name }}
       run: |
         pip install pyyaml -q
         python3 << 'EOF' >> $GITHUB_OUTPUT
         import json
         import os
-        import subprocess
 
         import yaml
 
-        latest_release_tag = os.environ["LATEST_RELEASE_TAG"]
         staging_branch = os.environ["STAGING_BRANCH"]
 
         with open("tests/integration/ml/algorithm_configs.yaml") as f:
             staging_config = yaml.safe_load(f)
-
-        production_config = yaml.safe_load(
-            subprocess.check_output(
-                [
-                    "git",
-                    "show",
-                    f"{latest_release_tag}:tests/integration/ml/algorithm_configs.yaml",
-                ],
-                text=True,
-            )
-        )
 
         matrix = [
             {
@@ -65,22 +40,13 @@ jobs:
             }
             for algorithm in staging_config["algorithms"]
         ]
-        matrix.extend(
-            {
-                "algorithm": algorithm["name"],
-                "environment": "production",
-                "python-version": "3.11",
-                "test-harness-ref": latest_release_tag,
-            }
-            for algorithm in production_config["algorithms"]
-        )
 
         print("matrix=" + json.dumps(matrix))
         EOF
 
   start-training:
     needs: [discover-algorithms]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -88,40 +54,17 @@ jobs:
 
     steps:
     - name: Checkout code
-      if: ${{ matrix.environment != 'production' }}
       uses: actions/checkout@v4
       with:
         ref: ${{ matrix.test-harness-ref }}
-    - name: Checkout production test harness
-      if: ${{ matrix.environment == 'production' }}
-      uses: actions/checkout@v4
-      with:
-        ref: ${{ needs.discover-algorithms.outputs.latest_release_tag }}
-        fetch-depth: 0
     - name: Pull LFS objects
       run: git lfs pull
 
-    - name: Verify production test harness ref
-      if: ${{ matrix.environment == 'production' }}
-      run: |
-        checked_out_ref="$(git describe --tags --exact-match HEAD)"
-        expected_ref="${{ matrix.test-harness-ref }}"
-        if [ "$checked_out_ref" != "$expected_ref" ]; then
-          echo "::error::Expected production test harness ref $expected_ref, got $checked_out_ref"
-          exit 1
-        fi
-
     - name: Set up Python ${{ matrix.python-version }}
-      if: ${{ matrix.environment != 'production' }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
-    - name: Set up Python ${{ matrix.python-version }}
-      if: ${{ matrix.environment == 'production' }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
 
     - name: Install Python dependencies
       run: |
@@ -131,7 +74,7 @@ jobs:
     - name: Resolve test harness
       run: |
         echo "TEST_HARNESS_PATH=tests/integration/ml/test_algorithm_performance.py" >> "$GITHUB_ENV"
-        echo "Test harness environment: ${{ matrix.environment }}"
+        echo "Test harness environment: staging"
         echo "Test harness ref: ${{ matrix.test-harness-ref }}"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness path: tests/integration/ml/test_algorithm_performance.py"
@@ -144,9 +87,9 @@ jobs:
     - name: Start training job
       id: start-training
       env:
-        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
-        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         ALGORITHM_NAME: ${{ matrix.algorithm }}
       run: pytest -o log_cli=true --log-cli-level=INFO -v -k test_start_training "$TEST_HARNESS_PATH"
 

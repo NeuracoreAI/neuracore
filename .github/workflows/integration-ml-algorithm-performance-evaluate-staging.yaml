@@ -1,0 +1,119 @@
+name: Integration ML Algorithm Performance - Evaluate (Staging)
+
+on:
+  schedule:
+    - cron: "0 8 * * *"  # 8 hours after training starts; training cap is 6 hours
+  workflow_dispatch:
+
+jobs:
+  discover-algorithms:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref_name }}
+    - name: List algorithm names
+      id: list
+      run: |
+        pip install pyyaml -q
+        python3 << 'EOF' >> $GITHUB_OUTPUT
+        import json
+
+        import yaml
+
+        with open("tests/integration/ml/algorithm_configs.yaml") as f:
+            staging_config = yaml.safe_load(f)
+
+        matrix = [
+            {
+                "algorithm": algorithm["name"],
+                "environment": "staging",
+                "python-version": "3.11",
+                "test-harness-ref": "main",
+            }
+            for algorithm in staging_config["algorithms"]
+        ]
+
+        print("matrix=" + json.dumps(matrix))
+        EOF
+
+  evaluate:
+    needs: [discover-algorithms]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
+
+    steps:
+    - name: Restore training metadata from cache
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          training_job_id.txt
+          test_harness_ref.txt
+        # No exact key match is expected; restore-keys picks the most recent run.
+        key: training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-never-exact
+        restore-keys: |
+          training-job-${{ matrix.algorithm }}-${{ matrix.environment }}-
+
+    - name: Read training metadata
+      id: training-metadata
+      run: |
+        if [ ! -f training_job_id.txt ]; then
+          echo "::error::No cached training job ID found for ${{ matrix.algorithm }}/staging. Did the Start Training workflow succeed?"
+          exit 1
+        fi
+        echo "TRAINING_JOB_ID=$(cat training_job_id.txt)" >> "$GITHUB_ENV"
+        echo "TEST_HARNESS_REF=main" >> "$GITHUB_ENV"
+        echo "test_harness_ref=main" >> "$GITHUB_OUTPUT"
+        echo "Training job ID: $(cat training_job_id.txt)"
+        echo "Test harness ref: main"
+
+    - name: Checkout test harness
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ steps.training-metadata.outputs.test_harness_ref }}
+        fetch-depth: 0
+    - name: Pull LFS objects
+      run: git lfs pull
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir ".[dev,ml,examples]"
+
+    - name: Resolve test harness
+      run: |
+        echo "TEST_HARNESS_PATH=tests/integration/ml/test_algorithm_performance.py" >> "$GITHUB_ENV"
+        echo "Test harness environment: staging"
+        echo "Test harness ref: $TEST_HARNESS_REF"
+        echo "Test harness commit: $(git rev-parse HEAD)"
+        echo "Test harness path: tests/integration/ml/test_algorithm_performance.py"
+        python - << 'EOF'
+        import neuracore
+
+        print(f"Installed neuracore version: {neuracore.__version__}")
+        EOF
+
+    - name: Run Evaluation
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+        NEURACORE_ENDPOINT_TIMEOUT: 30
+        ALGORITHM_NAME: ${{ matrix.algorithm }}
+        DISPLAY: :0
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        Xvfb $DISPLAY -screen 0 1280x1024x24 &
+        pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate "$TEST_HARNESS_PATH"
