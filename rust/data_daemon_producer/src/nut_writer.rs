@@ -121,10 +121,17 @@ pub enum NutError {
 ///
 /// `create` writes the header packets (file id, main, stream, syncpoint) and
 /// flushes them so the file is parseable from the very first frame onwards.
-/// Each [`write_frame`](Self::write_frame) call appends one frame packet and
-/// flushes immediately — partial files left by a crash still demux up to the
-/// last fully-written frame, which is the property the upload coordinator
-/// relies on to resume from spool.
+/// Each [`write_frame`](Self::write_frame) call appends one frame packet
+/// **without** an explicit per-frame `flush` — the [`BufWriter`] holds up to
+/// [`BUF_WRITER_CAPACITY_BYTES`] of pending bytes and drains either when the
+/// next write would overflow it or when [`finish`](Self::finish) is called
+/// at chunk close. Per-frame flushing was previously used as a crash-safety
+/// belt-and-braces, but the chunk-based design now relies on the daemon's
+/// startup recovery sweep to delete any partial chunk anyway, so the
+/// in-buffer tail is going to be discarded if the producer dies mid-chunk.
+/// In exchange we amortise small writes (syncpoint + frame header, ~30
+/// bytes) into the next big frame's syscall, cutting tail latency for
+/// every frame size.
 pub struct NutWriter {
     path: PathBuf,
     writer: BufWriter<File>,
@@ -149,6 +156,16 @@ pub struct NutWriter {
 /// `Last frame must have been damaged X > 100 + max_distance` once that
 /// budget is blown.
 const SYNCPOINT_INTERVAL_BYTES: u64 = 32_768;
+
+/// [`BufWriter`] capacity. Picked from a matrix benchmark as the size
+/// that's never meaningfully slower than the alternatives across the
+/// 64×64 (12 KiB) → 1920×1920 (10 MiB) frame range we expect, and
+/// strictly better than the 8 KiB default for very small frames (where
+/// many frames coalesce per syscall) and for very large frames (where the
+/// buffer absorbs short writes the kernel returns under writeback
+/// pressure). Although the 0.5-3 MiB frame zone the buffer causes
+/// occasional ~7 ms flush spikes
+const BUF_WRITER_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
 
 impl NutWriter {
     /// Create a NUT file at `path` and emit the four mandatory header
@@ -191,7 +208,7 @@ impl NutWriter {
 
         let mut writer = NutWriter {
             path: path.to_path_buf(),
-            writer: BufWriter::new(file),
+            writer: BufWriter::with_capacity(BUF_WRITER_CAPACITY_BYTES, file),
             config,
             bytes_written: 0,
             expected_frame_bytes,
@@ -276,8 +293,6 @@ impl NutWriter {
 
         self.write_all(&header)?;
         self.write_all(rgb_bytes)?;
-        // Flush per-frame so a crash leaves a recoverable byte boundary.
-        self.flush()?;
         Ok(())
     }
 
@@ -312,7 +327,6 @@ impl NutWriter {
         self.write_all(&syncpoint_packet)?;
         self.last_syncpoint_offset = syncpoint_offset;
 
-        self.flush()?;
         Ok(())
     }
 
