@@ -121,10 +121,17 @@ class RecordingContext:
         name: str,
         width: int,
         height: int,
-        payload: bytes,
+        payload: memoryview,
         timestamp: float,
     ) -> None:
-        """Forward one video frame to the daemon."""
+        """Forward one video frame to the daemon.
+
+        ``payload`` may be either a ``bytes`` object or a flat ``memoryview``
+        (e.g. ``memoryview(numpy_array).cast("B")``); the native side reads
+        the buffer via the Python buffer protocol and copies straight into
+        the NUT writer's destination, so there's no benefit to materialising
+        a ``bytes`` first.
+        """
         recording_id = self._require_recording_id("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_frame(

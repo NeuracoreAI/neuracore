@@ -89,6 +89,8 @@ use pyo3::prelude::*;
 use thiserror::Error;
 use uuid::Uuid;
 
+use pyo3::buffer::PyBuffer;
+
 use crate::nut_writer::{NutVideoConfig, NutWriter};
 
 /// Bytes after which the producer rotates to a fresh NUT chunk file.
@@ -649,10 +651,19 @@ fn log_joints(
     let timestamp_for_json = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
     py.allow_threads(|| -> PyResult<()> {
         // Resolve a trace id for every joint, collecting the ones minted now.
+        // The recording must already be registered (i.e. an earlier
+        // `start_recording` is in scope) — if it's not, this call is a
+        // silent no-op. Auto-registering on the log path would resurrect a
+        // recording the producer has already torn down via `stop_recording`
+        // (a real race after the SDK's 5-minute expiry handler), spawning
+        // phantom trace ids that the daemon never receives an `EndTrace`
+        // for and which stay in `writing` forever.
         let mut new_traces: Vec<(String, String)> = Vec::new();
         let mut trace_ids: Vec<String> = Vec::with_capacity(items.len());
-        with_registry(|recordings| {
-            let recording = recordings.entry(recording_id.clone()).or_default();
+        let recording_known = with_registry(|recordings| {
+            let Some(recording) = recordings.get_mut(&recording_id) else {
+                return false;
+            };
             for (name, _) in &items {
                 let (trace_id, is_new) = resolve_trace(recording, &data_type, name);
                 if is_new {
@@ -660,7 +671,11 @@ fn log_joints(
                 }
                 trace_ids.push(trace_id);
             }
+            true
         });
+        if !recording_known {
+            return Ok(());
+        }
         // A StartTrace for each newly minted trace, ahead of the data batch.
         for (trace_id, name) in new_traces {
             publish(&Envelope::StartTrace {
@@ -703,13 +718,12 @@ fn log_joints(
 #[pyo3(signature = (recording_id, data_type, name, width, height, payload, timestamp_ns, timestamp_s = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
-    py: Python<'_>,
     recording_id: &str,
     data_type: &str,
     name: &str,
     width: u32,
     height: u32,
-    payload: &[u8],
+    payload: PyBuffer<u8>,
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
 ) -> PyResult<()> {
@@ -721,41 +735,71 @@ fn log_frame(
     if width == 0 || height == 0 {
         return Err(PyValueError::new_err("width and height must be non-zero"));
     }
+    let expected_bytes = (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(3);
+    let actual_bytes = payload.item_count();
+    if actual_bytes != expected_bytes {
+        return Err(PyValueError::new_err(format!(
+            "video frame buffer is {actual_bytes} bytes; expected width*height*3 = {expected_bytes}"
+        )));
+    }
+    if !payload.is_c_contiguous() {
+        return Err(PyValueError::new_err(
+            "video frame buffer must be C-contiguous",
+        ));
+    }
     let recording_id = recording_id.to_string();
     let data_type = data_type.to_string();
     let name = name.to_string();
-    // Copy the payload into owned Rust memory while the GIL is held — the
-    // `&[u8]` borrows a Python buffer.
-    let owned_payload = payload.to_vec();
     // Resolve `timestamp_s` once. Fall back to ns→s so the chunk envelope's
     // per-frame timestamp matches the integration matrix's exact-match
     // sidecar assertion even when the SDK omitted the f64.
     let resolved_timestamp_s =
         timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
-    py.allow_threads(|| -> PyResult<()> {
-        let (trace_id, is_new) = with_registry(|recordings| {
-            let recording = recordings.entry(recording_id.clone()).or_default();
-            resolve_trace(recording, &data_type, &name)
-        });
-        if is_new {
-            publish(&Envelope::StartTrace {
-                recording_id: recording_id.clone(),
-                trace_id: trace_id.clone(),
-                data_type: data_type.clone(),
-                data_type_name: Some(name),
-            })?;
-        }
-        record_video_frame(
-            &recording_id,
-            &data_type,
-            &trace_id,
-            width,
-            height,
-            &owned_payload,
-            timestamp_ns,
-            resolved_timestamp_s,
-        )
-    })
+
+    // SAFETY: PyO3 guarantees the GIL is held for the entire body of a
+    // `#[pyfunction]`, the buffer is `u8` (`PyBuffer::<u8>::get` validated
+    // the format and item size), the length comes straight from
+    // `PyBuffer::item_count`, and we only *read* from the slice. The
+    // buffer's underlying Python object stays alive for `payload`'s
+    // lifetime, which spans this entire function.
+    //
+    // We deliberately keep the GIL across the call. Releasing it (via
+    // `py.allow_threads`) would require copying `payload` into an owned
+    // `Vec<u8>` — for 1080p RGB that's a 6.22 MiB memcpy on *every*
+    // frame. Keeping the GIL lets us pass a zero-copy view straight from
+    // the numpy buffer through to `NutWriter::write_frame`. The ~2 ms
+    // NUT write blocks other Python threads briefly, which joint logging
+    // at 15-200 Hz tolerates comfortably.
+    let payload_slice: &[u8] =
+        unsafe { std::slice::from_raw_parts(payload.buf_ptr() as *const u8, actual_bytes) };
+
+    let Some((trace_id, is_new)) = with_registry(|recordings| {
+        recordings
+            .get_mut(&recording_id)
+            .map(|recording| resolve_trace(recording, &data_type, &name))
+    }) else {
+        return Ok(());
+    };
+    if is_new {
+        publish(&Envelope::StartTrace {
+            recording_id: recording_id.clone(),
+            trace_id: trace_id.clone(),
+            data_type: data_type.clone(),
+            data_type_name: Some(name),
+        })?;
+    }
+    record_video_frame(
+        &recording_id,
+        &data_type,
+        &trace_id,
+        width,
+        height,
+        payload_slice,
+        timestamp_ns,
+        resolved_timestamp_s,
+    )
 }
 
 /// Append one frame to the trace's in-progress NUT chunk. Opens the chunk
@@ -944,10 +988,15 @@ fn log_scalar(
     let name = name.to_string();
     let owned_payload = payload.to_vec();
     py.allow_threads(|| -> PyResult<()> {
-        let (trace_id, is_new) = with_registry(|recordings| {
-            let recording = recordings.entry(recording_id.clone()).or_default();
-            resolve_trace(recording, &data_type, &name)
-        });
+        // Silent drop if the recording isn't registered — see the
+        // matching no-auto-register comment in `log_joints`.
+        let Some((trace_id, is_new)) = with_registry(|recordings| {
+            recordings
+                .get_mut(&recording_id)
+                .map(|recording| resolve_trace(recording, &data_type, &name))
+        }) else {
+            return Ok(());
+        };
         if is_new {
             publish(&Envelope::StartTrace {
                 recording_id: recording_id.clone(),

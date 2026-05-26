@@ -497,14 +497,13 @@ def _log_camera_data(
     stream.log(camera_data_without_frame, frame=image)
 
     if rust_daemon_enabled() and robot.get_current_recording_id() is not None:
-        # Rust daemon: the recording-scoped native session owns the camera's
-        # trace lifecycle; hand it the raw frame bytes.
+        contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
         robot._get_daemon_recording_context().log_frame(
             camera_type.value,
             storage_name,
             int(image.shape[1]),
             int(image.shape[0]),
-            image.tobytes(),
+            memoryview(contiguous).cast("B"),
             camera_data_without_frame.timestamp,
         )
 
