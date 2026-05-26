@@ -1,23 +1,29 @@
-//! Per-trace `ffmpeg` transcoder.
+//! Per-chunk `ffmpeg` transcoder and segment concatenator.
 //!
-//! The trace actor spools captured frames into a `raw.nut` file via
-//! [`crate::encoding::nut_writer`]; once the trace ends, this module hands the
-//! file to a supervised `ffmpeg` child that produces two mp4s:
+//! The producer spools video frames into a sequence of NUT chunk files
+//! beneath each trace's `chunks/` directory. As each chunk arrives the
+//! per-trace actor calls [`VideoEncoder::encode_chunk`] which shells out to
+//! ffmpeg to produce two MP4 segments:
 //!
-//! - `lossy.mp4` — `libx264` `-pix_fmt yuv420p -preset ultrafast -qp 23` for
-//!   fast playback.
-//! - `lossless.mp4` — `libx264` `-pix_fmt yuv444p10le -preset ultrafast -qp 0`
-//!   for mathematically-lossless archival. `ffv1` would be the natural codec
-//!   for this but is incompatible with the `.mp4` container the on-disk
-//!   layout contract requires.
+//! - `chunk_NNNN_lossy.mp4` — `libx264` `-pix_fmt yuv420p -preset ultrafast
+//!   -qp 23` for fast playback.
+//! - `chunk_NNNN_lossless.mp4` — `libx264` `-pix_fmt yuv444p10le -preset
+//!   ultrafast -qp 0` for mathematically-lossless archival. `ffv1` would be
+//!   the natural codec for this but is incompatible with the `.mp4`
+//!   container the on-disk layout contract requires.
 //!
-//! Both outputs are verified non-empty before the source `raw.nut` is unlinked;
-//! a failed encode leaves the spool intact so the upload coordinator can either
-//! retry or surface the partial state on the dashboard. We deliberately keep
-//! the ffmpeg invocation in a single command (two `-map 0:v` output streams)
-//! so that the raw file is demuxed exactly once.
+//! On `EndTrace` the per-trace actor calls [`VideoEncoder::concat_segments`]
+//! which stream-copies the per-chunk segments into the final `lossy.mp4` /
+//! `lossless.mp4`. Stream-copy avoids a second decode/encode pass, so the
+//! tail of a recording finishes in seconds regardless of total length.
+//!
+//! Both outputs are verified non-empty before the caller is told the
+//! invocation succeeded; ffmpeg occasionally exits 0 but produces a
+//! zero-byte file when the requested codec is unavailable in the local
+//! build.
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -27,29 +33,34 @@ use tokio::process::Command;
 /// when they need to point at a specific build.
 pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 
-/// Inputs to one transcode invocation.
+/// Inputs to one per-chunk transcode invocation.
 #[derive(Debug, Clone)]
-pub struct VideoEncodeRequest {
-    /// Source NUT spool produced by [`crate::encoding::nut_writer::NutWriter`].
+pub struct ChunkEncodeRequest {
+    /// Source NUT chunk file produced by the producer.
     pub raw_nut: PathBuf,
-    /// Destination for the H.264 lossy output (`lossy.mp4`).
-    pub lossy_mp4: PathBuf,
-    /// Destination for the lossless output (`lossless.mp4`).
-    pub lossless_mp4: PathBuf,
+    /// Destination for the per-chunk lossy mp4 segment.
+    pub lossy_out: PathBuf,
+    /// Destination for the per-chunk lossless mp4 segment.
+    pub lossless_out: PathBuf,
 }
 
-/// Outcome of a successful transcode.
+/// Outcome of a successful per-chunk transcode.
 #[derive(Debug, Clone, Copy)]
-pub struct VideoEncodeOutcome {
-    /// Bytes written to the lossy mp4.
+pub struct ChunkEncodeOutcome {
+    /// Bytes written to the lossy segment.
     pub lossy_bytes: u64,
-    /// Bytes written to the lossless mp4.
+    /// Bytes written to the lossless segment.
     pub lossless_bytes: u64,
-    /// Whether the source `raw.nut` was unlinked after verification.
-    pub raw_nut_removed: bool,
 }
 
-/// Errors raised by [`VideoEncoder::run`].
+/// Outcome of a successful concat invocation.
+#[derive(Debug, Clone, Copy)]
+pub struct ConcatOutcome {
+    /// Bytes written to the concatenated output.
+    pub bytes: u64,
+}
+
+/// Errors raised by [`VideoEncoder`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum VideoEncodeError {
     /// `ffmpeg` could not be located or spawned (typically `ENOENT`).
@@ -79,7 +90,8 @@ pub enum VideoEncodeError {
         /// Path that should have been written.
         path: PathBuf,
     },
-    /// An I/O operation around the encode (file metadata, unlink) failed.
+    /// An I/O operation around the encode (file metadata, unlink, concat list
+    /// write) failed.
     #[error("I/O failure during transcode for {path}: {source}")]
     Io {
         /// Path being inspected when the error occurred.
@@ -88,10 +100,13 @@ pub enum VideoEncodeError {
         #[source]
         source: std::io::Error,
     },
+    /// `concat_segments` was called with no input segments — caller bug.
+    #[error("concat_segments called with empty segment list")]
+    EmptySegments,
 }
 
-/// Builder for one transcode invocation. Keeps the ffmpeg binary path
-/// configurable so unit tests can shim in a wrapper script if needed.
+/// Builder for ffmpeg invocations. Keeps the ffmpeg binary path configurable
+/// so unit tests can shim in a wrapper script if needed.
 #[derive(Debug, Clone)]
 pub struct VideoEncoder {
     binary: OsString,
@@ -117,22 +132,24 @@ impl VideoEncoder {
         self
     }
 
-    /// Transcode `request.raw_nut` into the configured mp4 outputs.
+    /// Transcode one NUT chunk into the configured per-chunk mp4 outputs.
     ///
-    /// On success the source `raw.nut` is unlinked. A failed encode leaves it
-    /// in place — the caller decides whether to retry or escalate.
-    pub async fn run(
+    /// The source `raw.nut` is left in place — the caller is responsible for
+    /// unlinking it after verifying both outputs landed (the per-trace actor
+    /// drops the source as part of its envelope handling so a partial encode
+    /// can be retried via the recovery sweep without needing to re-spool).
+    pub async fn encode_chunk(
         &self,
-        request: &VideoEncodeRequest,
-    ) -> Result<VideoEncodeOutcome, VideoEncodeError> {
-        ensure_parent_dirs(&request.lossy_mp4)?;
-        ensure_parent_dirs(&request.lossless_mp4)?;
+        request: &ChunkEncodeRequest,
+    ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
+        ensure_parent_dirs(&request.lossy_out)?;
+        ensure_parent_dirs(&request.lossless_out)?;
 
         // `-y` overwrites existing outputs (resume safety: a previous failed
         // run may have left a partial mp4). `-fflags +genpts` rebuilds the
         // presentation timestamps from the NUT timing when the spool was
         // truncated mid-frame. `-vsync vfr` (applied per output) is the
-        // critical knob here: the NUT spool uses `time_base = 1/1_000_000`
+        // critical knob here: the NUT chunk uses `time_base = 1/1_000_000`
         // so ffmpeg's demuxer reports `r_frame_rate = 1_000_000/1` (one
         // million fps). With the default `vsync auto` cfr policy the encoder
         // would then synthesise an output frame at every microsecond slot
@@ -165,7 +182,7 @@ impl VideoEncoder {
             .arg("ultrafast")
             .arg("-qp")
             .arg("23")
-            .arg(&request.lossy_mp4)
+            .arg(&request.lossy_out)
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
@@ -178,7 +195,7 @@ impl VideoEncoder {
             .arg("ultrafast")
             .arg("-qp")
             .arg("0")
-            .arg(&request.lossless_mp4)
+            .arg(&request.lossless_out)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -205,32 +222,135 @@ impl VideoEncoder {
             });
         }
 
-        let lossy_bytes = non_empty_file_size(&request.lossy_mp4)?;
-        let lossless_bytes = non_empty_file_size(&request.lossless_mp4)?;
+        let lossy_bytes = non_empty_file_size(&request.lossy_out)?;
+        let lossless_bytes = non_empty_file_size(&request.lossless_out)?;
 
-        // Source spool can be removed only after both outputs are confirmed
-        // non-empty. If the unlink itself fails we still report success on the
-        // mp4s — leaving a stale `raw.nut` is preferable to discarding the
-        // archived outputs the user is waiting on.
-        let raw_nut_removed = match std::fs::remove_file(&request.raw_nut) {
-            Ok(()) => true,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    raw_nut = %request.raw_nut.display(),
-                    "ffmpeg succeeded but raw spool could not be removed"
-                );
-                false
-            }
-        };
-
-        Ok(VideoEncodeOutcome {
+        Ok(ChunkEncodeOutcome {
             lossy_bytes,
             lossless_bytes,
-            raw_nut_removed,
         })
     }
+
+    /// Stream-copy concatenate `segments` into `out`.
+    ///
+    /// Uses ffmpeg's `concat` demuxer with `-c copy`, so no transcode
+    /// happens — total cost is bounded by the read+write of the segment
+    /// bytes. Caller is responsible for unlinking the source segments after
+    /// the concat succeeds.
+    pub async fn concat_segments(
+        &self,
+        segments: &[PathBuf],
+        out: &Path,
+    ) -> Result<ConcatOutcome, VideoEncodeError> {
+        if segments.is_empty() {
+            return Err(VideoEncodeError::EmptySegments);
+        }
+        ensure_parent_dirs(out)?;
+
+        // The concat demuxer reads a list-file describing absolute segment
+        // paths. We write it next to the output so a future debugging pass
+        // can see exactly which segments were concatenated; the file is
+        // unlinked on the success path so it doesn't accumulate.
+        let list_path = list_file_for(out);
+        write_concat_list(&list_path, segments)?;
+
+        let result = Command::new(&self.binary)
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("concat")
+            // `-safe 0` permits absolute paths (and any non-portable chars)
+            // in the list file. Without it ffmpeg rejects paths that aren't
+            // simple relative names.
+            .arg("-safe")
+            .arg("0")
+            .arg("-i")
+            .arg(&list_path)
+            .arg("-c")
+            .arg("copy")
+            .arg(out)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output()
+            .await;
+
+        // Always try to clean up the list file, even on failure — leaving it
+        // around just clutters the trace directory.
+        let _ = std::fs::remove_file(&list_path);
+
+        let output = result.map_err(|source| VideoEncodeError::Spawn {
+            binary: self.binary.clone(),
+            source,
+        })?;
+
+        if !output.status.success() {
+            let stderr_tail = tail_stderr(&output.stderr);
+            return Err(VideoEncodeError::NonZeroExit {
+                status: format!("{:?}", output.status),
+                stderr_tail,
+            });
+        }
+
+        let bytes = non_empty_file_size(out)?;
+        Ok(ConcatOutcome { bytes })
+    }
+}
+
+/// Build the path to the temporary concat list file used by
+/// [`VideoEncoder::concat_segments`]. Placed alongside `out` so concurrent
+/// trace concats don't collide.
+fn list_file_for(out: &Path) -> PathBuf {
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| OsString::from("concat_list"));
+    name.push(".concat.txt");
+    match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
+/// Render the ffmpeg `concat` list-file format: one `file '...'` entry per
+/// segment, single-quoted with escaped embedded single quotes per the
+/// demuxer's own escape rule (`'` → `'\''`).
+///
+/// Relative segment paths are resolved against the current working directory
+/// before being written. ffmpeg's concat demuxer interprets `file '...'`
+/// entries *relative to the list-file's directory*, not the daemon's CWD —
+/// so a relative segment path like `recordings/rec/cam/trace/chunk_0000.mp4`
+/// listed in `recordings/rec/cam/trace/lossy.mp4.concat.txt` would expand to
+/// `recordings/rec/cam/trace/recordings/rec/cam/trace/chunk_0000.mp4` and
+/// fail to open. Absolutising on write side-steps that without forcing
+/// callers to pre-canonicalise.
+fn write_concat_list(path: &Path, segments: &[PathBuf]) -> Result<(), VideoEncodeError> {
+    let mut file = std::fs::File::create(path).map_err(|source| VideoEncodeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    for segment in segments {
+        let absolute = if segment.is_absolute() {
+            segment.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|source| VideoEncodeError::Io {
+                    path: segment.clone(),
+                    source,
+                })?
+                .join(segment)
+        };
+        let escaped = absolute.to_string_lossy().replace('\'', r"'\''");
+        writeln!(file, "file '{escaped}'").map_err(|source| VideoEncodeError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 /// Ensure the parent directory for `path` exists. The trace actor normally
@@ -284,14 +404,13 @@ fn tail_stderr(stderr: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::encoding::nut_writer::{NutVideoConfig, NutWriter};
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
-    /// Locate `ffmpeg` on `PATH`. Mirrors the `locate_ffprobe` helper in
-    /// [`crate::encoding::nut_writer`] so the suite skips cleanly on sandboxes
-    /// that lack the FFmpeg toolchain.
+    /// Locate an ffmpeg-suite binary on `PATH`. Returns `None` (with a
+    /// caller-side skip) so the suite stays green in sandboxes that lack
+    /// the FFmpeg toolchain.
     fn locate_binary(name: &str) -> Option<PathBuf> {
         let output = StdCommand::new("which").arg(name).output().ok()?;
         if !output.status.success() {
@@ -306,26 +425,28 @@ mod tests {
         }
     }
 
-    /// Render a small synthetic NUT spool with the given frame count.
-    fn write_synthetic_nut(path: &Path, frame_count: u64) -> NutVideoConfig {
-        let config = NutVideoConfig {
-            width: 16,
-            height: 16,
-            time_base_num: 1,
-            time_base_den: 30,
-        };
-        let mut writer = NutWriter::create(path, config).expect("create nut");
-        for index in 0..frame_count {
-            let mut buffer = vec![0u8; 16 * 16 * 3];
-            for (pixel_index, chunk) in buffer.chunks_mut(3).enumerate() {
-                chunk[0] = ((pixel_index + index as usize) & 0xFF) as u8;
-                chunk[1] = ((pixel_index * 3 + index as usize) & 0xFF) as u8;
-                chunk[2] = ((pixel_index * 5 + index as usize) & 0xFF) as u8;
-            }
-            writer.write_frame(index, &buffer).expect("frame");
-        }
-        writer.finish().expect("finish nut");
-        config
+    /// Synthesise a small NUT chunk via ffmpeg's `testsrc` source so the
+    /// encoder tests don't need to pull in the producer crate just for the
+    /// NUT writer. `frame_count` frames at the configured rate land in a
+    /// NUT-container raw-rgb24 stream that `encode_chunk` can demux.
+    fn write_synthetic_nut(ffmpeg: &Path, path: &Path, frame_count: u64) {
+        let duration = format!("{}", frame_count); // 1 fps testsrc → frame_count seconds
+        let status = StdCommand::new(ffmpeg)
+            .args([
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+            ])
+            .arg(format!("testsrc=duration={duration}:size=16x16:rate=1"))
+            .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
+            .arg(path)
+            .status()
+            .expect("ffmpeg synth status");
+        assert!(status.success(), "synthetic NUT generation failed");
     }
 
     #[test]
@@ -357,42 +478,105 @@ mod tests {
         assert_eq!(tail.len(), 4 * 1024);
     }
 
+    #[test]
+    fn concat_list_escapes_single_quotes() {
+        let tempdir = TempDir::new().unwrap();
+        let list = tempdir.path().join("list.txt");
+        let segments = vec![
+            PathBuf::from("/var/data/recordings/rec/cam/trace/chunks/chunk_0000.nut"),
+            PathBuf::from("/var/data/rec'with quote/trace/chunks/chunk_0001.nut"),
+        ];
+        write_concat_list(&list, &segments).expect("write list");
+        let contents = std::fs::read_to_string(&list).unwrap();
+        assert!(
+            contents.contains("file '/var/data/recordings/rec/cam/trace/chunks/chunk_0000.nut'")
+        );
+        assert!(
+            contents.contains(r"file '/var/data/rec'\''with quote/trace/chunks/chunk_0001.nut'"),
+            "got: {contents}"
+        );
+    }
+
+    #[test]
+    fn concat_list_absolutises_relative_segment_paths() {
+        // ffmpeg's concat demuxer resolves entries against the list-file's
+        // directory, not the daemon's CWD. Relative segment paths must be
+        // joined against the current working directory before being written
+        // so the demuxer ends up at the same file the daemon meant to open.
+        let tempdir = TempDir::new().unwrap();
+        let list = tempdir.path().join("list.txt");
+        let cwd = std::env::current_dir().unwrap();
+        let segments = vec![PathBuf::from("rel/chunk_0000.mp4")];
+        write_concat_list(&list, &segments).expect("write list");
+        let contents = std::fs::read_to_string(&list).unwrap();
+        let expected = cwd.join("rel/chunk_0000.mp4");
+        assert!(
+            contents.contains(&format!("file '{}'", expected.display())),
+            "got: {contents}"
+        );
+    }
+
+    #[test]
+    fn concat_segments_rejects_empty_input() {
+        let tempdir = TempDir::new().unwrap();
+        let out = tempdir.path().join("out.mp4");
+        // Sync wrapper so the test body isn't async for this trivial case.
+        let result = futures_block(VideoEncoder::new().concat_segments(&[], &out));
+        assert!(matches!(result, Err(VideoEncodeError::EmptySegments)));
+    }
+
+    /// Drive a future to completion on a single-threaded tokio runtime.
+    /// Used by the trivial unit tests that don't need `#[tokio::test]`
+    /// scaffolding.
+    fn futures_block<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
     #[tokio::test]
-    async fn transcode_emits_both_outputs_and_removes_raw() {
-        let Some(_) = locate_binary("ffmpeg") else {
-            eprintln!(
-                "ffmpeg not on PATH — skipping transcode test. Install \
-                 `ffmpeg` to enable this test."
-            );
-            return;
+    async fn encode_chunk_emits_sealed_mp4_outputs() {
+        let ffmpeg = match locate_binary("ffmpeg") {
+            Some(path) => path,
+            None => {
+                eprintln!(
+                    "ffmpeg not on PATH — skipping encode_chunk test. Install \
+                     `ffmpeg` to enable this test."
+                );
+                return;
+            }
         };
         let ffprobe = match locate_binary("ffprobe") {
             Some(path) => path,
             None => {
-                eprintln!("ffprobe not on PATH — skipping transcode test.");
+                eprintln!("ffprobe not on PATH — skipping encode_chunk test.");
                 return;
             }
         };
 
         let tempdir = TempDir::new().unwrap();
-        let raw = tempdir.path().join("raw.nut");
-        let lossy = tempdir.path().join("lossy.mp4");
-        let lossless = tempdir.path().join("lossless.mp4");
+        let raw = tempdir.path().join("chunk_0000.nut");
+        let lossy = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0000_lossless.mp4");
 
-        write_synthetic_nut(&raw, 8);
+        write_synthetic_nut(&ffmpeg, &raw, 8);
 
         let encoder = VideoEncoder::new();
-        let request = VideoEncodeRequest {
+        let request = ChunkEncodeRequest {
             raw_nut: raw.clone(),
-            lossy_mp4: lossy.clone(),
-            lossless_mp4: lossless.clone(),
+            lossy_out: lossy.clone(),
+            lossless_out: lossless.clone(),
         };
-        let outcome = encoder.run(&request).await.expect("transcode succeeds");
+        let outcome = encoder.encode_chunk(&request).await.expect("transcode");
 
         assert!(outcome.lossy_bytes > 0);
         assert!(outcome.lossless_bytes > 0);
-        assert!(outcome.raw_nut_removed);
-        assert!(!raw.exists(), "raw.nut should be unlinked on success");
+        // The new encode_chunk leaves the source in place — the per-trace
+        // actor owns the unlink on its own success path so a partial
+        // post-encode failure can still be cleaned up by the recovery sweep.
+        assert!(raw.exists(), "encode_chunk must not unlink its source");
 
         for path in [&lossy, &lossless] {
             let status = StdCommand::new(&ffprobe)
@@ -422,175 +606,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcode_preserves_frame_count_for_microsecond_timebase() {
-        // Reproduces the daemon's runtime configuration: 1/1_000_000
-        // time-base with PTS values spaced at 60 Hz (≈16_667 μs apart).
-        // Regression guard for the frame-count collapse where every frame
-        // PTS was effectively zero and ffmpeg coalesced 600 frames into ~6.
-        if locate_binary("ffmpeg").is_none() {
-            eprintln!("ffmpeg not on PATH — skipping frame-count regression test.");
-            return;
-        }
+    async fn concat_segments_produces_single_mp4() {
+        let ffmpeg = match locate_binary("ffmpeg") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffmpeg not on PATH — skipping concat_segments test.");
+                return;
+            }
+        };
         let ffprobe = match locate_binary("ffprobe") {
             Some(path) => path,
             None => {
-                eprintln!("ffprobe not on PATH — skipping frame-count regression test.");
+                eprintln!("ffprobe not on PATH — skipping concat_segments test.");
                 return;
             }
         };
 
         let tempdir = TempDir::new().unwrap();
-        let raw = tempdir.path().join("raw.nut");
-        let lossy = tempdir.path().join("lossy.mp4");
-        let lossless = tempdir.path().join("lossless.mp4");
-
-        // 64x64 RGB24 = 12_288 bytes per frame, so 30 frames > MAX_DISTANCE
-        // (65_536) — this size forces the periodic-syncpoint emit path that
-        // the production daemon hits with the integration matrix's smallest
-        // camera (64x64 @ 60 Hz). Reducing this resolution would hide the
-        // regression we just fixed.
-        let config = NutVideoConfig {
-            width: 64,
-            height: 64,
-            time_base_num: 1,
-            time_base_den: 1_000_000,
-        };
-        let mut writer = NutWriter::create(&raw, config).unwrap();
-        // Match the integration matrix's 10s @ 60 Hz workload — 600 frames
-        // crosses the syncpoint cadence enough times that any pixel
-        // shuffle around a syncpoint boundary will be observable.
-        //
-        // Timestamps simulate the integration test's actual producer:
-        // `int((ts_start + N/60) * 1e9)`. The float64 precision loss at
-        // large ts_start (epoch nanoseconds) is intentional — it
-        // reproduces the real-world PTS quantisation that triggered the
-        // bug, and exercises the `last_pts + 1` monotonicity guard the
-        // production trace_actor relies on.
-        let frame_count: u64 = 600;
-        let ts_start_s: f64 = 1_779_000_000.0;
-        for index in 0..frame_count {
-            // Mirror the integration test's frame-code encoder: write the
-            // 16-byte big-endian representation of `index` into the red channel
-            // of the top-left 4x4 pixel grid (the very pattern the data-integrity
-            // pass decodes back from cloud-downloaded frames). The rest of the
-            // frame is a uniform fill so lossy quantisation can't corrupt the
-            // marker.
-            const GRID_SIZE: usize = 4;
-            const WIDTH: usize = 64;
-            let mut buffer = vec![128u8; 64 * 64 * 3];
-            let frame_bytes = (index as u128).to_be_bytes();
-            for row in 0..GRID_SIZE {
-                for col in 0..GRID_SIZE {
-                    let byte_value = frame_bytes[row * GRID_SIZE + col];
-                    let pixel_offset = (row * WIDTH + col) * 3;
-                    buffer[pixel_offset] = byte_value;
-                    buffer[pixel_offset + 1] = 255 - byte_value;
-                    buffer[pixel_offset + 2] = byte_value / 2;
-                }
-            }
-            // Replicate the integration test producer + production
-            // `trace_actor` together: timestamps are derived from float
-            // seconds (so PTS spacing reflects 60 Hz quantisation), then
-            // re-based to a per-trace origin the way `trace_actor` does,
-            // so PTS values stay in the same small range the daemon
-            // actually emits in production.
-            let timestamp_ns: i64 = ((ts_start_s + (index as f64) / 60.0) * 1_000_000_000.0) as i64;
-            let origin_ns: i64 = (ts_start_s * 1_000_000_000.0) as i64;
-            let pts_us = ((timestamp_ns - origin_ns) / 1_000) as u64;
-            writer.write_frame(pts_us, &buffer).unwrap();
-        }
-        writer.finish().unwrap();
-
         let encoder = VideoEncoder::new();
-        let request = VideoEncodeRequest {
-            raw_nut: raw.clone(),
-            lossy_mp4: lossy.clone(),
-            lossless_mp4: lossless.clone(),
-        };
-        encoder.run(&request).await.expect("transcode succeeds");
-
-        for path in [&lossy, &lossless] {
-            let output = StdCommand::new(&ffprobe)
-                .args([
-                    "-v",
-                    "error",
-                    "-select_streams",
-                    "v:0",
-                    "-count_frames",
-                    "-show_entries",
-                    "stream=nb_read_frames",
-                    "-of",
-                    "default=nokey=1:noprint_wrappers=1",
-                ])
-                .arg(path)
-                .output()
-                .expect("spawn ffprobe");
-            assert!(
-                output.status.success(),
-                "ffprobe rejected {}: {}",
-                path.display(),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let raw = String::from_utf8(output.stdout).unwrap();
-            let trimmed = raw.trim();
-            let nb_read_frames: u64 = trimmed.parse().unwrap_or_else(|_| {
-                panic!("expected integer frame count in ffprobe output, got {trimmed:?}")
-            });
-            assert_eq!(
-                nb_read_frames,
-                frame_count,
-                "{} should contain all {} frames (got {})",
-                path.display(),
-                frame_count,
-                nb_read_frames
-            );
+        let mut segments = Vec::new();
+        let total_frames: u64 = 4 * 3;
+        // Encode three synthetic 4-frame NUT chunks into per-chunk MP4s.
+        for chunk_index in 0..3u32 {
+            let raw = tempdir.path().join(format!("chunk_{chunk_index:04}.nut"));
+            let lossy = tempdir
+                .path()
+                .join(format!("chunk_{chunk_index:04}_lossy.mp4"));
+            let lossless = tempdir
+                .path()
+                .join(format!("chunk_{chunk_index:04}_lossless.mp4"));
+            write_synthetic_nut(&ffmpeg, &raw, 4);
+            encoder
+                .encode_chunk(&ChunkEncodeRequest {
+                    raw_nut: raw,
+                    lossy_out: lossy.clone(),
+                    lossless_out: lossless,
+                })
+                .await
+                .expect("transcode chunk");
+            segments.push(lossy);
         }
 
-        // The lossless transcode must round-trip the per-frame red marker
-        // exactly. If the muxer shuffles or duplicates frames around a
-        // syncpoint boundary (the integration-test failure mode), the
-        // decoded marker sequence will skip or repeat.
-        let ffmpeg = locate_binary("ffmpeg").expect("ffmpeg located above");
-        let frames_dir = tempdir.path().join("frames");
-        std::fs::create_dir_all(&frames_dir).unwrap();
-        let pattern = frames_dir.join("%04d.rgb");
-        // Use the LOSSLESS mp4 — `qp=0` round-trips the marker bytes
-        // exactly so we can assert on the precise frame index. The lossy
-        // mp4 is also produced by the same encoder invocation; the
-        // integration test exercises both qualities and any frame-shuffle
-        // bug in our muxer would affect both streams equally.
-        let extract = StdCommand::new(&ffmpeg)
-            .args(["-hide_banner", "-loglevel", "error", "-i"])
-            .arg(&lossless)
-            .args(["-f", "image2", "-vcodec", "rawvideo", "-pix_fmt", "rgb24"])
-            .arg(&pattern)
+        let final_lossy = tempdir.path().join("lossy.mp4");
+        let outcome = encoder
+            .concat_segments(&segments, &final_lossy)
+            .await
+            .expect("concat");
+        assert!(outcome.bytes > 0);
+
+        // The concat list file lives next to the output during encoding; the
+        // success path unlinks it.
+        let list = list_file_for(&final_lossy);
+        assert!(!list.exists(), "concat list file should be cleaned up");
+
+        let probe = StdCommand::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+            ])
+            .arg(&final_lossy)
             .output()
-            .expect("spawn ffmpeg extract");
-        assert!(
-            extract.status.success(),
-            "ffmpeg extract failed: {}",
-            String::from_utf8_lossy(&extract.stderr)
+            .expect("spawn ffprobe");
+        assert!(probe.status.success());
+        let trimmed = String::from_utf8(probe.stdout).unwrap();
+        let nb_read_frames: u64 = trimmed.trim().parse().unwrap();
+        assert_eq!(
+            nb_read_frames, total_frames,
+            "concat output should contain all {total_frames} frames"
         );
-        const GRID_SIZE_BACK: usize = 4;
-        const WIDTH_BACK: usize = 64;
-        for index in 0..frame_count {
-            let path = frames_dir.join(format!("{:04}.rgb", index + 1));
-            let bytes = std::fs::read(&path)
-                .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
-            let mut decoded = [0u8; 16];
-            for row in 0..GRID_SIZE_BACK {
-                for col in 0..GRID_SIZE_BACK {
-                    let pixel_offset = (row * WIDTH_BACK + col) * 3;
-                    decoded[row * GRID_SIZE_BACK + col] = bytes[pixel_offset];
-                }
-            }
-            let actual = u128::from_be_bytes(decoded) as u64;
-            assert_eq!(
-                actual, index,
-                "decoded frame at output index {} carries marker {} (expected {})",
-                index, actual, index
-            );
-        }
     }
 
     #[tokio::test]
@@ -601,20 +691,19 @@ mod tests {
         }
 
         let tempdir = TempDir::new().unwrap();
-        let request = VideoEncodeRequest {
+        let request = ChunkEncodeRequest {
             raw_nut: tempdir.path().join("does-not-exist.nut"),
-            lossy_mp4: tempdir.path().join("lossy.mp4"),
-            lossless_mp4: tempdir.path().join("lossless.mp4"),
+            lossy_out: tempdir.path().join("lossy.mp4"),
+            lossless_out: tempdir.path().join("lossless.mp4"),
         };
         let encoder = VideoEncoder::new();
-        let error = encoder.run(&request).await.expect_err("ffmpeg should fail");
+        let error = encoder
+            .encode_chunk(&request)
+            .await
+            .expect_err("ffmpeg should fail");
         assert!(
             matches!(error, VideoEncodeError::NonZeroExit { .. }),
             "unexpected error variant: {error:?}"
-        );
-        assert!(
-            request.raw_nut.parent().unwrap().exists(),
-            "tempdir should still exist after failed encode"
         );
     }
 
@@ -623,14 +712,17 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let raw = tempdir.path().join("raw.nut");
         std::fs::write(&raw, [0u8; 16]).unwrap();
-        let request = VideoEncodeRequest {
+        let request = ChunkEncodeRequest {
             raw_nut: raw,
-            lossy_mp4: tempdir.path().join("lossy.mp4"),
-            lossless_mp4: tempdir.path().join("lossless.mp4"),
+            lossy_out: tempdir.path().join("lossy.mp4"),
+            lossless_out: tempdir.path().join("lossless.mp4"),
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");
-        let error = encoder.run(&request).await.expect_err("spawn should fail");
+        let error = encoder
+            .encode_chunk(&request)
+            .await
+            .expect_err("spawn should fail");
         match error {
             VideoEncodeError::Spawn { binary, .. } => {
                 assert_eq!(

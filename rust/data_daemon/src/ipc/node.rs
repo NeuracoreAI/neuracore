@@ -1,15 +1,18 @@
 //! iceoryx2 node and per-stream service bring-up.
 //!
 //! The daemon owns a single iceoryx2 [`Node`] for the duration of the process.
-//! At startup it opens two long-lived subscribers: `commands` carries
-//! lifecycle envelopes plus non-video `Frame`s, and `frames` carries the
-//! pixel-bearing traffic of video traces. The split keeps the deep lifecycle
-//! buffer away from multi-MiB payloads — see
-//! [`data_daemon_ipc::service_name::FRAMES`] for the rationale.
+//! At startup it opens one long-lived subscriber on the `commands` service:
+//! it carries lifecycle envelopes, non-video `Frame`s, and the
+//! [`Envelope::VideoChunkReady`] notifications the producer emits when a NUT
+//! chunk lands on disk. There is no dedicated video bus — pixel buffers are
+//! spooled to disk by the producer, so the IPC bus only ever carries
+//! metadata-sized payloads.
+//!
+//! [`Envelope::VideoChunkReady`]: data_daemon_ipc::Envelope::VideoChunkReady
 
 use data_daemon_ipc::service_name::{
-    COMMANDS, FRAMES, FRAMES_SUBSCRIBER_BUFFER_SIZE, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
-    MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
+    COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
+    MAX_SUBSCRIBERS_PER_SERVICE,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::subscriber::Subscriber;
@@ -63,10 +66,10 @@ pub enum IpcSetupError {
 
 /// Daemon-side iceoryx2 transport.
 ///
-/// Holds the node and the long-lived `commands` and `frames` subscribers. The
-/// struct is `Send` (so it can move into the tokio main task) but not `Sync`
-/// because iceoryx2's subscriber ports own shared-memory descriptors that must
-/// be advanced from a single thread.
+/// Holds the node and the long-lived `commands` subscriber. The struct is
+/// `Send` (so it can move into the tokio main task) but not `Sync` because
+/// iceoryx2's subscriber ports own shared-memory descriptors that must be
+/// advanced from a single thread.
 pub struct IpcTransport {
     /// Backing iceoryx2 node. Holding it alive keeps every service this
     /// daemon created visible to discovery.
@@ -76,19 +79,14 @@ pub struct IpcTransport {
     /// Service handle held alongside the subscriber so port discovery doesn't
     /// race the service handle going out of scope.
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
-    /// Subscriber on `neuracore/data_daemon/frames` — video-trace traffic.
-    frames_subscriber: Subscriber<ipc::Service, [u8], ()>,
-    /// Service handle for the `frames` service, held for the same reason as
-    /// `_commands_service`.
-    _frames_service: PortFactory<ipc::Service, [u8], ()>,
 }
 
 impl IpcTransport {
     /// Bring up the daemon's iceoryx2 transport.
     ///
     /// Creates a node named after this daemon's PID
-    /// (`neuracore-data-daemon-{pid}`), opens the `commands` and `frames`
-    /// services, and builds a subscriber on each.
+    /// (`neuracore-data-daemon-{pid}`), opens the `commands` service, and
+    /// builds a subscriber on it.
     pub fn bring_up() -> Result<Self, IpcSetupError> {
         let node_name = format!("neuracore-data-daemon-{}", std::process::id());
         let parsed_name =
@@ -103,26 +101,17 @@ impl IpcTransport {
 
         let (commands_service, commands_subscriber) =
             open_subscriber(&node, COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)?;
-        let (frames_service, frames_subscriber) =
-            open_subscriber(&node, FRAMES, FRAMES_SUBSCRIBER_BUFFER_SIZE)?;
 
         Ok(IpcTransport {
             _node: node,
             commands_subscriber,
             _commands_service: commands_service,
-            frames_subscriber,
-            _frames_service: frames_service,
         })
     }
 
     /// Borrow the `commands` subscriber port.
     pub fn commands_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
         &self.commands_subscriber
-    }
-
-    /// Borrow the `frames` subscriber port.
-    pub fn frames_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
-        &self.frames_subscriber
     }
 }
 
@@ -147,21 +136,13 @@ fn open_subscriber(
             name: name.to_string(),
             detail: format!("{error}"),
         })?;
-    // `subscriber_buffer_size` differs per service: the `commands` service
-    // takes `LIFECYCLE_SUBSCRIBER_BUFFER_SIZE`, while `frames` takes the
-    // small `FRAMES_SUBSCRIBER_BUFFER_SIZE` so the publisher data segment
-    // that backs multi-MiB video frames stays bounded. The producer reuses
-    // the same service config via `open_or_create`, so both sides must agree
-    // on every attribute here.
-    //
     // `enable_safe_overflow(false)` is load-bearing: iceoryx2 defaults a
     // service to safe-overflow *on*, where a full subscriber buffer silently
     // evicts the oldest sample — which, for the `commands` service, is
     // typically a `StartTrace`. With overflow disabled a full buffer instead
     // makes the producer's `UnableToDeliverStrategy::Block` take effect, so
     // delivery is lossless and in-order regardless of how shallow the buffer
-    // is. Dropping a lifecycle envelope strands the per-trace actor; dropping
-    // a video frame corrupts the trace — neither service can tolerate it.
+    // is. Dropping a lifecycle envelope strands the per-trace actor.
     let service = node
         .service_builder(&service_name)
         .publish_subscribe::<[u8]>()

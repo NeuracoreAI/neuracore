@@ -1,22 +1,16 @@
-//! Tokio task that drains the iceoryx2 `commands` and `frames` subscribers.
+//! Tokio task that drains the iceoryx2 `commands` subscriber.
 //!
 //! iceoryx2 0.8 does not expose an `async`/`Notify`-style adaptor, so the
-//! listener polls both subscribers on a short tick. The cadence is fast enough
+//! listener polls the subscriber on a short tick. The cadence is fast enough
 //! to keep frame latency low and slow enough to leave idle daemons
 //! effectively quiescent.
-//!
-//! `commands` is drained before `frames` each tick so that, within a tick, a
-//! trace's `StartTrace` (on `commands`) tends to reach the dispatcher ahead of
-//! its frames (on `frames`). Cross-service ordering is not guaranteed in
-//! general — the per-trace actor buffers frames that arrive before their
-//! `StartTrace` — but draining in this order keeps that buffer shallow.
 //!
 //! ## Send-safety
 //!
 //! iceoryx2's [`Subscriber`] is `Send` but `!Sync`, so a `&Subscriber` borrow
 //! held across an `await` would make this task's future `!Send` — tokio's
 //! multi-thread runtime would refuse to spawn it. The loop therefore drains
-//! the subscribers synchronously into a local `Vec<Envelope>` before awaiting
+//! the subscriber synchronously into a local `Vec<Envelope>` before awaiting
 //! the dispatcher.
 
 use std::time::Duration;
@@ -37,7 +31,7 @@ use crate::lifecycle::signals::ShutdownSignal;
 /// debounce, so the trace lifecycle isn't gated on the listener loop.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-/// Drain the iceoryx2 subscribers until a shutdown signal arrives.
+/// Drain the iceoryx2 subscriber until a shutdown signal arrives.
 ///
 /// Each successfully decoded envelope is forwarded to the dispatcher's
 /// [`mpsc::Sender`]. If the dispatcher's queue fills (the dispatcher has
@@ -54,7 +48,6 @@ pub async fn run(
 ) {
     tracing::info!(
         commands = data_daemon_ipc::service_name::COMMANDS,
-        frames = data_daemon_ipc::service_name::FRAMES,
         "ipc listener started"
     );
 
@@ -63,13 +56,10 @@ pub async fn run(
 
     loop {
         // -- Synchronous drain --------------------------------------------------
-        // The subscriber borrows MUST stay inside this block (no `.await` in
+        // The subscriber borrow MUST stay inside this block (no `.await` in
         // any of these calls). The local `batch` is `Send`, so it can survive
         // across the awaits below without infecting the task with !Send.
-        // `commands` is drained first so a trace's `StartTrace` is forwarded
-        // ahead of its frames within the same tick where possible.
         drain_subscriber(transport.commands_subscriber(), &mut batch, &mut counters);
-        drain_subscriber(transport.frames_subscriber(), &mut batch, &mut counters);
 
         // -- Async forward ------------------------------------------------------
         for envelope in batch.drain(..) {

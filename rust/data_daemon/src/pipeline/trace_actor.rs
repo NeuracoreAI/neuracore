@@ -1,10 +1,11 @@
 //! Per-trace actor task.
 //!
 //! Owns the SQLite lifecycle and the on-disk encoders for one trace: scalar /
-//! sensor traces stream into a [`JsonTraceWriter`]; video traces (signalled by
-//! an [`Envelope::OpenFrameStream`]) spool raw RGB frames through a
-//! [`NutWriter`], then on `EndTrace` shell out to [`VideoEncoder`] for the
-//! dual-output transcode and flush the [`VideoMetadataAccumulator`] sidecar.
+//! sensor traces stream into a [`JsonTraceWriter`]; video traces consume
+//! [`Envelope::VideoChunkReady`] notifications that hand off producer-spooled
+//! NUT chunks for ffmpeg-side transcoding into per-chunk MP4 segments, then
+//! on `EndTrace` stitch the segments into the final `lossy.mp4` /
+//! `lossless.mp4` and flush the [`VideoMetadataAccumulator`] sidecar.
 //!
 //! Database writes are debounced — a per-frame `bytes_written` UPDATE is
 //! wasteful at 200+ Hz scalar ingestion, so a counter is flushed every
@@ -13,17 +14,18 @@
 //! → pending_metadata → written` — is driven from this actor; the
 //! registration coordinator keys off the terminal `written` state.
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use data_daemon_ipc::Envelope;
 use serde_json::Value;
 use tokio::sync::{mpsc, Semaphore};
-use tokio::task;
+use tokio::task::{self, JoinSet};
 
 use crate::encoding::json_trace::{JsonTraceError, JsonTraceWriter};
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
-use crate::encoding::nut_writer::{NutError, NutVideoConfig, NutWriter};
-use crate::encoding::video_encoder::{VideoEncodeError, VideoEncodeRequest, VideoEncoder};
+use crate::encoding::video_encoder::{ChunkEncodeRequest, VideoEncodeError, VideoEncoder};
 use crate::state::store::TraceUpdate;
 use crate::state::{SqliteStateStore, StateStore, TraceWriteStatus};
 use crate::storage::budget::StorageBudget;
@@ -31,9 +33,9 @@ use crate::storage::paths::{self, TracePath};
 
 /// Key identifying one per-trace actor.
 ///
-/// Frame and EndTrace envelopes only carry `trace_id` on the wire, so the
-/// dispatcher routes by `trace_id` alone. The actor learns its
-/// `recording_id` and `data_type` from the first `StartTrace` it sees.
+/// Frame, VideoChunkReady, and EndTrace envelopes only carry `trace_id` on
+/// the wire, so the dispatcher routes by `trace_id` alone. The actor learns
+/// its `recording_id` and `data_type` from the first `StartTrace` it sees.
 pub type TraceKey = String;
 
 /// Flush `bytes_written` to the DB every N frames instead of every frame.
@@ -45,11 +47,10 @@ pub type TraceKey = String;
 const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 
 /// Cap on concurrent ffmpeg transcodes. Each ffmpeg child happily saturates a
-/// CPU core; without a cap N simultaneous `EndTrace` envelopes (the
-/// integration matrix's `parallel_contexts=8` × 3-camera setup hits 24
-/// trivially) starve the rest of the daemon. Set to 8 so a single-camera
-/// 8-context workload can transcode all video traces in parallel; raise
-/// further if multi-camera setups exhibit the same queueing bottleneck.
+/// CPU core; without a cap N simultaneous per-chunk encode invocations starve
+/// the rest of the daemon. Set to 8 so a single-camera 8-context workload can
+/// transcode chunks in parallel; raise further if multi-camera setups
+/// exhibit the same queueing bottleneck.
 pub(crate) const DEFAULT_FFMPEG_CONCURRENCY: usize = 8;
 
 /// Shared context passed to every per-trace actor.
@@ -64,12 +65,13 @@ pub struct TraceActorContext {
     /// Shared storage-budget tracker. Reserved here so the budget can refuse
     /// frames when the configured quota is exhausted.
     pub storage_budget: Arc<StorageBudget>,
-    /// Encoder used to transcode the per-trace NUT spool into the dual mp4
-    /// outputs on `EndTrace`. Cloning a [`VideoEncoder`] is cheap (it carries
-    /// only the configured ffmpeg binary path).
+    /// Encoder used to transcode per-chunk NUT files into MP4 segments and
+    /// to stream-copy concatenate the segments into the final outputs on
+    /// `EndTrace`. Cloning a [`VideoEncoder`] is cheap (it carries only the
+    /// configured ffmpeg binary path).
     pub video_encoder: VideoEncoder,
     /// Bounds concurrent ffmpeg children. Shared across actors so the
-    /// integration matrix's parallel `EndTrace` storms don't fork-bomb the
+    /// integration matrix's parallel encode storms don't fork-bomb the
     /// transcoder.
     pub ffmpeg_permits: Arc<Semaphore>,
     /// Optional daemon event bus. When present, the trace actor publishes a
@@ -126,7 +128,7 @@ pub fn trace_key(envelope: &Envelope) -> Option<TraceKey> {
         Envelope::StartTrace { trace_id, .. }
         | Envelope::Frame { trace_id, .. }
         | Envelope::EndTrace { trace_id, .. }
-        | Envelope::OpenFrameStream { trace_id, .. } => Some(trace_id.clone()),
+        | Envelope::VideoChunkReady { trace_id, .. } => Some(trace_id.clone()),
         // `BatchedFrames` spans multiple traces and is expanded into
         // per-trace `Frame`s by the IPC listener — it never reaches routing.
         Envelope::BatchedFrames { .. }
@@ -149,31 +151,59 @@ pub enum TraceActorMessage {
 /// Internal state of a per-trace actor.
 ///
 /// Encoders are opened lazily: a scalar trace doesn't need a `trace.json` file
-/// until the first frame arrives, and a video trace doesn't need a `raw.nut`
-/// until both the resolution (`OpenFrameStream`) *and* a frame have been seen.
-/// Keeping the writers as `Option` is what lets the actor uniformly mark an
-/// empty trace as `written` on `EndTrace` without producing a stub file.
+/// until the first frame arrives, and a video trace's segment / metadata
+/// state is allocated when the first `VideoChunkReady` lands.
 enum TraceWriter {
-    /// No frames yet observed; the writer is decided on the first frame.
+    /// No frames yet observed; the writer is decided on the first frame or
+    /// chunk envelope.
     Pending,
     /// Scalar trace streaming into a single `trace.json` array.
     Json(JsonTraceWriter),
-    /// Video trace spooling RGB frames into `raw.nut` while the sidecar
-    /// metadata buffers in memory.
+    /// Video trace whose chunk encodes run concurrently as background tasks.
     ///
-    /// PTS is derived from `timestamp_ns` (microsecond ticks, relative to the
-    /// first frame). The container's time-base is `1/1_000_000`; sliding
-    /// `pts_origin_us` to the first frame keeps PTS values small (avoids
-    /// ffmpeg quirks with absolute nanosecond PTS) while preserving
-    /// inter-frame spacing exactly. `last_pts` enforces strict monotonicity
-    /// for the rare duplicate-timestamp case.
+    /// Each `VideoChunkReady` envelope spawns one encode task; the per-trace
+    /// actor returns to the inbox immediately so a slow ffmpeg invocation
+    /// can't back-pressure unrelated joint/scalar publishers sharing the
+    /// `commands` service. Completed encodes land in `completed_chunks`
+    /// keyed by `chunk_index`; `EndTrace` awaits any still-running encode
+    /// and concatenates the segments in `chunk_index` order. The
+    /// `ffmpeg_permits` semaphore on `TraceActorContext` still caps total
+    /// concurrent ffmpeg children across every trace, so per-trace
+    /// parallelism is bounded by CPU rather than the actor's serialisation.
     Video {
-        nut_writer: NutWriter,
-        metadata: VideoMetadataAccumulator,
-        frame_index: u64,
-        pts_origin_us: Option<i64>,
-        last_pts: Option<u64>,
+        /// Frame width in pixels (recorded from the first chunk envelope).
+        width: u32,
+        /// Frame height in pixels.
+        height: u32,
+        /// Encodes completed so far, keyed by `chunk_index` so the EndTrace
+        /// concat can iterate in order regardless of completion order.
+        completed_chunks: BTreeMap<u32, CompletedChunk>,
+        /// Spawned chunk-encode tasks still running.
+        pending_encodes: JoinSet<ChunkEncodeJobResult>,
     },
+}
+
+/// One successfully encoded chunk, ready to feed into the EndTrace concat.
+struct CompletedChunk {
+    /// `chunk_NNNN_lossy.mp4` segment path.
+    lossy_segment: PathBuf,
+    /// `chunk_NNNN_lossless.mp4` segment path.
+    lossless_segment: PathBuf,
+    /// Sum of both segments' on-disk byte counts.
+    bytes: u64,
+    /// Per-frame `timestamp_s` values from the chunk envelope, applied to
+    /// the metadata accumulator at EndTrace in chunk-index order.
+    frame_timestamps_s: Vec<f64>,
+    /// Frame count carried by the chunk envelope.
+    frame_count: u32,
+}
+
+/// Outcome of one background chunk-encode task.
+struct ChunkEncodeJobResult {
+    chunk_index: u32,
+    /// `Ok(CompletedChunk)` on success; `Err` is logged and the trace marked
+    /// failed by the polling path.
+    outcome: Result<CompletedChunk, VideoEncodeError>,
 }
 
 /// Whether the actor should keep running after handling an envelope.
@@ -226,28 +256,22 @@ struct ActorState {
     trace_id: String,
     recording_id: Option<String>,
     data_type: Option<String>,
-    /// Resolution announced by [`Envelope::OpenFrameStream`]. When set, the
-    /// next `Frame` opens the video pipeline; when unset, the next `Frame`
-    /// opens the JSON pipeline.
-    video_config: Option<(u32, u32)>,
     writer: TraceWriter,
     frame_count: u64,
     bytes_on_disk: u64,
     /// Last `bytes_written` value flushed to the DB. Used by the debouncer to
     /// avoid issuing a no-op UPDATE when the writer's on-disk size hasn't
-    /// changed since the last flush (e.g. when the JSON writer is still
-    /// buffering).
+    /// changed since the last flush.
     last_db_bytes: i64,
     /// Running count of frames the storage budget refused. Logged
     /// periodically so a runaway producer with no disk left doesn't drown
     /// the daemon log in identical warnings.
     dropped_over_budget: u64,
-    /// Envelopes received before `StartTrace`. A video trace's
-    /// `OpenFrameStream` / `Frame` / `EndTrace` ride the `frames` service
-    /// while its `StartTrace` rides `commands`; the two have no mutual
-    /// ordering guarantee, so the actor can be spawned by a frame envelope
-    /// before its `StartTrace` is drained. Such envelopes are buffered here in
-    /// arrival order and replayed once `StartTrace` lands.
+    /// Envelopes received before `StartTrace`. Both scalar `Frame`s and
+    /// `VideoChunkReady` envelopes can in principle arrive before
+    /// `StartTrace` is drained — although both ride the same `commands`
+    /// service today, the per-trace pre-`StartTrace` buffer is kept as a
+    /// safety net against any future reordering or producer-side race.
     pending: Vec<Envelope>,
     /// Count of envelopes dropped because [`Self::pending`] hit its cap before
     /// `StartTrace` arrived. Rate-limits the associated warning.
@@ -260,7 +284,6 @@ impl ActorState {
             trace_id,
             recording_id: None,
             data_type: None,
-            video_config: None,
             writer: TraceWriter::Pending,
             frame_count: 0,
             bytes_on_disk: 0,
@@ -315,10 +338,6 @@ impl ActorState {
                     .await;
                 Flow::Continue
             }
-            Envelope::OpenFrameStream { width, height, .. } => {
-                self.handle_open_frame_stream(width, height);
-                Flow::Continue
-            }
             Envelope::Frame {
                 timestamp_ns,
                 timestamp_s,
@@ -327,6 +346,28 @@ impl ActorState {
             } => {
                 self.handle_frame(store, context, timestamp_ns, timestamp_s, payload)
                     .await;
+                Flow::Continue
+            }
+            Envelope::VideoChunkReady {
+                chunk_index,
+                width,
+                height,
+                byte_count,
+                frame_count,
+                frame_timestamps_s,
+                ..
+            } => {
+                self.handle_video_chunk_ready(
+                    store,
+                    context,
+                    chunk_index,
+                    width,
+                    height,
+                    byte_count,
+                    frame_count,
+                    frame_timestamps_s,
+                )
+                .await;
                 Flow::Continue
             }
             Envelope::EndTrace { trace_id } => {
@@ -431,42 +472,16 @@ impl ActorState {
         }
     }
 
-    fn handle_open_frame_stream(&mut self, width: u32, height: u32) {
-        // Reject zero / overflowing geometry now rather than at the first frame
-        // — the NUT writer would reject it anyway, but failing here keeps the
-        // pipeline closer to the producer's intent and avoids opening a stale
-        // JSON writer for what is actually a video trace.
-        if width == 0 || height == 0 {
-            tracing::warn!(
-                trace_id = self.trace_id,
-                width,
-                height,
-                "ignoring open_frame_stream with zero dimension"
-            );
-            return;
-        }
-        self.video_config = Some((width, height));
-        tracing::debug!(
-            trace_id = self.trace_id,
-            width,
-            height,
-            "video resolution announced"
-        );
-    }
-
     async fn handle_frame(
         &mut self,
         store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
         timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        _timestamp_s: Option<f64>,
         payload: Vec<u8>,
     ) {
         // Trace metadata must exist by the time the first frame arrives —
-        // `StartTrace` is the first envelope routed by the dispatcher. Skip
-        // the body otherwise so a misbehaving producer can't silently
-        // accumulate frames against a nonexistent DB row. Checking before
-        // `ensure_writer_open` also avoids creating an orphan trace file.
+        // `StartTrace` is the first envelope routed by the dispatcher.
         let (Some(recording_id), Some(data_type)) =
             (self.recording_id.clone(), self.data_type.clone())
         else {
@@ -477,14 +492,6 @@ impl ActorState {
             return;
         };
 
-        // The storage budget gates every frame, not just the
-        // writer-open path. Refusing here keeps the on-disk artefact
-        // bounded; the producer sees no error (the SDK contract is
-        // best-effort delivery for sensor data), but the dropped count is
-        // surfaced both on the periodic warning and at finalise. Running
-        // the check *before* `ensure_writer_open` also means an empty
-        // trace whose first frame is over-budget never produces a stub
-        // trace directory.
         if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
             return;
         }
@@ -497,7 +504,7 @@ impl ActorState {
         // UPDATE for this field; the bytes-written debouncer covers the rest.
         let bumped_status = self.frame_count == 0;
 
-        if let Err(error) = self.append_frame(timestamp_ns, timestamp_s, &payload).await {
+        if let Err(error) = self.append_frame(timestamp_ns, &payload).await {
             tracing::warn!(
                 %error,
                 trace_id = self.trace_id,
@@ -532,21 +539,13 @@ impl ActorState {
     }
 
     /// Ask the storage budget whether `payload_len` bytes may be written
-    /// against the currently open writer. Returns `true` when the write is
-    /// allowed; emits a (rate-limited) warning and bumps the
-    /// `dropped_over_budget` counter when it isn't. Best-effort failures
-    /// (a `statvfs` error, an inaccessible parent directory) fail open — they
-    /// default to "allow" so a transient kernel hiccup doesn't drop sample
-    /// data.
+    /// against the currently open writer. See the original comment block in
+    /// the prior implementation for the fail-open rationale.
     fn budget_allows_frame(&mut self, budget: &Arc<StorageBudget>, payload_len: usize) -> bool {
         match budget.check(payload_len as u64) {
             Ok(check) if check.is_available() => true,
             Ok(check) => {
                 self.dropped_over_budget = self.dropped_over_budget.saturating_add(1);
-                // Cap the warning to roughly one log per ~256 dropped frames
-                // so a 30 fps stream that runs out of disk doesn't spam the
-                // daemon log faster than 0.1 lines/s. The first drop always
-                // gets a warning so operators see the failure immediately.
                 if self.dropped_over_budget == 1 || self.dropped_over_budget.is_multiple_of(256) {
                     tracing::warn!(
                         trace_id = self.trace_id,
@@ -558,9 +557,6 @@ impl ActorState {
                 false
             }
             Err(error) => {
-                // Fail-open: a transient kernel hiccup must not silently
-                // drop sample data. The next periodic refresh will
-                // re-evaluate against the real used-bytes total.
                 tracing::warn!(
                     %error,
                     trace_id = self.trace_id,
@@ -571,10 +567,9 @@ impl ActorState {
         }
     }
 
-    /// Lazily open the JSON or video writer. Returns `false` if the writer
-    /// could not be opened (I/O error); the storage-budget gate now lives
-    /// in [`Self::budget_allows_frame`] which the caller runs *before* this
-    /// method.
+    /// Lazily open the JSON writer for scalar traces. Video traces no
+    /// longer open a writer on the frame path — they wait for the first
+    /// `VideoChunkReady` to allocate the video writer.
     fn ensure_writer_open(
         &mut self,
         context: &Arc<TraceActorContext>,
@@ -586,62 +581,27 @@ impl ActorState {
         }
 
         let trace_dir = self.trace_directory(recording_id, data_type, context);
-
-        if let Some((width, height)) = self.video_config {
-            // Time-base 1/1_000_000 (microsecond ticks). Frame PTS is derived
-            // in `append_frame` as `(timestamp_ns - origin_ns) / 1000`.
-            let config = NutVideoConfig {
-                width,
-                height,
-                time_base_num: 1,
-                time_base_den: 1_000_000,
-            };
-            let raw_nut = trace_dir.join(paths::RAW_NUT_FILENAME);
-            match NutWriter::create(&raw_nut, config) {
-                Ok(nut_writer) => {
-                    self.bytes_on_disk = nut_writer.bytes_written();
-                    self.writer = TraceWriter::Video {
-                        nut_writer,
-                        metadata: VideoMetadataAccumulator::new(),
-                        frame_index: 0,
-                        pts_origin_us: None,
-                        last_pts: None,
-                    };
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        trace_id = self.trace_id,
-                        path = %raw_nut.display(),
-                        "failed to open NUT spool"
-                    );
-                    return false;
-                }
+        match JsonTraceWriter::open(&trace_dir) {
+            Ok(json_writer) => {
+                self.bytes_on_disk = json_writer.bytes_on_disk();
+                self.writer = TraceWriter::Json(json_writer);
+                true
             }
-        } else {
-            match JsonTraceWriter::open(&trace_dir) {
-                Ok(json_writer) => {
-                    self.bytes_on_disk = json_writer.bytes_on_disk();
-                    self.writer = TraceWriter::Json(json_writer);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        trace_id = self.trace_id,
-                        path = %trace_dir.display(),
-                        "failed to open JSON trace"
-                    );
-                    return false;
-                }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    trace_id = self.trace_id,
+                    path = %trace_dir.display(),
+                    "failed to open JSON trace"
+                );
+                false
             }
         }
-        true
     }
 
     async fn append_frame(
         &mut self,
         timestamp_ns: i64,
-        timestamp_s: Option<f64>,
         payload: &[u8],
     ) -> Result<(), FrameAppendError> {
         match &mut self.writer {
@@ -665,68 +625,265 @@ impl ActorState {
                 self.bytes_on_disk = writer.bytes_on_disk();
                 Ok(())
             }
-            TraceWriter::Video {
-                nut_writer,
-                metadata,
-                frame_index,
-                pts_origin_us,
-                last_pts,
-            } => {
-                let origin_us = *pts_origin_us.get_or_insert(timestamp_ns / 1_000);
-                // Microsecond ticks relative to the first frame. Clamp at 0 so
-                // a producer that ships a non-monotonic earlier timestamp does
-                // not produce a negative PTS; the `last_pts` monotonicity
-                // guard below catches the rest.
-                let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
-                let mut pts = relative_us as u64;
-                if let Some(previous) = *last_pts {
-                    if pts <= previous {
-                        pts = previous.saturating_add(1);
-                    }
-                }
-                let (width, height) = self
-                    .video_config
-                    .expect("video writer implies video_config is set");
-                // Decode the 16-byte big-endian test marker the integration
-                // test producer stamps into the top-left 4×4 R-channel grid
-                // (see `tests/.../shared/test_case/build_test_case_context.py`
-                // `encode_frame_number`). The decode is essentially free (16
-                // byte reads); we log it on every frame so a downstream test
-                // failure has a daemon-side timeline of which source-frame
-                // marker arrived at which receive position. Frames produced
-                // outside the test harness decode to a deterministic noisy
-                // value, which is harmless.
-                let marker = decode_test_marker(payload, width);
-                tracing::debug!(
+            TraceWriter::Video { .. } => {
+                // Video traces no longer receive standalone `Frame`
+                // envelopes — pixel data flows via `VideoChunkReady`. A
+                // stray frame for a video trace is a producer bug; log it
+                // and ignore.
+                tracing::warn!(
                     trace_id = self.trace_id,
-                    frame_index = *frame_index,
-                    pts,
-                    timestamp_ns,
-                    payload_len = payload.len(),
-                    marker,
-                    "video frame received"
+                    "video trace received standalone Frame; ignoring"
                 );
-                nut_writer.write_frame(pts, payload)?;
-                *last_pts = Some(pts);
-                let mut entry = serde_json::Map::new();
-                // Per-frame metadata shape: `timestamp` is seconds (float),
-                // `width`/`height` set when present. Prefer the
-                // producer-supplied `timestamp_s` (a real
-                // f64 carrying the SDK's intended capture time) over the
-                // nanosecond integer round-trip, which would truncate to
-                // microsecond granularity and break the manual-timestamp
-                // assertion (see Envelope::Frame docs).
-                let timestamp =
-                    timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
-                entry.insert("timestamp".to_string(), Value::from(timestamp));
-                entry.insert("width".to_string(), Value::from(width as u64));
-                entry.insert("height".to_string(), Value::from(height as u64));
-                metadata.record_frame(entry);
-                self.bytes_on_disk = nut_writer.bytes_written();
-                *frame_index = frame_index.saturating_add(1);
                 Ok(())
             }
         }
+    }
+
+    /// Handle one finished NUT chunk: transcode it to per-chunk MP4 segments,
+    /// append the segment paths to the pending list for the EndTrace concat,
+    /// and unlink the source NUT.
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_video_chunk_ready(
+        &mut self,
+        store: &Arc<SqliteStateStore>,
+        context: &Arc<TraceActorContext>,
+        chunk_index: u32,
+        width: u32,
+        height: u32,
+        byte_count: u64,
+        frame_count: u32,
+        frame_timestamps_s: Vec<f64>,
+    ) {
+        let (Some(recording_id), Some(data_type)) =
+            (self.recording_id.clone(), self.data_type.clone())
+        else {
+            tracing::warn!(
+                trace_id = self.trace_id,
+                chunk_index,
+                "dropping video chunk received before start_trace"
+            );
+            return;
+        };
+
+        let trace_dir = self.trace_directory(&recording_id, &data_type, context);
+        let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
+        let raw_nut = chunks_dir.join(paths::chunk_filename(chunk_index));
+        let lossy_segment = trace_dir.join(paths::chunk_lossy_filename(chunk_index));
+        let lossless_segment = trace_dir.join(paths::chunk_lossless_filename(chunk_index));
+
+        // Allocate the video writer on the first chunk and mark the trace
+        // `writing` so the registration coordinator can observe lifecycle
+        // progress. The mark happens once per trace.
+        let bumped_status = matches!(self.writer, TraceWriter::Pending);
+        if bumped_status {
+            self.writer = TraceWriter::Video {
+                width,
+                height,
+                completed_chunks: BTreeMap::new(),
+                pending_encodes: JoinSet::new(),
+            };
+        }
+
+        // Drain any background encodes that finished while we were idle.
+        // Doing this here (rather than only at EndTrace) keeps
+        // `bytes_on_disk` / `frame_count` fresh enough for the debounced DB
+        // progress UPDATE.
+        if self.drain_completed_encodes(store).await {
+            // A previous chunk's encode failed; mark_failed already ran, no
+            // point spawning more work.
+            return;
+        }
+
+        // Sanity-warn on resolution drift — the on-disk sidecar uses the
+        // first-chunk values, so a producer bug shipping a different
+        // resolution mid-trace would lose pixels silently.
+        if let TraceWriter::Video {
+            width: stored_width,
+            height: stored_height,
+            ..
+        } = &self.writer
+        {
+            if (*stored_width, *stored_height) != (width, height) {
+                tracing::warn!(
+                    trace_id = self.trace_id,
+                    chunk_index,
+                    stored = ?(*stored_width, *stored_height),
+                    arrived = ?(width, height),
+                    "video chunk resolution disagrees with first-chunk resolution"
+                );
+            }
+        }
+
+        let TraceWriter::Video {
+            pending_encodes, ..
+        } = &mut self.writer
+        else {
+            // Should be unreachable — we just allocated the writer above.
+            return;
+        };
+
+        // Spawn the encode as a background task. The actor returns to the
+        // inbox immediately so a slow ffmpeg invocation cannot back-pressure
+        // unrelated joint / scalar publishers sharing the commands service.
+        // `ffmpeg_permits` still caps total concurrent ffmpeg children
+        // across every trace.
+        let permits = context.ffmpeg_permits.clone();
+        let encoder = context.video_encoder.clone();
+        let trace_id = self.trace_id.clone();
+        let request = ChunkEncodeRequest {
+            raw_nut: raw_nut.clone(),
+            lossy_out: lossy_segment.clone(),
+            lossless_out: lossless_segment.clone(),
+        };
+        pending_encodes.spawn(async move {
+            // Acquire a permit, then encode. The permit lives only inside
+            // the task — dropping it releases the slot, even on panic.
+            let permit = match permits.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(_) => {
+                    return ChunkEncodeJobResult {
+                        chunk_index,
+                        outcome: Err(VideoEncodeError::Spawn {
+                            binary: std::ffi::OsString::from("ffmpeg"),
+                            source: std::io::Error::other("ffmpeg permit pool closed"),
+                        }),
+                    };
+                }
+            };
+            let outcome = encoder.encode_chunk(&request).await;
+            drop(permit);
+            match outcome {
+                Ok(encode) => {
+                    // Drop the source NUT chunk now that both segments are
+                    // sealed. Failure to unlink leaves the file for the
+                    // recovery sweep to collect.
+                    if let Err(error) = std::fs::remove_file(&request.raw_nut) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                %error,
+                                trace_id = %trace_id,
+                                chunk_index,
+                                path = %request.raw_nut.display(),
+                                "failed to remove source NUT chunk after encode"
+                            );
+                        }
+                    }
+                    let segment_bytes = encode.lossy_bytes.saturating_add(encode.lossless_bytes);
+                    tracing::debug!(
+                        trace_id = %trace_id,
+                        chunk_index,
+                        frame_count,
+                        byte_count,
+                        lossy_bytes = encode.lossy_bytes,
+                        lossless_bytes = encode.lossless_bytes,
+                        "video chunk encoded"
+                    );
+                    ChunkEncodeJobResult {
+                        chunk_index,
+                        outcome: Ok(CompletedChunk {
+                            lossy_segment: request.lossy_out,
+                            lossless_segment: request.lossless_out,
+                            bytes: segment_bytes,
+                            frame_timestamps_s,
+                            frame_count,
+                        }),
+                    }
+                }
+                Err(error) => ChunkEncodeJobResult {
+                    chunk_index,
+                    outcome: Err(error),
+                },
+            }
+        });
+
+        // Stamp `writing` on the first chunk so the registration coordinator
+        // sees the trace's lifecycle moving forward without waiting for the
+        // first encode to complete.
+        if bumped_status {
+            let update = TraceUpdate {
+                write_status: Some(TraceWriteStatus::Writing),
+                ..TraceUpdate::default()
+            };
+            if let Err(error) = store.update_trace(&self.trace_id, update).await {
+                tracing::warn!(
+                    %error,
+                    trace_id = self.trace_id,
+                    "failed to mark trace writing"
+                );
+            }
+        }
+    }
+
+    /// Drain every background encode that has already finished. On encode
+    /// failure marks the trace failed and returns `true`; otherwise returns
+    /// `false`. Caller-side use: gate further work on the return value.
+    async fn drain_completed_encodes(&mut self, store: &Arc<SqliteStateStore>) -> bool {
+        let TraceWriter::Video {
+            completed_chunks,
+            pending_encodes,
+            ..
+        } = &mut self.writer
+        else {
+            return false;
+        };
+        let mut any_failure = false;
+        let mut new_bytes: u64 = 0;
+        let mut new_frames: u64 = 0;
+        while let Some(joined) = pending_encodes.try_join_next() {
+            match joined {
+                Ok(result) => match result.outcome {
+                    Ok(completed) => {
+                        new_bytes = new_bytes.saturating_add(completed.bytes);
+                        new_frames = new_frames.saturating_add(completed.frame_count as u64);
+                        completed_chunks.insert(result.chunk_index, completed);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            trace_id = self.trace_id,
+                            chunk_index = result.chunk_index,
+                            "failed to encode video chunk"
+                        );
+                        any_failure = true;
+                    }
+                },
+                Err(join_error) => {
+                    tracing::warn!(
+                        %join_error,
+                        trace_id = self.trace_id,
+                        "video encode task join failed"
+                    );
+                    any_failure = true;
+                }
+            }
+        }
+        if new_bytes > 0 || new_frames > 0 {
+            self.bytes_on_disk = self.bytes_on_disk.saturating_add(new_bytes);
+            self.frame_count = self.frame_count.saturating_add(new_frames);
+            // Debounce the DB UPDATE the same way the scalar path does — a
+            // chunk landing every ~second is rare enough that we can flush
+            // every time, but only when there's been an actual change.
+            let bytes_changed = self.bytes_on_disk as i64 != self.last_db_bytes;
+            if bytes_changed {
+                let update = TraceUpdate {
+                    bytes_written: Some(self.bytes_on_disk as i64),
+                    ..TraceUpdate::default()
+                };
+                if let Err(error) = store.update_trace(&self.trace_id, update).await {
+                    tracing::warn!(
+                        %error,
+                        trace_id = self.trace_id,
+                        "failed to update trace progress"
+                    );
+                } else {
+                    self.last_db_bytes = self.bytes_on_disk as i64;
+                }
+            }
+        }
+        if any_failure {
+            self.mark_failed(store).await;
+        }
+        any_failure
     }
 
     async fn handle_end_trace(
@@ -808,45 +965,119 @@ impl ActorState {
             }
             TraceWriter::Json(writer) => Ok(writer.finish()?),
             TraceWriter::Video {
-                nut_writer,
-                metadata,
-                ..
+                width,
+                height,
+                mut completed_chunks,
+                mut pending_encodes,
             } => {
-                // Drop the NUT writer first so its `BufWriter` flushes the
-                // last frame before ffmpeg attaches. The spool path is
-                // recovered from the trace directory because the writer
-                // doesn't survive `finish`.
+                // Drain every still-running encode. A failure here is
+                // terminal — without a complete chunk set the concat would
+                // produce a video with a missing range, which is worse than
+                // marking the trace failed.
+                while let Some(joined) = pending_encodes.join_next().await {
+                    let result = match joined {
+                        Ok(result) => result,
+                        Err(join_error) => {
+                            return Err(FrameAppendError::VideoEncode(VideoEncodeError::Spawn {
+                                binary: std::ffi::OsString::from("ffmpeg"),
+                                source: std::io::Error::other(format!(
+                                    "video encode task join failed: {join_error}"
+                                )),
+                            }))
+                        }
+                    };
+                    let completed = result.outcome?;
+                    completed_chunks.insert(result.chunk_index, completed);
+                }
+
+                if completed_chunks.is_empty() {
+                    // The trace allocated a Video writer but every chunk
+                    // failed (or none ever landed) — fall back to the empty
+                    // trace.json path so the artefact set isn't missing a
+                    // sidecar entirely.
+                    let trace_dir = self.trace_directory(recording_id, data_type, context);
+                    let json = JsonTraceWriter::open(&trace_dir)?;
+                    return Ok(json.finish()?);
+                }
+
                 let trace_dir = self.trace_directory(recording_id, data_type, context);
-                let raw_nut = trace_dir.join(paths::RAW_NUT_FILENAME);
-                let _final_nut_bytes = nut_writer.finish()?;
+                let lossy_out = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
+                let lossless_out = trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME);
 
-                let lossy = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
-                let lossless = trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME);
-                let request = VideoEncodeRequest {
-                    raw_nut,
-                    lossy_mp4: lossy,
-                    lossless_mp4: lossless,
-                };
+                // BTreeMap iteration is sorted by chunk_index, so the concat
+                // segment lists are guaranteed in producer-arrival order
+                // regardless of encode completion order.
+                let lossy_segments: Vec<PathBuf> = completed_chunks
+                    .values()
+                    .map(|chunk| chunk.lossy_segment.clone())
+                    .collect();
+                let lossless_segments: Vec<PathBuf> = completed_chunks
+                    .values()
+                    .map(|chunk| chunk.lossless_segment.clone())
+                    .collect();
 
-                // Cap concurrent ffmpeg children across all per-trace actors.
-                // The permit is released on drop, so a panic or `?` short-
-                // circuit inside `run` cannot leak the slot.
-                let _ffmpeg_permit = context
+                // Build the metadata accumulator in the same chunk-index
+                // order so per-frame entries appear in capture order.
+                let mut metadata = VideoMetadataAccumulator::new();
+                for chunk in completed_chunks.values() {
+                    for timestamp_s in &chunk.frame_timestamps_s {
+                        let mut entry = serde_json::Map::new();
+                        entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
+                        entry.insert("width".to_string(), Value::from(width as u64));
+                        entry.insert("height".to_string(), Value::from(height as u64));
+                        metadata.record_frame(entry);
+                    }
+                }
+
+                // Concat is stream-copy: cheap relative to encode but still
+                // bounded by an ffmpeg permit so a tail-stitch storm
+                // doesn't fork-bomb the host.
+                let permit = context
                     .ffmpeg_permits
-                    .acquire()
+                    .clone()
+                    .acquire_owned()
                     .await
                     .map_err(|_| FrameAppendError::FfmpegPermits)?;
-                let outcome = context.video_encoder.run(&request).await?;
-                drop(_ffmpeg_permit);
+                let lossy_outcome = context
+                    .video_encoder
+                    .concat_segments(&lossy_segments, &lossy_out)
+                    .await?;
+                let lossless_outcome = context
+                    .video_encoder
+                    .concat_segments(&lossless_segments, &lossless_out)
+                    .await?;
+                drop(permit);
+
+                // Unlink per-chunk segments now that the final outputs are
+                // sealed. Best-effort: a leftover segment is wasted disk
+                // space, not a correctness problem.
+                for segment in lossy_segments.iter().chain(lossless_segments.iter()) {
+                    if let Err(error) = std::fs::remove_file(segment) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                %error,
+                                trace_id = self.trace_id,
+                                path = %segment.display(),
+                                "failed to remove encoded chunk segment after concat"
+                            );
+                        }
+                    }
+                }
 
                 // Sidecar metadata is the *last* thing on disk so a partial
                 // transcode failure leaves a recognisable "no sidecar"
                 // signature for the recovery sweep.
                 let metadata_bytes = flush_metadata_blocking(metadata, trace_dir.clone()).await?;
 
-                Ok(outcome
-                    .lossy_bytes
-                    .saturating_add(outcome.lossless_bytes)
+                tracing::debug!(
+                    trace_id = self.trace_id,
+                    chunks_encoded = completed_chunks.len(),
+                    "video trace concatenated"
+                );
+
+                Ok(lossy_outcome
+                    .bytes
+                    .saturating_add(lossless_outcome.bytes)
                     .saturating_add(metadata_bytes))
             }
         }
@@ -886,12 +1117,8 @@ impl ActorState {
         _store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
     ) {
-        // Drop the writer first so the BufWriter releases its file handle
-        // before we unlink the directory. The encoders carry `BufWriter`s
-        // around `File` handles — on Linux the unlink succeeds with an open
-        // handle but the disk blocks aren't reclaimed until the handle is
-        // closed, so dropping first keeps the storage budget's free-bytes
-        // estimate accurate.
+        // Drop the writer first so any BufWriter inside releases its file
+        // handle before we unlink the directory.
         self.writer = TraceWriter::Pending;
 
         let (Some(recording_id), Some(data_type)) =
@@ -911,9 +1138,6 @@ impl ActorState {
                 );
             }
         }
-        // Release the bytes we'd previously reserved against the storage
-        // budget so the cap can absorb a re-run of the same recording
-        // without an unnecessary refresh-rescan delay.
         if self.bytes_on_disk > 0 {
             context.storage_budget.release(self.bytes_on_disk);
             self.bytes_on_disk = 0;
@@ -949,40 +1173,9 @@ enum FrameAppendError {
     #[error(transparent)]
     Json(#[from] JsonTraceError),
     #[error(transparent)]
-    Nut(#[from] NutError),
-    #[error(transparent)]
     VideoEncode(#[from] VideoEncodeError),
     #[error(transparent)]
     Metadata(#[from] MetadataError),
-}
-
-/// Decode the integration test producer's 16-byte big-endian frame marker.
-///
-/// The test harness stamps the source frame index into the R-channel of the
-/// top-left 4×4 pixel grid (see `tests/.../shared/test_case/constants.py`
-/// `FRAME_BYTE_LENGTH=16`, `FRAME_GRID_SIZE=4`). Pixel `(row, col)` in that
-/// grid carries marker byte `row * 4 + col`, with the R channel at byte
-/// offset `(row * width + col) * 3` in a packed RGB24 buffer.
-///
-/// Returns `None` if the payload is too short for the 4×4 grid at the given
-/// `width`. The first 16 marker bytes are returned as the low bytes of a
-/// `u128` so the integer round-trips losslessly through `tracing::debug!`.
-fn decode_test_marker(payload: &[u8], width: u32) -> Option<u128> {
-    let stride = (width as usize).checked_mul(3)?;
-    // Need bytes through row 3, column 3 inclusive — i.e. offset
-    // `3 * stride + 3 * 3` must exist in `payload`.
-    let last_byte = stride.checked_mul(3)?.checked_add(3 * 3)?;
-    if payload.len() <= last_byte {
-        return None;
-    }
-    let mut marker: u128 = 0;
-    for row in 0..4 {
-        for col in 0..4 {
-            let byte = payload[row * stride + col * 3];
-            marker = (marker << 8) | u128::from(byte);
-        }
-    }
-    Some(marker)
 }
 
 /// Wrap a non-JSON scalar payload in a minimal object so the on-disk
@@ -1008,15 +1201,10 @@ async fn flush_metadata_blocking(
     let handle = task::spawn_blocking(move || metadata.finish(&output_dir));
     match handle.await {
         Ok(result) => Ok(result?),
-        Err(join_error) => {
-            // A join failure inside `spawn_blocking` means the runtime is
-            // shutting down or the task panicked — fold both into the
-            // metadata-error arm so callers see a uniform `FrameAppendError`.
-            Err(FrameAppendError::Metadata(MetadataError::Write {
-                path: path_for_error,
-                source: std::io::Error::other(format!("metadata flush join failed: {join_error}")),
-            }))
-        }
+        Err(join_error) => Err(FrameAppendError::Metadata(MetadataError::Write {
+            path: path_for_error,
+            source: std::io::Error::other(format!("metadata flush join failed: {join_error}")),
+        })),
     }
 }
 
@@ -1046,37 +1234,6 @@ mod tests {
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = scalar_fallback_entry(123, &[0xFF, 0xFE]);
         assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
-    }
-
-    #[test]
-    fn decode_test_marker_round_trips_known_indices() {
-        // Build a 64×4 RGB24 buffer, stamp marker `value` into the top-left
-        // 4×4 R-channel grid the way the integration-test producer does, then
-        // verify `decode_test_marker` reads it back.
-        let width: u32 = 64;
-        let stride = (width as usize) * 3;
-        let buffer_len = stride * 4;
-        for value in [0u128, 1, 254, 255, 256, 257, 599, 1 << 32] {
-            let mut payload = vec![100u8; buffer_len];
-            for byte_index in 0..16usize {
-                let shift = (15 - byte_index) * 8;
-                let byte = ((value >> shift) & 0xFF) as u8;
-                let row = byte_index / 4;
-                let col = byte_index % 4;
-                payload[row * stride + col * 3] = byte;
-            }
-            let decoded = decode_test_marker(&payload, width).expect("decode");
-            assert_eq!(decoded, value, "round-trip failed for {value}");
-        }
-    }
-
-    #[test]
-    fn decode_test_marker_returns_none_for_short_payload() {
-        // 4-pixel-wide buffer with only 3 rows is missing the row-3 marker
-        // bytes; the decoder must refuse rather than read out-of-bounds.
-        let width: u32 = 4;
-        let payload = vec![0u8; (width as usize) * 3 * 3];
-        assert!(decode_test_marker(&payload, width).is_none());
     }
 
     #[tokio::test]
@@ -1144,9 +1301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn video_trace_produces_mp4_outputs_when_ffmpeg_available() {
-        // Same skip pattern as `encoding::video_encoder` tests so the suite
-        // stays green in sandboxes that lack FFmpeg.
+    async fn video_chunk_ready_appends_segment_and_concats_on_end() {
         if !ffmpeg_available() {
             eprintln!("ffmpeg not on PATH — skipping video trace_actor test.");
             return;
@@ -1163,35 +1318,65 @@ mod tests {
         state
             .handle_start_trace(&store_arc, "rec-1".to_string(), "RGB".to_string(), None)
             .await;
-        state.handle_open_frame_stream(16, 16);
-        for index in 0..4u64 {
-            let mut pixels = vec![0u8; 16 * 16 * 3];
-            for (pixel_index, chunk) in pixels.chunks_mut(3).enumerate() {
-                chunk[0] = ((pixel_index + index as usize) & 0xFF) as u8;
-                chunk[1] = ((pixel_index * 3 + index as usize) & 0xFF) as u8;
-                chunk[2] = ((pixel_index * 5 + index as usize) & 0xFF) as u8;
-            }
+
+        // Build two NUT chunks via ffmpeg testsrc and place them where the
+        // producer would have spooled them.
+        let trace_dir = TracePath::new("rec-1", "RGB", "trace-vid")
+            .directory(context.recordings_root.as_path());
+        let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
+        std::fs::create_dir_all(&chunks_dir).unwrap();
+
+        for chunk_index in 0..2u32 {
+            let chunk_path = chunks_dir.join(paths::chunk_filename(chunk_index));
+            let duration = "4";
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg(format!("testsrc=duration={duration}:size=16x16:rate=1"))
+                .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
+                .arg(&chunk_path)
+                .status()
+                .expect("synth status");
+            assert!(status.success(), "synth NUT failed");
+
+            let frame_timestamps_s: Vec<f64> =
+                (0..4u32).map(|i| (chunk_index * 4 + i) as f64).collect();
             state
-                .handle_frame(
+                .handle_video_chunk_ready(
                     &store_arc,
                     &context,
-                    index as i64 * 33_000_000,
-                    None,
-                    pixels,
+                    chunk_index,
+                    16,
+                    16,
+                    chunk_path.metadata().unwrap().len(),
+                    4,
+                    frame_timestamps_s,
                 )
                 .await;
         }
+
         state.handle_end_trace(&store_arc, &context).await;
 
-        let trace_dir = TracePath::new("rec-1", "RGB", "trace-vid")
-            .directory(context.recordings_root.as_path());
-        assert!(trace_dir.join("lossy.mp4").exists());
-        assert!(trace_dir.join("lossless.mp4").exists());
-        assert!(trace_dir.join("trace.json").exists());
-        assert!(
-            !trace_dir.join("raw.nut").exists(),
-            "raw.nut should be unlinked on successful transcode"
-        );
+        assert!(trace_dir.join(paths::LOSSY_VIDEO_FILENAME).exists());
+        assert!(trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME).exists());
+        assert!(trace_dir.join(paths::TRACE_JSON_FILENAME).exists());
+        // Per-chunk segments and source NUTs should have been cleaned up.
+        for chunk_index in 0..2u32 {
+            assert!(!chunks_dir.join(paths::chunk_filename(chunk_index)).exists());
+            assert!(!trace_dir
+                .join(paths::chunk_lossy_filename(chunk_index))
+                .exists());
+            assert!(!trace_dir
+                .join(paths::chunk_lossless_filename(chunk_index))
+                .exists());
+        }
 
         let trace = store
             .get_trace("trace-vid")
@@ -1204,9 +1389,6 @@ mod tests {
 
     #[tokio::test]
     async fn handle_frame_without_start_trace_is_a_noop() {
-        // `handle_frame`'s own guard: applied directly (bypassing the
-        // `accept_envelope` buffer) with no `StartTrace`, it drops the frame
-        // rather than opening an orphan writer.
         let tempdir = TempDir::new().unwrap();
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
@@ -1219,16 +1401,11 @@ mod tests {
             .handle_frame(&store_arc, &context, 0, None, b"raw".to_vec())
             .await;
         assert_eq!(state.frame_count, 0);
-        // No `StartTrace` ⇒ no row was created.
         assert!(store.get_trace("trace-1").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn envelopes_buffered_before_start_trace_replay_in_order() {
-        // A video trace's frames ride the `frames` service while its
-        // `StartTrace` rides `commands`; the actor can be spawned by a frame
-        // before `StartTrace` is drained. Those envelopes must be buffered and
-        // replayed in arrival order once `StartTrace` lands — not dropped.
         let tempdir = TempDir::new().unwrap();
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
@@ -1238,7 +1415,6 @@ mod tests {
 
         let mut state = ActorState::new("trace-1".to_string());
 
-        // Two frames and the EndTrace all arrive before StartTrace.
         for index in 0..2i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             let flow = state
@@ -1269,8 +1445,6 @@ mod tests {
             "buffered envelopes are not applied yet"
         );
 
-        // StartTrace lands — replay applies the two frames then the EndTrace,
-        // which finalises the trace and returns Stop.
         let flow = state
             .accept_envelope(
                 &store_arc,
@@ -1308,9 +1482,6 @@ mod tests {
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
             .expect("open store");
-        // Build a context whose storage budget refuses any non-zero write
-        // request. `min_free_disk_bytes = u64::MAX` short-circuits the
-        // free-disk check regardless of actual filesystem state.
         let root = tempdir.path().join("recordings");
         let policy = StoragePolicy {
             storage_limit_bytes: None,
@@ -1337,7 +1508,6 @@ mod tests {
         }
         assert_eq!(state.frame_count, 0, "all frames must have been dropped");
         assert_eq!(state.dropped_over_budget, 3);
-        // No writer ever opened so no on-disk trace file exists.
         let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
             .directory(context.recordings_root.as_path());
         assert!(!trace_dir.join("trace.json").exists());

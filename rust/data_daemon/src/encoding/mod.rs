@@ -2,10 +2,9 @@
 //!
 //! - [`json_trace`] — incremental JSON-array writer used by scalar / sensor
 //!   traces and the video sidecar.
-//! - [`nut_writer`] — minimal NUT muxer that spools raw RGB frames to a
-//!   growing on-disk file for the ffmpeg transcoder.
-//! - [`video_encoder`] — supervised `ffmpeg` subprocess that turns a spooled
-//!   NUT into both `lossy.mp4` and `lossless.mp4`.
+//! - [`video_encoder`] — supervised `ffmpeg` subprocess that turns a NUT
+//!   chunk into a per-chunk MP4 pair, and stitches the chunk segments into
+//!   the final `lossy.mp4` / `lossless.mp4` on `EndTrace`.
 //! - [`metadata`] — accumulator that flushes the video-trace sidecar
 //!   `trace.json` alongside the mp4 outputs.
 //!
@@ -18,7 +17,5 @@
 pub mod json_trace;
 #[allow(dead_code)]
 pub mod metadata;
-#[allow(dead_code)]
-pub mod nut_writer;
 #[allow(dead_code)]
 pub mod video_encoder;

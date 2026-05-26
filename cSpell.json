@@ -20,9 +20,13 @@
         "neuracore-dictionary"
     ],
     "words": [
+        "absolutises",
+        "absolutising",
         "allocvec",
         "atfork",
         "colorspace",
+        "concatenator",
+        "concats",
         "debouncer",
         "demux",
         "demuxed",
@@ -37,6 +41,7 @@
         "framecode",
         "genpts",
         "isinstance",
+        "lavfi",
         "libavformat",
         "libc",
         "loglevel",
@@ -50,6 +55,7 @@
         "startcode",
         "startcodes",
         "syncpoint",
+        "testsrc",
         "vdecode",
         "vencode"
     ]

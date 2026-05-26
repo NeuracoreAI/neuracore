@@ -15,57 +15,42 @@
 //! schema is forward-compatible: postcard's enum representation tags variants
 //! with a u32 discriminant, so new envelope variants append cleanly.
 //!
-//! Lifecycle messages and non-video `frame` payloads travel over the
-//! `commands` service; video traffic travels over the dedicated `frames`
-//! service. See [`service_name`] for the split.
+//! All envelopes — lifecycle, joints/scalars, and the chunk-ready notifications
+//! for video traces — travel over a single `commands` service. Video pixel
+//! buffers themselves are *not* on the IPC bus: the producer spools them to
+//! disk as NUT chunks and announces each finished chunk with a
+//! [`Envelope::VideoChunkReady`] envelope. See [`service_name`].
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// iceoryx2 service-name conventions shared by daemon and producer.
 pub mod service_name {
-    /// Pub/sub service carrying lifecycle envelopes (`start_recording`,
-    /// `start_trace`, `stop_recording`, `cancel_recording`) plus the
-    /// `frame` / `end_trace` envelopes of **non-video** traces (joints,
-    /// scalars, custom streams).
+    /// Pub/sub service carrying every IPC envelope: lifecycle
+    /// (`start_recording`, `start_trace`, `stop_recording`,
+    /// `cancel_recording`), non-video `frame` / `batched_frames` envelopes
+    /// (joints, scalars, custom streams), and the
+    /// [`Envelope::VideoChunkReady`] notifications that hand off
+    /// disk-spooled video chunks to the daemon.
     ///
-    /// Video traffic — `open_frame_stream`, `frame` and `end_trace` for any
-    /// trace that announced a resolution — travels on [`FRAMES`] instead, so
-    /// the deep lifecycle buffer here is never paired with multi-MiB payloads.
+    /// There is no longer a dedicated video service — the producer writes
+    /// pixel data straight to disk, so the IPC bus only ever carries
+    /// metadata-sized payloads.
     pub const COMMANDS: &str = "neuracore/data_daemon/commands";
-
-    /// Pub/sub service carrying video-trace traffic: `open_frame_stream`,
-    /// the pixel-bearing `frame` envelopes, and the trace's `end_trace`.
-    ///
-    /// Kept separate from [`COMMANDS`] because iceoryx2 sizes a publisher's
-    /// data segment as `max_subscribers × (buffer + borrowed) ×
-    /// initial_max_slice_len`; pairing the 1024-deep lifecycle buffer with the
-    /// 16 MiB video slice produced a 128 GiB segment whose retained-sample
-    /// resident pages exhausted `/dev/shm` (SIGBUS). A dedicated service lets
-    /// video use a small [`FRAMES_SUBSCRIBER_BUFFER_SIZE`] buffer that bounds
-    /// the retained-frame footprint to `buffer × frame_size`.
-    pub const FRAMES: &str = "neuracore/data_daemon/frames";
 
     /// Maximum size of a single `commands`-service sample.
     ///
-    /// `commands` now carries only lifecycle envelopes and non-video `frame`
-    /// payloads (joint / scalar / custom samples), so the cap no longer has to
-    /// fit a full RGB video frame — that lives on [`FRAMES`] under
-    /// [`FRAMES_MAX_PAYLOAD_BYTES`]. 1 MiB leaves generous headroom for the
-    /// largest scalar/custom payload plus postcard envelope scaffolding.
+    /// All envelope payloads are now metadata-sized: non-video frames are
+    /// small JSON, the integration matrix's 1000-joint batch encodes to
+    /// ~90 KiB, and `VideoChunkReady`'s `frame_timestamps_s` vector is
+    /// ~30 KiB even for a 128 MiB 1080p chunk. 1 MiB leaves generous
+    /// headroom for the worst case.
     pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
-
-    /// Maximum size of a single `frames`-service sample.
-    ///
-    /// Sized so a 1920×1080 RGB24 frame (6,220,800 bytes) plus the postcard
-    /// envelope scaffolding fits comfortably while still under iceoryx2's slice
-    /// budget.
-    pub const FRAMES_MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 
     /// Subscriber buffer depth for the lifecycle service.
     ///
-    /// Lossless, in-order delivery is *not* a function of this depth: both
-    /// services are opened with `enable_safe_overflow(false)`, so a full
+    /// Lossless, in-order delivery is *not* a function of this depth: the
+    /// service is opened with `enable_safe_overflow(false)`, so a full
     /// buffer makes the producer's `Block` strategy wait rather than silently
     /// evict the oldest sample. (Were overflow left at iceoryx2's default the
     /// oldest sample — typically a `StartTrace` — would be dropped, stranding
@@ -87,25 +72,7 @@ pub mod service_name {
     /// fills under normal load. The one-time `StartTrace` burst at recording
     /// setup (one envelope per trace) briefly blocks the producer once the
     /// buffer is full — acceptable for a setup-path cost.
-    ///
-    /// Reducing this from the historical 1024 is the follow-up the per-joint
-    /// `Frame` → `BatchedFrames` batching unlocked: a `log_joint_positions`
-    /// call is now a single envelope, not N back-to-back, so the deep buffer
-    /// sized to absorb per-joint bursts is no longer needed.
     pub const LIFECYCLE_SUBSCRIBER_BUFFER_SIZE: usize = 64;
-
-    /// Subscriber buffer depth for the [`FRAMES`] video service.
-    ///
-    /// Unlike the lifecycle buffer this is deliberately *small*. iceoryx2
-    /// sizes a publisher's data segment proportional to the buffer depth, and
-    /// each `frames` chunk is [`FRAMES_MAX_PAYLOAD_BYTES`] (16 MiB); the
-    /// resident pages of retained (undrained) samples are what exhaust
-    /// `/dev/shm`. Capping the buffer at 16 bounds the worst-case retained
-    /// footprint to `16 × frame_size` per publisher (~3 MiB at 256×256,
-    /// ~96 MiB at 1080p). Video traces are low-rate (30–120 Hz) and the daemon
-    /// drains every 10 ms, so 16 samples is ample slack without risking the
-    /// `Block` strategy stalling the producer.
-    pub const FRAMES_SUBSCRIBER_BUFFER_SIZE: usize = 16;
 
     /// Maximum number of concurrent publishers per service.
     ///
@@ -127,11 +94,11 @@ pub mod service_name {
 
     /// Maximum number of concurrent subscribers per service.
     ///
-    /// The daemon opens exactly one subscriber per service (`commands` and
-    /// `frames`); producers never subscribe. iceoryx2 sizes every publisher's
-    /// data segment as `max_subscribers × (buffer + borrowed) × slice`, so the
-    /// default of 8 inflates each segment 8× for subscribers that never exist.
-    /// Pinning this to 1 keeps the segment proportional to the real topology.
+    /// The daemon opens exactly one subscriber per service; producers never
+    /// subscribe. iceoryx2 sizes every publisher's data segment as
+    /// `max_subscribers × (buffer + borrowed) × slice`, so the default of 8
+    /// inflates each segment 8× for subscribers that never exist. Pinning
+    /// this to 1 keeps the segment proportional to the real topology.
     pub const MAX_SUBSCRIBERS_PER_SERVICE: usize = 1;
 
     /// Maximum number of concurrent iceoryx2 nodes attached to any service.
@@ -183,7 +150,11 @@ pub enum Envelope {
     /// Producer delivers one frame/sample for a trace.
     ///
     /// The payload is opaque to the IPC layer; the per-trace actor parses it
-    /// according to `data_type` and writes it through the JSON / NUT writers.
+    /// according to `data_type` and writes it through the JSON writer.
+    ///
+    /// Video frames do *not* travel as `Frame` envelopes — they are spooled
+    /// to disk by the producer and announced via
+    /// [`Envelope::VideoChunkReady`] instead.
     Frame {
         /// Trace this frame belongs to.
         trace_id: String,
@@ -248,19 +219,35 @@ pub enum Envelope {
         /// [`Envelope::StartRecording`].
         recording_id: String,
     },
-    /// Producer announces that it is about to publish video frames of
-    /// `(width, height)` for `trace_id`.
+    /// Producer announces a finished NUT chunk for a video trace.
     ///
-    /// Sent on the [`COMMANDS`](service_name::COMMANDS) service so the daemon
-    /// can lazily open the [`FRAMES`](service_name::FRAMES) service before the
-    /// first video frame arrives.
-    OpenFrameStream {
+    /// The producer spools captured RGB frames to disk as a sequence of NUT
+    /// chunks. When a chunk crosses the flush threshold (or the trace ends)
+    /// the producer renames `chunk_NNNN.nut.tmp` → `chunk_NNNN.nut`, then
+    /// publishes this envelope so the daemon can encode the chunk to a
+    /// sealed MP4 segment. Per-frame `timestamp_s` values are carried
+    /// inline so the daemon-side `trace.json` sidecar matches the bit-exact
+    /// assertion that today travels through [`Envelope::Frame::timestamp_s`].
+    VideoChunkReady {
+        /// Recording this trace belongs to. Carried so the daemon can resolve
+        /// the on-disk path without a roundtrip through `StartTrace`.
+        recording_id: String,
         /// Trace these frames belong to.
         trace_id: String,
-        /// Frame width in pixels.
+        /// Zero-based chunk index within the trace.
+        chunk_index: u32,
+        /// Frame width in pixels (constant across a trace).
         width: u32,
-        /// Frame height in pixels.
+        /// Frame height in pixels (constant across a trace).
         height: u32,
+        /// Size of the NUT file in bytes.
+        byte_count: u64,
+        /// Number of frames packed into this chunk.
+        frame_count: u32,
+        /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
+        /// Length equals `frame_count`; values round-trip bit-exact through
+        /// postcard.
+        frame_timestamps_s: Vec<f64>,
     },
 }
 
@@ -304,7 +291,7 @@ impl Envelope {
             Envelope::EndTrace { .. } => "end_trace",
             Envelope::StopRecording { .. } => "stop_recording",
             Envelope::CancelRecording { .. } => "cancel_recording",
-            Envelope::OpenFrameStream { .. } => "open_frame_stream",
+            Envelope::VideoChunkReady { .. } => "video_chunk_ready",
         }
     }
 
@@ -474,15 +461,53 @@ mod tests {
     }
 
     #[test]
-    fn open_frame_stream_round_trips() {
-        let original = Envelope::OpenFrameStream {
+    fn video_chunk_ready_round_trips() {
+        let original = Envelope::VideoChunkReady {
+            recording_id: "rec-1".into(),
             trace_id: "trace-1".into(),
+            chunk_index: 3,
             width: 1920,
             height: 1080,
+            byte_count: 128 * 1024 * 1024,
+            frame_count: 7,
+            frame_timestamps_s: vec![
+                1_700_000_000.0,
+                1_700_000_000.016_666_7,
+                1_700_000_000.033_333_3,
+                7.0_f64 / 60.0_f64,
+                1_700_000_000.066_666_7,
+                1_700_000_000.083_333_3,
+                1_700_000_000.1,
+            ],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
-        assert_eq!(original.kind(), "open_frame_stream");
+        assert_eq!(original.kind(), "video_chunk_ready");
+    }
+
+    #[test]
+    fn video_chunk_ready_worst_case_fits_commands_slice() {
+        // A 128 MiB 1080p chunk holds ~3800 frames; carry one f64 per frame.
+        // Even at 10_000 timestamps the envelope is comfortably under
+        // COMMANDS_MAX_PAYLOAD_BYTES.
+        let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let envelope = Envelope::VideoChunkReady {
+            recording_id: "11111111-2222-3333-4444-555555555555".into(),
+            trace_id: "66666666-7777-8888-9999-aaaaaaaaaaaa".into(),
+            chunk_index: 42,
+            width: 1920,
+            height: 1080,
+            byte_count: 128 * 1024 * 1024,
+            frame_count: frame_timestamps_s.len() as u32,
+            frame_timestamps_s,
+        };
+        let bytes = envelope.encode().expect("encode");
+        assert!(
+            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+            "10k-frame chunk envelope ({} bytes) must fit the commands slice ({} bytes)",
+            bytes.len(),
+            service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+        );
     }
 }

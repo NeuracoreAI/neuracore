@@ -14,9 +14,11 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 data_daemon_ipc = { path = "../data_daemon_ipc" }
+# Mirrors the daemon's recordings-root resolution so the producer-spooled NUT
+# chunk paths match what the daemon expects to encode.
+dirs.workspace = true
 iceoryx2.workspace = true
 libc.workspace = true
-once_cell.workspace = true
 pyo3.workspace = true
 # Used by the batched joint-data fast path to format each per-item
 # `{"timestamp":...,"value":...}` payload. We deliberately do NOT hand-format
@@ -33,3 +35,6 @@ tracing.workspace = true
 # UUIDs keep the wire/DB/backend format identical to the ids the Python layer
 # used to generate via `uuid.uuid4()`.
 uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
