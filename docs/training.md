@@ -64,6 +64,11 @@ job_data = nc.start_training_run(
 # Use name_auto_increment=True to auto-use MyTrainingJob_1, MyTrainingJob_2, etc. if the name already exists.
 ```
 
+### Monitoring your training
+1. Go to the **Training** page on your [web dashboard](https://www.neuracore.com/).
+![Training Jobs](assets/training_jobs.png)
+2. Click on your training job
+![Training Details](assets/training_details.png)
 ---
 
 ## 💻 Local training
@@ -98,7 +103,7 @@ neuracore/
     utils/                # Training utilities
 ```
 
-## Training Command Examples
+### Training Command Examples
 **Note**: Passing `training_name` is optional. If you don't pass the `training_name`, the system will generate a random name. To better track the training experiment, we highly recommend you to pass a `training_name`. If a training with the same name already exists, training fails by default; set `training_name_auto_increment=true` to use an incremented name (e.g. `my_experiment_1`) instead.
 ```bash
 # Basic training with Diffusion Policy
@@ -222,3 +227,15 @@ algorithm:
   spatial_softmax_num_keypoints: 32
   # ... (see config/algorithm/*.yaml in the repo for full options)
 ```
+
+### Monitoring your training
+1. Note down the training run name from the training logs
+2. Launch TensorBoard with the CLI:
+```bash
+neuracore training monitor --training-name my_experiment
+```
+To compare all local runs:
+```bash
+neuracore training monitor
+```
+![Training TensorBoard](assets/training_tensorboard.png)
