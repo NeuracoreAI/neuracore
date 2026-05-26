@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import time
 import traceback
 from collections.abc import Sequence
@@ -35,18 +34,15 @@ from neuracore.importer.core.base import (
 from neuracore.importer.core.exceptions import ImportError
 
 logger = logging.getLogger(__name__)
+
 gpus = tf.config.list_physical_devices("GPU")
 if gpus:
     try:
         for gpu in gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
-        logger.info("Memory growth enabled")
+        logger.debug("Memory growth enabled")
     except RuntimeError as e:
-        logger.error("Error enabling memory growth: %s", e)
-
-# Suppress TensorFlow informational messages (e.g., "End of sequence")
-# 0 = all logs, 1 = no INFO, 2 = no WARNING, 3 = no ERROR
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "1")
+        logger.error(f"Error enabling memory growth: {e}")
 
 
 class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
@@ -124,14 +120,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         self._builder: tfds.core.DatasetBuilder | None = None
         self._episode_iter = None
 
-        self.logger.info(
-            "Initialized %s importer for '%s' (split=%s, episodes=%s, freq=%s, dir=%s)",
-            self.dataset_label,
-            self.dataset_name,
-            self.split,
-            self.num_episodes,
-            self.frequency,
-            self.builder_dir,
+        logger.info(
+            f"Initialized {self.dataset_label} importer for '{self.dataset_name}' "
+            f"(split={self.split}, episodes={self.num_episodes}, "
+            f"freq={self.frequency}, dir={self.builder_dir})"
         )
 
     def __getstate__(self) -> dict:
@@ -155,11 +147,8 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         self._builder = self._load_builder()
 
         sliced_split = self._build_sliced_split(chunk, self._builder)
-        self.logger.info(
-            "[worker %s] Loading split=%s from %s",
-            worker_id,
-            sliced_split,
-            self.builder_dir,
+        logger.info(
+            f"[worker {worker_id}] Loading split={sliced_split} from {self.builder_dir}"
         )
 
         dataset = self._load_dataset(self._builder, sliced_split)
@@ -230,13 +219,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         worker_label = (
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
-        self.logger.info(
-            "[%s] Importing %s (%s/%s, steps=%s)",
-            worker_label,
-            episode_label,
-            item.index + 1,
-            self.num_episodes,
-            total_steps if total_steps is not None else "unknown",
+        logger.info(
+            f"[{worker_label}] Importing {episode_label} "
+            f"({item.index + 1}/{self.num_episodes}, "
+            f"steps={total_steps if total_steps is not None else 'unknown'})"
         )
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=episode_label
@@ -260,7 +246,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             nc.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
-        self.logger.info("[%s] Completed %s", worker_label, episode_label)
+        logger.info(f"[{worker_label}] Completed {episode_label}")
 
     def _handle_step_error(
         self, exc: Exception, item: ImportItem, step_index: int
@@ -334,9 +320,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
 
     def _load_builder(self) -> tfds.core.DatasetBuilder:
         """Load a TFDS builder directly from the local dataset directory."""
-        self.logger.info(
-            "Loading %s builder from %s", self.dataset_label, self.builder_dir
-        )
+        logger.info(f"Loading {self.dataset_label} builder from {self.builder_dir}")
         try:
             builder = tfds.builder_from_directory(str(self.builder_dir))
             self._on_builder_loaded(builder)
@@ -390,7 +374,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         self, builder: tfds.core.DatasetBuilder, split: tfds.typing.SplitArg
     ) -> tfds.core.dataset_builder.DatasetBuilder:
         """Load the TFDS dataset from the local builder."""
-        self.logger.info("Opening dataset split '%s' for import.", split)
+        logger.info(f"Opening dataset split '{split}' for import.")
         try:
             return builder.as_dataset(
                 split=split,
@@ -400,11 +384,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         except Exception as exc:
             retry_config = self._build_retry_read_config()
             if self._is_missing_file_error(exc) and retry_config is not None:
-                self.logger.warning(
+                logger.warning(
                     "Some dataset shard files appear to be missing. "
                     "This may indicate an incomplete dataset. "
-                    "Attempting to continue with available shards. Error: %s",
-                    exc,
+                    f"Attempting to continue with available shards. Error: {exc}"
                 )
                 try:
                     return builder.as_dataset(
@@ -642,11 +625,9 @@ class TFDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             super()._handle_episode_load_error(exc, item)
             return
         if self._is_missing_file_error(exc):
-            self.logger.warning(
-                "[worker %s item %s] Skipping episode due to missing shard file: %s",
-                self._worker_id if self._worker_id is not None else 0,
-                item.index,
-                exc,
+            logger.warning(
+                f"[worker {self._worker_id if self._worker_id is not None else 0} "
+                f"item {item.index}] Skipping episode due to missing shard file: {exc}"
             )
             raise ImportError(
                 f"Episode {item.index} cannot be loaded due to missing shard "
@@ -663,14 +644,12 @@ class TFDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
                     if subdir.is_dir():
                         tfrecord_files.extend(subdir.glob("*.tfrecord*"))
             if tfrecord_files:
-                self.logger.info(
-                    "Found %d TFRecord shard files in dataset directory",
-                    len(tfrecord_files),
-                )
+                n = len(tfrecord_files)
+                logger.info(f"Found {n} TFRecord shard files in dataset directory")
             else:
-                self.logger.warning(
+                logger.warning(
                     "No TFRecord files found in dataset directory. "
                     "Dataset may be incomplete or use a different format."
                 )
         except Exception as exc:  # noqa: BLE001 - informational check only
-            self.logger.debug("Could not check for missing shards: %s", exc)
+            logger.debug(f"Could not check for missing shards: {exc}")

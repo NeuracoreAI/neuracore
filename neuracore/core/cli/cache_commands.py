@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -10,6 +11,23 @@ import typer
 from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
 
 cache_app = typer.Typer(help="Cache management utilities.")
+
+
+@cache_app.callback()
+def callback(
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
+) -> None:
+    """Configure cache command options."""
+    from neuracore.utils import setup_logging
+
+    if log_level:
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(level=log_level, force=log_level is not None)
+
 
 DEFAULT_DATASET_CACHE_DIR = DEFAULT_CACHE_DIR / "dataset_cache"
 

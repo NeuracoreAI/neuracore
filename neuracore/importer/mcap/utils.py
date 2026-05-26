@@ -33,6 +33,8 @@ from neuracore_types.nc_data.nc_data import MappingItem
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.importer.core.exceptions import ImportError
 
+logger = logging.getLogger(__name__)
+
 
 def split_topic_path(source: str) -> tuple[str, list[str]]:
     """Split a source path into topic and nested field components."""
@@ -220,7 +222,7 @@ def read_mcap_summary(reader: McapReader) -> Any | None:
         return None
 
 
-def log_mcap_header(header: Any | None, logger: logging.Logger) -> None:
+def log_mcap_header(header: Any | None) -> None:
     """Log basic MCAP header details for diagnostics."""
     if header is None:
         return
@@ -231,7 +233,7 @@ def log_mcap_header(header: Any | None, logger: logging.Logger) -> None:
     )
 
 
-def log_mcap_summary_details(summary: Any | None, logger: logging.Logger) -> None:
+def log_mcap_summary_details(summary: Any | None) -> None:
     """Log non-message record counts that this importer does not process."""
     if summary is None:
         return
@@ -479,9 +481,7 @@ def _load_decoder_factory_class(module_name: str) -> type[DecoderFactory] | None
     return decoder_factory_cls
 
 
-def _discover_decoder_factory_classes(
-    logger: logging.Logger | None = None,
-) -> list[type[DecoderFactory]]:
+def _discover_decoder_factory_classes() -> list[type[DecoderFactory]]:
     global _DISCOVERED_DECODER_FACTORY_CLASSES
 
     if _DISCOVERED_DECODER_FACTORY_CLASSES is not None:
@@ -495,28 +495,22 @@ def _discover_decoder_factory_classes(
         classes.append(factory_cls)
 
     _DISCOVERED_DECODER_FACTORY_CLASSES = classes
-
-    if logger is not None:
-        logger.info(f"Discovered {len(classes)} MCAP decoder plugin class(es).")
-
+    logger.info(f"Discovered {len(classes)} MCAP decoder plugin class(es).")
     return list(_DISCOVERED_DECODER_FACTORY_CLASSES)
 
 
-def discover_decoder_factories(
-    logger: logging.Logger | None = None,
-) -> list[DecoderFactory]:
+def discover_decoder_factories() -> list[DecoderFactory]:
     """Discover and instantiate optional MCAP decoder factories."""
     factories: list[DecoderFactory] = []
-    for factory_cls in _discover_decoder_factory_classes(logger=logger):
+    for factory_cls in _discover_decoder_factory_classes():
         try:
             factories.append(factory_cls())
         except Exception as exc:  # noqa: BLE001
-            if logger is not None:
-                logger.debug(
-                    "Failed to instantiate discovered MCAP decoder factory "
-                    f"'{factory_cls}': {exc}",
-                    exc_info=True,
-                )
+            logger.debug(
+                "Failed to instantiate discovered MCAP decoder factory "
+                f"'{factory_cls}': {exc}",
+                exc_info=True,
+            )
     return factories
 
 
@@ -524,7 +518,6 @@ def list_decoder_factories(
     *,
     enable_discovery: bool = False,
     include_raw_fallback: bool = True,
-    logger: logging.Logger | None = None,
 ) -> list[DecoderFactory]:
     """Build decoder factories used by ``make_reader(..., decoder_factories=...)``."""
     factories: list[DecoderFactory] = [
@@ -542,7 +535,7 @@ def list_decoder_factories(
 
     if enable_discovery:
         seen = {factory.__class__ for factory in factories}
-        for factory in discover_decoder_factories(logger=logger):
+        for factory in discover_decoder_factories():
             if factory.__class__ in seen:
                 continue
             factories.append(factory)
@@ -551,15 +544,11 @@ def list_decoder_factories(
     if include_raw_fallback:
         factories.append(RawPassthroughDecoderFactory())
 
-    if logger is not None:
-        factory_names = [
-            f"{factory.__class__.__module__}.{factory.__class__.__qualname__}"
-            for factory in factories
-        ]
-        logger.debug(
-            f"Configured MCAP decoder factories: {factory_names}",
-        )
-
+    factory_names = [
+        f"{factory.__class__.__module__}.{factory.__class__.__qualname__}"
+        for factory in factories
+    ]
+    logger.debug(f"Configured MCAP decoder factories: {factory_names}")
     return factories
 
 
@@ -583,7 +572,6 @@ def validate_channel_decoder_support(
     summary: Any | None,
     topics: list[str],
     decoder_factories: list[DecoderFactory],
-    logger: logging.Logger,
 ) -> None:
     """Warn when configured topics lack non-raw decoder support."""
     if summary is None or not getattr(summary, "channels", None):
@@ -643,8 +631,6 @@ def _decode_raw_image(
     data_type: DataType,
     data: Any,
     message: Any,
-    *,
-    logger: logging.Logger,
 ) -> np.ndarray:
     """Decode ``sensor_msgs/Image``-style payloads."""
     height = _read_field(message, "height")
@@ -704,50 +690,46 @@ def _decode_raw_image(
     if is_bigendian and np.dtype(dtype).itemsize > 1:
         array = array.byteswap()
 
-    return _drop_alpha_channel(data_type, array, logger=logger)
+    return _drop_alpha_channel(data_type, array)
 
 
 def _decode_compressed_image(
     data_type: DataType,
     message: Any,
-    *,
-    logger: logging.Logger,
 ) -> np.ndarray:
     """Decode ``sensor_msgs/CompressedImage`` payloads."""
     raw = _read_field(message, "data")
     if raw is None:
         raise ImportError("Compressed image decoding requires data field.")
-    return __decode_compressed_image_bytes(data_type, raw, logger=logger)
+    return __decode_compressed_image_bytes(data_type, raw)
 
 
 def read_image_data(
     data_type: DataType,
     data: Any,
     message: Any,
-    *,
-    logger: logging.Logger,
 ) -> Any:
     """Read image payloads as arrays; keep non-image values untouched."""
     if data_type not in {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES}:
         return data
 
     if isinstance(data, np.ndarray):
-        return _drop_alpha_channel(data_type, data, logger=logger)
+        return _drop_alpha_channel(data_type, data)
 
     if _is_raw_image_message(message):
-        return _decode_raw_image(data_type, data, message, logger=logger)
+        return _decode_raw_image(data_type, data, message)
 
     if _is_compressed_image_message(message):
-        return _decode_compressed_image(data_type, message, logger=logger)
+        return _decode_compressed_image(data_type, message)
 
     if isinstance(data, (list, tuple)) and data and not _is_byte_list(data):
         array = np.array(data)
         if array.ndim >= 2:
-            return _drop_alpha_channel(data_type, array, logger=logger)
+            return _drop_alpha_channel(data_type, array)
 
     if isinstance(data, (bytes, bytearray, memoryview, str)) or _is_byte_list(data):
         try:
-            return __decode_compressed_image_bytes(data_type, data, logger=logger)
+            return __decode_compressed_image_bytes(data_type, data)
         except ImportError:
             pass
 
@@ -761,7 +743,6 @@ def __decode_compressed_image_bytes(
     data_type: DataType,
     data: Any,
     *,
-    logger: logging.Logger,
     has_pil: bool = HAS_PIL,
     image_module: Any = Image,
 ) -> np.ndarray:
@@ -781,7 +762,7 @@ def __decode_compressed_image_bytes(
     except Exception as exc:  # noqa: BLE001
         raise ImportError(f"Failed decoding compressed image: {exc}") from exc
 
-    return _drop_alpha_channel(data_type, array, logger=logger)
+    return _drop_alpha_channel(data_type, array)
 
 
 def _read_bytes(data: Any) -> bytes:
@@ -798,8 +779,6 @@ def _read_bytes(data: Any) -> bytes:
 def _drop_alpha_channel(
     data_type: DataType,
     array: np.ndarray,
-    *,
-    logger: logging.Logger,
 ) -> np.ndarray:
     """Normalize image arrays into Neuracore-friendly shape and dtype."""
     if data_type == DataType.RGB_IMAGES and array.ndim == 3 and array.shape[2] == 4:
@@ -846,7 +825,6 @@ def iter_mcap_source_events(
     decoded_data: Any,
     *,
     topic_map: TopicMap,
-    logger: logging.Logger,
     timestamp: float,
 ) -> Iterator[MCAPSourceEvent]:
     """Yield source events for each mapping config, ready for _log_data."""
@@ -864,7 +842,6 @@ def iter_mcap_source_events(
                 config.data_type,
                 base,
                 decoded_data,
-                logger=logger,
             )
             if not _is_language_text(config.data_type, config.import_config):
                 source_data = to_numpy(source_data)
@@ -894,7 +871,6 @@ def iter_mcap_source_events(
                 config.data_type,
                 source_data,
                 decoded_data,
-                logger=logger,
             )
             if not _is_language_text(config.data_type, config.import_config):
                 source_data = to_numpy(source_data)
@@ -984,10 +960,7 @@ def to_numpy(data: Any) -> Any:
     return data
 
 
-def clip_depth(
-    data: Any,
-    logger: logging.Logger | None = None,
-) -> Any:
+def clip_depth(data: Any) -> Any:
     """Clip depth arrays to the backend-accepted meter range."""
     if not isinstance(data, np.ndarray):
         return data
@@ -998,7 +971,7 @@ def clip_depth(
         or float32.size > 0
         and (float(float32.min()) < 0.0 or float(float32.max()) > MAX_DEPTH)
     )
-    if needs_clip and logger is not None:
+    if needs_clip:
         logger.warning(
             f"Depth values outside valid range [0, {MAX_DEPTH:.1f} m] — clipping."
         )

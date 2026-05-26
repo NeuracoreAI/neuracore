@@ -420,7 +420,7 @@ class TestLogData:
         timestamp = 1234567890.0
 
         with pytest.raises(DataValidationError):
-            with patch.object(importer.logger, "error") as mock_error:
+            with patch("neuracore.importer.core.base.logger") as mock_logger:
                 importer._log_data(
                     DataType.RGB_IMAGES,
                     source_data,
@@ -428,7 +428,7 @@ class TestLogData:
                     format,
                     timestamp,
                 )
-                assert mock_error.called
+                assert mock_logger.error.called
 
     @patch("neuracore.importer.core.base.nc")
     def test_log_data_joint_validation_warning(
@@ -441,7 +441,7 @@ class TestLogData:
         mock_mapping_item.transforms.return_value = 2.0  # Above limit 1.0
         mock_mapping_item.name = "joint1"  # Valid joint name
 
-        with patch.object(importer.logger, "warning") as mock_warning:
+        with patch("neuracore.importer.core.base.logger") as mock_logger:
             importer._log_data(
                 DataType.JOINT_POSITIONS,
                 source_data,
@@ -449,7 +449,7 @@ class TestLogData:
                 format,
                 timestamp,
             )
-            assert mock_warning.called
+            assert mock_logger.warning.called
             mock_nc.log_joint_position.assert_called_once()
 
     @patch("neuracore.importer.core.base.nc")
@@ -461,7 +461,7 @@ class TestLogData:
         mock_mapping_item.transforms.side_effect = ValueError("Transform error")
 
         with pytest.raises(ValueError):
-            with patch.object(importer.logger, "error") as mock_error:
+            with patch("neuracore.importer.core.base.logger") as mock_logger:
                 importer._log_data(
                     DataType.JOINT_POSITIONS,
                     source_data,
@@ -469,7 +469,7 @@ class TestLogData:
                     format,
                     timestamp,
                 )
-                assert mock_error.called
+                assert mock_logger.error.called
 
     @patch("neuracore.importer.core.base.nc")
     def test_log_data_logging_exception(self, mock_nc, importer, mock_mapping_item):
@@ -480,7 +480,7 @@ class TestLogData:
         mock_nc.log_depth.side_effect = RuntimeError("Logging error")
 
         with pytest.raises(RuntimeError):
-            with patch.object(importer.logger, "error") as mock_error:
+            with patch("neuracore.importer.core.base.logger") as mock_logger:
                 importer._log_data(
                     DataType.DEPTH_IMAGES,
                     source_data,
@@ -488,7 +488,7 @@ class TestLogData:
                     format,
                     timestamp,
                 )
-                assert mock_error.called
+                assert mock_logger.error.called
 
     @patch("neuracore.importer.core.base.nc")
     def test_log_data_joint_data_validates_transformed(

@@ -388,3 +388,7 @@ urdfdom
 tinyxml
 assimp
 octomap
+absl
+ONEDNN
+qpsolvers
+renderable

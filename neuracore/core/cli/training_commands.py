@@ -31,6 +31,25 @@ from neuracore.ml.cli import training_runs_cloud as training_runs
 training_app = typer.Typer(help="Training utilities.")
 console = Console()
 
+
+@training_app.callback()
+def callback(
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
+) -> None:
+    """Configure training command options."""
+    import os
+
+    from neuracore.utils import setup_logging
+
+    if log_level:
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(level=log_level, force=log_level is not None)
+
+
 LOCAL_RUNS_ROOT = DEFAULT_CACHE_DIR / "runs"
 SUCCESS_MARKER = "Training completed successfully"
 

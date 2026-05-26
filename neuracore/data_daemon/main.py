@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import typer
 
 from neuracore.data_daemon.config_manager.args_handler import (
@@ -17,6 +19,23 @@ app = typer.Typer(
     add_completion=False,
     help="Neuracore Data Daemon CLI.",
 )
+
+
+@app.callback()
+def callback(
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
+) -> None:
+    """Configure data-daemon command options."""
+    from neuracore.utils import setup_logging
+
+    if log_level:
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(level=log_level, force=log_level is not None)
+
 
 app.command("launch")(run_launch)
 app.command("stop")(run_stop)

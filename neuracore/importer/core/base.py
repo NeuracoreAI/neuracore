@@ -14,6 +14,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from logging.handlers import QueueHandler
 from pathlib import Path
 from queue import Empty
 from typing import Any
@@ -29,16 +30,20 @@ from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType, NCDataImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
 from rich.console import Console
+from rich.console import Group as RichGroup
+from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
     Progress,
     SpinnerColumn,
+    Task,
     TaskID,
     TextColumn,
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.text import Text
 from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
@@ -63,6 +68,8 @@ from .exceptions import (
     ImporterError,
     ImportError,
 )
+
+logger = logging.getLogger(__name__)
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
 
@@ -185,9 +192,6 @@ class NeuracoreDatasetImporter(ABC):
         self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
-        self.logger = logging.getLogger(
-            f"{self.__class__.__module__}.{self.__class__.__name__}"
-        )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int = -1
         self._error_queue: mp.Queue[WorkerError] | None = None
@@ -566,10 +570,11 @@ class NeuracoreDatasetImporter(ABC):
                 self._validate_input_data(data_type, source_data, format)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
-                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+                logger.warning(f"[WARNING] {data_type} ({item.name}): {w}")
         except DataValidationError as e:
-            self.logger.error(
-                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            logger.error(
+                f"[ERROR] {data_type} ({item.name}): {e} -- skipping episode",
+                exc_info=True,
             )
             raise
 
@@ -667,15 +672,17 @@ class NeuracoreDatasetImporter(ABC):
                     self._validate_joint_data(data_type, transformed_data, item.name)
         except DataValidationWarning as w:
             if not self.suppress_warnings:
-                self.logger.warning("[WARNING] %s (%s): %s", data_type, item.name, w)
+                logger.warning(f"[WARNING] {data_type} ({item.name}): {w}")
         except DataValidationError as e:
-            self.logger.error(
-                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            logger.error(
+                f"[ERROR] {data_type} ({item.name}): {e} -- skipping episode",
+                exc_info=True,
             )
             raise
         except Exception as e:
-            self.logger.error(
-                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            logger.error(
+                f"[ERROR] {data_type} ({item.name}): {e} -- skipping episode",
+                exc_info=True,
             )
             raise
 
@@ -731,8 +738,9 @@ class NeuracoreDatasetImporter(ABC):
                     intrinsics=intrinsics,
                 )
         except Exception as e:
-            self.logger.error(
-                "[ERROR] %s (%s): %s -- skipping episode", data_type, item.name, e
+            logger.error(
+                f"[ERROR] {data_type} ({item.name}): {e} -- skipping episode",
+                exc_info=True,
             )
             raise
 
@@ -920,7 +928,7 @@ class NeuracoreDatasetImporter(ABC):
         """
         items = list(self.build_work_items())
         if not items:
-            self.logger.info("No import items found; nothing to do.")
+            logger.info("No import items found; nothing to do.")
             return
 
         original_count = len(items)
@@ -931,25 +939,22 @@ class NeuracoreDatasetImporter(ABC):
             ]
             skipped_count = original_count - len(items)
             if skipped_count > 0:
-                self.logger.info(
-                    "Skipping %s previously completed episode(s) from %s.",
-                    skipped_count,
-                    self.completed_items_file,
+                logger.info(
+                    f"Skipping {skipped_count} previously completed episode(s) "
+                    f"from {self.completed_items_file}."
                 )
             if not items:
-                self.logger.info(
-                    "All episodes are already completed according to %s.",
-                    self.completed_items_file,
+                logger.info(
+                    f"All episodes are already completed according to "
+                    f"{self.completed_items_file}."
                 )
                 return
 
         if self.random_sample is not None:
             n = min(self.random_sample, len(items))
             items = random.sample(items, n)
-            self.logger.info(
-                "Sampling %s random episode(s) from %s episodes.",
-                n,
-                original_count,
+            logger.info(
+                f"Sampling {n} random episode(s) from {original_count} episodes."
             )
 
         # Pre-check: dry run to check for errors
@@ -959,13 +964,15 @@ class NeuracoreDatasetImporter(ABC):
         self.pre_check = True
         skip_joint_target_positions = False
         try:
-            self.logger.info(
-                "Pre-check: importing %s episode(s) with 1 worker.",
-                len(precheck_items),
+            logger.info(
+                f"Pre-check: importing {len(precheck_items)} episode(s) with 1 worker."
             )
             precheck_errors, precheck_processes, precheck_result_queue = (
                 self._run_import_workers(
-                    precheck_items, 1, use_precheck_result_queue=True
+                    precheck_items,
+                    1,
+                    use_precheck_result_queue=True,
+                    show_progress=False,
                 )
             )
             self._report_process_status(precheck_processes)
@@ -991,23 +998,14 @@ class NeuracoreDatasetImporter(ABC):
                     for c in self.ordered_import_configs
                     if c[0] != DataType.JOINT_TARGET_POSITIONS
                 ]
-                self.logger.warning(
+                logger.warning(
                     "Joint target positions provided are equivalent to joint positions "
                     "in next step. Skip importing joint target positions."
                 )
 
         worker_count = self._resolve_worker_count(len(items))
-        live_status = "Live" if not self.dry_run else "Dry-run"
-        self.logger.info(
-            "%s: importing %s episodes with %s workers",
-            live_status,
-            len(items),
-            worker_count,
-        )
-
-        self.worker_errors, processes, _ = self._run_import_workers(items, worker_count)
+        _, processes, _ = self._run_import_workers(items, worker_count)
         self._report_process_status(processes)
-        self._report_errors(self.worker_errors)
 
         if self.worker_errors and self.skip_on_error == "all":
             raise ImporterError("Import aborted due to worker errors.")
@@ -1017,6 +1015,7 @@ class NeuracoreDatasetImporter(ABC):
         items: Sequence[ImportItem],
         worker_count: int,
         use_precheck_result_queue: bool = False,
+        show_progress: bool = True,
     ) -> tuple[
         list[WorkerError],
         list[mp.context.SpawnProcess],
@@ -1025,8 +1024,9 @@ class NeuracoreDatasetImporter(ABC):
         """Run import with the given items and worker count."""
         ctx = mp.get_context("spawn")
         error_queue: mp.Queue[WorkerError] = ctx.Queue()
-        progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue()
+        progress_queue: mp.Queue[ProgressUpdate] = ctx.Queue(maxsize=2048)
         completed_queue: mp.Queue[str] = ctx.Queue()
+        log_queue: mp.Queue[logging.LogRecord] = ctx.Queue(-1)
         pause_event = ctx.Event()  # when set, workers pause at next item boundary
         precheck_result_queue: mp.Queue[bool] | None = (
             ctx.Queue() if use_precheck_result_queue else None
@@ -1048,13 +1048,21 @@ class NeuracoreDatasetImporter(ABC):
                     ready_barrier,
                     pause_event,
                     precheck_result_queue,
+                    log_queue,
                 ),
             )
             process.start()
             processes.append(process)
 
         self._monitor_progress(
-            processes, progress_queue, len(items), pause_event, completed_queue
+            processes,
+            progress_queue,
+            len(items),
+            pause_event,
+            completed_queue,
+            log_queue,
+            error_queue,
+            show_progress=show_progress,
         )
 
         for process in processes:
@@ -1063,6 +1071,8 @@ class NeuracoreDatasetImporter(ABC):
         progress_queue.join_thread()
         completed_queue.close()
         completed_queue.join_thread()
+        log_queue.close()
+        log_queue.join_thread()
 
         return (
             self._collect_errors(error_queue),
@@ -1109,6 +1119,7 @@ class NeuracoreDatasetImporter(ABC):
         ready_barrier: mp.synchronize.Barrier | None = None,
         pause_event: mp.synchronize.Event | None = None,
         precheck_result_queue: mp.Queue[bool] | None = None,
+        log_queue: mp.Queue | None = None,
     ) -> None:
         """Worker body that wraps import with error capture.
 
@@ -1122,6 +1133,11 @@ class NeuracoreDatasetImporter(ABC):
         """
         self._worker_id = worker_id
         self._progress_queue = progress_queue
+
+        if log_queue is not None:
+            from neuracore.utils import setup_logging
+
+            setup_logging(handler=QueueHandler(log_queue), force=True)
 
         try:
             sig = inspect.signature(self.prepare_worker)
@@ -1173,7 +1189,6 @@ class NeuracoreDatasetImporter(ABC):
                             traceback=tb,
                         )
                     )
-                self._log_worker_error(worker_id, item.index, str(exc))
                 raise
 
         if self.pre_check and precheck_result_queue is not None:
@@ -1257,10 +1272,9 @@ class NeuracoreDatasetImporter(ABC):
             with self.completed_items_file.open("r", encoding="utf-8") as file:
                 return {line.strip() for line in file if line.strip()}
         except Exception as exc:  # noqa: BLE001 - best effort
-            self.logger.warning(
-                "Failed to read completed imports file '%s': %s",
-                self.completed_items_file,
-                exc,
+            logger.warning(
+                f"Failed to read completed imports file "
+                f"'{self.completed_items_file}': {exc}"
             )
             return set()
 
@@ -1285,16 +1299,14 @@ class NeuracoreDatasetImporter(ABC):
         """Log any non-zero exit codes from worker processes."""
         for process in processes:
             if process.exitcode not in (0, None):
-                self.logger.error(
-                    "Worker pid=%s exited with status %s",
-                    process.pid,
-                    process.exitcode,
+                logger.error(
+                    f"Worker pid={process.pid} exited with status {process.exitcode}"
                 )
 
     def _report_errors(self, errors: list[WorkerError]) -> None:
         """Summarize captured worker errors."""
         if not errors:
-            self.logger.info("All workers completed without reported errors.")
+            logger.info("All workers completed without reported errors.")
             return
 
         deduped: dict[tuple[int | None, int | None, str], int] = {}
@@ -1302,10 +1314,9 @@ class NeuracoreDatasetImporter(ABC):
             key = (err.worker_id, err.item_index, err.message)
             deduped[key] = deduped.get(key, 0) + 1
 
-        self.logger.error(
-            "Completed with %s worker error event(s) (%s unique).",
-            len(errors),
-            len(deduped),
+        logger.error(
+            f"Completed with {len(errors)} worker error event(s) "
+            f"({len(deduped)} unique)."
         )
 
         for (worker_id, item_index, message), count in deduped.items():
@@ -1314,12 +1325,9 @@ class NeuracoreDatasetImporter(ABC):
                 prefix += f" item {item_index}"
             prefix += "]"
             suffix = f" (x{count})" if count > 1 else ""
-            self.logger.error("%s %s%s", prefix, message, suffix)
+            logger.error(f"{prefix} {message}{suffix}")
 
-        self.logger.error(
-            "Import finished with errors. Re-run with DEBUG logging for tracebacks "
-            "or fix the reported issues above."
-        )
+        logger.error("Import finished with errors. Fix the reported issues above.")
 
     def _log_worker_error(
         self, worker_id: int, item_index: int | None, message: str
@@ -1334,7 +1342,7 @@ class NeuracoreDatasetImporter(ABC):
         if item_index is not None:
             prefix += f" item {item_index}"
         prefix += "]"
-        self.logger.error("%s %s", prefix, message)
+        logger.error(f"{prefix} {message}")
 
     def _emit_progress(
         self,
@@ -1357,7 +1365,7 @@ class NeuracoreDatasetImporter(ABC):
                 )
             )
         except Exception:  # noqa: BLE001 - best-effort progress updates
-            self.logger.debug("Failed to emit progress update.", exc_info=True)
+            logger.debug("Failed to emit progress update.", exc_info=True)
 
     @staticmethod
     def _format_bytes(num_bytes: int | float) -> str:
@@ -1392,6 +1400,68 @@ class NeuracoreDatasetImporter(ABC):
                     pass  # Skip files that disappear or can't be accessed
         return total_size
 
+    def _monitor_no_progress(
+        self,
+        processes: Sequence[mp.context.SpawnProcess],
+        progress_queue: mp.Queue[ProgressUpdate],
+        completed_queue: mp.Queue[str] | None,
+        log_queue: mp.Queue | None,
+        error_queue: mp.Queue | None,
+    ) -> None:
+        """Wait for workers without showing a progress bar (used for pre-check)."""
+        nc_handlers = [
+            h
+            for h in logging.getLogger("neuracore").handlers
+            if not isinstance(h, logging.NullHandler)
+        ]
+        log_handlers = nc_handlers or logging.root.handlers
+        rich_handler = next(
+            (h for h in log_handlers if isinstance(h, RichHandler)), None
+        )
+        non_rich_handlers = [h for h in log_handlers if not isinstance(h, RichHandler)]
+
+        def drain_log_queue() -> None:
+            if log_queue is None:
+                return
+            records: list[logging.LogRecord] = []
+            try:
+                while True:
+                    records.append(log_queue.get_nowait())
+            except Empty:
+                pass
+            if rich_handler is not None:
+                formatted = [
+                    rich_handler.render(
+                        record=r,
+                        traceback=None,
+                        message_renderable=rich_handler.render_message(
+                            r, rich_handler.format(r)
+                        ),
+                    )
+                    for r in records
+                    if r.levelno >= rich_handler.level
+                ]
+                if formatted:
+                    get_shared_console().print(RichGroup(*formatted))
+            for record in records:
+                for handler in non_rich_handlers:
+                    if record.levelno >= handler.level:
+                        handler.emit(record)
+
+        while True:
+            try:
+                progress_queue.get_nowait()
+            except Empty:
+                pass
+            drain_log_queue()
+            any_alive = any(proc.is_alive() for proc in processes)
+            if not any_alive:
+                drain_log_queue()
+                if error_queue is not None:
+                    self.worker_errors = self._collect_errors(error_queue)
+                break
+            time.sleep(0.1)
+
     def _monitor_progress(
         self,
         processes: Sequence[mp.context.SpawnProcess],
@@ -1399,6 +1469,9 @@ class NeuracoreDatasetImporter(ABC):
         total_items: int,
         pause_event: mp.synchronize.Event | None = None,
         completed_queue: mp.Queue[str] | None = None,
+        log_queue: mp.Queue | None = None,
+        error_queue: mp.Queue | None = None,
+        show_progress: bool = True,
     ) -> None:
         """Render a progress bar by aggregating all worker updates.
 
@@ -1408,11 +1481,39 @@ class NeuracoreDatasetImporter(ABC):
         """
         if not processes:
             return
+        if not show_progress:
+            self._monitor_no_progress(
+                processes, progress_queue, completed_queue, log_queue, error_queue
+            )
+            return
 
         completed_items: set[int] = set()
         worker_states: dict[int, ProgressUpdate] = {}
+        worker_tasks: dict[int, TaskID] = {}
+        worker_labels: dict[int, str] = {}
         last_disk_check = 0.0
         workers_paused = False
+
+        class OverallOnlyTimeElapsed(TimeElapsedColumn):
+            def render(self_, task: Task) -> Text:  # noqa: N805
+                return (
+                    Text("") if task.fields.get("is_worker") else super().render(task)
+                )
+
+        progress = Progress(
+            SpinnerColumn(style="cyan"),
+            TextColumn("{task.description}"),
+            BarColumn(bar_width=None, complete_style="green", pulse_style="cyan"),
+            MofNCompleteColumn(),
+            OverallOnlyTimeElapsed(),
+            TimeRemainingColumn(),
+            console=get_shared_console(),
+            auto_refresh=False,
+            transient=True,
+        )
+        overall_task = progress.add_task(
+            "[bold blue]Importing episodes", total=total_items
+        )
 
         def flush_completed_queue() -> None:
             if completed_queue is None:
@@ -1426,19 +1527,51 @@ class NeuracoreDatasetImporter(ABC):
             if batch:
                 self._append_completed_item_keys(batch)
 
-        with Progress(
-            SpinnerColumn(style="cyan"),
-            TextColumn("[bold blue]{task.description}"),
-            BarColumn(bar_width=None, complete_style="green", pulse_style="cyan"),
-            MofNCompleteColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-            refresh_per_second=10,
-            transient=False,
-            console=get_shared_console(),
-        ) as progress:
-            overall_task = progress.add_task("Importing episodes", total=total_items)
+        nc_handlers = [
+            h
+            for h in logging.getLogger("neuracore").handlers
+            if not isinstance(h, logging.NullHandler)
+        ]
+        log_handlers = nc_handlers or logging.root.handlers
+        rich_handler = next(
+            (h for h in log_handlers if isinstance(h, RichHandler)), None
+        )
+        non_rich_handlers = [h for h in log_handlers if not isinstance(h, RichHandler)]
 
+        def drain_log_queue() -> None:
+            if log_queue is None:
+                return
+            records: list[logging.LogRecord] = []
+            try:
+                while True:
+                    records.append(log_queue.get_nowait())
+            except Empty:
+                pass
+            if rich_handler is not None:
+                formatted = [
+                    rich_handler.render(
+                        record=r,
+                        traceback=None,
+                        message_renderable=rich_handler.render_message(
+                            r, rich_handler.format(r)
+                        ),
+                    )
+                    for r in records
+                    if r.levelno >= rich_handler.level
+                ]
+                if formatted:
+                    progress.console.print(RichGroup(*formatted))
+            for record in records:
+                for handler in non_rich_handlers:
+                    if record.levelno >= handler.level:
+                        handler.emit(record)
+
+        with progress:
+            live_status = "Dry-run" if self.dry_run else "Live"
+            logger.info(
+                f"{live_status}: importing {total_items} episodes "
+                f"with {len(processes)} workers"
+            )
             while True:
                 flush_completed_queue()
 
@@ -1455,7 +1588,7 @@ class NeuracoreDatasetImporter(ABC):
                             if pause_event is not None and not workers_paused:
                                 workers_paused = True
                                 pause_event.set()
-                                self.logger.warning(
+                                logger.warning(
                                     "Local cache limit exceeded "
                                     f"({used_str} of {limit_str}). "
                                     "Pausing workers until usage drops below limit."
@@ -1463,19 +1596,22 @@ class NeuracoreDatasetImporter(ABC):
                             progress.update(
                                 overall_task,
                                 description=(
-                                    f"Paused ({pct_used:.0f}% of local cache used: "
+                                    f"[bold blue]Paused "
+                                    f"({pct_used:.0f}% of local cache used: "
                                     f"{used_str} / {limit_str}). "
                                     "Waiting for recordings to upload to cloud "
                                     "and free up local cache."
                                 ),
                             )
+                            drain_log_queue()
+                            progress.refresh()
                             time.sleep(self.DISK_CHECK_INTERVAL_SECS)
                             continue
                         else:
                             if workers_paused and pause_event is not None:
                                 workers_paused = False
                                 pause_event.clear()
-                                self.logger.info(
+                                logger.info(
                                     "Local cache usage below limit "
                                     f"({used_str} of {limit_str}). "
                                     "Resuming import."
@@ -1483,7 +1619,7 @@ class NeuracoreDatasetImporter(ABC):
                             progress.update(
                                 overall_task,
                                 description=(
-                                    f"Importing episodes "
+                                    f"[bold blue]Importing episodes "
                                     f"({pct_used:.0f}% of local cache used: "
                                     f"{used_str} / {limit_str})."
                                 ),
@@ -1492,9 +1628,8 @@ class NeuracoreDatasetImporter(ABC):
                         pass
 
                 any_alive = any(proc.is_alive() for proc in processes)
-                timeout = 0.1 if any_alive else 0
                 try:
-                    update = progress_queue.get(timeout=timeout)
+                    update = progress_queue.get(timeout=0.1 if any_alive else 0)
                 except Empty:
                     update = None
 
@@ -1504,25 +1639,35 @@ class NeuracoreDatasetImporter(ABC):
                         overall_task,
                         completed_items,
                         worker_states,
+                        worker_tasks,
+                        worker_labels,
                         update,
                     )
 
+                drain_log_queue()
+                progress.refresh()
+
                 if not any_alive:
-                    while True:
-                        try:
-                            update = progress_queue.get_nowait()
-                        except Empty:
-                            break
-                        self._apply_progress_update(
-                            progress,
-                            overall_task,
-                            completed_items,
-                            worker_states,
-                            update,
-                        )
+                    try:
+                        while True:
+                            self._apply_progress_update(
+                                progress,
+                                overall_task,
+                                completed_items,
+                                worker_states,
+                                worker_tasks,
+                                worker_labels,
+                                progress_queue.get_nowait(),
+                            )
+                    except Empty:
+                        pass
+                    drain_log_queue()
                     flush_completed_queue()
                     progress.update(overall_task, completed=total_items)
-                    return
+                    if error_queue is not None:
+                        self.worker_errors = self._collect_errors(error_queue)
+                        self._report_errors(self.worker_errors)
+                    break
 
     def _apply_progress_update(
         self,
@@ -1530,19 +1675,40 @@ class NeuracoreDatasetImporter(ABC):
         overall_task: TaskID,
         completed_items: set[int],
         worker_states: dict[int, ProgressUpdate],
+        worker_tasks: dict[int, TaskID],
+        worker_labels: dict[int, str],
         update: ProgressUpdate,
     ) -> None:
-        """Process a single progress update and refresh the unified bar."""
+        """Process a single progress update and refresh the progress bars."""
         prev = worker_states.get(update.worker_id)
         if prev is not None and prev.item_index != update.item_index:
             completed_items.add(prev.item_index)
-
         if update.total_steps is not None and update.step >= update.total_steps:
             completed_items.add(update.item_index)
-
         worker_states[update.worker_id] = update
-
-        progress.update(
-            overall_task,
-            completed=len(completed_items),
-        )
+        progress.update(overall_task, completed=len(completed_items))
+        if update.total_steps is None:
+            return
+        label = update.episode_label or f"episode {update.item_index}"
+        description = f"  [dim]↳[/dim] [blue]worker {update.worker_id}  {label}"
+        worker_id = update.worker_id
+        if worker_id not in worker_tasks:
+            worker_tasks[worker_id] = progress.add_task(
+                description, total=update.total_steps, is_worker=True
+            )
+            worker_labels[worker_id] = description
+        elif worker_labels[worker_id] != description:
+            worker_labels[worker_id] = description
+            progress.reset(
+                worker_tasks[worker_id],
+                start=True,
+                total=update.total_steps,
+                completed=update.step,
+                description=description,
+            )
+        else:
+            progress.update(
+                worker_tasks[worker_id],
+                completed=update.step,
+                total=update.total_steps,
+            )

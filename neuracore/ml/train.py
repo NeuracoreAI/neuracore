@@ -38,7 +38,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
-from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.trainers.batch_autotuner import (
     find_optimal_batch_size,
@@ -62,9 +61,11 @@ from neuracore.ml.utils.training_config import (
     validate_complete_config,
 )
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
+from neuracore.utils import setup_logging
 
 # Environment setup
 os.environ["PJRT_DEVICE"] = "GPU"
+os.environ.setdefault("HYDRA_FULL_ERROR", "1")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -285,26 +286,6 @@ def _save_local_training_metadata(
     metadata_path.write_text(json.dumps(metadata, indent=2))
 
 
-def setup_logging(output_dir: str, rank: int = 0) -> None:
-    """Setup logging configuration."""
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    stream_handler = logging.StreamHandler()
-
-    if rank == 0:
-        file_handler = logging.FileHandler(output_path / "train.log")
-    else:
-        file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
-    file_handler.setFormatter(JsonLineLogFormatter())
-
-    handlers: list[logging.Handler] = [file_handler, stream_handler]
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=handlers,
-        force=True,
-    )
-
-
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
@@ -340,8 +321,7 @@ def get_model_and_algorithm_config(
         )
     else:
         raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' "
-            "must be provided in the configuration"
+            "Either 'algorithm' or 'algorithm_id' must be provided in the configuration"
         )
     return model, algorithm_config
 
@@ -500,7 +480,10 @@ def run_training(
         setup_distributed(rank, world_size)
 
     # Setup logging (different file per process)
-    setup_logging(cfg.local_output_dir, rank)
+    log_file = Path(cfg.local_output_dir) / (
+        "train.log" if rank == 0 else f"train-rank{rank}.log"
+    )
+    setup_logging(json_format=True, log_file=log_file, force=True)
     logger = logging.getLogger(__name__)
 
     # Set random seed (different for each process to ensure different data sampling)
@@ -724,7 +707,11 @@ def _main(cfg: DictConfig) -> None:
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
 
-    setup_logging(cfg.local_output_dir)
+    setup_logging(
+        json_format=True,
+        log_file=Path(cfg.local_output_dir) / "train.log",
+        force=True,
+    )
     log_streamer: CloudLogStreamer | None = None
 
     try:

@@ -1,4 +1,16 @@
+# ruff: noqa: E402
 """Neuracore CLI entry point."""
+
+import logging
+import os
+import warnings
+
+# Must run before any neuracore import — neuracore/__init__.py triggers datasets/TF
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+warnings.filterwarnings("ignore", category=UserWarning, module="qpsolvers")
+# TF skips adding its BASIC_FORMAT StreamHandler when root already has handlers
+logging.getLogger().addHandler(logging.NullHandler())
 
 import typer
 
@@ -8,6 +20,7 @@ from neuracore.core.cli.generate_api_key import run as login
 from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
 from neuracore.data_daemon.main import app as data_daemon_app
+from neuracore.utils import setup_logging
 
 app = typer.Typer(add_completion=True, help="Neuracore command line interface.")
 
@@ -44,9 +57,16 @@ def callback(
         is_eager=True,
         is_flag=True,
     ),
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
 ) -> None:
-    """Handle global CLI option for --version."""
-    return None
+    """Handle global CLI options."""
+    if log_level:
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(level=log_level, force=log_level is not None)
 
 
 app.command("login")(login)

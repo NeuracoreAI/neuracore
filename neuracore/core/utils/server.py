@@ -28,11 +28,11 @@ from neuracore.core.const import (
     SET_CHECKPOINT_ENDPOINT,
 )
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
-from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.utils.preprocessing_utils import (
     PreprocessingConfiguration,
     resolve_preprocessing_config,
 )
+from neuracore.utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -49,23 +49,6 @@ class CheckpointRequest(BaseModel):
     """Request model for setting checkpoints."""
 
     epoch: int
-
-
-def setup_server_logging(log_level: str, log_file_path: str | None = None) -> None:
-    """Configure structured logging for the server process."""
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
-    if log_file_path is not None:
-        path = Path(log_file_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(path)
-        handlers.append(file_handler)
-
-    formatter = JsonLineLogFormatter()
-    for handler in handlers:
-        handler.setFormatter(formatter)
-
-    level = getattr(logging, log_level.upper(), logging.INFO)
-    logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
 def write_startup_status(
@@ -244,7 +227,12 @@ def start_server(
     Returns:
         ModelServer instance
     """
-    setup_server_logging(log_level=log_level, log_file_path=log_file_path)
+    setup_logging(
+        level=log_level,
+        json_format=True,
+        log_file=Path(log_file_path) if log_file_path is not None else None,
+        force=True,
+    )
     logger.info("Starting model server on %s:%s.", host, port)
     server = ModelServer(
         input_embodiment_description=input_embodiment_description,

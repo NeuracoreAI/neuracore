@@ -26,15 +26,17 @@ from pydantic import BaseModel
 from torch.utils.data import DataLoader
 
 import neuracore as nc
-from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
+from neuracore.utils import setup_logging
 
 from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples
 from ..datasets.pytorch_dummy_dataset import MAX_LEN_PER_DATA_TYPE, PytorchDummyDataset
 from .algorithm_loader import AlgorithmLoader
 from .nc_archive import create_nc_archive
+
+logger = logging.getLogger(__name__)
 
 
 class AlgorithmCheck(BaseModel):
@@ -59,23 +61,6 @@ def _indexed_names(data_type: DataType) -> dict[int, str]:
     return {
         index: f"{data_type.value}_{index}" for index in range(MAX_LEN_PER_DATA_TYPE)
     }
-
-
-def setup_logging(output_dir: Path) -> None:
-    """Configure logging for validation process with file output only.
-
-    Sets up logging to capture validation progress and errors in a log file.
-
-    Args:
-        output_dir: Directory where the validation log file will be created.
-    """
-    file_handler = logging.FileHandler(output_dir / "validate.log")
-    file_handler.setFormatter(JsonLineLogFormatter())
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[file_handler],
-        force=True,
-    )
 
 
 def run_validation(
@@ -127,8 +112,11 @@ def run_validation(
     # Setup output directory
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    setup_logging(output_dir)
-    logger = logging.getLogger(__name__)
+    setup_logging(
+        json_format=True,
+        log_file=output_dir / "validate.log",
+        force=True,
+    )
 
     algo_check = AlgorithmCheck()
     error_msg = ""

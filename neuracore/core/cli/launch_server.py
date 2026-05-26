@@ -15,8 +15,8 @@ from neuracore_types import DataType
 import neuracore as nc
 from neuracore.core.endpoint import policy_local_server
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
+from neuracore.utils import setup_logging
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -41,6 +41,11 @@ def _try_report_error_to_cloud(
 
 
 def run(
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
     input_embodiment_description: str = typer.Option(
         ...,
         "--input_embodiment_description",
@@ -66,6 +71,11 @@ def run(
     port: int = typer.Option(8080, "--port", help="Port to bind the server"),
 ) -> None:
     """Launch a local policy server."""
+    if log_level:
+        import os
+
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(level=log_level, force=log_level is not None)
     try:
         input_order_raw = json.loads(input_embodiment_description)
         output_order_raw = json.loads(output_embodiment_description)
@@ -113,6 +123,7 @@ def run(
 
 def main() -> None:
     """CLI entrypoint for launching the local policy server."""
+    setup_logging()
     typer.run(run)
 
 
