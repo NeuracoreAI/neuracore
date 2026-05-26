@@ -2,6 +2,7 @@
 
 import json
 
+import pytest
 from neuracore_types import DataType
 from omegaconf import OmegaConf
 
@@ -18,6 +19,8 @@ def _make_config(size: list[int]) -> object:
 
 
 def test_resolve_preprocessing_config_converts_listconfig_to_plain_list():
+    pytest.importorskip("hydra")
+    pytest.importorskip("torch")
     cfg = _make_config([224, 224])
     resolved = resolve_preprocessing_config(cfg)
 
@@ -27,6 +30,8 @@ def test_resolve_preprocessing_config_converts_listconfig_to_plain_list():
 
 
 def test_resolve_preprocessing_config_to_dict_is_json_serializable():
+    pytest.importorskip("hydra")
+    pytest.importorskip("torch")
     cfg = _make_config([224, 224])
     resolved = resolve_preprocessing_config(cfg)
 

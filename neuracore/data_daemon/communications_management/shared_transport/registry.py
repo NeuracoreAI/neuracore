@@ -28,6 +28,7 @@ from .models import (
     SharedSlotControlRuntime,
     SharedSlotRegistryConfig,
     SharedSlotRegistryState,
+    SharedSlotUnhealthyReason,
 )
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,10 @@ def create_control_socket_path(base_dir: Path = ACK_BASE_DIR) -> Path:
 
 class SharedSlotUnhealthyError(RuntimeError):
     """Raised when the shared-slot transport can no longer accept work."""
+
+
+class SharedSlotOpenFailedError(SharedSlotUnhealthyError):
+    """Raised when the daemon explicitly rejected a shared-slot open request."""
 
 
 class SharedSlotTimeout(TimeoutError):
@@ -140,7 +145,7 @@ class SharedSlotRegistry:
                     return False
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    self._mark_unhealthy_locked("open_timeout")
+                    self._mark_unhealthy_locked(SharedSlotUnhealthyReason.OPEN_TIMEOUT)
                     return False
                 self._condition.wait(timeout=min(0.1, remaining))
             return True
@@ -171,7 +176,9 @@ class SharedSlotRegistry:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     if not self._state.ready:
-                        self._mark_unhealthy_locked("open_timeout")
+                        self._mark_unhealthy_locked(
+                            SharedSlotUnhealthyReason.OPEN_TIMEOUT
+                        )
                         raise SharedSlotTimeout(
                             "Timed out waiting for daemon-owned shared slots to open"
                         )
@@ -234,7 +241,7 @@ class SharedSlotRegistry:
         with self._condition:
             if not self._is_healthy_locked():
                 return
-            self._mark_unhealthy_locked("sender_failure")
+            self._mark_unhealthy_locked(SharedSlotUnhealthyReason.SENDER_FAILURE)
 
     def get_in_flight_count(self) -> int:
         """Return the number of descriptors still awaiting slot credit."""
@@ -268,7 +275,11 @@ class SharedSlotRegistry:
                     self._state.shm_name,
                     in_flight_count,
                     len(self._state.free_slots),
-                    self._state.unhealthy_reason,
+                    (
+                        self._state.unhealthy_reason.value
+                        if self._state.unhealthy_reason is not None
+                        else None
+                    ),
                 )
             self._mark_closed_locked()
 
@@ -365,7 +376,7 @@ class SharedSlotRegistry:
                 "Failed to attach daemon-owned shared memory %s", ready.shm_name
             )
             with self._condition:
-                self._mark_unhealthy_locked("attach_failed")
+                self._mark_unhealthy_locked(SharedSlotUnhealthyReason.ATTACH_FAILED)
             return
 
         with self._condition:
@@ -380,7 +391,7 @@ class SharedSlotRegistry:
             if self._state.closed:
                 return
             self._mark_unhealthy_locked(
-                "open_failed",
+                SharedSlotUnhealthyReason.OPEN_FAILED,
                 error_message=failure.error_message,
             )
 
@@ -427,6 +438,7 @@ class SharedSlotRegistry:
         self._state.max_ack_latency_s = 0.0
         self._state.last_credit_return_at = None
         self._state.unhealthy_reason = None
+        self._state.unhealthy_reason_detail = None
         self._state.failure_message = None
         self._condition.notify_all()
 
@@ -472,8 +484,11 @@ class SharedSlotRegistry:
         )
         self._state.ack_timeout_count += 1
         self._mark_unhealthy_locked(
-            "credit_stall("
-            f"sequence_id={oldest_entry.sequence_id},slot_id={oldest_entry.slot_id})"
+            SharedSlotUnhealthyReason.CREDIT_STALL,
+            reason_detail=(
+                f"sequence_id={oldest_entry.sequence_id},"
+                f"slot_id={oldest_entry.slot_id}"
+            ),
         )
 
     def _release_sequence_locked(self, sequence_id: int) -> None:
@@ -580,9 +595,10 @@ class SharedSlotRegistry:
 
     def _mark_unhealthy_locked(
         self,
-        reason: str,
+        reason: SharedSlotUnhealthyReason,
         *,
         error_message: str | None = None,
+        reason_detail: str | None = None,
         sequence_ids: list[int] | None = None,
     ) -> None:
         """Transition to unhealthy state and release affected slots."""
@@ -590,14 +606,24 @@ class SharedSlotRegistry:
         diagnostics = self._format_unhealthy_diagnostics_locked()
         self._state.healthy = False
         self._state.unhealthy_reason = reason
+        self._state.unhealthy_reason_detail = reason_detail
         if error_message is not None:
             self._state.failure_message = error_message
         if was_healthy:
-            logger.error(
-                "Shared-slot transport marked unhealthy reason=%s %s",
-                reason,
-                diagnostics,
-            )
+            if error_message:
+                logger.error(
+                    "Shared-slot transport marked unhealthy reason=%s "
+                    "daemon_error=%r %s",
+                    reason,
+                    error_message,
+                    diagnostics,
+                )
+            else:
+                logger.error(
+                    "Shared-slot transport marked unhealthy reason=%s %s",
+                    reason,
+                    diagnostics,
+                )
         ids_to_release = (
             list(self._state.in_flight) if sequence_ids is None else sequence_ids
         )
@@ -612,12 +638,17 @@ class SharedSlotRegistry:
         )
         reason = self._state.unhealthy_reason
         if reason:
+            reason_label = reason.value
+            if self._state.unhealthy_reason_detail:
+                reason_label = f"{reason_label}({self._state.unhealthy_reason_detail})"
             message = (
-                f"{base_message}: reason={reason} "
+                f"{base_message}: reason={reason_label} "
                 f"{self._format_unhealthy_diagnostics_locked()}"
             )
         else:
             message = f"{base_message}: {self._format_unhealthy_diagnostics_locked()}"
+        if reason is SharedSlotUnhealthyReason.OPEN_FAILED:
+            return SharedSlotOpenFailedError(message)
         return SharedSlotUnhealthyError(message)
 
     def _format_unhealthy_diagnostics_locked(self) -> str:

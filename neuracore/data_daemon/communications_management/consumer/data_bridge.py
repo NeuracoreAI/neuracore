@@ -232,7 +232,7 @@ class DataBridge:
             logger.warning("Unknown command %s from producer_id=%s", cmd, producer_id)
             return
 
-        if message.sequence_number is not None:
+        if message.sequence_number is not None and cmd != CommandType.HEARTBEAT:
             if message.sequence_number > channel.last_sequence_number:
                 channel.last_sequence_number = message.sequence_number
                 self._trace_lifecycle.note_producer_sequence(
@@ -240,8 +240,10 @@ class DataBridge:
                 )
             else:
                 logger.warning(
-                    "Non-monotonic sequence_number=%s for producer_id=%s (last=%s)",
+                    "Non-monotonic sequence_number=%s command=%s "
+                    "for producer_id=%s (last=%s)",
                     message.sequence_number,
+                    cmd,
                     producer_id,
                     channel.last_sequence_number,
                 )
@@ -563,6 +565,21 @@ class DataBridge:
     ) -> None:
         """Handle an END_TRACE command from a producer."""
         self._trace_lifecycle.handle_trace_end(channel, message)
+
+        sequence_number = message.sequence_number
+        has_pending_shared_slots = (
+            sequence_number is not None
+            and self._trace_lifecycle.has_pending_shared_slot_sequences_at_or_before(
+                channel.producer_id,
+                sequence_number,
+            )
+        )
+        if (
+            channel.uses_shared_memory_transport()
+            and channel.shared_slot.shm_name is not None
+            and not has_pending_shared_slots
+        ):
+            self._shared_slot_handler.cleanup_channel_resources(channel)
 
     def cleanup_channel_on_trace_written(
         self,

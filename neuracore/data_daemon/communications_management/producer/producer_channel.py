@@ -35,7 +35,11 @@ from neuracore.data_daemon.models import (
 )
 
 from ..shared_transport.communications_manager import CommunicationsManager
-from ..shared_transport.registry import SharedSlotTimeout, SharedSlotUnhealthyError
+from ..shared_transport.registry import (
+    SharedSlotOpenFailedError,
+    SharedSlotTimeout,
+    SharedSlotUnhealthyError,
+)
 from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
 from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_heartbeat_service import ProducerHeartbeatService
@@ -44,19 +48,31 @@ logger = logging.getLogger(__name__)
 
 BytePart = bytes | bytearray | memoryview
 
-__all__ = ["ProducerChannel", "producer_transport_args_for_data_type"]
+__all__ = [
+    "ProducerChannel",
+    "data_type_uses_shared_slot_transport",
+    "producer_transport_args_for_data_type",
+]
 
 
 def data_type_uses_shared_slot_transport(data_type: DataType) -> bool:
     """Return True when the data type should use shared-slot transport."""
-    return data_type == DataType.RGB_IMAGES
+    return data_type in (
+        DataType.RGB_IMAGES,
+        DataType.DEPTH_IMAGES,
+        DataType.POINT_CLOUDS,
+    )
 
 
 def producer_transport_args_for_data_type(
     data_type: DataType,
 ) -> tuple[int, int, int]:
     """Return producer transport arguments for the given data type."""
-    if data_type in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+    if data_type in (
+        DataType.RGB_IMAGES,
+        DataType.DEPTH_IMAGES,
+        DataType.POINT_CLOUDS,
+    ):
         return (
             DEFAULT_VIDEO_CHUNK_SIZE,
             DEFAULT_VIDEO_SLOT_SIZE,
@@ -273,7 +289,6 @@ class ProducerChannel:
             if (
                 stop_failure is None
                 and not sender_failed
-                and wait_for_slot_drain
                 and self._shared_slot_transport is not None
             ):
                 self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
@@ -610,6 +625,7 @@ class ProducerChannel:
             self._send_socket_data_chunk(payload)
             return
 
+        initial_exc: Exception | None = None
         for attempt in range(2):
             try:
                 self._send_data_parts_shared_slots(
@@ -619,12 +635,13 @@ class ProducerChannel:
                 )
                 return
             except (SharedSlotTimeout, SharedSlotUnhealthyError) as exc:
-                if attempt > 0:
+                if attempt > 0 or isinstance(exc, SharedSlotOpenFailedError):
                     self._stop_shared_slot_logging_after_failure()
                     raise RuntimeError(
                         "Shared-slot transport remained unhealthy after recovery"
-                    ) from exc
+                    ) from (initial_exc or exc)
 
+                initial_exc = exc
                 if not self._ping_daemon_for_shared_slot_recovery(timeout_s=2.0):
                     self._stop_shared_slot_logging_after_failure()
                     raise RuntimeError(
@@ -634,7 +651,8 @@ class ProducerChannel:
 
                 logger.warning(
                     "Shared-slot transport unhealthy; resetting transport and "
-                    "retrying payload once"
+                    "retrying payload once. Initial error: %s",
+                    exc,
                 )
                 self._reset_shared_slot_transport_for_recovery()
 
@@ -650,7 +668,12 @@ class ProducerChannel:
         stop_cutoff_sequence_number: int,
         wait_for_slot_drain: bool = True,
     ) -> None:
-        """Finish one trace after queued recording data up to stop cutoff is sent."""
+        """Finish one trace after queued recording data up to stop cutoff is sent.
+
+        Shared-slot transports must always drain before a recording session is
+        reset. The wait flag controls higher-level/backend waiting, not whether
+        daemon-owned shm slots may be abandoned with credits still in flight.
+        """
         if stop_cutoff_sequence_number < 0:
             raise ValueError("stop_cutoff_sequence_number must be non-negative")
 
@@ -670,7 +693,7 @@ class ProducerChannel:
                 "Failed to send queued recording data up to stop cutoff before cleanup"
             )
 
-        if wait_for_slot_drain and self._shared_slot_transport is not None:
+        if self._shared_slot_transport is not None:
             payload_cutoff_sequence_number = (
                 self._shared_slot_transport.get_last_payload_sequence_number()
             )
