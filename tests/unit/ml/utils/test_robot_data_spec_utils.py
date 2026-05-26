@@ -17,20 +17,95 @@ def _indexed_names(*names: str) -> dict[int, str]:
     return dict(enumerate(names))
 
 
+def _robots_list_requests(mock_auth_requests, mocked_org_id: str):
+    list_url = f"{API_URL}/org/{mocked_org_id}/robots/list"
+    return [r for r in mock_auth_requests.request_history if r.url.startswith(list_url)]
+
+
+def _robots_list_page(
+    robots: list[dict],
+    *,
+    total: int | None = None,
+) -> dict:
+    return {
+        "data": robots,
+        "metadata": None,
+        "total": total if total is not None else len(robots),
+        "limit": 30,
+        "start_after": None,
+    }
+
+
 @pytest.fixture
-def mock_auth_requests_robots(mock_auth_requests):
+def mock_current_org(monkeypatch, mocked_org_id):
+    monkeypatch.setattr(
+        "neuracore.core.robot.get_current_org",
+        lambda: mocked_org_id,
+    )
+
+
+@pytest.fixture
+def mock_auth_requests_robots(
+    mock_auth_requests,
+    temp_config_dir,
+    reset_neuracore,
+    mocked_org_id,
+    mock_current_org,
+):
     nc.login("test_api_key")
-    mocked_org_id = "test-org-id"
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=false",
-        json=[{"id": TEST_ROBOT_ID, "name": "robot_name"}],
+    robot = {"id": TEST_ROBOT_ID, "name": "robot_name"}
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots/list",
+        json=_robots_list_page([robot]),
         status_code=200,
     )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots?is_shared=true",
-        json=[{"id": TEST_ROBOT_ID, "name": "robot_name"}],
-        status_code=200,
+
+
+@pytest.fixture
+def mock_auth_requests_robots_paginated(
+    mock_auth_requests,
+    temp_config_dir,
+    reset_neuracore,
+    mocked_org_id,
+    mock_current_org,
+):
+    nc.login("test_api_key")
+    other_robot = {
+        "id": "11111111-1111-4111-8111-111111111111",
+        "name": "other_robot",
+    }
+    target_robot = {"id": TEST_ROBOT_ID, "name": "robot_name"}
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots/list",
+        [
+            {
+                "json": _robots_list_page([other_robot], total=2),
+                "status_code": 200,
+            },
+            {
+                "json": _robots_list_page([target_robot], total=2),
+                "status_code": 200,
+            },
+            {
+                "json": _robots_list_page([]),
+                "status_code": 200,
+            },
+        ],
     )
+
+
+def test_convert_robot_data_spec_names_to_ids_resolves_name_across_pages(
+    mock_auth_requests,
+    mock_auth_requests_robots_paginated,
+    mocked_org_id,
+) -> None:
+    spec = {"robot_name": {DataType.RGB_IMAGES: _indexed_names("cam")}}
+    result = convert_cross_embodiment_description_names_to_ids(spec)
+
+    assert result == {TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("cam")}}
+
+    list_requests = _robots_list_requests(mock_auth_requests, mocked_org_id)
+    assert len(list_requests) == 3
 
 
 def test_convert_robot_data_spec_names_to_ids_raises_error_on_duplicates(
