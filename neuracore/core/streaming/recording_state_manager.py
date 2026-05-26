@@ -293,7 +293,7 @@ class RecordingStateManager(BaseSSEConsumer):
                 robot_id=robot_id, robot_instance=instance
             )
             callback = self._drain_callbacks.get(instance_key)
-            if callback:
+            if callback and was_recording:
                 threading.Thread(
                     target=callback,
                     args=(recording_id,),
