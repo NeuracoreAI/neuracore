@@ -49,6 +49,107 @@ def _login_and_connect_robot(mock_auth_requests, mocked_org_id: str) -> None:
     nc.connect_robot(TEST_ROBOT_ID)
 
 
+def _mock_deploy_endpoint(mock_auth_requests, mocked_org_id: str) -> None:
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
+        json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
+        status_code=200,
+    )
+
+
+def _mock_training_job_metadata(mock_auth_requests, mocked_org_id: str) -> None:
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123",
+        json={
+            "input_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_POSITIONS": {"0": "joint1"}}
+            },
+            "output_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}
+            },
+        },
+        status_code=200,
+    )
+
+
+def _assert_deployed_embodiments_from_job_metadata(request_body: dict) -> None:
+    assert request_body["input_embodiment_description"]["JOINT_POSITIONS"] == {
+        "0": "joint1"
+    }
+    assert request_body["output_embodiment_description"]["JOINT_TARGET_POSITIONS"] == {
+        "0": "joint1"
+    }
+
+
+def _local_server_url(port: int) -> str:
+    return f"http://127.0.0.1:{port}"
+
+
+def _mock_local_server_http(
+    mock_auth_requests, port: int, *, predict: bool = False
+) -> str:
+    localhost = _local_server_url(port)
+    mock_auth_requests.get(f"{localhost}/ping", status_code=200)
+    if predict:
+        mock_auth_requests.post(
+            f"{localhost}/predict",
+            json=FAKE_PREDICTED_DATA_JSON,
+            status_code=200,
+        )
+    return localhost
+
+
+def _setup_policy_local_server_train_run_mocks(
+    mock_auth_requests, mocked_org_id: str, port: int, *, predict: bool = False
+) -> str:
+    localhost = _mock_local_server_http(mock_auth_requests, port, predict=predict)
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=[{
+            "id": "job_123",
+            "name": "test_run",
+            "status": "completed",
+        }],
+        status_code=200,
+    )
+    _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/model_url",
+        json={"url": f"{localhost}/model.nc.zip"},
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{localhost}/model.nc.zip",
+        content=b"dummy model content",
+        status_code=200,
+    )
+    return localhost
+
+
+def _patch_subprocess_for_local_server(
+    monkeypatch, *, capture: bool = False
+) -> list[list[str]]:
+    captured_commands: list[list[str]] = []
+
+    def popen(cmd, **kwargs):
+        if capture:
+            captured_commands.append(cmd)
+        return mock_subprocess_popen(cmd, **kwargs)
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+    return captured_commands
+
+
+def _assert_local_policy_passes_robot_id(
+    local_endpoint, captured_commands: list[list[str]], expected_robot_id: str
+) -> None:
+    assert local_endpoint.robot_id == expected_robot_id
+    cmd = captured_commands[0]
+    robot_id_flag_index = cmd.index("--robot-id")
+    assert cmd[robot_id_flag_index + 1] == expected_robot_id
+
+
 def _log_default_inputs() -> None:
     nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
     nc.log_rgb("top_camera", np.zeros((100, 100, 3), dtype=np.uint8))
@@ -438,21 +539,8 @@ def test_connect_local_endpoint(
     """Test connecting to a local endpoint."""
 
     port = np.random.randint(8000, 9000)
-    localhost = f"http://127.0.0.1:{port}"
-
-    mock_auth_requests.get(
-        f"{localhost}/ping",
-        status_code=200,
-    )
-
-    mock_auth_requests.post(
-        f"{localhost}/predict",
-        json=FAKE_PREDICTED_DATA_JSON,
-        status_code=200,
-    )
-
-    monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+    _mock_local_server_http(mock_auth_requests, port, predict=True)
+    _patch_subprocess_for_local_server(monkeypatch)
 
     _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
@@ -480,17 +568,8 @@ def test_local_endpoint_filters_sync_point_from_input_description(
 ):
     """Local endpoints should only receive configured input data types."""
     port = np.random.randint(8000, 9000)
-    localhost = f"http://127.0.0.1:{port}"
-
-    mock_auth_requests.get(f"{localhost}/ping", status_code=200)
-    mock_auth_requests.post(
-        f"{localhost}/predict",
-        json=FAKE_PREDICTED_DATA_JSON,
-        status_code=200,
-    )
-
-    monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+    _mock_local_server_http(mock_auth_requests, port, predict=True)
+    _patch_subprocess_for_local_server(monkeypatch)
 
     _login_and_connect_robot(mock_auth_requests, mocked_org_id)
 
@@ -694,42 +773,63 @@ def test_deploy_model_failure(
         )
 
 
+def test_deploy_model_loads_embodiments_from_job_metadata_for_robot_id(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Deploy model should load embodiments from job metadata when robot_id is set."""
+    nc.login(TEST_API_KEY)
+    _mock_deploy_endpoint(mock_auth_requests, mocked_org_id)
+    _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
+
+    result = nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+        robot_id=TEST_ROBOT_PAYLOAD["robot_id"],
+    )
+
+    assert result["id"] == "endpoint_123"
+    _assert_deployed_embodiments_from_job_metadata(
+        mock_auth_requests.request_history[-1].json()
+    )
+
+
 def test_deploy_model_loads_embodiments_from_job_metadata_for_robot_name(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, monkeypatch
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):
     """Deploy model should resolve robot_name and load job metadata embodiments."""
     _login_and_connect_robot(mock_auth_requests, mocked_org_id)
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/models/deploy",
-        json={"id": "endpoint_123", "name": "test_endpoint", "status": "deploying"},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123",
-        json={
-            "input_cross_embodiment_description": {
-                "mock_robot_id": {"JOINT_POSITIONS": {"0": "joint1"}}
-            },
-            "output_cross_embodiment_description": {
-                "mock_robot_id": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}
-            },
-        },
-        status_code=200,
-    )
+    _mock_deploy_endpoint(mock_auth_requests, mocked_org_id)
+    _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
 
-    nc.deploy_model(
+    result = nc.deploy_model(
         job_id="job_123",
         name="test_endpoint",
         robot_name=TEST_ROBOT_ID,
     )
 
-    request_body = mock_auth_requests.request_history[-1].json()
-    assert request_body["input_embodiment_description"]["JOINT_POSITIONS"] == {
-        "0": "joint1"
-    }
-    assert request_body["output_embodiment_description"]["JOINT_TARGET_POSITIONS"] == {
-        "0": "joint1"
-    }
+    assert result["id"] == "endpoint_123"
+    _assert_deployed_embodiments_from_job_metadata(
+        mock_auth_requests.request_history[-1].json()
+    )
+
+
+def test_deploy_model_loads_embodiments_from_job_metadata_for_active_robot(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Deploy model should use the active robot when no robot selector is provided."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    _mock_deploy_endpoint(mock_auth_requests, mocked_org_id)
+    _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
+
+    result = nc.deploy_model(
+        job_id="job_123",
+        name="test_endpoint",
+    )
+
+    assert result["id"] == "endpoint_123"
+    _assert_deployed_embodiments_from_job_metadata(
+        mock_auth_requests.request_history[-1].json()
+    )
 
 
 def test_deploy_model_raises_when_missing_embodiments_and_robot_selector(
@@ -737,13 +837,91 @@ def test_deploy_model_raises_when_missing_embodiments_and_robot_selector(
 ):
     """Deploy model requires embodiments or a robot_id/robot_name."""
     nc.login(TEST_API_KEY)
-    with pytest.raises(
-        ValueError, match="Must provide both input_embodiment_description"
-    ):
+    with pytest.raises(ValueError, match="Missing input_embodiment_description"):
         nc.deploy_model(
             job_id="job_123",
             name="test_endpoint",
         )
+
+
+def test_policy_local_server_loads_embodiments_from_job_metadata_for_robot_id(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, monkeypatch
+):
+    """Local server should pass robot_id to the server when embodiments are omitted."""
+    nc.login(TEST_API_KEY)
+    port = np.random.randint(8000, 9000)
+    _setup_policy_local_server_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    captured_commands = _patch_subprocess_for_local_server(monkeypatch, capture=True)
+
+    local_endpoint = nc.policy_local_server(
+        train_run_name="test_run",
+        port=port,
+        robot_id=TEST_ROBOT_PAYLOAD["robot_id"],
+    )
+    try:
+        _assert_local_policy_passes_robot_id(
+            local_endpoint,
+            captured_commands,
+            TEST_ROBOT_PAYLOAD["robot_id"],
+        )
+    finally:
+        local_endpoint.disconnect()
+
+
+def test_policy_local_server_loads_embodiments_from_job_metadata_for_robot_name(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, monkeypatch
+):
+    """Local server should resolve robot_name and pass robot_id to the server."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    port = np.random.randint(8000, 9000)
+    _setup_policy_local_server_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    captured_commands = _patch_subprocess_for_local_server(monkeypatch, capture=True)
+
+    local_endpoint = nc.policy_local_server(
+        train_run_name="test_run",
+        port=port,
+        robot_name=TEST_ROBOT_ID,
+    )
+    try:
+        _assert_local_policy_passes_robot_id(
+            local_endpoint,
+            captured_commands,
+            TEST_ROBOT_PAYLOAD["robot_id"],
+        )
+    finally:
+        local_endpoint.disconnect()
+
+
+def test_policy_local_server_loads_embodiments_from_job_metadata_for_active_robot(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id, monkeypatch
+):
+    """Local server should use the active robot when no robot selector is provided."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    port = np.random.randint(8000, 9000)
+    _setup_policy_local_server_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    captured_commands = _patch_subprocess_for_local_server(monkeypatch, capture=True)
+
+    local_endpoint = nc.policy_local_server(
+        train_run_name="test_run",
+        port=port,
+    )
+    try:
+        _assert_local_policy_passes_robot_id(
+            local_endpoint,
+            captured_commands,
+            TEST_ROBOT_PAYLOAD["robot_id"],
+        )
+    finally:
+        local_endpoint.disconnect()
+
+
+def test_policy_local_server_raises_when_missing_embodiments_and_robot_selector(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Local server requires embodiments or a robot_id/robot_name/active robot."""
+    nc.login(TEST_API_KEY)
+    with pytest.raises(ValueError, match="Missing input_embodiment_description"):
+        nc.policy_local_server(train_run_name="test_run")
 
 
 def test_connect_local_endpoint_with_train_run(
@@ -752,45 +930,10 @@ def test_connect_local_endpoint_with_train_run(
     """Test connecting to a local endpoint using a training run name."""
     _login_and_connect_robot(mock_auth_requests, mocked_org_id)
     port = np.random.randint(8000, 9000)
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[{
-            "id": "job_123",
-            "name": "test_run",
-            "status": "completed",
-        }],
-        status_code=200,
+    _setup_policy_local_server_train_run_mocks(
+        mock_auth_requests, mocked_org_id, port, predict=True
     )
-
-    localhost = f"http://127.0.0.1:{port}"
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123/model_url",
-        json={
-            "url": f"{localhost}/model.nc.zip",
-        },
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{localhost}/model.nc.zip",
-        content=b"dummy model content",
-        status_code=200,
-    )
-
-    mock_auth_requests.get(
-        f"{localhost}/ping",
-        status_code=200,
-    )
-
-    mock_auth_requests.post(
-        f"{localhost}/predict",
-        json=FAKE_PREDICTED_DATA_JSON,
-        status_code=200,
-    )
-
-    monkeypatch.setattr("subprocess.Popen", mock_subprocess_popen)
-    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: None)
+    _patch_subprocess_for_local_server(monkeypatch)
 
     # Connect using train run name
     local_endpoint = nc.policy_local_server(

@@ -150,7 +150,7 @@ def test_resolve_embodiments_with_override_returns_explicit_descriptions() -> No
 
 
 def test_resolve_embodiments_with_override_loads_from_job_metadata(
-    requests_mock, monkeypatch
+    requests_mock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class _Auth:
         def get_headers(self):
@@ -193,7 +193,8 @@ def test_resolve_embodiments_with_override_loads_from_model_archive(
 ) -> None:
     pytest.importorskip("torch")
     monkeypatch.setattr(
-        "neuracore.ml.utils.nc_archive.load_cross_embodiment_descriptions_from_nc_archive",
+        "neuracore.ml.utils.nc_archive."
+        "load_cross_embodiment_descriptions_from_nc_archive",
         lambda model_file: (
             {"robot-1": {"JOINT_POSITIONS": {"0": "joint1"}}},
             {"robot-1": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}},
@@ -211,10 +212,114 @@ def test_resolve_embodiments_with_override_loads_from_model_archive(
     assert resolved_output == {DataType.JOINT_TARGET_POSITIONS: {"0": "joint1"}}
 
 
-def test_resolve_embodiments_with_override_raises_when_incomplete() -> None:
+def test_resolve_embodiments_with_override_raises_when_training_job_not_found(
+    requests_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Job metadata fetch returns 404, so cross-embodiment specs are never loaded."""
+
+    class _Auth:
+        def get_headers(self):
+            return {"Authorization": "Bearer test-token"}
+
+    monkeypatch.setattr(
+        "neuracore.core.utils.robot_data_spec_utils.get_auth",
+        lambda: _Auth(),
+    )
+    monkeypatch.setattr(
+        "neuracore.core.utils.robot_data_spec_utils.get_current_org",
+        lambda: "test-org-id",
+    )
+    requests_mock.get(
+        f"{API_URL}/org/test-org-id/training/jobs/job-123",
+        status_code=404,
+    )
+
     with pytest.raises(
-        ValueError, match="Must provide both input_embodiment_description"
+        ValueError,
+        match=(
+            "Failed to load input_cross_embodiment_description and "
+            "output_cross_embodiment_description"
+        ),
     ):
+        resolve_embodiment_descriptions_with_override(
+            robot_id="robot-1",
+            job_id="job-123",
+        )
+
+
+def test_resolve_embodiments_override_raises_when_job_lacks_cross_embodiment(
+    requests_mock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _Auth:
+        def get_headers(self):
+            return {"Authorization": "Bearer test-token"}
+
+    monkeypatch.setattr(
+        "neuracore.core.utils.robot_data_spec_utils.get_auth",
+        lambda: _Auth(),
+    )
+    monkeypatch.setattr(
+        "neuracore.core.utils.robot_data_spec_utils.get_current_org",
+        lambda: "test-org-id",
+    )
+    requests_mock.get(
+        f"{API_URL}/org/test-org-id/training/jobs/job-123",
+        json={"id": "job-123", "name": "run"},
+        status_code=200,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Failed to load input_cross_embodiment_description and "
+            "output_cross_embodiment_description"
+        ),
+    ):
+        resolve_embodiment_descriptions_with_override(
+            robot_id="robot-1",
+            job_id="job-123",
+        )
+
+
+def test_resolve_embodiments_override_raises_when_archive_lacks_cross_embodiment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("torch")
+    monkeypatch.setattr(
+        "neuracore.ml.utils.nc_archive."
+        "load_cross_embodiment_descriptions_from_nc_archive",
+        lambda model_file: (None, None),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=(
+            "Failed to load input_cross_embodiment_description and "
+            "output_cross_embodiment_description"
+        ),
+    ):
+        resolve_embodiment_descriptions_with_override(
+            robot_id="robot-1",
+            model_file=Path("dummy.nc.zip"),
+        )
+
+
+def test_resolve_embodiments_with_override_raises_when_nothing_provided() -> None:
+    with pytest.raises(ValueError, match="Failed to resolve embodiment descriptions"):
+        resolve_embodiment_descriptions_with_override()
+
+
+def test_resolve_embodiments_with_override_raises_when_only_output_provided() -> None:
+    with pytest.raises(ValueError, match="Failed to resolve embodiment descriptions"):
+        resolve_embodiment_descriptions_with_override(
+            output_embodiment_description={
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names("joint1")
+            },
+        )
+
+
+def test_resolve_embodiments_with_override_raises_when_incomplete() -> None:
+    with pytest.raises(ValueError, match="Failed to resolve embodiment descriptions"):
         resolve_embodiment_descriptions_with_override(
             input_embodiment_description={
                 DataType.JOINT_POSITIONS: _indexed_names("j1")

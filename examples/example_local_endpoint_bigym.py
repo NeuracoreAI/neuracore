@@ -137,13 +137,32 @@ def main(
         mjcf_path="bigym/bigym/envs/xmls/h1/h1.xml",  # Update path as needed
         overwrite=True,
     )
-    # If you know the path to the local model.nc.zip file
-    # you can use it directly without connecting to a robot
+    # If you have a train run name, you can use it to connect to a local policy. E.g.:
     policy = nc.policy(
-        model_file="PATH/TO/MODEL.nc.zip",
-        input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
-        output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+        train_run_name=TRAINING_JOB_NAME,
     )
+
+    # If the robot you are using is not present in the training,
+    # you can specify the embodiment descriptions explicitly as:
+    # policy = nc.policy(
+    #     train_run_name=TRAINING_JOB_NAME,
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    # )
+
+    # If you know the path to the local model.nc.zip file, you can use it directly as:
+    # policy = nc.policy(
+    #     model_file="PATH/TO/MODEL.nc.zip",
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    # )
+
+    # Alternatively, you can connect to a local endpoint that has been started
+    # policy = nc.policy_local_server(
+    #     train_run_name=TRAINING_JOB_NAME,
+    #     input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
+    #     output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
+    # )
 
     # Optional. Set the checkpoint to the last epoch.
     # Note by default, model is loaded from the last epoch.
