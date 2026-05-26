@@ -1,0 +1,47 @@
+name: Integration ML Algorithm Validation - Staging
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout test harness
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref_name }}
+        fetch-depth: 0
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.11"
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir ".[dev]"
+
+    - name: Resolve test harness
+      run: |
+        echo "Test harness environment: staging"
+        echo "Test harness ref: ${{ github.ref_name }}"
+        echo "Test harness commit: $(git rev-parse HEAD)"
+        echo "Test harness path: tests/integration/ml/test_algorithm_validation.py"
+        python - << 'EOF'
+        import neuracore
+
+        print(f"Installed neuracore version: {neuracore.__version__}")
+        EOF
+
+    - name: Run Algorithm Validation Integration Test
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+      run: pytest -o log_cli=true --log-cli-level=INFO -v tests/integration/ml/test_algorithm_validation.py

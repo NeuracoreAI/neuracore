@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Validation
+name: Integration ML Algorithm Validation - Production
 
 on:
   schedule:
@@ -7,12 +7,7 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-22.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.11']
-        environment: [staging, production]
+    runs-on: ubuntu-latest
 
     steps:
     - name: Checkout repository metadata
@@ -34,11 +29,10 @@ jobs:
     - name: Checkout test harness
       uses: actions/checkout@v4
       with:
-        ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}
+        ref: ${{ steps.release-tag.outputs.latest_release_tag }}
         fetch-depth: 0
 
     - name: Verify production test harness ref
-      if: ${{ matrix.environment == 'production' }}
       run: |
         checked_out_ref="$(git describe --tags --exact-match HEAD)"
         expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
@@ -47,21 +41,22 @@ jobs:
           exit 1
         fi
 
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python 3.11
       uses: actions/setup-python@v4
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.11"
         cache: 'pip'
 
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir ".[dev]"
+        VERSION="${{ steps.release-tag.outputs.latest_release_tag }}"
+        pip install --no-cache-dir "neuracore[dev]==${VERSION#v}"
 
     - name: Resolve test harness
       run: |
-        echo "Test harness environment: ${{ matrix.environment }}"
-        echo "Test harness ref: ${{ matrix.environment == 'production' && steps.release-tag.outputs.latest_release_tag || github.ref_name }}"
+        echo "Test harness environment: production"
+        echo "Test harness ref: ${{ steps.release-tag.outputs.latest_release_tag }}"
         echo "Test harness commit: $(git rev-parse HEAD)"
         echo "Test harness path: tests/integration/ml/test_algorithm_validation.py"
         python - << 'EOF'
@@ -72,7 +67,7 @@ jobs:
 
     - name: Run Algorithm Validation Integration Test
       env:
-        NEURACORE_API_URL: ${{ matrix.environment == 'staging' && 'https://staging.api.neuracore.com/api' || 'https://api.neuracore.com/api' }}
-        NEURACORE_API_KEY: ${{ matrix.environment == 'staging' && secrets.STAGING_SERVICE_API_KEY || secrets.PROD_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ matrix.environment == 'staging' && vars.STAGING_SERVICE_ORG_ID || vars.PROD_SERVICE_ORG_ID }}
+        NEURACORE_API_URL: https://api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
       run: pytest -o log_cli=true --log-cli-level=INFO -v tests/integration/ml/test_algorithm_validation.py
