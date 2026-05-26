@@ -25,6 +25,7 @@ from neuracore.core.cli.training_display import (
     RunDisplayRow,
     print_run_table,
 )
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.exceptions import AuthenticationError, ConfigError, TrainingRunError
 from neuracore.ml.cli import training_runs_cloud as training_runs
@@ -585,6 +586,7 @@ def delete_training(
 
     try:
         if use_cloud:
+            org_id = get_current_org()
             job_id, job = _resolve_cloud_training_job(training_name)
             if not yes:
                 confirm = typer.confirm(
@@ -593,7 +595,7 @@ def delete_training(
                 if not confirm:
                     typer.echo("Aborted.")
                     raise typer.Exit(code=0)
-            delete_training_job(job_id)
+            delete_training_job(job_id, org_id=org_id)
             typer.echo(f"Deleted cloud training run '{job.name}' ({job_id}).")
         else:
             run_path = _resolve_local_run_path(training_name, root)

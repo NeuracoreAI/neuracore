@@ -336,11 +336,12 @@ def get_training_job_logs(
         raise ValueError(f"Error getting training job logs: {e}")
 
 
-def delete_training_job(job_id: str) -> None:
+def delete_training_job(job_id: str, org_id: str | None = None) -> None:
     """Delete a training job and free its resources.
 
     Args:
         job_id: The ID of the training job to delete
+        org_id: Optional organization ID. Defaults to the current organization.
 
     Raises:
         ValueError: If there is an error deleting the job
@@ -349,11 +350,11 @@ def delete_training_job(job_id: str) -> None:
         ConfigError: If there is an error trying to get the current org
     """
     auth = get_auth()
-    org_id = get_current_org()
+    resolved_org_id = org_id or get_current_org()
     try:
         session = thread_local_session()
         response = session.delete(
-            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+            f"{API_URL}/org/{resolved_org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
         )
         response.raise_for_status()
