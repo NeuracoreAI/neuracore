@@ -393,3 +393,5 @@ assimp
 octomap
 delenv
 isinstance
+ipykernel
+Gvbggk

@@ -154,3 +154,22 @@ python example_flag_data.py
 
 ### Work with your own robot
 If you want to get your own robot working with neuracore, please refer to and also [tutorial](../docs/tutorial.md) and use the example files as a reference.
+
+
+### Run the Notebook locally
+
+```
+
+conda create --name neuracore_env python=3.11
+conda activate neuracore_env
+
+pip install "neuracore[ml,mjcf]==12.1.0"
+
+git clone -b fix/colab https://github.com/NeuracoreAI/bigym.git
+cd bigym
+pip install -e .
+
+pip install jupyter
+
+jupyter notebook
+```
