@@ -13,7 +13,7 @@ concurrency:
 
 jobs:
   detect-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       ml: ${{ steps.filter.outputs.ml }}
       non-ml: ${{ steps.filter.outputs.non-ml }}
@@ -43,7 +43,7 @@ jobs:
               - '.pre-commit-config.yaml'
 
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python-version: ["3.10", "3.11"]
@@ -60,13 +60,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-24.04, macos-26]
         python-version: ["3.10", "3.11"]
         package-manager: [uv, pip]
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
-      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11' && matrix.package-manager == 'uv' }}
+      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.11' && matrix.package-manager == 'uv' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
@@ -91,7 +91,7 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          if [ "${{ matrix.os }}" = "macos-26" ]; then
             EXTRAS=".[dev]"
           else
             EXTRAS=".[dev,import]"
@@ -114,7 +114,7 @@ jobs:
           fi
           # Importer tests require pinocchio, which only publishes manylinux wheels
           IGNORE="--ignore=tests/unit/ml"
-          if [ "${{ matrix.os }}" = "macos-latest" ]; then
+          if [ "${{ matrix.os }}" = "macos-26" ]; then
             IGNORE="${IGNORE} --ignore=tests/unit/importer"
           fi
           PYTEST_ARGS="-sv -o log_cli=true --log-cli-level=INFO"
@@ -149,10 +149,10 @@ jobs:
             pytest-coverage.txt
             pytest.xml
             diff-cover.json
-            
+
   test-non-ml-complete:
     needs: [test-non-ml]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: always()
     steps:
       - name: Check all matrix jobs passed
@@ -163,7 +163,7 @@ jobs:
 
   test-ml:
     needs: [detect-changes, pre-commit]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}

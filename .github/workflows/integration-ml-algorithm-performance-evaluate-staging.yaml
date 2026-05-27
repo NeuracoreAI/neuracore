@@ -7,7 +7,7 @@ on:
 
 jobs:
   discover-algorithms:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
@@ -41,7 +41,7 @@ jobs:
 
   evaluate:
     needs: [discover-algorithms]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -114,6 +114,6 @@ jobs:
         DISPLAY: :0
       run: |
         sudo apt-get update
-        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+        sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
         pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate "$TEST_HARNESS_PATH"

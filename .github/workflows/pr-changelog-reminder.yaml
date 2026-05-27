@@ -12,7 +12,7 @@ on:
 
 jobs:
   suggest-changelog-update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # Only run if PR has version:major or version:minor label
     if: |
       contains(github.event.pull_request.labels.*.name, 'version:major') ||
