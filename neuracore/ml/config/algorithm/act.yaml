@@ -5,7 +5,7 @@ algorithm:
   # Transformer architecture
   hidden_dim: 512          # Hidden dimension for transformer layers
   num_encoder_layers: 4    # Number of transformer encoder layers
-  num_decoder_layers: 7    # Number of transformer decoder layers
+  num_decoder_layers: 1    # Number of transformer decoder layers
   nheads: 8                # Number of attention heads
   dim_feedforward: 3200    # Feedforward network dimension
   dropout: 0.1             # Dropout probability
