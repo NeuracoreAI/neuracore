@@ -52,6 +52,8 @@
 
 # 🛠️ Installation
 
+Neuracore has been tested on Ubuntu 24.04 and MacOS 26 (Arm64, Apple Silicon, M1 series Chips). If you're on Windows, please use [Windows Subsystem for Linux (WSL)](https://learn.microsoft.com/en-us/windows/wsl/install)
+
 To install the basic package for data logging and visualization:
 
 ```bash

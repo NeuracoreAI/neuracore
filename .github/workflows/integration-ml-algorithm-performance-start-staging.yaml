@@ -7,7 +7,7 @@ on:
 
 jobs:
   discover-algorithms:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.list.outputs.matrix }}
     steps:
@@ -46,7 +46,7 @@ jobs:
 
   start-training:
     needs: [discover-algorithms]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

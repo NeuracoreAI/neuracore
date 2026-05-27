@@ -12,7 +12,7 @@ on:
 
 jobs:
   analyze-changes:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       should_release: ${{ steps.analyze.outputs.should_release }}
       bump_type: ${{ steps.analyze.outputs.bump_type }}
@@ -136,7 +136,7 @@ jobs:
 
   generate-changelog:
     needs: analyze-changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       new_version: ${{ steps.calc_version.outputs.new_version }}
       changelog_content: ${{ steps.generate.outputs.changelog_content }}
@@ -300,7 +300,7 @@ jobs:
   release:
     needs: [analyze-changes, generate-changelog]
     if: needs.analyze-changes.outputs.should_release == 'true' && inputs.dry_run == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     outputs:
@@ -438,7 +438,7 @@ jobs:
   dry-run-summary:
     needs: [analyze-changes, generate-changelog]
     if: inputs.dry_run == true
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Generate dry run summary
@@ -484,7 +484,7 @@ jobs:
   no-release-needed:
     needs: [analyze-changes, generate-changelog]
     if: always() && needs.analyze-changes.outputs.should_release != 'true' && inputs.dry_run == false
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Fail - no release needed

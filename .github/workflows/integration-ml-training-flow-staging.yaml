@@ -7,7 +7,7 @@ on:
 
 jobs:
   pre-commit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v4
@@ -17,7 +17,7 @@ jobs:
 
   test:
     needs: pre-commit
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # TODO: NDD has socket issue when running in parallel
     #   in CommunicationsManager when calling create_producer_socket()
 
@@ -73,7 +73,7 @@ jobs:
           DISPLAY: :0
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1-mesa-glx libosmesa6-dev
+          sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
           Xvfb $DISPLAY -screen 0 1280x1024x24 &
           pytest \
             -o log_cli=true \
