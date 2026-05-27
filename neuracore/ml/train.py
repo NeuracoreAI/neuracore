@@ -5,7 +5,6 @@ import gc
 import json
 import logging
 import os
-import re
 import sys
 import time
 import traceback
@@ -16,7 +15,6 @@ from typing import Any
 import hydra
 import torch
 import torch.multiprocessing as mp
-from names_generator import generate_name
 from neuracore_types import (
     BatchedNCData,
     CrossEmbodimentDescription,
@@ -27,7 +25,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
-from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
+from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.robot_data_spec_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
@@ -78,101 +76,6 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
     if configured_dir is None:
         return DEFAULT_RECORDING_CACHE_DIR
     return Path(str(configured_dir)).expanduser()
-
-
-def _resolve_output_dir(
-    training_name: str | None = None,
-    training_name_auto_increment: bool | str = False,
-) -> str:
-    """Hydra resolver to generate the output directory path.
-
-    This resolver generates a unique output directory based on training_name.
-    It's called during Hydra initialization, so the directory is available before
-    the main function runs.
-
-    When training_name_auto_increment is False (default), if a directory for the given
-    run name already exists, resolution fails with FileExistsError. Set
-    training_name_auto_increment=true to automatically use name_1, name_2, etc.
-
-    Args:
-        training_name: Optional training name. If None or "null", a random name
-            will be generated.
-        training_name_auto_increment: If True (or "true"), append _1, _2, ...
-            when the name already exists. If False (default), fail when the name
-            exists.
-
-    Returns:
-        Full path to the output directory.
-
-    Raises:
-        FileExistsError: When training_name_auto_increment is False and a
-            directory for training_name (or training_name_N) already exists.
-    """
-    # Handle None, empty string, or string "null"
-    if (
-        not training_name
-        or training_name == "null"
-        or (isinstance(training_name, str) and training_name.strip() == "")
-    ):
-        # Generate name with hyphens instead of underscores
-        training_name = generate_name(style="underscore").replace("_", "-")
-    else:
-        training_name = _sanitize_run_name(str(training_name))
-
-    auto_increment = (
-        str(training_name_auto_increment).lower() == "true"
-        if not isinstance(training_name_auto_increment, bool)
-        else training_name_auto_increment
-    )
-
-    base_dir = DEFAULT_CACHE_DIR / "runs"
-
-    final_training_name = training_name
-    if base_dir.exists():
-        taken = {
-            p.name
-            for p in base_dir.iterdir()
-            if p.is_dir()
-            and (p.name == training_name or p.name.startswith(f"{training_name}_"))
-        }
-        if training_name in taken:
-            if not auto_increment:
-                existing = base_dir / training_name
-                raise FileExistsError(
-                    f"A training named {training_name!r} already exists at "
-                    f"{existing}. Either use a different training_name, or set "
-                    "training_name_auto_increment=true to use an incremented "
-                    "name (e.g. training_name_1)."
-                )
-            suffix = 1
-            while f"{training_name}_{suffix}" in taken:
-                suffix += 1
-            final_training_name = f"{training_name}_{suffix}"
-            logger.warning(
-                f"A training named {training_name} already exists. "
-                f"Using {final_training_name} for this run."
-            )
-
-    # Build full path
-    return str(base_dir / final_training_name)
-
-
-def _sanitize_run_name(name: str) -> str:
-    """Sanitize run name for use in file paths.
-
-    Args:
-        name: The run name to sanitize.
-
-    Returns:
-        A sanitized version of the name safe for file paths.
-    """
-    # Replace spaces, slashes, and other problematic characters with underscores
-    sanitized = re.sub(r"[^\w\-]", "_", name)
-    # Remove multiple consecutive underscores
-    sanitized = re.sub(r"_+", "_", sanitized)
-    # Remove leading/trailing underscores
-    sanitized = sanitized.strip("_")
-    return sanitized
 
 
 def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
@@ -675,14 +578,6 @@ def run_training(
             cleanup_distributed()
 
         logger.info(f"Process {rank} completed")
-
-
-# Register the resolver with OmegaConf
-OmegaConf.register_new_resolver(
-    "resolve_output_dir",
-    _resolve_output_dir,
-    use_cache=True,  # Avoid re-resolving the output directory after it's been created
-)
 
 
 def _try_report_error_to_cloud(cfg: DictConfig, error_msg: str) -> None:
