@@ -121,3 +121,6 @@ examples/logs/
 examples/test_streaming/
 
 .data_daemon_test_state/
+
+*.zip
+*.mp4

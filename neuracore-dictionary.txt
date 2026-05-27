@@ -392,3 +392,4 @@ tinyxml
 assimp
 octomap
 delenv
+isinstance
