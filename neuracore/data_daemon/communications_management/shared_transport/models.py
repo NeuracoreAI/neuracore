@@ -6,6 +6,7 @@ import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 from multiprocessing.shared_memory import SharedMemory
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,16 @@ from ..consumer.bridge_chunk_spool import ChunkSpoolRef
 
 if TYPE_CHECKING:
     from ..producer.producer_channel_message_sender import ProducerChannelMessageSender
+
+
+class SharedSlotUnhealthyReason(str, Enum):
+    """Enumeration of reasons a shared-slot transport can become unhealthy."""
+
+    OPEN_TIMEOUT = "open_timeout"
+    OPEN_FAILED = "open_failed"
+    ATTACH_FAILED = "attach_failed"
+    SENDER_FAILURE = "sender_failure"
+    CREDIT_STALL = "credit_stall"
 
 
 @dataclass(frozen=True)
@@ -95,7 +106,8 @@ class SharedSlotRegistryState:
     max_ack_latency_s: float = 0.0
     last_credit_return_at: float | None = None
     closed: bool = False
-    unhealthy_reason: str | None = None
+    unhealthy_reason: SharedSlotUnhealthyReason | None = None
+    unhealthy_reason_detail: str | None = None
     failure_message: str | None = None
 
 

@@ -431,6 +431,50 @@ def test_producer_send_data_parts_lazily_opens_shared_memory(
     assert second_chunk == b"cd"
 
 
+@pytest.mark.parametrize(
+    "data_type",
+    [DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS],
+)
+def test_producer_send_data_parts_uses_shared_slots_for_depth_and_point_clouds(
+    monkeypatch, data_type: DataType
+) -> None:
+    messages = _stub_producer_transport(monkeypatch)
+
+    producer = ProducerChannel(
+        chunk_size=2,
+        recording_id="rec-1",
+        shared_memory_size=2048,
+        data_type=data_type,
+    )
+
+    try:
+        producer.start_new_trace()
+        producer.send_data(
+            b"abcd",
+            data_type=data_type,
+            data_type_name="custom",
+            robot_instance=2,
+            robot_id="robot-1",
+            robot_name="robot",
+            dataset_id="dataset-1",
+            dataset_name="dataset",
+        )
+        _wait_for_envelopes(messages, 3)
+        first_metadata, first_chunk = _read_shared_slot_packet(messages[1])
+        second_metadata, second_chunk = _read_shared_slot_packet(messages[2])
+    finally:
+        producer.stop_producer_channel()
+
+    assert len(messages) == 3
+    assert messages[0].command == CommandType.OPEN_FIXED_SHARED_SLOTS
+    assert messages[1].command == CommandType.SHARED_SLOT_DESCRIPTOR
+    assert messages[2].command == CommandType.SHARED_SLOT_DESCRIPTOR
+    assert first_metadata["data_type"] == data_type.value
+    assert "data_type" not in second_metadata
+    assert first_chunk == b"ab"
+    assert second_chunk == b"cd"
+
+
 def test_producer_send_data_parts_uses_socket_for_non_video(monkeypatch) -> None:
     messages = _stub_producer_transport(monkeypatch)
     producer = ProducerChannel(

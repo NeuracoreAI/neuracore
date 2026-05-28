@@ -191,6 +191,7 @@ def test_resolve_embodiments_with_override_loads_from_job_metadata(
 def test_resolve_embodiments_with_override_loads_from_model_archive(
     monkeypatch,
 ) -> None:
+    pytest.importorskip("torch")
     monkeypatch.setattr(
         "neuracore.ml.utils.nc_archive.load_cross_embodiment_descriptions_from_nc_archive",
         lambda model_file: (

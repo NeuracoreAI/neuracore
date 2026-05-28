@@ -48,6 +48,20 @@ class _ActiveStream:
         })
 
 
+class _FailingStopStream(_ActiveStream):
+    def stop_recording(
+        self,
+        *,
+        stop_cutoff_sequence_number: int,
+        wait_for_producer_drain: bool = True,
+    ) -> None:
+        super().stop_recording(
+            stop_cutoff_sequence_number=stop_cutoff_sequence_number,
+            wait_for_producer_drain=wait_for_producer_drain,
+        )
+        raise RuntimeError("producer drain failed")
+
+
 def test_stop_all_streams_removes_stale_stream_and_continues() -> None:
     robot = Robot("robot", instance=0, org_id="org-1")
     stale = _StaleStream()
@@ -109,3 +123,22 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
         recording_id="rec-abc",
         producer_stop_sequence_numbers={"active-channel": 42},
     )
+
+
+def test_stop_all_streams_logs_stop_failure_and_continues() -> None:
+    robot = Robot("robot", instance=0, org_id="org-1")
+    failing = _FailingStopStream()
+    active = _ActiveStream()
+
+    robot.add_data_stream("JOINT_POSITIONS:failing", failing)  # type: ignore[arg-type]
+    robot.add_data_stream("JOINT_POSITIONS:active", active)  # type: ignore[arg-type]
+
+    sequence_numbers = robot._stop_all_streams(wait_for_producer_drain=True)
+
+    assert sequence_numbers == {"active-channel": 42}
+    assert failing.stop_calls == [
+        {"stop_cutoff_sequence_number": 42, "wait_for_producer_drain": True}
+    ]
+    assert active.stop_calls == [
+        {"stop_cutoff_sequence_number": 42, "wait_for_producer_drain": True}
+    ]

@@ -43,7 +43,7 @@ class _FakeSharedSlotTransport:
         self.finish_recording_session_calls += 1
 
 
-def test_cleanup_producer_channel_wait_false_skips_slot_drain() -> None:
+def test_cleanup_producer_channel_wait_false_still_drains_shared_slots() -> None:
     channel = object.__new__(ProducerChannel)
     transport = _FakeSharedSlotTransport()
     wait_calls: list[int] = []
@@ -64,7 +64,7 @@ def test_cleanup_producer_channel_wait_false_skips_slot_drain() -> None:
     )
 
     assert transport.wait_until_payload_handed_off_calls == [30.0]
-    assert transport.wait_until_drained_calls == []
+    assert transport.wait_until_drained_calls == [30.0]
     assert transport.finish_recording_session_calls == 1
     assert end_trace_calls == ["end"]
     assert wait_calls == [41]
@@ -121,7 +121,7 @@ def test_cleanup_producer_channel_raises_when_descriptor_cutoff_not_sent() -> No
     assert end_trace_calls == []
 
 
-def test_stop_producer_channel_wait_false_skips_slot_drain() -> None:
+def test_stop_producer_channel_wait_false_still_drains_shared_slots() -> None:
     channel = object.__new__(ProducerChannel)
     transport = _FakeSharedSlotTransport()
     wait_calls: list[int] = []
@@ -142,7 +142,7 @@ def test_stop_producer_channel_wait_false_skips_slot_drain() -> None:
     ProducerChannel.stop_producer_channel(channel, wait_for_slot_drain=False)
 
     assert wait_calls == [12]
-    assert transport.wait_until_drained_calls == []
+    assert transport.wait_until_drained_calls == [30.0]
     assert close_calls == ["heartbeat", "transport", "sender", "comm"]
 
 

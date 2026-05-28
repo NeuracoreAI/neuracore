@@ -26,6 +26,8 @@ from neuracore_types import (
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.endpoint import Policy
+from neuracore.core.robot import get_robot
+from neuracore.core.utils import backend_utils
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
@@ -123,6 +125,8 @@ BACK_TO_BACK_CNNMLP_CONFIG = {
     "epochs": 1,
     "output_prediction_horizon": 5,
 }
+RECORDING_STOP_TIMEOUT_SECONDS = 500
+RECORDING_STOP_POLL_SECONDS = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +192,7 @@ def _collect_demo_data(
             for _ in range(episode_length_multiplier)
         ]
         nc.start_recording(robot_name=robot_name, instance=instance_id)
+        recording_id = get_robot(robot_name, instance_id).get_current_recording_id()
         t = time.time()
         for frame_idx, action_dict in enumerate(expanded_action_traj):
             t += 1.0 / FREQUENCY
@@ -209,13 +214,11 @@ def _collect_demo_data(
             pose = np.array([0.1 + frame_idx * 0.001, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0])
             img = np.zeros((84, 84, 3), dtype=np.uint8)
             img.fill(50 + frame_idx % 200)
-            depth = np.full((64, 64), 0.75 + 0.01 * (frame_idx % 10), dtype=np.float32)
-            point_cloud = np.linspace(0.0, 1.0, 96, dtype=np.float16).reshape(
-                32, 3
-            ) + np.float16(frame_idx * 0.001)
-            rgb_points = np.full(
-                (point_cloud.shape[0], 3), 80 + frame_idx % 120, dtype=np.uint8
-            )
+            # np.full((64, 64), 0.75 + 0.01 * (frame_idx % 10), dtype=np.float32)
+            # point_cloud = np.linspace(0.0, 1.0, 96, dtype=np.float16).reshape(
+            #     32, 3
+            # ) + np.float16(frame_idx * 0.001)
+            # np.full((point_cloud.shape[0], 3), 80 + frame_idx % 120, dtype=np.uint8)
             nc.log_joint_positions(
                 positions=joint_positions,
                 timestamp=t,
@@ -267,26 +270,48 @@ def _collect_demo_data(
                 robot_name=robot_name,
                 instance=instance_id,
             )
-            nc.log_depth(
-                name=DEPTH_CAM_NAME,
-                depth=depth,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_point_cloud(
-                name=POINT_CLOUD_SENSOR_NAME,
-                points=point_cloud,
-                rgb_points=rgb_points,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-        nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
+        _stop_recording_and_wait(
+            robot_name=robot_name,
+            instance_id=instance_id,
+            recording_id=recording_id,
+            dataset_name=dataset_name,
+            episode_number=ep_idx + 1,
+        )
         logger.info(
             f"Episode {ep_idx + 1} recorded ({len(expanded_action_traj)} frames)"
         )
     return dataset
+
+
+def _stop_recording_and_wait(
+    robot_name: str,
+    instance_id: int,
+    recording_id: str,
+    dataset_name: str,
+    episode_number: int,
+    timeout_seconds: int = RECORDING_STOP_TIMEOUT_SECONDS,
+) -> None:
+    """Stop recording with a bounded wait for daemon/backend trace drain."""
+    nc.stop_recording(wait=False, robot_name=robot_name, instance=instance_id)
+
+    deadline = time.time() + timeout_seconds
+    saw_active_traces = False
+    last_trace_count: int | None = None
+    while time.time() < deadline:
+        data_traces = backend_utils.get_active_data_traces(recording_id)
+        last_trace_count = len(data_traces)
+        if last_trace_count > 0:
+            saw_active_traces = True
+        elif saw_active_traces:
+            return
+        time.sleep(RECORDING_STOP_POLL_SECONDS)
+
+    raise AssertionError(
+        "Timed out waiting for recording traces to drain after stop: "
+        f"dataset={dataset_name} episode={episode_number} "
+        f"recording_id={recording_id} last_active_trace_count={last_trace_count} "
+        f"saw_active_traces={saw_active_traces}"
+    )
 
 
 def _wait_for_training(
