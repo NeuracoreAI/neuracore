@@ -91,10 +91,34 @@ class DaemonDbStore:
     def _table_name(table: str) -> str:
         return str(table)
 
+    def _with_sqlite_retry(
+        self,
+        operation: Callable[[], Any],
+        *,
+        timeout_s: float = 20.0,
+        poll_interval_s: float = 0.1,
+    ) -> Any:
+        """Retry short-lived SQLite read failures during daemon state transitions."""
+        deadline = time.monotonic() + timeout_s
+        last_error: sqlite3.Error | None = None
+
+        while time.monotonic() < deadline:
+            try:
+                return operation()
+            except sqlite3.Error as exc:
+                last_error = exc
+                time.sleep(poll_interval_s)
+
+        raise AssertionError(
+            f"Daemon DB was not queryable after {timeout_s}s. "
+            f"db_path={self._db_path_provider()} last_error={last_error!r}"
+        ) from last_error
+
     def connect(self) -> sqlite3.Connection:
         """Return a read-write SQLite connection to the active daemon state DB."""
-        conn = sqlite3.connect(str(self._db_path_provider()))
+        conn = sqlite3.connect(str(self._db_path_provider()), timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def connect_read_only(self) -> sqlite3.Connection:
@@ -102,24 +126,36 @@ class DaemonDbStore:
         conn = sqlite3.connect(
             f"file:{self._db_path_provider()}?mode=ro",
             uri=True,
+            timeout=5.0,
         )
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
         return conn
 
     def fetch_all_rows(self, table: str) -> list[dict[str, Any]]:
         """Return every row from the named table in the daemon state DB."""
         table_name = self._table_name(table)
-        with self.connect() as conn:
-            rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()  # noqa: S608
-        return [dict(row) for row in rows]
+
+        def _fetch() -> list[dict[str, Any]]:
+            with self.connect() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM {table_name}"
+                ).fetchall()  # noqa: S608
+            return [dict(row) for row in rows]
+
+        return self._with_sqlite_retry(_fetch)
 
     def list_tables(self) -> set[str]:
         """Return the names of all user tables currently present in the daemon DB."""
-        with self.connect() as conn:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        return {str(row[0]) for row in rows}
+
+        def _fetch() -> set[str]:
+            with self.connect() as conn:
+                rows = conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            return {str(row[0]) for row in rows}
+
+        return self._with_sqlite_retry(_fetch)
 
     def table_exists(
         self,
@@ -145,12 +181,17 @@ class DaemonDbStore:
 
     def fetch_recording(self, recording_id: str) -> dict[str, Any] | None:
         """Return the recording row for ``recording_id`` if it exists."""
-        with self.connect() as conn:
-            row = conn.execute(
-                f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {COLUMN_RECORDING_ID} = ?",
-                (recording_id,),
-            ).fetchone()
-        return dict(row) if row is not None else None
+
+        def _fetch() -> dict[str, Any] | None:
+            with self.connect() as conn:
+                row = conn.execute(
+                    f"SELECT * FROM {RECORDINGS_TABLE} "
+                    f"WHERE {COLUMN_RECORDING_ID} = ?",
+                    (recording_id,),
+                ).fetchone()
+            return dict(row) if row is not None else None
+
+        return self._with_sqlite_retry(_fetch)
 
     def fetch_all_traces(
         self,
@@ -159,38 +200,46 @@ class DaemonDbStore:
         columns: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Return trace rows for one recording, limited to available columns."""
-        with self.connect_read_only() as conn:
-            if not self.table_exists(conn, TRACES_TABLE):
-                return []
 
-            trace_columns = self.table_columns(conn, TRACES_TABLE)
-            if COLUMN_RECORDING_ID not in trace_columns:
-                return []
+        def _fetch() -> list[dict[str, Any]]:
+            with self.connect_read_only() as conn:
+                if not self.table_exists(conn, TRACES_TABLE):
+                    return []
 
-            if columns is None:
-                selected_columns = sorted(trace_columns)
-            else:
-                selected_columns = [col for col in columns if col in trace_columns]
+                trace_columns = self.table_columns(conn, TRACES_TABLE)
+                if COLUMN_RECORDING_ID not in trace_columns:
+                    return []
 
-            if not selected_columns:
-                return []
+                if columns is None:
+                    selected_columns = sorted(trace_columns)
+                else:
+                    selected_columns = [col for col in columns if col in trace_columns]
 
-            order_by_columns = [
-                col
-                for col in (COLUMN_LAST_UPDATED, COLUMN_TRACE_ID)
-                if col in selected_columns
+                if not selected_columns:
+                    return []
+
+                order_by_columns = [
+                    col
+                    for col in (COLUMN_LAST_UPDATED, COLUMN_TRACE_ID)
+                    if col in selected_columns
+                ]
+                order_by_clause = (
+                    f" ORDER BY {', '.join(order_by_columns)}"
+                    if order_by_columns
+                    else ""
+                )
+                rows = conn.execute(
+                    f"SELECT {', '.join(selected_columns)} "
+                    f"FROM {TRACES_TABLE} "
+                    f"WHERE {COLUMN_RECORDING_ID} = ?{order_by_clause}",
+                    (recording_id,),
+                ).fetchall()
+
+            return [
+                {column: row[column] for column in selected_columns} for row in rows
             ]
-            order_by_clause = (
-                f" ORDER BY {', '.join(order_by_columns)}" if order_by_columns else ""
-            )
-            rows = conn.execute(
-                f"SELECT {', '.join(selected_columns)} "
-                f"FROM {TRACES_TABLE} "
-                f"WHERE {COLUMN_RECORDING_ID} = ?{order_by_clause}",
-                (recording_id,),
-            ).fetchall()
 
-        return [{column: row[column] for column in selected_columns} for row in rows]
+        return self._with_sqlite_retry(_fetch)
 
 
 _TEST_STORE = DaemonDbStore()
@@ -334,7 +383,7 @@ def fetch_recording_online_verification_stats(
             recording_id,
             columns=[COLUMN_REGISTRATION_STATUS, COLUMN_UPLOAD_STATUS],
         )
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
         return default_stats
 
     expected_trace_count = _optional_int(
@@ -413,7 +462,7 @@ def fetch_recording_trace_upload_stats(recording_id: str) -> dict[str, object]:
 
     try:
         rows = fetch_all_traces(recording_id, columns=selected_columns)
-    except sqlite3.OperationalError:
+    except sqlite3.Error:
         return default_result
 
     write_status_counts: dict[str, int] = {}
@@ -633,7 +682,7 @@ def wait_for_offline_db_ready(
 
             try:
                 existing_tables = list_tables()
-            except sqlite3.OperationalError as exc:
+            except sqlite3.Error as exc:
                 last_error = exc
                 time.sleep(0.1)
                 continue
@@ -648,7 +697,7 @@ def wait_for_offline_db_ready(
     try:
         if db_path.exists():
             existing_tables = list_tables()
-    except sqlite3.OperationalError as exc:
+    except sqlite3.Error as exc:
         last_error = exc
 
     raise AssertionError(
@@ -731,7 +780,7 @@ def wait_for_all_traces_written(
                 for trace in fetch_all_rows(TRACES_TABLE)
                 if trace[COLUMN_RECORDING_ID] in recording_ids
             ]
-        except sqlite3.OperationalError:
+        except sqlite3.Error:
             _sleep_for_next_poll(progress_made=False)
             continue
 
@@ -787,7 +836,7 @@ def wait_for_all_traces_written(
     try:
         recordings = fetch_all_rows(RECORDINGS_TABLE)
         traces = fetch_all_rows(TRACES_TABLE)
-    except sqlite3.OperationalError as exc:
+    except sqlite3.Error as exc:
         raise AssertionError(
             f"Daemon DB was still not queryable after waiting {timeout_s}s: {exc}"
         ) from exc
@@ -859,7 +908,7 @@ def assert_recording_db_statuses(
                 COLUMN_UPLOAD_STATUS,
             ],
         )
-    except sqlite3.OperationalError as exc:
+    except sqlite3.Error as exc:
         raise AssertionError(
             f"Cannot query traces for recording {recording_id}: {exc}"
         ) from exc

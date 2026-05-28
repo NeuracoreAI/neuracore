@@ -12,7 +12,7 @@ import os
 import sqlite3
 import sys
 import time
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -167,31 +167,33 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     recordings_root = get_daemon_recordings_root_path()
 
     if storage_state_action == STORAGE_STATE_EMPTY:
-        if db_path.exists():
-            with sqlite3.connect(str(db_path)) as connection:
-                for table in ("traces", "recordings"):
-                    try:
-                        connection.execute(f"DELETE FROM {table}")
-                    except sqlite3.OperationalError:
-                        pass
-                connection.commit()
-        if recordings_root.exists():
-            shutil.rmtree(recordings_root, ignore_errors=True)
-            recordings_root.mkdir(parents=True, exist_ok=True)
-    elif storage_state_action == STORAGE_STATE_DELETE:
-        try:
-            db_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        if recordings_root.exists():
-            shutil.rmtree(recordings_root, ignore_errors=True)
-
-    if storage_state_action in {STORAGE_STATE_EMPTY, STORAGE_STATE_DELETE}:
-        for suffix in ("-shm", "-wal"):
+        for candidate in (
+            db_path,
+            Path(str(db_path) + "-wal"),
+            Path(str(db_path) + "-shm"),
+        ):
             try:
-                Path(str(db_path) + suffix).unlink(missing_ok=True)
+                candidate.unlink(missing_ok=True)
             except OSError:
                 pass
+
+        if recordings_root.exists():
+            shutil.rmtree(recordings_root, ignore_errors=True)
+        recordings_root.mkdir(parents=True, exist_ok=True)
+
+    elif storage_state_action == STORAGE_STATE_DELETE:
+        for candidate in (
+            db_path,
+            Path(str(db_path) + "-wal"),
+            Path(str(db_path) + "-shm"),
+        ):
+            try:
+                candidate.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if recordings_root.exists():
+            shutil.rmtree(recordings_root, ignore_errors=True)
 
 
 def delete_cloud_dataset(dataset_name: str) -> None:
@@ -208,6 +210,46 @@ def delete_cloud_dataset(dataset_name: str) -> None:
         )
     except Exception:  # noqa: BLE001
         logger.warning("Failed to delete cloud dataset %r", dataset_name, exc_info=True)
+
+
+def _is_retryable_sqlite_error(exc: sqlite3.Error) -> bool:
+    message = str(exc).lower()
+    return any(
+        text in message
+        for text in (
+            "database is locked",
+            "disk i/o error",
+            "database disk image is malformed",
+            "unable to open database file",
+            "no such table",
+        )
+    )
+
+
+def _with_sqlite_retry(
+    operation: Callable[[], None],
+    *,
+    timeout_s: float = 10.0,
+    poll_interval_s: float = 0.1,
+) -> None:
+    deadline = time.monotonic() + timeout_s
+    last_error: sqlite3.Error | None = None
+
+    while time.monotonic() < deadline:
+        try:
+            operation()
+            return
+        except sqlite3.Error as exc:
+            if not _is_retryable_sqlite_error(exc):
+                raise
+
+            last_error = exc
+            time.sleep(poll_interval_s)
+
+    raise AssertionError(
+        f"Could not apply daemon DB cleanup after {timeout_s}s. "
+        f"db_path={get_daemon_db_path()} last_error={last_error!r}"
+    ) from last_error
 
 
 # ---------------------------------------------------------------------------
