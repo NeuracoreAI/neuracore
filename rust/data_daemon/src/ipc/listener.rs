@@ -27,9 +27,13 @@ use crate::lifecycle::signals::ShutdownSignal;
 
 /// How often the listener polls the iceoryx2 subscriber.
 ///
-/// Picked to bound wake-up latency to ~10 ms — well below the 1 s registration
-/// debounce, so the trace lifecycle isn't gated on the listener loop.
-const POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// 1 ms bounds the worst-case producer-block time on a full subscriber
+/// buffer. At the integration matrix's heaviest fanout (8 multiprocess
+/// workers × ~4 producer threads each = ~32 publishers competing for
+/// LIFECYCLE_SUBSCRIBER_BUFFER_SIZE=64 slots), 10 ms left producer-side
+/// `log_*` calls blocked for ~1 s at a stretch on 2-vCPU hosts when the
+/// listener task was preempted off-CPU by ffmpeg / per-trace work.
+const POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Drain the iceoryx2 subscriber until a shutdown signal arrives.
 ///

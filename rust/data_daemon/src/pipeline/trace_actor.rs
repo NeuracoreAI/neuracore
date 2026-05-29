@@ -49,11 +49,17 @@ pub type TraceKey = String;
 const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 
 /// Cap on concurrent ffmpeg transcodes. Each ffmpeg child happily saturates a
-/// CPU core; without a cap N simultaneous per-chunk encode invocations starve
-/// the rest of the daemon. Set to 8 so a single-camera 8-context workload can
-/// transcode chunks in parallel; raise further if multi-camera setups
-/// exhibit the same queueing bottleneck.
-pub(crate) const DEFAULT_FFMPEG_CONCURRENCY: usize = 8;
+/// CPU core; without a cap N simultaneous per-chunk encode invocations
+/// starve the rest of the daemon. Scales with the host's available
+/// parallelism so 2-vCPU runners aren't 4× oversubscribed while bigger
+/// hosts can still transcode multi-camera 8-context workloads in parallel.
+///
+/// Floor at 2 so single-core hosts still get a useful permit pool.
+pub(crate) fn default_ffmpeg_concurrency() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().max(2))
+        .unwrap_or(2)
+}
 
 /// Time the actor waits after `StopAtSequence` for any envelopes the producer
 /// promised but that have not yet arrived.
@@ -105,7 +111,7 @@ impl TraceActorContext {
             recordings_root,
             storage_budget,
             video_encoder,
-            Arc::new(Semaphore::new(DEFAULT_FFMPEG_CONCURRENCY)),
+            Arc::new(Semaphore::new(default_ffmpeg_concurrency())),
         )
     }
 
