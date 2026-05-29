@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import sqlite3
 import sys
 import time
 from collections.abc import Generator
@@ -167,17 +166,25 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     recordings_root = get_daemon_recordings_root_path()
 
     if storage_state_action == STORAGE_STATE_EMPTY:
-        if db_path.exists():
-            with sqlite3.connect(str(db_path)) as connection:
-                for table in ("traces", "recordings"):
-                    try:
-                        connection.execute(f"DELETE FROM {table}")
-                    except sqlite3.OperationalError:
-                        pass
-                connection.commit()
+        db_state_paths = (
+            db_path,
+            Path(str(db_path) + "-wal"),
+            Path(str(db_path) + "-shm"),
+        )
+
+        for db_state_path in db_state_paths:
+            try:
+                db_state_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Failed to remove daemon DB state file during test cleanup: %s",
+                    db_state_path,
+                    exc_info=True,
+                )
+
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)
-            recordings_root.mkdir(parents=True, exist_ok=True)
+        recordings_root.mkdir(parents=True, exist_ok=True)
     elif storage_state_action == STORAGE_STATE_DELETE:
         try:
             db_path.unlink(missing_ok=True)
