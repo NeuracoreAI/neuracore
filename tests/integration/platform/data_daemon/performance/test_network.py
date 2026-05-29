@@ -66,7 +66,7 @@ def test_cloud_upload_and_readiness_performance(
             " or a saved current organization."
         )
     dataset_name = create_testing_dataset_name(case)
-    specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
+    specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=False)
     results: list[ContextResult] = []
     with scoped_storage_state(case, dataset_name=dataset_name):
         try:

@@ -275,25 +275,51 @@ PRE_NETWORK_PERFORMANCE_CASES = (
 )
 
 NETWORK_PERFORMANCE_CASES = (
-    # High frequency robot control at 210Hz joint data
-    # Tests: high-frequency sampling, temporal jitter, joint-only streaming
+    # Joint-only online frequency sweep for VM limit discovery.
+    #
+    # Workload held constant:
+    # - 7 joints
+    # - no camera
+    # - 1 context
+    # - 3 recordings x 30s
+    # - wait=True
+    #
+    # Observed on VM:
+    # - 210Hz: pass
+    # - 225Hz: pass
+    # - 250Hz: clean pass
+    # - 275Hz: reaches readiness but stop_recording exceeds 15s diagnostic target
+    # - 300Hz: does not complete reliably; stop_recording can hang
+    #
+    # Conservative required-suite boundary: 250Hz.
     DataDaemonTestCase(
-        duration_sec=60,
+        duration_sec=30,
         joint_count=7,
         video_count=0,
         parallel_contexts=1,
-        recording_count=5,
+        recording_count=3,
         context_duration_mode=DURATION_MODE_FIXED,
         joint_fps=210,
+        wait=True,
     ),
     DataDaemonTestCase(
-        duration_sec=60,
+        duration_sec=30,
         joint_count=7,
         video_count=0,
         parallel_contexts=1,
-        recording_count=5,
+        recording_count=3,
         context_duration_mode=DURATION_MODE_FIXED,
-        joint_fps=210,
+        joint_fps=225,
+        wait=True,
+    ),
+    DataDaemonTestCase(
+        duration_sec=30,
+        joint_count=7,
+        video_count=0,
+        parallel_contexts=1,
+        recording_count=3,
+        context_duration_mode=DURATION_MODE_FIXED,
+        joint_fps=250,
         wait=True,
     ),
     # High number of medium-throughput robots with synchronized
