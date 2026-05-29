@@ -1,6 +1,7 @@
 """Tests resume file path, keys, loading, and append on NeuracoreDatasetImporter."""
 
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -11,9 +12,9 @@ from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
 class _CompletedItemsTestImporter(NeuracoreDatasetImporter):
     """Stub importer wiring dataset_dir, output name, and completed_items_file."""
 
-    def __init__(self, dataset_dir: Path, output_dataset_name: str):
+    def __init__(self, dataset_dir: Path, output_dataset_id: str):
         self.dataset_dir = dataset_dir
-        self.output_dataset_name = output_dataset_name
+        self.output_dataset_id = output_dataset_id
         self.logger = logging.getLogger(__name__)
         self.dry_run = False
         self.pre_check = False
@@ -36,14 +37,16 @@ class _CompletedItemsTestImporter(NeuracoreDatasetImporter):
         return source
 
 
-def test_resolve_completed_items_file_sanitizes_dataset_name(tmp_path):
-    """Resume path uses a safe filename suffix from the output dataset name."""
+def test_resolve_completed_items_file_sanitizes_dataset_id(tmp_path):
+    """Resume path uses a safe filename suffix from the output dataset ID."""
+    dataset_id = "my dataset/id:with?chars"
     importer = _CompletedItemsTestImporter(
         dataset_dir=tmp_path,
-        output_dataset_name="my dataset/name:with?chars",
+        output_dataset_id=dataset_id,
     )
 
-    expected = tmp_path / ".neuracore_import_completed_my_dataset_name_with_chars.txt"
+    safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", dataset_id)
+    expected = tmp_path / f".neuracore_import_completed_{safe_id}.txt"
     assert importer._resolve_completed_items_file() == expected
 
 

@@ -1,0 +1,62 @@
+input_dataset_name: mcap_openarm_dataset
+dataset_type: MCAP
+
+output_dataset:
+  name: mcap_openarm_dataset
+  tags: [manipulation, bimanual]
+  description: "Example OpenArm dataset"
+
+robot:
+  name: openarm_description
+  overwrite_existing: true
+
+frequency: 50.0
+
+data_import_config:
+  JOINT_POSITIONS:
+    source: /joint_states.position
+    format:
+      angle_units: RADIANS
+    mapping:
+      - name: openarm_left_finger_joint1
+        index: 0
+      - name: openarm_left_joint1
+        index: 1
+      - name: openarm_left_joint2
+        index: 2
+      - name: openarm_left_joint3
+        index: 3
+      - name: openarm_left_joint4
+        index: 4
+      - name: openarm_left_joint5
+        index: 5
+      - name: openarm_left_joint6
+        index: 6
+      - name: openarm_left_joint7
+        index: 7
+      - name: openarm_right_finger_joint1
+        index: 8
+      - name: openarm_right_joint1
+        index: 9
+      - name: openarm_right_joint2
+        index: 10
+      - name: openarm_right_joint3
+        index: 11
+      - name: openarm_right_joint4
+        index: 12
+      - name: openarm_right_joint5
+        index: 13
+      - name: openarm_right_joint6
+        index: 14
+      - name: openarm_right_joint7
+        index: 15
+
+  RGB_IMAGES:
+    source: /cam_waist/image_raw/compressed
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      - name: cam_waist
+      - name: cam_wrist_l
+        source_name: /cam_wrist_l/image_raw/compressed

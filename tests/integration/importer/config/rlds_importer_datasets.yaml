@@ -1,0 +1,11 @@
+datasets:
+  - name: asu_table_top
+    cache_relative_path: rlds/asu_table_top/0.1.0
+    dataset_config: neuracore/importer/config/rlds/asu_table_top.yaml
+    robot_keyword: ur5
+    max_workers: 1
+  - name: austin_buds
+    cache_relative_path: rlds/austin_buds/0.1.0
+    dataset_config: neuracore/importer/config/rlds/austin_buds.yaml
+    robot_keyword: franka_panda
+    max_workers: 1

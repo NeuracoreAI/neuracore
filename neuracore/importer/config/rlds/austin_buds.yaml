@@ -15,15 +15,19 @@ frequency: 20.0
 data_import_config:
   RGB_IMAGES:
     source: observation
-    image_convention: CHANNELS_LAST
-    order_of_channels: RGB
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
     mapping: 
       - name: image
+        source_name: image
       - name: wrist_image
+        source_name: wrist_image
 
   JOINT_POSITIONS: 
     source: observation.state
-    units: RADIANS
+    format:
+      angle_units: RADIANS
     mapping:
       - name: panda_joint1
         index: 0
@@ -52,7 +56,8 @@ data_import_config:
 
   PARALLEL_GRIPPER_OPEN_AMOUNTS:
     source: observation.state
-    inverted: false
+    format:
+      invert_gripper_amount: false
     mapping:
       - name: gripper_open_amount
         index: 7
@@ -60,12 +65,9 @@ data_import_config:
   END_EFFECTOR_POSES:
     source: observation.state
     format:
-      pose_type: MATRIX
+      ee_pose_input_type: JOINT_POSITIONS
     mapping:
-      - name: end_effector_pose
-        index_range: 
-          start: 8
-          end: 24
+      - name: panda_hand_tcp
 
   LANGUAGE:
     source: language_instruction

@@ -40,9 +40,9 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
     def __init__(
         self,
         input_dataset_name: str,
-        output_dataset_name: str,
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
+        output_dataset_id: str,
         joint_info: dict[str, JointInfo] = {},
         urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
@@ -59,7 +59,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         super().__init__(
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
-            output_dataset_name=output_dataset_name,
+            output_dataset_id=output_dataset_id,
             max_workers=max_workers,
             skip_on_error=skip_on_error,
             joint_info=joint_info,
