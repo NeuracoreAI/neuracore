@@ -18,7 +18,8 @@ use tokio::time::sleep;
 
 use crate::api::auth::{AuthError, AuthProvider};
 use crate::api::models::{
-    BatchRegisterResponse, RegisterTraceRequest, ResumableUploadUrlResponse, TraceStatusUpdate,
+    BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest,
+    ResumableUploadUrlResponse, TraceStatusUpdate,
 };
 
 /// Retry policy constants — match `const.py::BACKEND_API_*`.
@@ -231,6 +232,81 @@ impl ApiClient {
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
             .await?;
         Ok(())
+    }
+
+    /// `POST /org/{org}/recording/stop?recording_id={recording_id}`.
+    ///
+    /// Mirrors the call the Python SDK previously made inline from
+    /// `nc.stop_recording`. Moving it into the daemon keeps the SDK call
+    /// bounded by producer work (~ms) and absorbs staging POST tail
+    /// latency in the daemon's background tokio runtime instead of in the
+    /// test's SLA-timed block. The body is empty; `recording_id` is a
+    /// query parameter.
+    pub async fn recording_stop(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/stop");
+        let query = [("recording_id", recording_id)];
+        let _ = self
+            .send_with_retry(Method::POST, &path, |builder| builder.query(&query))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /org/{org}/recording/cancel?recording_id=…`.
+    ///
+    /// Cancels the recording server-side. The daemon's cancel notifier makes
+    /// this call best-effort once it knows the cloud `recording_id`; the SDK
+    /// no longer calls it inline.
+    pub async fn recording_cancel(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/cancel");
+        let query = [("recording_id", recording_id)];
+        let _ = self
+            .send_with_retry(Method::POST, &path, |builder| builder.query(&query))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /org/{org}/recording/start`.
+    ///
+    /// Opens a recording server-side and returns the backend-minted cloud
+    /// `recording_id`. Mirrors [`recording_stop`](Self::recording_stop): the
+    /// SDK no longer makes this call inline — the daemon's recording-start
+    /// notifier POSTs it in the background once the local recording row
+    /// exists, absorbing staging POST tail latency off the SDK's hot path.
+    /// The body carries the source identity; the response is `{"id": "..."}`.
+    pub async fn recording_start(
+        &self,
+        org_id: &str,
+        robot_id: &str,
+        instance: i64,
+        dataset_id: &str,
+    ) -> Result<String, ApiClientError> {
+        let path = format!("/org/{org_id}/recording/start");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            robot_id: &'a str,
+            instance: i64,
+            dataset_id: &'a str,
+        }
+        let body = Body {
+            robot_id,
+            instance,
+            dataset_id,
+        };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        let bytes = response.bytes().await?;
+        let parsed: RecordingStartResponse =
+            serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)?;
+        Ok(parsed.id)
     }
 
     /// `PUT /org/{org}/recording/{rec}/expected-trace-count`.

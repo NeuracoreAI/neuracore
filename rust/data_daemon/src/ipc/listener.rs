@@ -113,25 +113,10 @@ fn drain_subscriber(
     loop {
         match subscriber.receive() {
             Ok(Some(sample)) => match Envelope::decode(sample.payload()) {
-                // A `BatchedFrames` envelope is a wire-only optimisation: the
-                // producer packs N joint samples into one iceoryx2 message.
-                // Unpack it here, at the transport boundary, so the dispatcher
-                // and per-trace actors only ever see standalone `Frame`s.
-                Ok(Envelope::BatchedFrames {
-                    timestamp_ns,
-                    timestamp_s,
-                    frames,
-                }) => {
-                    for item in frames {
-                        batch.push(Envelope::frame(
-                            item.trace_id,
-                            item.sequence_number,
-                            timestamp_ns,
-                            timestamp_s,
-                            item.payload,
-                        ));
-                    }
-                }
+                // Every envelope is forwarded whole. `BatchedData` is held and
+                // released as a single unit by the dispatcher (all its items
+                // share one timestamp, so they belong to one window) and
+                // expanded into per-sensor routes only at release time.
                 Ok(envelope) => batch.push(envelope),
                 Err(error) => {
                     counters.decode_failures = counters.decode_failures.saturating_add(1);

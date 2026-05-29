@@ -12,6 +12,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -267,7 +268,7 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(self, dataset_id: str) -> str:
+    def start_recording(self, dataset_id: str) -> str | None:
         """Start recording data from all active streams to a dataset.
 
         Initiates a recording session that will capture data from all registered
@@ -277,7 +278,10 @@ class Robot:
             dataset_id: Unique identifier of the dataset to record into.
 
         Returns:
-            The unique recording ID for this recording session.
+            Under the legacy Python daemon, the backend recording ID for the
+            session. Under the Rust daemon the daemon owns recording identity
+            and assigns it asynchronously, so there is nothing to return at
+            call time — a local correlation handle is returned for convenience.
 
         Raises:
             RobotError: If the robot is not initialized or if
@@ -286,6 +290,25 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+
+        if rust_daemon_enabled():
+            # Thin-shipper path: no synchronous backend POST. The producer
+            # publishes a source-tagged StartRecording; the daemon allocates
+            # and owns the recording id and POSTs /recording/start itself. A
+            # local handle is minted purely for SDK-side bookkeeping (recording
+            # state + the 5-minute expiry timer) — it never reaches the wire.
+            local_handle = str(uuid.uuid4())
+            self._get_daemon_recording_context().start_recording(
+                robot_id=self.id,
+                robot_instance=self.instance,
+                robot_name=self.name,
+                dataset_id=dataset_id,
+                dataset_name=None,
+            )
+            get_recording_state_manager().recording_started(
+                robot_id=self.id, instance=self.instance, recording_id=local_handle
+            )
+            return local_handle
 
         try:
             start_time = time.time()
@@ -316,17 +339,6 @@ class Robot:
             ):
                 warn("This recording had already been started!")
 
-            if rust_daemon_enabled():
-                # Announce the recording to the Rust daemon once. The native
-                # layer is idempotent, so a repeated start is harmless.
-                self._get_daemon_recording_context().start_recording(
-                    recording_id=recording_id,
-                    robot_id=self.id,
-                    robot_name=self.name,
-                    dataset_id=dataset_id,
-                    dataset_name=None,
-                )
-
             get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
             )
@@ -344,17 +356,18 @@ class Robot:
 
     def stop_recording(
         self,
-        recording_id: str,
+        recording_id: str | None = None,
         wait_for_producer_drain: bool = True,
     ) -> None:
         """Stop an active recording session.
 
-        Ends the specified recording session and stops data collection from
-        all streams. The recorded data will be processed and stored in the
-        associated dataset.
+        Ends the active recording session for this robot instance and stops
+        data collection from all streams.
 
         Args:
-            recording_id: Unique identifier of the recording session to stop.
+            recording_id: Unused under the Rust daemon (the daemon stops the
+                active recording for this source); the legacy daemon uses it to
+                address the backend stop POST.
 
         Raises:
             RobotError: If the robot is not initialized, if the recording cannot
@@ -363,6 +376,23 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+
+        if rust_daemon_enabled():
+            # Thin-shipper path: clear local recording state for the source,
+            # drain the streams, and let the producer publish StopRecording.
+            # The daemon owns the backend /recording/stop POST (online posts;
+            # offline skips and the startup sweep retries once online), so
+            # there is no SDK-side POST and the stop returns immediately.
+            active_handle = get_recording_state_manager().get_current_recording_id(
+                self.id, self.instance
+            )
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=active_handle
+            )
+            self._drain_streams_and_notify_daemon(
+                recording_id, wait_for_producer_drain=wait_for_producer_drain
+            )
+            return
 
         get_recording_state_manager().recording_stopped(
             robot_id=self.id, instance=self.instance, recording_id=recording_id
@@ -399,7 +429,7 @@ class Robot:
             raise RobotError(f"Failed to stop recording: {str(e)}")
 
     def _drain_streams_and_notify_daemon(
-        self, recording_id: str, *, wait_for_producer_drain: bool
+        self, recording_id: str | None, *, wait_for_producer_drain: bool
     ) -> None:
         """Stop all streams and send the recording-stopped IPC message to the daemon."""
         try:
@@ -478,11 +508,34 @@ class Robot:
 
         Returns:
             The current recording ID if the robot is recording, None otherwise.
+            Under the Rust daemon this is a local correlation handle, not the
+            cloud recording id — use :meth:`get_cloud_recording_id` for that.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
         return get_recording_state_manager().get_current_recording_id(
             robot_id=self.id, instance=self.instance
+        )
+
+    def get_cloud_recording_id(
+        self, timestamp_ns: int | None = None, timeout_s: float = 30.0
+    ) -> str | None:
+        """Resolve the daemon-owned cloud recording id for a recording window.
+
+        Under the Rust daemon the daemon allocates the cloud recording id
+        asynchronously, so this asks the daemon (it may block) for the id of the
+        recording whose window brackets ``timestamp_ns`` for this source
+        (defaulting to the most recently started recording). For
+        non-performance-critical use only (tests, ``stop_recording(wait=True)``).
+        Returns ``None`` under the legacy daemon (use
+        :meth:`get_current_recording_id`).
+        """
+        if not self.id:
+            raise RobotError("Robot not initialized. Call init() first.")
+        if not rust_daemon_enabled():
+            return self.get_current_recording_id()
+        return self._get_daemon_recording_context().get_recording_id(
+            timestamp_ns=timestamp_ns, timeout_s=timeout_s
         )
 
     def _package_urdf(self) -> dict:
@@ -739,21 +792,35 @@ class Robot:
 
         return joint_info
 
-    def cancel_recording(self, recording_id: str) -> None:
+    def cancel_recording(self, recording_id: str | None = None) -> None:
         """Cancel an active recording without saving any data.
 
         Args:
-            recording_id: the ID of the recording to cancel.
+            recording_id: Unused under the Rust daemon (the daemon cancels the
+                active recording for this source); the legacy daemon uses it to
+                address the backend cancel POST.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
         self._stop_all_streams()
         daemon_context = self._get_daemon_recording_context()
+
         if rust_daemon_enabled():
-            daemon_context.cancel_recording(recording_id=recording_id)
-        else:
-            daemon_context.stop_recording(recording_id=recording_id)
+            # Thin-shipper path: the producer publishes CancelRecording for the
+            # source and the daemon discards the recording locally. The daemon
+            # owns any backend cancel (best-effort if a cloud id was minted) —
+            # the SDK has no recording id to POST with.
+            daemon_context.cancel_recording()
+            active_handle = get_recording_state_manager().get_current_recording_id(
+                self.id, self.instance
+            )
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=active_handle
+            )
+            return
+
+        daemon_context.stop_recording(recording_id=recording_id)
 
         try:
             session = thread_local_session()

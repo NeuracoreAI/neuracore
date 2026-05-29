@@ -23,4 +23,4 @@ pub use schema::{
     TraceUploadStatus, TraceWriteStatus,
 };
 #[allow(unused_imports)]
-pub use store::{SqliteStateStore, StateStore, StateStoreError};
+pub use store::{NewRecording, SqliteStateStore, StateStore, StateStoreError, TraceUpdate};

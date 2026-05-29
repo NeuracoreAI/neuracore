@@ -74,6 +74,13 @@ pub struct ResumableUploadUrlResponse {
     pub url: String,
 }
 
+/// Response for `POST /recording/start`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RecordingStartResponse {
+    /// Backend-minted cloud `recording_id`.
+    pub id: String,
+}
+
 /// Status value for the per-trace batch update API. Matches the wire enum
 /// `RecordingDataTraceStatus` in `neuracore_types`.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]

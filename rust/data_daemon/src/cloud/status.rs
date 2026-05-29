@@ -21,7 +21,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::api::models::{TraceStatusUpdate, TraceStatusValue};
 use crate::api::ApiClient;
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::state::{SqliteStateStore, StateStore};
+use crate::state::{RecordingRow, SqliteStateStore, StateStore};
 
 /// Maximum number of traces to coalesce before flushing.
 pub const MAX_BATCH_SIZE: usize = 50;
@@ -39,8 +39,8 @@ const ORG_RESOLVE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 /// the backend.
 #[derive(Debug, Clone)]
 pub struct StatusUpdate {
-    /// Recording the trace belongs to.
-    pub recording_id: String,
+    /// Recording the trace belongs to (local `recording_index`).
+    pub recording_index: i64,
     /// Trace identifier.
     pub trace_id: String,
     /// Bytes uploaded so far.
@@ -53,9 +53,9 @@ pub struct StatusUpdate {
 
 impl StatusUpdate {
     /// Build an in-progress (bytes-only) status update.
-    pub fn in_progress(recording_id: String, trace_id: String, uploaded_bytes: i64) -> Self {
+    pub fn in_progress(recording_index: i64, trace_id: String, uploaded_bytes: i64) -> Self {
         Self {
-            recording_id,
+            recording_index,
             trace_id,
             uploaded_bytes,
             completed: false,
@@ -64,9 +64,9 @@ impl StatusUpdate {
     }
 
     /// Build a completion update (status=UPLOAD_COMPLETE).
-    pub fn completed(recording_id: String, trace_id: String, total_bytes: i64) -> Self {
+    pub fn completed(recording_index: i64, trace_id: String, total_bytes: i64) -> Self {
         Self {
-            recording_id,
+            recording_index,
             trace_id,
             uploaded_bytes: total_bytes,
             completed: true,
@@ -109,9 +109,9 @@ async fn run(
     mut inbox: mpsc::UnboundedReceiver<StatusUpdate>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
-    // Per-recording pending batches keyed by recording_id; preserves the
+    // Per-recording pending batches keyed by recording_index; preserves the
     // last-seen update per trace (later updates supersede earlier ones).
-    let mut pending: HashMap<String, RecordingBatch> = HashMap::new();
+    let mut pending: HashMap<i64, RecordingBatch> = HashMap::new();
     // Flush tasks running in the background — spawned by flush_due and the
     // max-batch path so the select loop never blocks on HTTP round-trips.
     let mut background_flushes: JoinSet<Option<RecordingBatch>> = JoinSet::new();
@@ -127,7 +127,7 @@ async fn run(
                 // so flush_all gets a chance to send them.
                 while let Some(flush_result) = background_flushes.join_next().await {
                     if let Ok(Some(deferred_batch)) = flush_result {
-                        pending.insert(deferred_batch.recording_id.clone(), deferred_batch);
+                        pending.insert(deferred_batch.recording_index, deferred_batch);
                     }
                 }
                 flush_all(&store, &client, &mut pending).await;
@@ -139,7 +139,7 @@ async fn run(
             {
                 match flush_result {
                     Ok(Some(deferred_batch)) => {
-                        pending.insert(deferred_batch.recording_id.clone(), deferred_batch);
+                        pending.insert(deferred_batch.recording_index, deferred_batch);
                     }
                     Ok(None) => {}
                     Err(panic_err) => {
@@ -152,13 +152,13 @@ async fn run(
             }
             maybe_update = inbox.recv() => {
                 let Some(update) = maybe_update else { break };
-                let recording_id = update.recording_id.clone();
+                let recording_index = update.recording_index;
                 let batch = pending
-                    .entry(update.recording_id.clone())
-                    .or_insert_with(|| RecordingBatch::new(update.recording_id.clone()));
+                    .entry(recording_index)
+                    .or_insert_with(|| RecordingBatch::new(recording_index));
                 batch.add(update);
                 if batch.size() >= MAX_BATCH_SIZE {
-                    if let Some(batch) = pending.remove(&recording_id) {
+                    if let Some(batch) = pending.remove(&recording_index) {
                         background_flushes.spawn(flush_batch(
                             Arc::clone(&store),
                             Arc::clone(&client),
@@ -176,17 +176,17 @@ async fn run(
 fn flush_due(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
-    pending: &mut HashMap<String, RecordingBatch>,
+    pending: &mut HashMap<i64, RecordingBatch>,
     background_flushes: &mut JoinSet<Option<RecordingBatch>>,
 ) {
     let now = Instant::now();
-    let due_ids: Vec<String> = pending
+    let due_ids: Vec<i64> = pending
         .iter()
         .filter(|(_, batch)| now >= batch.deadline())
-        .map(|(recording_id, _)| recording_id.clone())
+        .map(|(recording_index, _)| *recording_index)
         .collect();
-    for recording_id in &due_ids {
-        if let Some(batch) = pending.remove(recording_id) {
+    for recording_index in &due_ids {
+        if let Some(batch) = pending.remove(recording_index) {
             background_flushes.spawn(flush_batch(Arc::clone(store), Arc::clone(client), batch));
         }
     }
@@ -195,7 +195,7 @@ fn flush_due(
 async fn flush_all(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
-    pending: &mut HashMap<String, RecordingBatch>,
+    pending: &mut HashMap<i64, RecordingBatch>,
 ) {
     let mut tasks: JoinSet<Option<RecordingBatch>> = JoinSet::new();
     for (_, batch) in pending.drain() {
@@ -210,26 +210,31 @@ async fn flush_all(
 }
 
 /// Flush a single recording's batch. Returns the batch back if the recording's
-/// org_id isn't available yet (caller should re-insert with deferred deadline),
-/// or `None` when the flush was sent (or the batch was empty).
+/// `org_id` / cloud `recording_id` isn't available yet (caller should re-insert
+/// with deferred deadline), or `None` when the flush was sent (or the batch was
+/// empty).
 async fn flush_batch(
     store: Arc<SqliteStateStore>,
     client: Arc<ApiClient>,
     mut batch: RecordingBatch,
 ) -> Option<RecordingBatch> {
-    let recording_id = batch.recording_id.clone();
-    let org_id = match resolve_org(&store, &recording_id).await {
-        Some(org_id) => org_id,
+    let recording_index = batch.recording_index;
+    let row = match resolve_recording(&store, recording_index).await {
+        Some(row) => row,
         None => {
             // Re-queue with a fresh `opened_at` pushed
             // `ORG_RESOLVE_RETRY_BACKOFF` into the future so the next
-            // `flush_due` skips this batch until the producer has had a
-            // chance to stamp the org. Without this, a missing org_id pins
-            // `deadline()` permanently in the past and the select loop
-            // becomes a busy-wait until the org appears.
+            // `flush_due` skips this batch until the producer/registration has
+            // had a chance to stamp the org and mint the cloud id. Without
+            // this, a missing field pins `deadline()` permanently in the past
+            // and the select loop becomes a busy-wait until the row is ready.
             batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
             return Some(batch);
         }
+    };
+    let (Some(org_id), Some(recording_id)) = (row.org_id, row.recording_id) else {
+        batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
+        return Some(batch);
     };
     let updates = batch.into_updates();
     if updates.is_empty() {
@@ -242,24 +247,28 @@ async fn flush_batch(
     {
         Ok(()) => {
             tracing::debug!(
+                recording_index,
                 recording_id,
                 count = updates_payload.len(),
                 "flushed status updates"
             );
         }
         Err(error) => {
-            tracing::warn!(%error, recording_id, count = updates_payload.len(), "status batch update failed");
+            tracing::warn!(%error, recording_index, recording_id, count = updates_payload.len(), "status batch update failed");
         }
     }
     None
 }
 
-async fn resolve_org(store: &Arc<SqliteStateStore>, recording_id: &str) -> Option<String> {
-    match store.get_recording(recording_id).await {
-        Ok(Some(row)) => row.org_id,
+async fn resolve_recording(
+    store: &Arc<SqliteStateStore>,
+    recording_index: i64,
+) -> Option<RecordingRow> {
+    match store.get_recording(recording_index).await {
+        Ok(Some(row)) => Some(row),
         Ok(None) => None,
         Err(error) => {
-            tracing::warn!(%error, recording_id, "status updater could not read recording row");
+            tracing::warn!(%error, recording_index, "status updater could not read recording row");
             None
         }
     }
@@ -267,17 +276,16 @@ async fn resolve_org(store: &Arc<SqliteStateStore>, recording_id: &str) -> Optio
 
 #[derive(Debug)]
 struct RecordingBatch {
-    #[allow(dead_code)]
-    recording_id: String,
+    recording_index: i64,
     opened_at: Instant,
     has_completion: bool,
     updates: HashMap<String, TraceStatusUpdate>,
 }
 
 impl RecordingBatch {
-    fn new(recording_id: String) -> Self {
+    fn new(recording_index: i64) -> Self {
         Self {
-            recording_id,
+            recording_index,
             opened_at: Instant::now(),
             has_completion: false,
             updates: HashMap::new(),
@@ -332,18 +340,10 @@ mod tests {
 
     #[test]
     fn batch_records_completion_flag() {
-        let mut batch = RecordingBatch::new("rec".to_string());
-        batch.add(StatusUpdate::in_progress(
-            "rec".to_string(),
-            "t1".to_string(),
-            1,
-        ));
+        let mut batch = RecordingBatch::new(1);
+        batch.add(StatusUpdate::in_progress(1, "t1".to_string(), 1));
         assert!(!batch.has_completion);
-        batch.add(StatusUpdate::completed(
-            "rec".to_string(),
-            "t1".to_string(),
-            100,
-        ));
+        batch.add(StatusUpdate::completed(1, "t1".to_string(), 100));
         assert!(batch.has_completion);
         // The latest update for the same trace_id overrides bytes_uploaded.
         let entry = batch.updates.get("t1").unwrap();
@@ -360,12 +360,8 @@ mod tests {
         // stamped yet. Without it the batch's deadline stays in the past
         // and the select loop spins; with it the next deadline is at
         // least `delay` from now.
-        let mut batch = RecordingBatch::new("rec".to_string());
-        batch.add(StatusUpdate::in_progress(
-            "rec".to_string(),
-            "t".to_string(),
-            1,
-        ));
+        let mut batch = RecordingBatch::new(1);
+        batch.add(StatusUpdate::in_progress(1, "t".to_string(), 1));
         // Force the batch's apparent deadline well into the past.
         batch.opened_at = Instant::now() - Duration::from_secs(60);
         assert!(batch.deadline() < Instant::now());
@@ -383,14 +379,10 @@ mod tests {
 
     #[test]
     fn completion_deadline_is_shorter() {
-        let mut batch = RecordingBatch::new("rec".to_string());
+        let mut batch = RecordingBatch::new(1);
         let baseline = batch.opened_at + IN_PROGRESS_MAX_WAIT;
         assert!(batch.deadline() <= baseline);
-        batch.add(StatusUpdate::completed(
-            "rec".to_string(),
-            "t".to_string(),
-            1,
-        ));
+        batch.add(StatusUpdate::completed(1, "t".to_string(), 1));
         assert!(batch.deadline() < baseline);
     }
 }

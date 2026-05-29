@@ -22,6 +22,69 @@ pub const LOSSLESS_VIDEO_FILENAME: &str = "lossless.mp4";
 /// producer-spooled NUT chunks awaiting daemon-side encoding.
 pub const CHUNKS_DIRNAME: &str = "chunks";
 
+/// Top-level directory (under `recordings_root`) the producer spools video NUT
+/// chunks into before the daemon knows which recording they belong to. Keyed
+/// by source + sensor because the producer cannot reference a recording. The
+/// daemon relinks a chunk under its recording once routing resolves a window,
+/// and reclaims the whole tree on startup (a daemon restart mid-recording
+/// corrupts that recording).
+pub const INBOX_DIRNAME: &str = "_inbox";
+
+/// Resolve the producer's video inbox directory for a `(source, sensor)`
+/// stream: `{recordings_root}/_inbox/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+///
+/// Both producer and daemon agree on this layout so the daemon can find and
+/// relink the producer's spooled NUTs. `sensor_name` is omitted from the path
+/// when absent.
+pub fn inbox_dir(
+    recordings_root: &Path,
+    robot_id: &str,
+    robot_instance: i64,
+    data_type: &str,
+    sensor_name: Option<&str>,
+) -> PathBuf {
+    let mut dir = recordings_root
+        .join(INBOX_DIRNAME)
+        .join(robot_id)
+        .join(robot_instance.to_string())
+        .join(data_type);
+    if let Some(sensor_name) = sensor_name {
+        dir = dir.join(sensor_name);
+    }
+    dir
+}
+
+/// Build the inbox filename for a producer spool sequence: `chunk_NNNNNNNN.nut`.
+/// Wider than [`chunk_filename`] because the spool sequence is per-`(source,
+/// sensor)` over the whole process lifetime, not per-recording.
+pub fn inbox_chunk_filename(spool_seq: u64) -> String {
+    format!("chunk_{spool_seq:08}.nut")
+}
+
+/// Resolve the full inbox path for one spooled chunk.
+pub fn inbox_chunk_path(
+    recordings_root: &Path,
+    robot_id: &str,
+    robot_instance: i64,
+    data_type: &str,
+    sensor_name: Option<&str>,
+    spool_seq: u64,
+) -> PathBuf {
+    inbox_dir(
+        recordings_root,
+        robot_id,
+        robot_instance,
+        data_type,
+        sensor_name,
+    )
+    .join(inbox_chunk_filename(spool_seq))
+}
+
+/// Resolve the top-level inbox directory, reclaimed wholesale on daemon start.
+pub fn inbox_root(recordings_root: &Path) -> PathBuf {
+    recordings_root.join(INBOX_DIRNAME)
+}
+
 /// Build the filename for a video chunk at `chunk_index` — `chunk_NNNN.nut`.
 ///
 /// The producer writes directly to this final path; no `.tmp` staging is

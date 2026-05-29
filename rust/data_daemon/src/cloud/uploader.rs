@@ -215,12 +215,12 @@ async fn drain_ready_traces(
     };
     for recording in recordings {
         let traces = match store
-            .list_traces_for_recording(&recording.recording_id)
+            .list_traces_for_recording(recording.recording_index)
             .await
         {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(%error, recording_id = recording.recording_id, "uploader could not list traces");
+                tracing::warn!(%error, recording_index = recording.recording_index, "uploader could not list traces");
                 continue;
             }
         };
@@ -316,6 +316,19 @@ async fn upload_single(
         return;
     }
 
+    // Resolve the cloud `recording_id` (needed for the resumable-upload-url
+    // refresh) before we touch the trace's upload state. A None here means
+    // registration hasn't minted the cloud id yet — leave the trace in its
+    // queued/retrying state and skip; a later drain re-enters once it lands.
+    let Some(recording_id) = recording_cloud_id(store, trace.recording_index).await else {
+        tracing::warn!(
+            trace_id,
+            recording_index = trace.recording_index,
+            "recording has no cloud recording_id yet; deferring upload"
+        );
+        return;
+    };
+
     // Mark the trace as uploading so the next bus tick doesn't repeat the
     // attempt (the registration path is one-shot, but the periodic rescan
     // could re-enter on a long-running upload).
@@ -330,8 +343,7 @@ async fn upload_single(
         .await;
 
     tracing::info!(trace_id, data_type = ?trace.data_type, "starting trace upload");
-    let (Some(data_type), recording_id) = (trace.data_type.as_deref(), trace.recording_id.as_str())
-    else {
+    let Some(data_type) = trace.data_type.as_deref() else {
         // No data_type means we never saw a `StartTrace` for this row, so we
         // can't locate the on-disk artefact. Surface the failure both to the
         // status updater and on the event bus so the recording's progress
@@ -341,8 +353,14 @@ async fn upload_single(
         mark_failed_and_emit(store, bus, status_tx, &trace, "trace missing data_type").await;
         return;
     };
-    let trace_dir = TracePath::new(recording_id, data_type, trace_id.to_string())
-        .directory(recordings_root.as_path());
+    // On-disk artefacts are keyed by the local `recording_index`, matching the
+    // directory the dispatcher / trace actors wrote to.
+    let trace_dir = TracePath::new(
+        trace.recording_index.to_string(),
+        data_type,
+        trace_id.to_string(),
+    )
+    .directory(recordings_root.as_path());
 
     // Group on-disk artefacts and their session URIs in a stable order. We
     // walk by-reference rather than by-value so the recovery message stays
@@ -386,6 +404,7 @@ async fn upload_single(
             bus,
             status_tx,
             &trace,
+            &recording_id,
             &local_path,
             &filename,
             content_type,
@@ -443,10 +462,10 @@ async fn finalise_upload(
     }
     bus.publish(DaemonEvent::UploadComplete {
         trace_id: trace.trace_id.clone(),
-        recording_id: trace.recording_id.clone(),
+        recording_index: trace.recording_index,
     });
     let _ = status_tx.send(StatusUpdate::completed(
-        trace.recording_id.clone(),
+        trace.recording_index,
         trace.trace_id.clone(),
         total_uploaded.max(trace.total_bytes),
     ));
@@ -472,10 +491,10 @@ async fn mark_failed_and_emit(
     // single bad trace would block the recording's progress report forever.
     bus.publish(DaemonEvent::UploadComplete {
         trace_id: trace.trace_id.clone(),
-        recording_id: trace.recording_id.clone(),
+        recording_index: trace.recording_index,
     });
     let _ = status_tx.send(StatusUpdate::completed(
-        trace.recording_id.clone(),
+        trace.recording_index,
         trace.trace_id.clone(),
         trace.total_bytes.max(0),
     ));
@@ -545,6 +564,7 @@ async fn upload_one_file(
     bus: &EventBus,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     trace: &TraceRecord,
+    recording_id: &str,
     local_path: &std::path::Path,
     cloud_filepath: &str,
     content_type: &str,
@@ -569,9 +589,9 @@ async fn upload_one_file(
     let mut hasher = Md5::new();
     let mut server_md5_hex: Option<String> = None;
     let mut session_uri = session_uri;
-    let recording_id = trace.recording_id.clone();
+    let recording_index = trace.recording_index;
     let trace_id = trace.trace_id.clone();
-    let Some(org_id) = trace_org_id(store, &recording_id).await else {
+    let Some(org_id) = recording_org_id(store, recording_index).await else {
         return Err("recording has no org_id; cannot refresh session URI".to_string());
     };
 
@@ -651,12 +671,7 @@ async fn upload_one_file(
                     "upload session expired; requesting fresh URI"
                 );
                 match client
-                    .fetch_resumable_upload_url(
-                        &org_id,
-                        &recording_id,
-                        cloud_filepath,
-                        content_type,
-                    )
+                    .fetch_resumable_upload_url(&org_id, recording_id, cloud_filepath, content_type)
                     .await
                 {
                     Ok(new_uri) => {
@@ -683,12 +698,12 @@ async fn upload_one_file(
 
         bus.publish(DaemonEvent::UploadProgress {
             trace_id: trace_id.clone(),
-            recording_id: recording_id.clone(),
+            recording_index,
             bytes_uploaded: offset as i64,
             total_bytes: Some(total_bytes as i64),
         });
         let _ = status_tx.send(StatusUpdate::in_progress(
-            recording_id.clone(),
+            recording_index,
             trace_id.clone(),
             offset as i64,
         ));
@@ -726,12 +741,27 @@ async fn upload_one_file(
     })
 }
 
-async fn trace_org_id(store: &Arc<SqliteStateStore>, recording_id: &str) -> Option<String> {
-    match store.get_recording(recording_id).await {
+/// Resolve the recording's `org_id` from its local `recording_index`.
+async fn recording_org_id(store: &Arc<SqliteStateStore>, recording_index: i64) -> Option<String> {
+    match store.get_recording(recording_index).await {
         Ok(Some(row)) => row.org_id,
         Ok(None) => None,
         Err(error) => {
-            tracing::warn!(%error, recording_id, "uploader could not read recording org_id");
+            tracing::warn!(%error, recording_index, "uploader could not read recording org_id");
+            None
+        }
+    }
+}
+
+/// Resolve the cloud `recording_id` (the backend handle every cloud URL needs)
+/// from its local `recording_index`. `None` when registration hasn't minted
+/// the cloud id yet, or the row is missing.
+async fn recording_cloud_id(store: &Arc<SqliteStateStore>, recording_index: i64) -> Option<String> {
+    match store.get_recording(recording_index).await {
+        Ok(Some(row)) => row.recording_id,
+        Ok(None) => None,
+        Err(error) => {
+            tracing::warn!(%error, recording_index, "uploader could not read recording cloud id");
             None
         }
     }
@@ -944,7 +974,7 @@ mod tests {
     use super::*;
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
-    use crate::state::store::TraceUpdate;
+    use crate::state::store::{NewRecording, TraceUpdate};
     use crate::state::{TraceUploadStatus, TraceWriteStatus};
     use crate::storage::paths::TRACE_JSON_FILENAME;
     use std::collections::HashMap;
@@ -973,28 +1003,39 @@ mod tests {
     async fn seed_ready_trace(
         store: &SqliteStateStore,
         recordings_root: &std::path::Path,
-        recording_id: &str,
+        cloud_recording_id: &str,
         trace_id: &str,
         data_type: &str,
         data_type_name: &str,
         session_uri: &str,
         contents: &[u8],
-    ) -> std::path::PathBuf {
-        store.create_recording(recording_id).await.unwrap();
+    ) -> (i64, std::path::PathBuf) {
+        let recording = store
+            .create_recording(NewRecording {
+                org_id: Some("org-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        let recording_index = recording.recording_index;
+        // Stamp the cloud `recording_id` so the uploader's cloud-id resolution
+        // and the resumable-upload-url refresh see the same id the wiremock
+        // expectations assert on.
         store
-            .set_recording_org(recording_id, "org-1")
+            .mark_recording_start_notified(recording_index, cloud_recording_id)
             .await
             .unwrap();
         store
             .create_trace(
-                recording_id,
+                recording_index,
                 trace_id,
                 Some(data_type),
                 Some(data_type_name),
             )
             .await
             .unwrap();
-        let dir = TracePath::new(recording_id, data_type, trace_id.to_string())
+        // On-disk artefacts are keyed by the local `recording_index`.
+        let dir = TracePath::new(recording_index.to_string(), data_type, trace_id.to_string())
             .directory(recordings_root);
         std::fs::create_dir_all(&dir).unwrap();
         let local = dir.join(TRACE_JSON_FILENAME);
@@ -1017,7 +1058,7 @@ mod tests {
             )
             .await
             .unwrap();
-        local
+        (recording_index, local)
     }
 
     #[tokio::test]
@@ -1041,7 +1082,7 @@ mod tests {
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
         let payload = b"some-bytes";
-        seed_ready_trace(
+        let (_recording_index, _) = seed_ready_trace(
             &store,
             &recordings_root,
             "rec-1",
@@ -1099,7 +1140,7 @@ mod tests {
 
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
-        seed_ready_trace(
+        let (_recording_index, _) = seed_ready_trace(
             &store,
             &recordings_root,
             "rec-1",
@@ -1178,7 +1219,7 @@ mod tests {
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
         let dead_uri = format!("{}/upload/dead", server.uri());
-        seed_ready_trace(
+        let (_recording_index, _) = seed_ready_trace(
             &store,
             &recordings_root,
             "rec-1",
@@ -1244,12 +1285,24 @@ mod tests {
         let (store, tempdir) = open_store().await;
         let recordings_root = tempdir.path().join("recordings");
 
-        store.create_recording("rec-1").await.unwrap();
-        store.set_recording_org("rec-1", "org-1").await.unwrap();
+        let recording = store
+            .create_recording(NewRecording {
+                org_id: Some("org-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        let recording_index = recording.recording_index;
+        // Stamp a cloud id so the uploader's cloud-id resolution passes and it
+        // reaches the missing-data-type branch (not the deferral path).
+        store
+            .mark_recording_start_notified(recording_index, "rec-1")
+            .await
+            .unwrap();
         // Insert directly with NULL data_type so the uploader hits the
         // missing-data-type branch.
         store
-            .create_trace("rec-1", "trace-1", None, None)
+            .create_trace(recording_index, "trace-1", None, None)
             .await
             .unwrap();
         let mut uris = HashMap::new();

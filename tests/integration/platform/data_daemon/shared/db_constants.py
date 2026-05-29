@@ -5,8 +5,19 @@ from __future__ import annotations
 RECORDINGS_TABLE = "recordings"
 TRACES_TABLE = "traces"
 
+# Thin-shipper rewrite (migration 0006): the daemon owns recording identity.
+# ``recording_index`` is the local INTEGER PK of ``recordings`` and the
+# ``recording_index`` foreign key on ``traces`` (and the top on-disk directory
+# segment). ``recording_id`` is now a SEPARATE, NULLABLE cloud handle filled in
+# asynchronously by the start-notifier (or minted on demand when offline).
+COLUMN_RECORDING_INDEX = "recording_index"
 COLUMN_RECORDING_ID = "recording_id"
 COLUMN_TRACE_ID = "trace_id"
+# Source identity = (robot_id, robot_instance); recordings are looked up by
+# source ordered by recording_index.
+COLUMN_ROBOT_ID = "robot_id"
+COLUMN_ROBOT_INSTANCE = "robot_instance"
+COLUMN_STARTED_AT = "started_at"
 COLUMN_EXPECTED_TRACE_COUNT = "expected_trace_count"
 COLUMN_EXPECTED_TRACE_COUNT_REPORTED = "expected_trace_count_reported"
 COLUMN_PROGRESS_REPORTED = "progress_reported"

@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
-    read_org_id_from_config, spawn_progress_reporter, spawn_registration, spawn_status_updater,
-    spawn_uploader, StatusUpdate,
+    read_org_id_from_config, spawn_progress_reporter, spawn_recording_cancel_notifier,
+    spawn_recording_start_notifier, spawn_recording_stop_notifier, spawn_registration,
+    spawn_status_updater, spawn_uploader, StatusUpdate,
 };
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
@@ -517,6 +518,9 @@ struct CloudHandles {
     uploader: crate::cloud::UploaderHandle,
     status: crate::cloud::StatusUpdaterHandle,
     progress: crate::cloud::ProgressReporterHandle,
+    recording_start: crate::cloud::RecordingStartNotifierHandle,
+    recording_stop: crate::cloud::RecordingStopNotifierHandle,
+    recording_cancel: crate::cloud::RecordingCancelNotifierHandle,
 }
 
 impl CloudHandles {
@@ -530,6 +534,9 @@ impl CloudHandles {
         self.uploader.join().await;
         self.status.join().await;
         self.progress.join().await;
+        self.recording_start.join().await;
+        self.recording_stop.join().await;
+        self.recording_cancel.join().await;
     }
 }
 
@@ -580,8 +587,29 @@ fn spawn_cloud_coordinators(
         status_rx,
         shutdown_tx.subscribe(),
     );
-    let progress =
-        spawn_progress_reporter(state_store, Arc::clone(&client), shutdown_tx.subscribe());
+    let progress = spawn_progress_reporter(
+        state_store.clone(),
+        Arc::clone(&client),
+        shutdown_tx.subscribe(),
+    );
+    let recording_start = spawn_recording_start_notifier(
+        state_store.clone(),
+        event_bus.clone(),
+        Arc::clone(&client),
+        shutdown_tx.subscribe(),
+    );
+    let recording_stop = spawn_recording_stop_notifier(
+        state_store.clone(),
+        event_bus.clone(),
+        Arc::clone(&client),
+        shutdown_tx.subscribe(),
+    );
+    let recording_cancel = spawn_recording_cancel_notifier(
+        state_store,
+        event_bus,
+        Arc::clone(&client),
+        shutdown_tx.subscribe(),
+    );
 
     CloudHandles {
         connection,
@@ -589,6 +617,9 @@ fn spawn_cloud_coordinators(
         uploader,
         status,
         progress,
+        recording_start,
+        recording_stop,
+        recording_cancel,
     }
 }
 

@@ -1,29 +1,35 @@
 //! Per-trace actor task.
 //!
-//! Owns the SQLite lifecycle and the on-disk encoders for one trace: scalar /
-//! sensor traces stream into a [`JsonTraceWriter`]; video traces consume
-//! [`Envelope::VideoChunkReady`] notifications that hand off producer-spooled
-//! NUT chunks for ffmpeg-side transcoding into per-chunk MP4 segments, then
-//! on `EndTrace` stitch the segments into the final `lossy.mp4` /
+//! Owns the SQLite lifecycle and the on-disk encoders for one trace. The
+//! daemon owns trace identity: a trace is `(recording_index, data_type,
+//! sensor_name)` and the dispatcher mints its `trace_id` (a UUID, the DB
+//! primary key and on-disk directory name) when it first routes data for that
+//! key. The actor therefore knows its full identity at spawn time — there is
+//! no `StartTrace` and no pre-`StartTrace` buffering.
+//!
+//! Scalar / sensor traces stream into a [`JsonTraceWriter`]; video traces
+//! consume [`TraceActorMessage::Video`] notifications that hand off
+//! daemon-relinked NUT chunks for ffmpeg-side transcoding into per-chunk MP4
+//! segments, then on finalise stitch the segments into the final `lossy.mp4` /
 //! `lossless.mp4` and flush the [`VideoMetadataAccumulator`] sidecar.
+//!
+//! Finalisation is driven by a single [`TraceActorMessage::WindowClosing`]
+//! signal: the dispatcher sends every routed datum to the actor's FIFO inbox
+//! *before* `WindowClosing`, so by the time the actor sees it every frame has
+//! been applied — completeness without counting sequence numbers.
 //!
 //! Database writes are debounced — a per-frame `bytes_written` UPDATE is
 //! wasteful at 200+ Hz scalar ingestion, so a counter is flushed every
 //! [`BYTES_WRITTEN_DEBOUNCE_FRAMES`] frames during ingestion and always on
-//! finalise. The encoding tail of the state machine — `initializing → writing
-//! → pending_metadata → written` — is driven from this actor; the
-//! registration coordinator keys off the terminal `written` state.
+//! finalise.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use data_daemon_ipc::Envelope;
 use serde_json::Value;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::{self, JoinSet};
-use tokio::time::{sleep, Sleep};
 
 use crate::encoding::json_trace::{JsonTraceError, JsonTraceWriter};
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
@@ -33,12 +39,32 @@ use crate::state::{SqliteStateStore, StateStore, TraceWriteStatus};
 use crate::storage::budget::StorageBudget;
 use crate::storage::paths::{self, TracePath};
 
-/// Key identifying one per-trace actor.
+/// Routing key identifying one per-trace actor.
 ///
-/// `Frame` and `VideoChunkReady` envelopes only carry `trace_id` on the
-/// wire, so the dispatcher routes by `trace_id` alone. The actor learns its
-/// `recording_id` and `data_type` from the first `StartTrace` it sees.
-pub type TraceKey = String;
+/// `Data` and `VideoChunkReady` envelopes carry their source + sensor on the
+/// wire; the dispatcher resolves the source's active window to a
+/// `recording_index` and routes by this key. Two recordings of the same sensor
+/// get distinct actors automatically because `recording_index` differs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TraceKey {
+    /// Parent recording's local index.
+    pub recording_index: i64,
+    /// Wire data-type label (e.g. `"JOINT_POSITIONS"`, `"RGB_IMAGES"`).
+    pub data_type: String,
+    /// Per-stream sensor label (joint name, camera id). Persisted to the trace
+    /// row's `data_type_name` column.
+    pub sensor_name: Option<String>,
+}
+
+/// Full identity handed to a spawned actor: its routing key plus the
+/// daemon-minted `trace_id` used as the DB primary key and on-disk directory.
+#[derive(Debug, Clone)]
+pub struct TraceIdentity {
+    /// Daemon-minted UUID — DB primary key and on-disk directory name.
+    pub trace_id: String,
+    /// Routing key (`recording_index`, `data_type`, `sensor_name`).
+    pub key: TraceKey,
+}
 
 /// Flush `bytes_written` to the DB every N frames instead of every frame.
 ///
@@ -61,15 +87,6 @@ pub(crate) fn default_ffmpeg_concurrency() -> usize {
         .unwrap_or(2)
 }
 
-/// Time the actor waits after `StopAtSequence` for any envelopes the producer
-/// promised but that have not yet arrived.
-///
-/// Producer envelopes are normally delivered within the listener's 10 ms poll
-/// tick; 5 s is generous slack for cross-publisher reorder while still failing
-/// fast when a publishing thread crashed before delivering its tail frames —
-/// the trace is then marked failed so the recovery sweep can clean up.
-const STOP_AT_SEQUENCE_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// Shared context passed to every per-trace actor.
 ///
 /// Cheap to clone (everything inside is an `Arc` or `Copy`-like config), so
@@ -84,7 +101,7 @@ pub struct TraceActorContext {
     pub storage_budget: Arc<StorageBudget>,
     /// Encoder used to transcode per-chunk NUT files into MP4 segments and
     /// to stream-copy concatenate the segments into the final outputs on
-    /// `EndTrace`. Cloning a [`VideoEncoder`] is cheap (it carries only the
+    /// finalise. Cloning a [`VideoEncoder`] is cheap (it carries only the
     /// configured ffmpeg binary path).
     pub video_encoder: VideoEncoder,
     /// Bounds concurrent ffmpeg children. Shared across actors so the
@@ -139,34 +156,38 @@ impl TraceActorContext {
     }
 }
 
-/// Derive the per-actor routing key from an envelope.
-pub fn trace_key(envelope: &Envelope) -> Option<TraceKey> {
-    match envelope {
-        Envelope::StartTrace { trace_id, .. }
-        | Envelope::Frame { trace_id, .. }
-        | Envelope::VideoChunkReady { trace_id, .. } => Some(trace_id.clone()),
-        // `BatchedFrames` spans multiple traces and is expanded into
-        // per-trace `Frame`s by the IPC listener — it never reaches routing.
-        Envelope::BatchedFrames { .. }
-        | Envelope::StartRecording { .. }
-        | Envelope::StopRecording { .. }
-        | Envelope::CancelRecording { .. } => None,
-    }
-}
-
 /// Message accepted by a per-trace actor.
 #[derive(Debug)]
 pub enum TraceActorMessage {
-    /// A producer-originated envelope routed to this trace.
-    Envelope(Envelope),
-    /// Producer-promised total envelope count for this trace. The actor
-    /// finalises when its observed `Frame` / `VideoChunkReady` count reaches
-    /// `final_sequence_number`. A fixed deadline marks the trace failed if
-    /// promised envelopes never arrive.
-    StopAtSequence {
-        /// Total envelopes the producer published for this trace.
-        final_sequence_number: u64,
+    /// One sensor sample routed to this trace after its holdback elapsed.
+    Data {
+        /// Caller-supplied capture time in nanoseconds since the Unix epoch.
+        timestamp_ns: i64,
+        /// Optional caller-supplied capture time in seconds.
+        timestamp_s: Option<f64>,
+        /// Opaque per-sample bytes.
+        payload: Vec<u8>,
     },
+    /// One finished NUT chunk, already relinked by the dispatcher into this
+    /// trace's `chunks/chunk_NNNN.nut` with the daemon-assigned `chunk_index`.
+    Video {
+        /// Daemon-assigned, per-trace monotonic chunk index.
+        chunk_index: u32,
+        /// Frame width in pixels (constant across a trace).
+        width: u32,
+        /// Frame height in pixels.
+        height: u32,
+        /// Size of the relinked NUT file in bytes.
+        byte_count: u64,
+        /// Number of frames in the chunk.
+        frame_count: u32,
+        /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
+        frame_timestamps_s: Vec<f64>,
+    },
+    /// The recording window has closed and its holdback has drained: finalise
+    /// the trace. Every routed datum has already been delivered ahead of this
+    /// message by the single-owner dispatcher.
+    WindowClosing,
     /// Drop the in-flight writer and delete the on-disk artefacts. Sent by
     /// the dispatcher when the parent recording is cancelled.
     Cancel,
@@ -176,30 +197,20 @@ pub enum TraceActorMessage {
 ///
 /// Encoders are opened lazily: a scalar trace doesn't need a `trace.json` file
 /// until the first frame arrives, and a video trace's segment / metadata
-/// state is allocated when the first `VideoChunkReady` lands.
+/// state is allocated when the first `Video` message lands.
 enum TraceWriter {
     /// No frames yet observed; the writer is decided on the first frame or
-    /// chunk envelope.
+    /// chunk message.
     Pending,
     /// Scalar trace streaming into a single `trace.json` array.
     Json(JsonTraceWriter),
     /// Video trace whose chunk encodes run concurrently as background tasks.
-    ///
-    /// Each `VideoChunkReady` envelope spawns one encode task; the per-trace
-    /// actor returns to the inbox immediately so a slow ffmpeg invocation
-    /// can't back-pressure unrelated joint/scalar publishers sharing the
-    /// `commands` service. Completed encodes land in `completed_chunks`
-    /// keyed by `chunk_index`; `EndTrace` awaits any still-running encode
-    /// and concatenates the segments in `chunk_index` order. The
-    /// `ffmpeg_permits` semaphore on `TraceActorContext` still caps total
-    /// concurrent ffmpeg children across every trace, so per-trace
-    /// parallelism is bounded by CPU rather than the actor's serialisation.
     Video {
-        /// Frame width in pixels (recorded from the first chunk envelope).
+        /// Frame width in pixels (recorded from the first chunk message).
         width: u32,
         /// Frame height in pixels.
         height: u32,
-        /// Encodes completed so far, keyed by `chunk_index` so the EndTrace
+        /// Encodes completed so far, keyed by `chunk_index` so the finalise
         /// concat can iterate in order regardless of completion order.
         completed_chunks: BTreeMap<u32, CompletedChunk>,
         /// Spawned chunk-encode tasks still running.
@@ -207,7 +218,7 @@ enum TraceWriter {
     },
 }
 
-/// One successfully encoded chunk, ready to feed into the EndTrace concat.
+/// One successfully encoded chunk, ready to feed into the finalise concat.
 struct CompletedChunk {
     /// `chunk_NNNN_lossy.mp4` segment path.
     lossy_segment: PathBuf,
@@ -215,10 +226,10 @@ struct CompletedChunk {
     lossless_segment: PathBuf,
     /// Sum of both segments' on-disk byte counts.
     bytes: u64,
-    /// Per-frame `timestamp_s` values from the chunk envelope, applied to
-    /// the metadata accumulator at EndTrace in chunk-index order.
+    /// Per-frame `timestamp_s` values from the chunk message, applied to the
+    /// metadata accumulator at finalise in chunk-index order.
     frame_timestamps_s: Vec<f64>,
-    /// Frame count carried by the chunk envelope.
+    /// Frame count carried by the chunk message.
     frame_count: u32,
 }
 
@@ -230,99 +241,74 @@ struct ChunkEncodeJobResult {
     outcome: Result<CompletedChunk, VideoEncodeError>,
 }
 
-/// Whether the actor should keep running after handling an envelope.
-enum Flow {
-    /// Continue receiving envelopes.
-    Continue,
-    /// Terminal condition reached (promised envelope count met, cancel, or
-    /// stop-at-sequence timeout) — the actor should return.
-    Stop,
-}
-
-/// Run the per-trace actor until the dispatcher closes the inbox.
-///
-/// The loop races inbox reads against an optional timeout armed when
-/// `StopAtSequence` arrives but the observed envelope count hasn't yet caught
-/// up to the producer's promise; if the timer fires first the trace is
-/// marked failed.
+/// Run the per-trace actor until the dispatcher closes the inbox or sends a
+/// terminal message (`WindowClosing` / `Cancel`).
 pub async fn run(
     store: Arc<SqliteStateStore>,
     context: Arc<TraceActorContext>,
-    trace_id: TraceKey,
+    identity: TraceIdentity,
     mut inbox: mpsc::Receiver<TraceActorMessage>,
 ) {
-    let mut state = ActorState::new(trace_id.clone());
+    let mut state = ActorState::new(identity);
+    state.ensure_trace_row(&store).await;
 
-    loop {
-        // Re-arm the timeout each loop iteration based on current state — it
-        // is `Some` only while `StopAtSequence` is set and the envelope count
-        // still trails it. `Box::pin` because `Sleep` is `!Unpin`.
-        let timeout: Option<std::pin::Pin<Box<Sleep>>> = state
-            .is_awaiting_stop_at_sequence()
-            .then(|| Box::pin(sleep(STOP_AT_SEQUENCE_TIMEOUT)));
-
-        let message = match timeout {
-            Some(mut timer) => {
-                tokio::select! {
-                    biased;
-                    message = inbox.recv() => message,
-                    _ = &mut timer => {
-                        tracing::warn!(
-                            trace_id = state.trace_id,
-                            envelopes_received = state.envelopes_received,
-                            final_sequence_number = state.final_sequence_number,
-                            "stop_at_sequence wait timed out; marking trace failed",
-                        );
-                        state.mark_failed(&store).await;
-                        return;
-                    }
-                }
-            }
-            None => inbox.recv().await,
-        };
-
-        let Some(message) = message else {
-            // Inbox closed without ever reaching the promised count nor a
-            // Cancel — typically a daemon shutdown. Mark the trace as failed
-            // so the lifecycle is observable from the DB and the registration
-            // coordinator doesn't pick it up. Skip when no StartTrace has
-            // been seen — there is no row yet, and writing one in `failed`
-            // state would be misleading.
-            state.handle_shutdown_without_end(&store).await;
-            return;
-        };
-
+    while let Some(message) = inbox.recv().await {
         match message {
-            TraceActorMessage::Envelope(envelope) => {
-                if let Flow::Stop = state.accept_envelope(&store, &context, envelope).await {
-                    return;
-                }
-            }
-            TraceActorMessage::StopAtSequence {
-                final_sequence_number,
+            TraceActorMessage::Data {
+                timestamp_ns,
+                timestamp_s,
+                payload,
             } => {
-                if let Flow::Stop = state
-                    .handle_stop_at_sequence(&store, &context, final_sequence_number)
-                    .await
-                {
-                    return;
-                }
+                state
+                    .handle_data(&store, &context, timestamp_ns, timestamp_s, payload)
+                    .await;
+            }
+            TraceActorMessage::Video {
+                chunk_index,
+                width,
+                height,
+                byte_count,
+                frame_count,
+                frame_timestamps_s,
+            } => {
+                state
+                    .handle_video(
+                        &store,
+                        &context,
+                        chunk_index,
+                        width,
+                        height,
+                        byte_count,
+                        frame_count,
+                        frame_timestamps_s,
+                    )
+                    .await;
+            }
+            TraceActorMessage::WindowClosing => {
+                state.finalise_trace(&store, &context).await;
+                return;
             }
             TraceActorMessage::Cancel => {
-                tracing::info!(trace_id = state.trace_id, "cancel received by actor");
-                state.handle_cancel(&store, &context).await;
+                tracing::info!(
+                    trace_id = state.identity.trace_id,
+                    "cancel received by actor"
+                );
+                state.handle_cancel(&context).await;
                 return;
             }
         }
     }
+
+    // Inbox closed without a WindowClosing nor a Cancel — typically a daemon
+    // shutdown. Mark the trace failed so its lifecycle is observable from the
+    // DB and the registration coordinator doesn't pick it up.
+    state.handle_shutdown_without_end(&store).await;
 }
 
 /// Per-actor mutable bookkeeping. Pulled out of `run` so the message handlers
-/// can be tested with synthetic envelopes against a clean state object.
+/// can be tested with synthetic messages against a clean state object.
 struct ActorState {
-    trace_id: String,
-    recording_id: Option<String>,
-    data_type: Option<String>,
+    identity: TraceIdentity,
     writer: TraceWriter,
     frame_count: u64,
     bytes_on_disk: u64,
@@ -334,271 +320,42 @@ struct ActorState {
     /// periodically so a runaway producer with no disk left doesn't drown
     /// the daemon log in identical warnings.
     dropped_over_budget: u64,
-    /// Envelopes received before `StartTrace`. Both scalar `Frame`s and
-    /// `VideoChunkReady` envelopes can in principle arrive before
-    /// `StartTrace` is drained — although both ride the same `commands`
-    /// service today, the per-trace pre-`StartTrace` buffer is kept as a
-    /// safety net against any future reordering or producer-side race.
-    pending: Vec<Envelope>,
-    /// Count of envelopes dropped because [`Self::pending`] hit its cap before
-    /// `StartTrace` arrived. Rate-limits the associated warning.
-    pending_overflow: u64,
-    /// Count of producer-originated `Frame` or `VideoChunkReady` envelopes
-    /// applied to the writer. Compared against `final_sequence_number` to
-    /// decide when the trace can be finalised.
-    envelopes_received: u64,
-    /// Producer-promised total envelope count, set by `StopAtSequence`.
-    /// `None` until the dispatcher has fanned out the recording stop.
-    final_sequence_number: Option<u64>,
 }
 
 impl ActorState {
-    fn new(trace_id: String) -> Self {
+    fn new(identity: TraceIdentity) -> Self {
         Self {
-            trace_id,
-            recording_id: None,
-            data_type: None,
+            identity,
             writer: TraceWriter::Pending,
             frame_count: 0,
             bytes_on_disk: 0,
             last_db_bytes: 0,
             dropped_over_budget: 0,
-            pending: Vec::new(),
-            pending_overflow: 0,
-            envelopes_received: 0,
-            final_sequence_number: None,
         }
     }
 
-    /// True iff the producer has promised a final envelope count but the
-    /// actor hasn't observed all the envelopes yet. The run loop arms its
-    /// timeout exactly when this returns `true`.
-    fn is_awaiting_stop_at_sequence(&self) -> bool {
-        matches!(self.final_sequence_number, Some(target) if self.envelopes_received < target)
-    }
-
-    /// Route one inbound envelope.
-    ///
-    /// Until `StartTrace` has been observed every other envelope is buffered
-    /// (see [`Self::pending`]); `StartTrace` itself is applied immediately and
-    /// then drains the buffer in arrival order. Once the trace is known every
-    /// envelope is applied directly. After `StartTrace` (and any replay) we
-    /// re-check `try_finalise_if_target_reached` so an empty trace whose
-    /// `StopAtSequence(0)` raced ahead of `StartTrace` finalises at once.
-    async fn accept_envelope(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-        envelope: Envelope,
-    ) -> Flow {
-        let is_start_trace = matches!(envelope, Envelope::StartTrace { .. });
-        if self.recording_id.is_none() && !is_start_trace {
-            self.buffer_pending(envelope);
-            return Flow::Continue;
-        }
-        let flow = self.apply_envelope(store, context, envelope).await;
-        if is_start_trace && matches!(flow, Flow::Continue) {
-            let replay = self.replay_pending(store, context).await;
-            if matches!(replay, Flow::Stop) {
-                return Flow::Stop;
-            }
-            return self.try_finalise_if_target_reached(store, context).await;
-        }
-        flow
-    }
-
-    /// Apply one envelope to the writer/state machine. Assumes ordering
-    /// constraints are already satisfied — callers gate pre-`StartTrace`
-    /// envelopes via [`Self::accept_envelope`].
-    async fn apply_envelope(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-        envelope: Envelope,
-    ) -> Flow {
-        match envelope {
-            Envelope::StartTrace {
-                recording_id,
-                data_type,
-                data_type_name,
-                ..
-            } => {
-                self.handle_start_trace(store, recording_id, data_type, data_type_name)
-                    .await;
-                Flow::Continue
-            }
-            Envelope::Frame {
-                timestamp_ns,
-                timestamp_s,
-                payload,
-                ..
-            } => {
-                self.handle_frame(store, context, timestamp_ns, timestamp_s, payload)
-                    .await;
-                self.envelopes_received = self.envelopes_received.saturating_add(1);
-                self.try_finalise_if_target_reached(store, context).await
-            }
-            Envelope::VideoChunkReady {
-                chunk_index,
-                width,
-                height,
-                byte_count,
-                frame_count,
-                frame_timestamps_s,
-                ..
-            } => {
-                self.handle_video_chunk_ready(
-                    store,
-                    context,
-                    chunk_index,
-                    width,
-                    height,
-                    byte_count,
-                    frame_count,
-                    frame_timestamps_s,
-                )
-                .await;
-                self.envelopes_received = self.envelopes_received.saturating_add(1);
-                self.try_finalise_if_target_reached(store, context).await
-            }
-            Envelope::StartRecording { .. }
-            | Envelope::StopRecording { .. }
-            | Envelope::CancelRecording { .. }
-            | Envelope::BatchedFrames { .. } => {
-                // Recording-scoped envelopes never carry a trace_id, so the
-                // dispatcher routes them through its own branch — they can't
-                // reach a per-trace actor. `BatchedFrames` is likewise never
-                // seen here: the IPC listener expands it into per-trace
-                // `Frame`s before dispatch. The match arm exists so adding a
-                // new non-trace envelope variant is a compile error here
-                // rather than a silent ignore.
-                unreachable!("non-trace envelopes are filtered by trace_key");
-            }
-        }
-    }
-
-    /// Handle a producer-promised final envelope count. Records the target
-    /// and finalises immediately when the actor has already observed at
-    /// least that many envelopes (a recording with a small trace whose
-    /// frames arrive before the stop envelope is dispatched).
-    async fn handle_stop_at_sequence(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-        final_sequence_number: u64,
-    ) -> Flow {
-        tracing::info!(
-            trace_id = self.trace_id,
-            envelopes_received = self.envelopes_received,
-            final_sequence_number,
-            "stop_at_sequence received by actor",
-        );
-        self.final_sequence_number = Some(final_sequence_number);
-        self.try_finalise_if_target_reached(store, context).await
-    }
-
-    /// Finalise the trace when the observed envelope count has reached the
-    /// producer-promised target. A no-op (returns `Flow::Continue`) when the
-    /// target is unset, not yet met, or `StartTrace` has not been observed
-    /// yet — the last case covers a `StopAtSequence` that races ahead of
-    /// `StartTrace` on a different publisher; the actor stays armed and the
-    /// 5 s timer in `run` is the watchdog.
-    async fn try_finalise_if_target_reached(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-    ) -> Flow {
-        match self.final_sequence_number {
-            Some(target) if self.envelopes_received >= target && self.recording_id.is_some() => {
-                self.finalise_trace(store, context).await;
-                Flow::Stop
-            }
-            _ => Flow::Continue,
-        }
-    }
-
-    /// Buffer an envelope that arrived before `StartTrace`.
-    ///
-    /// Capped so a trace whose `StartTrace` is lost (or pathologically
-    /// delayed) cannot grow the buffer without bound; the oldest envelope is
-    /// dropped on overflow, which for an in-order frame stream means the
-    /// earliest frames — the least costly to lose.
-    fn buffer_pending(&mut self, envelope: Envelope) {
-        /// Upper bound on buffered pre-`StartTrace` envelopes. Generous
-        /// relative to the sub-tick `StartTrace` skew it exists to absorb.
-        const MAX_PENDING: usize = 512;
-        if self.pending.len() >= MAX_PENDING {
-            self.pending.remove(0);
-            self.pending_overflow = self.pending_overflow.saturating_add(1);
-            if self.pending_overflow == 1 || self.pending_overflow.is_multiple_of(256) {
-                tracing::warn!(
-                    trace_id = self.trace_id,
-                    dropped = self.pending_overflow,
-                    "pre-start_trace buffer full; dropping oldest envelope",
-                );
-            }
-        }
-        self.pending.push(envelope);
-    }
-
-    /// Replay buffered pre-`StartTrace` envelopes in arrival order. Called
-    /// immediately after `StartTrace` is applied.
-    async fn replay_pending(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-    ) -> Flow {
-        let pending = std::mem::take(&mut self.pending);
-        if !pending.is_empty() {
-            tracing::debug!(
-                trace_id = self.trace_id,
-                buffered = pending.len(),
-                "replaying envelopes buffered before start_trace",
-            );
-        }
-        for envelope in pending {
-            if let Flow::Stop = self.apply_envelope(store, context, envelope).await {
-                return Flow::Stop;
-            }
-        }
-        Flow::Continue
-    }
-
-    async fn handle_start_trace(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        recording_id: String,
-        data_type: String,
-        data_type_name: Option<String>,
-    ) {
-        self.recording_id = Some(recording_id.clone());
-        self.data_type = Some(data_type.clone());
-        match store
+    /// Insert the trace row in `initializing` state. Idempotent on `trace_id`.
+    async fn ensure_trace_row(&self, store: &Arc<SqliteStateStore>) {
+        let key = &self.identity.key;
+        if let Err(error) = store
             .create_trace(
-                &recording_id,
-                &self.trace_id,
-                Some(&data_type),
-                data_type_name.as_deref(),
+                key.recording_index,
+                &self.identity.trace_id,
+                Some(&key.data_type),
+                key.sensor_name.as_deref(),
             )
             .await
         {
-            Ok(_) => tracing::debug!(
-                trace_id = self.trace_id,
-                recording_id,
-                data_type,
-                data_type_name = data_type_name.as_deref(),
-                "trace initialised"
-            ),
-            Err(error) => tracing::warn!(
+            tracing::warn!(
                 %error,
-                trace_id = self.trace_id,
-                recording_id,
+                trace_id = self.identity.trace_id,
+                recording_index = key.recording_index,
                 "failed to create trace row"
-            ),
+            );
         }
     }
 
-    async fn handle_frame(
+    async fn handle_data(
         &mut self,
         store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
@@ -606,23 +363,11 @@ impl ActorState {
         _timestamp_s: Option<f64>,
         payload: Vec<u8>,
     ) {
-        // Trace metadata must exist by the time the first frame arrives —
-        // `StartTrace` is the first envelope routed by the dispatcher.
-        let (Some(recording_id), Some(data_type)) =
-            (self.recording_id.clone(), self.data_type.clone())
-        else {
-            tracing::warn!(
-                trace_id = self.trace_id,
-                "dropping frame received before start_trace"
-            );
-            return;
-        };
-
         if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
             return;
         }
 
-        if !self.ensure_writer_open(context, &recording_id, &data_type) {
+        if !self.ensure_writer_open(context) {
             return;
         }
 
@@ -633,7 +378,7 @@ impl ActorState {
         if let Err(error) = self.append_frame(timestamp_ns, &payload).await {
             tracing::warn!(
                 %error,
-                trace_id = self.trace_id,
+                trace_id = self.identity.trace_id,
                 "failed to append frame; marking trace failed"
             );
             self.mark_failed(store).await;
@@ -652,10 +397,10 @@ impl ActorState {
                 bytes_written: bytes_changed.then_some(self.bytes_on_disk as i64),
                 ..TraceUpdate::default()
             };
-            if let Err(error) = store.update_trace(&self.trace_id, update).await {
+            if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     "failed to update trace progress"
                 );
             } else if bytes_changed {
@@ -665,8 +410,7 @@ impl ActorState {
     }
 
     /// Ask the storage budget whether `payload_len` bytes may be written
-    /// against the currently open writer. See the original comment block in
-    /// the prior implementation for the fail-open rationale.
+    /// against the currently open writer.
     fn budget_allows_frame(&mut self, budget: &Arc<StorageBudget>, payload_len: usize) -> bool {
         match budget.check(payload_len as u64) {
             Ok(check) if check.is_available() => true,
@@ -674,7 +418,7 @@ impl ActorState {
                 self.dropped_over_budget = self.dropped_over_budget.saturating_add(1);
                 if self.dropped_over_budget == 1 || self.dropped_over_budget.is_multiple_of(256) {
                     tracing::warn!(
-                        trace_id = self.trace_id,
+                        trace_id = self.identity.trace_id,
                         dropped = self.dropped_over_budget,
                         ?check,
                         "storage budget refused frame; dropping"
@@ -685,7 +429,7 @@ impl ActorState {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     "storage budget query failed; allowing frame through"
                 );
                 true
@@ -693,20 +437,15 @@ impl ActorState {
         }
     }
 
-    /// Lazily open the JSON writer for scalar traces. Video traces no
-    /// longer open a writer on the frame path — they wait for the first
-    /// `VideoChunkReady` to allocate the video writer.
-    fn ensure_writer_open(
-        &mut self,
-        context: &Arc<TraceActorContext>,
-        recording_id: &str,
-        data_type: &str,
-    ) -> bool {
+    /// Lazily open the JSON writer for scalar traces. Video traces do not open
+    /// a writer on the data path — they wait for the first `Video` message to
+    /// allocate the video writer.
+    fn ensure_writer_open(&mut self, context: &Arc<TraceActorContext>) -> bool {
         if !matches!(self.writer, TraceWriter::Pending) {
             return true;
         }
 
-        let trace_dir = self.trace_directory(recording_id, data_type, context);
+        let trace_dir = self.trace_directory(context);
         match JsonTraceWriter::open(&trace_dir) {
             Ok(json_writer) => {
                 self.bytes_on_disk = json_writer.bytes_on_disk();
@@ -716,7 +455,7 @@ impl ActorState {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     path = %trace_dir.display(),
                     "failed to open JSON trace"
                 );
@@ -752,13 +491,12 @@ impl ActorState {
                 Ok(())
             }
             TraceWriter::Video { .. } => {
-                // Video traces no longer receive standalone `Frame`
-                // envelopes — pixel data flows via `VideoChunkReady`. A
-                // stray frame for a video trace is a producer bug; log it
-                // and ignore.
+                // Video traces no longer receive standalone data samples —
+                // pixel data flows via `Video` messages. A stray sample for a
+                // video trace is a producer bug; log it and ignore.
                 tracing::warn!(
-                    trace_id = self.trace_id,
-                    "video trace received standalone Frame; ignoring"
+                    trace_id = self.identity.trace_id,
+                    "video trace received standalone Data; ignoring"
                 );
                 Ok(())
             }
@@ -766,10 +504,10 @@ impl ActorState {
     }
 
     /// Handle one finished NUT chunk: transcode it to per-chunk MP4 segments,
-    /// append the segment paths to the pending list for the EndTrace concat,
+    /// append the segment paths to the pending list for the finalise concat,
     /// and unlink the source NUT.
     #[allow(clippy::too_many_arguments)]
-    async fn handle_video_chunk_ready(
+    async fn handle_video(
         &mut self,
         store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
@@ -780,18 +518,7 @@ impl ActorState {
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
     ) {
-        let (Some(recording_id), Some(data_type)) =
-            (self.recording_id.clone(), self.data_type.clone())
-        else {
-            tracing::warn!(
-                trace_id = self.trace_id,
-                chunk_index,
-                "dropping video chunk received before start_trace"
-            );
-            return;
-        };
-
-        let trace_dir = self.trace_directory(&recording_id, &data_type, context);
+        let trace_dir = self.trace_directory(context);
         let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
         let raw_nut = chunks_dir.join(paths::chunk_filename(chunk_index));
         let lossy_segment = trace_dir.join(paths::chunk_lossy_filename(chunk_index));
@@ -811,9 +538,6 @@ impl ActorState {
         }
 
         // Drain any background encodes that finished while we were idle.
-        // Doing this here (rather than only at EndTrace) keeps
-        // `bytes_on_disk` / `frame_count` fresh enough for the debounced DB
-        // progress UPDATE.
         if self.drain_completed_encodes(store).await {
             // A previous chunk's encode failed; mark_failed already ran, no
             // point spawning more work.
@@ -831,7 +555,7 @@ impl ActorState {
         {
             if (*stored_width, *stored_height) != (width, height) {
                 tracing::warn!(
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     chunk_index,
                     stored = ?(*stored_width, *stored_height),
                     arrived = ?(width, height),
@@ -851,11 +575,9 @@ impl ActorState {
         // Spawn the encode as a background task. The actor returns to the
         // inbox immediately so a slow ffmpeg invocation cannot back-pressure
         // unrelated joint / scalar publishers sharing the commands service.
-        // `ffmpeg_permits` still caps total concurrent ffmpeg children
-        // across every trace.
         let permits = context.ffmpeg_permits.clone();
         let encoder = context.video_encoder.clone();
-        let trace_id = self.trace_id.clone();
+        let trace_id = self.identity.trace_id.clone();
         let request = ChunkEncodeRequest {
             raw_nut: raw_nut.clone(),
             lossy_out: lossy_segment.clone(),
@@ -930,10 +652,10 @@ impl ActorState {
                 write_status: Some(TraceWriteStatus::Writing),
                 ..TraceUpdate::default()
             };
-            if let Err(error) = store.update_trace(&self.trace_id, update).await {
+            if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     "failed to mark trace writing"
                 );
             }
@@ -966,7 +688,7 @@ impl ActorState {
                     Err(error) => {
                         tracing::warn!(
                             %error,
-                            trace_id = self.trace_id,
+                            trace_id = self.identity.trace_id,
                             chunk_index = result.chunk_index,
                             "failed to encode video chunk"
                         );
@@ -976,7 +698,7 @@ impl ActorState {
                 Err(join_error) => {
                     tracing::warn!(
                         %join_error,
-                        trace_id = self.trace_id,
+                        trace_id = self.identity.trace_id,
                         "video encode task join failed"
                     );
                     any_failure = true;
@@ -986,19 +708,16 @@ impl ActorState {
         if new_bytes > 0 || new_frames > 0 {
             self.bytes_on_disk = self.bytes_on_disk.saturating_add(new_bytes);
             self.frame_count = self.frame_count.saturating_add(new_frames);
-            // Debounce the DB UPDATE the same way the scalar path does — a
-            // chunk landing every ~second is rare enough that we can flush
-            // every time, but only when there's been an actual change.
             let bytes_changed = self.bytes_on_disk as i64 != self.last_db_bytes;
             if bytes_changed {
                 let update = TraceUpdate {
                     bytes_written: Some(self.bytes_on_disk as i64),
                     ..TraceUpdate::default()
                 };
-                if let Err(error) = store.update_trace(&self.trace_id, update).await {
+                if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
                     tracing::warn!(
                         %error,
-                        trace_id = self.trace_id,
+                        trace_id = self.identity.trace_id,
                         "failed to update trace progress"
                     );
                 } else {
@@ -1017,21 +736,8 @@ impl ActorState {
         store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
     ) {
-        let (Some(recording_id), Some(data_type)) =
-            (self.recording_id.clone(), self.data_type.clone())
-        else {
-            tracing::warn!(
-                trace_id = self.trace_id,
-                envelopes_received = self.envelopes_received,
-                "stop_at_sequence reached before start_trace; dropping"
-            );
-            return;
-        };
-
         let writer = std::mem::replace(&mut self.writer, TraceWriter::Pending);
-        let finalise = self
-            .finalise_writer(writer, context, &recording_id, &data_type)
-            .await;
+        let finalise = self.finalise_writer(writer, context).await;
         match finalise {
             Ok(total_bytes) => {
                 self.bytes_on_disk = total_bytes;
@@ -1041,16 +747,16 @@ impl ActorState {
                     bytes_written: Some(total_bytes as i64),
                     ..TraceUpdate::default()
                 };
-                if let Err(error) = store.update_trace(&self.trace_id, update).await {
+                if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
                     tracing::warn!(
                         %error,
-                        trace_id = self.trace_id,
+                        trace_id = self.identity.trace_id,
                         "failed to mark trace as written"
                     );
                 }
                 tracing::info!(
-                    trace_id = self.trace_id,
-                    recording_id,
+                    trace_id = self.identity.trace_id,
+                    recording_index = self.identity.key.recording_index,
                     frame_count = self.frame_count,
                     dropped_over_budget = self.dropped_over_budget,
                     total_bytes,
@@ -1058,15 +764,15 @@ impl ActorState {
                 );
                 if let Some(bus) = context.event_bus.as_ref() {
                     bus.publish(crate::state::DaemonEvent::TraceWritten {
-                        trace_id: self.trace_id.clone(),
-                        recording_id: recording_id.clone(),
+                        trace_id: self.identity.trace_id.clone(),
+                        recording_index: self.identity.key.recording_index,
                     });
                 }
             }
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     "failed to finalise trace artefacts"
                 );
                 self.mark_failed(store).await;
@@ -1078,14 +784,12 @@ impl ActorState {
         &self,
         writer: TraceWriter,
         context: &Arc<TraceActorContext>,
-        recording_id: &str,
-        data_type: &str,
     ) -> Result<u64, FrameAppendError> {
         match writer {
             TraceWriter::Pending => {
                 // Empty trace — no encoder was ever opened. Leave a single
                 // empty `trace.json` behind so the artefact set is complete.
-                let trace_dir = self.trace_directory(recording_id, data_type, context);
+                let trace_dir = self.trace_directory(context);
                 let json = JsonTraceWriter::open(&trace_dir)?;
                 let total = json.finish()?;
                 Ok(total)
@@ -1122,12 +826,12 @@ impl ActorState {
                     // failed (or none ever landed) — fall back to the empty
                     // trace.json path so the artefact set isn't missing a
                     // sidecar entirely.
-                    let trace_dir = self.trace_directory(recording_id, data_type, context);
+                    let trace_dir = self.trace_directory(context);
                     let json = JsonTraceWriter::open(&trace_dir)?;
                     return Ok(json.finish()?);
                 }
 
-                let trace_dir = self.trace_directory(recording_id, data_type, context);
+                let trace_dir = self.trace_directory(context);
                 let lossy_out = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
                 let lossless_out = trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME);
 
@@ -1183,7 +887,7 @@ impl ActorState {
                         if error.kind() != std::io::ErrorKind::NotFound {
                             tracing::warn!(
                                 %error,
-                                trace_id = self.trace_id,
+                                trace_id = self.identity.trace_id,
                                 path = %segment.display(),
                                 "failed to remove encoded chunk segment after concat"
                             );
@@ -1197,7 +901,7 @@ impl ActorState {
                 let metadata_bytes = flush_metadata_blocking(metadata, trace_dir.clone()).await?;
 
                 tracing::debug!(
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     chunks_encoded = completed_chunks.len(),
                     "video trace concatenated"
                 );
@@ -1211,9 +915,6 @@ impl ActorState {
     }
 
     async fn handle_shutdown_without_end(&mut self, store: &Arc<SqliteStateStore>) {
-        if self.recording_id.is_none() {
-            return;
-        }
         self.mark_failed(store).await;
     }
 
@@ -1223,10 +924,10 @@ impl ActorState {
             bytes_written: Some(self.bytes_on_disk as i64),
             ..TraceUpdate::default()
         };
-        if let Err(error) = store.update_trace(&self.trace_id, update).await {
+        if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
             tracing::warn!(
                 %error,
-                trace_id = self.trace_id,
+                trace_id = self.identity.trace_id,
                 "failed to mark trace as failed"
             );
         }
@@ -1235,31 +936,19 @@ impl ActorState {
     /// Tear down the writer and delete the on-disk trace directory.
     ///
     /// Called when the parent recording is cancelled. The DB row's
-    /// `write_status` is left untouched here — the dispatcher will issue a
-    /// single `cancel_recording` transaction once every actor has exited
-    /// (the trace's terminal state is `Failed` with
-    /// `error_code = recording_cancelled`).
-    async fn handle_cancel(
-        &mut self,
-        _store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-    ) {
+    /// `write_status` is left untouched here — the dispatcher issues a single
+    /// `cancel_recording` transaction once every actor has exited.
+    async fn handle_cancel(&mut self, context: &Arc<TraceActorContext>) {
         // Drop the writer first so any BufWriter inside releases its file
         // handle before we unlink the directory.
         self.writer = TraceWriter::Pending;
 
-        let (Some(recording_id), Some(data_type)) =
-            (self.recording_id.clone(), self.data_type.clone())
-        else {
-            // No StartTrace observed — nothing on disk to clean up.
-            return;
-        };
-        let trace_dir = self.trace_directory(&recording_id, &data_type, context);
+        let trace_dir = self.trace_directory(context);
         if let Err(error) = std::fs::remove_dir_all(&trace_dir) {
             if error.kind() != std::io::ErrorKind::NotFound {
                 tracing::warn!(
                     %error,
-                    trace_id = self.trace_id,
+                    trace_id = self.identity.trace_id,
                     path = %trace_dir.display(),
                     "failed to remove cancelled trace directory"
                 );
@@ -1272,24 +961,20 @@ impl ActorState {
         }
     }
 
-    /// Build the on-disk directory for this trace. Callers must have already
-    /// confirmed via `StartTrace` that `recording_id` and `data_type` are
-    /// known, so the invariant is enforced at the type system (no
-    /// `"unknown"` fallback that could silently shunt misrouted traces into
-    /// a shared bucket).
-    fn trace_directory(
-        &self,
-        recording_id: &str,
-        data_type: &str,
-        context: &Arc<TraceActorContext>,
-    ) -> std::path::PathBuf {
-        TracePath::new(recording_id, data_type, self.trace_id.clone())
-            .directory(context.recordings_root.as_path())
+    /// Build the on-disk directory for this trace:
+    /// `{recordings_root}/{recording_index}/{data_type}/{trace_id}/`.
+    fn trace_directory(&self, context: &Arc<TraceActorContext>) -> std::path::PathBuf {
+        TracePath::new(
+            self.identity.key.recording_index.to_string(),
+            self.identity.key.data_type.clone(),
+            self.identity.trace_id.clone(),
+        )
+        .directory(context.recordings_root.as_path())
     }
 }
 
 /// Errors that can surface while appending or finalising a frame. The variants
-/// are unified so `handle_frame` / `finalise_trace` can log + mark-failed in
+/// are unified so `handle_data` / `finalise_trace` can log + mark-failed in
 /// one place regardless of which writer raised.
 #[derive(Debug, thiserror::Error)]
 enum FrameAppendError {
@@ -1317,9 +1002,7 @@ fn scalar_fallback_entry(timestamp_ns: i64, payload: &[u8]) -> Value {
 }
 
 /// Flush the in-memory metadata accumulator to `trace.json` on a blocking
-/// thread. The accumulator is small (one dict per video frame) but the write
-/// is synchronous, so we hop to a blocking thread to avoid stalling the
-/// runtime worker on disks under load.
+/// thread.
 async fn flush_metadata_blocking(
     metadata: VideoMetadataAccumulator,
     output_dir: std::path::PathBuf,
@@ -1357,6 +1040,27 @@ mod tests {
         ))
     }
 
+    fn identity(recording_index: i64, trace_id: &str, data_type: &str) -> TraceIdentity {
+        TraceIdentity {
+            trace_id: trace_id.to_string(),
+            key: TraceKey {
+                recording_index,
+                data_type: data_type.to_string(),
+                sensor_name: None,
+            },
+        }
+    }
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     #[test]
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = scalar_fallback_entry(123, &[0xFF, 0xFE]);
@@ -1372,20 +1076,18 @@ mod tests {
         let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
 
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
+        let mut state = ActorState::new(identity(7, "trace-1", "joints"));
+        state.ensure_trace_row(&store_arc).await;
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             state
-                .handle_frame(&store_arc, &context, index * 1_000_000, None, payload)
+                .handle_data(&store_arc, &context, index * 1_000_000, None, payload)
                 .await;
         }
         state.finalise_trace(&store_arc, &context).await;
 
-        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
-            .directory(context.recordings_root.as_path());
+        let trace_dir =
+            TracePath::new("7", "joints", "trace-1").directory(context.recordings_root.as_path());
         let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
         let parsed: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, json!([{"i": 0}, {"i": 1}, {"i": 2}]));
@@ -1396,6 +1098,7 @@ mod tests {
             .expect("get trace")
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
+        assert_eq!(trace.recording_index, 7);
         assert_eq!(trace.total_bytes as u64, bytes.len() as u64);
     }
 
@@ -1408,14 +1111,12 @@ mod tests {
         let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
 
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
+        let mut state = ActorState::new(identity(1, "trace-1", "joints"));
+        state.ensure_trace_row(&store_arc).await;
         state.finalise_trace(&store_arc, &context).await;
 
-        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
-            .directory(context.recordings_root.as_path());
+        let trace_dir =
+            TracePath::new("1", "joints", "trace-1").directory(context.recordings_root.as_path());
         let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
         assert_eq!(bytes, b"[]");
 
@@ -1428,7 +1129,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn video_chunk_ready_appends_segment_and_concats_on_end() {
+    async fn video_chunks_concat_on_finalise() {
         if !ffmpeg_available() {
             eprintln!("ffmpeg not on PATH — skipping video trace_actor test.");
             return;
@@ -1441,21 +1142,18 @@ mod tests {
         let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
 
-        let mut state = ActorState::new("trace-vid".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "RGB".to_string(), None)
-            .await;
+        let mut state = ActorState::new(identity(1, "trace-vid", "RGB"));
+        state.ensure_trace_row(&store_arc).await;
 
         // Build two NUT chunks via ffmpeg testsrc and place them where the
-        // producer would have spooled them.
-        let trace_dir = TracePath::new("rec-1", "RGB", "trace-vid")
-            .directory(context.recordings_root.as_path());
+        // dispatcher would have relinked them.
+        let trace_dir =
+            TracePath::new("1", "RGB", "trace-vid").directory(context.recordings_root.as_path());
         let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
         std::fs::create_dir_all(&chunks_dir).unwrap();
 
         for chunk_index in 0..2u32 {
             let chunk_path = chunks_dir.join(paths::chunk_filename(chunk_index));
-            let duration = "4";
             let status = std::process::Command::new("ffmpeg")
                 .args([
                     "-y",
@@ -1466,7 +1164,7 @@ mod tests {
                     "lavfi",
                     "-i",
                 ])
-                .arg(format!("testsrc=duration={duration}:size=16x16:rate=1"))
+                .arg("testsrc=duration=4:size=16x16:rate=1")
                 .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
                 .arg(&chunk_path)
                 .status()
@@ -1476,7 +1174,7 @@ mod tests {
             let frame_timestamps_s: Vec<f64> =
                 (0..4u32).map(|i| (chunk_index * 4 + i) as f64).collect();
             state
-                .handle_video_chunk_ready(
+                .handle_video(
                     &store_arc,
                     &context,
                     chunk_index,
@@ -1494,15 +1192,8 @@ mod tests {
         assert!(trace_dir.join(paths::LOSSY_VIDEO_FILENAME).exists());
         assert!(trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME).exists());
         assert!(trace_dir.join(paths::TRACE_JSON_FILENAME).exists());
-        // Per-chunk segments and source NUTs should have been cleaned up.
         for chunk_index in 0..2u32 {
             assert!(!chunks_dir.join(paths::chunk_filename(chunk_index)).exists());
-            assert!(!trace_dir
-                .join(paths::chunk_lossy_filename(chunk_index))
-                .exists());
-            assert!(!trace_dir
-                .join(paths::chunk_lossless_filename(chunk_index))
-                .exists());
         }
 
         let trace = store
@@ -1512,305 +1203,5 @@ mod tests {
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert!(trace.total_bytes > 0);
-    }
-
-    #[tokio::test]
-    async fn handle_frame_without_start_trace_is_a_noop() {
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_frame(&store_arc, &context, 0, None, b"raw".to_vec())
-            .await;
-        assert_eq!(state.frame_count, 0);
-        assert!(store.get_trace("trace-1").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn frames_buffered_before_start_trace_replay_and_finalise() {
-        // Race: two Frames arrive at the actor before its StartTrace lands
-        // on a different publisher. The actor must buffer them, then on
-        // StartTrace replay them in order, then finalise once the count
-        // matches the producer-promised total.
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-
-        for index in 0..2i64 {
-            let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
-            let flow = state
-                .accept_envelope(
-                    &store_arc,
-                    &context,
-                    Envelope::frame("trace-1".into(), index as u64, index, None, payload),
-                )
-                .await;
-            assert!(matches!(flow, Flow::Continue));
-        }
-        // Producer promises 2 envelopes total — set the target before
-        // StartTrace arrives to model the race.
-        let flow = state.handle_stop_at_sequence(&store_arc, &context, 2).await;
-        assert!(
-            matches!(flow, Flow::Continue),
-            "stop_at_sequence cannot finalise until StartTrace is observed"
-        );
-        assert_eq!(state.pending.len(), 2);
-        assert_eq!(
-            state.frame_count, 0,
-            "buffered envelopes are not applied yet"
-        );
-
-        let flow = state
-            .accept_envelope(
-                &store_arc,
-                &context,
-                Envelope::StartTrace {
-                    recording_id: "rec-1".into(),
-                    trace_id: "trace-1".into(),
-                    data_type: "joints".into(),
-                    data_type_name: None,
-                },
-            )
-            .await;
-        assert!(
-            matches!(flow, Flow::Stop),
-            "buffered frames meet the target during replay"
-        );
-        assert!(state.pending.is_empty(), "buffer drained on start_trace");
-
-        let trace = store
-            .get_trace("trace-1")
-            .await
-            .expect("get trace")
-            .expect("trace exists");
-        assert_eq!(trace.write_status, TraceWriteStatus::Written);
-        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
-            .directory(context.recordings_root.as_path());
-        let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
-        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(parsed, json!([{"i": 0}, {"i": 1}]));
-    }
-
-    #[tokio::test]
-    async fn actor_waits_for_late_frame_after_stop_at_sequence() {
-        // The producer promises 3 envelopes but only two have arrived when
-        // StopAtSequence lands. The actor must keep running until the
-        // missing envelope arrives.
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
-        for index in 0..2i64 {
-            let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
-            let flow = state
-                .accept_envelope(
-                    &store_arc,
-                    &context,
-                    Envelope::frame("trace-1".into(), index as u64, index, None, payload),
-                )
-                .await;
-            assert!(matches!(flow, Flow::Continue));
-        }
-
-        let flow = state.handle_stop_at_sequence(&store_arc, &context, 3).await;
-        assert!(
-            matches!(flow, Flow::Continue),
-            "actor must wait for the missing envelope"
-        );
-        assert!(state.is_awaiting_stop_at_sequence());
-
-        // The late frame arrives — actor should now finalise.
-        let payload = serde_json::to_vec(&json!({"i": 2})).unwrap();
-        let flow = state
-            .accept_envelope(
-                &store_arc,
-                &context,
-                Envelope::frame("trace-1".into(), 2, 2, None, payload),
-            )
-            .await;
-        assert!(matches!(flow, Flow::Stop));
-
-        let trace = store
-            .get_trace("trace-1")
-            .await
-            .expect("get trace")
-            .expect("trace exists");
-        assert_eq!(trace.write_status, TraceWriteStatus::Written);
-    }
-
-    #[tokio::test]
-    async fn actor_times_out_when_promised_frames_never_arrive() {
-        // StopAtSequence fires for a higher count than the actor will ever
-        // observe — after STOP_AT_SEQUENCE_TIMEOUT the run loop must mark
-        // the trace failed. Pause the tokio clock after the store is open
-        // so SQLx doesn't observe the mocked time, then advance past the
-        // actor's timeout once it has actually parked in `select!`.
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let store_arc = Arc::new(store.clone());
-        let context = test_context(&tempdir.path().join("recordings"));
-
-        let (tx, rx) = mpsc::channel(8);
-        let join = tokio::spawn(super::run(
-            Arc::clone(&store_arc),
-            Arc::clone(&context),
-            "trace-1".to_string(),
-            rx,
-        ));
-
-        tx.send(TraceActorMessage::Envelope(Envelope::StartTrace {
-            recording_id: "rec-1".into(),
-            trace_id: "trace-1".into(),
-            data_type: "joints".into(),
-            data_type_name: None,
-        }))
-        .await
-        .expect("send start_trace");
-        let payload = serde_json::to_vec(&json!({"i": 0})).unwrap();
-        tx.send(TraceActorMessage::Envelope(Envelope::frame(
-            "trace-1".into(),
-            0,
-            0,
-            None,
-            payload,
-        )))
-        .await
-        .expect("send frame");
-        tx.send(TraceActorMessage::StopAtSequence {
-            final_sequence_number: 5,
-        })
-        .await
-        .expect("send stop_at_sequence");
-        // Let the actor process the messages and park in its select loop.
-        // A short real sleep is sufficient — the SQLite writes complete in
-        // well under 100 ms.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Now pause and advance past the timeout. `advance` requires `pause`.
-        tokio::time::pause();
-        tokio::time::advance(STOP_AT_SEQUENCE_TIMEOUT + Duration::from_millis(100)).await;
-        tokio::time::resume();
-
-        join.await.expect("actor join");
-        let trace = store
-            .get_trace("trace-1")
-            .await
-            .expect("get trace")
-            .expect("trace exists");
-        assert_eq!(trace.write_status, TraceWriteStatus::Failed);
-    }
-
-    #[tokio::test]
-    async fn handle_frame_drops_when_storage_budget_exhausted() {
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let root = tempdir.path().join("recordings");
-        let policy = StoragePolicy {
-            storage_limit_bytes: None,
-            min_free_disk_bytes: u64::MAX,
-            refresh_interval: Duration::from_secs(60),
-        };
-        let budget = Arc::new(crate::storage::budget::StorageBudget::new(&root, policy));
-        let context = Arc::new(TraceActorContext::new(
-            root.clone(),
-            budget,
-            VideoEncoder::new(),
-        ));
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
-        for index in 0..3i64 {
-            let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
-            state
-                .handle_frame(&store_arc, &context, index, None, payload)
-                .await;
-        }
-        assert_eq!(state.frame_count, 0, "all frames must have been dropped");
-        assert_eq!(state.dropped_over_budget, 3);
-        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
-            .directory(context.recordings_root.as_path());
-        assert!(!trace_dir.join("trace.json").exists());
-    }
-
-    #[tokio::test]
-    async fn handle_cancel_removes_disk_dir_and_resets_writer() {
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
-        let payload = serde_json::to_vec(&json!({"i": 0})).unwrap();
-        state
-            .handle_frame(&store_arc, &context, 0, None, payload)
-            .await;
-
-        let trace_dir = TracePath::new("rec-1", "joints", "trace-1")
-            .directory(context.recordings_root.as_path());
-        assert!(trace_dir.exists(), "writer opens directory on first frame");
-
-        state.handle_cancel(&store_arc, &context).await;
-        assert!(!trace_dir.exists(), "cancel must remove the trace dir");
-        assert!(matches!(state.writer, TraceWriter::Pending));
-        assert_eq!(state.bytes_on_disk, 0);
-    }
-
-    #[tokio::test]
-    async fn shutdown_without_end_marks_trace_failed() {
-        let tempdir = TempDir::new().unwrap();
-        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
-            .await
-            .expect("open store");
-        let store_arc = Arc::new(store.clone());
-
-        let mut state = ActorState::new("trace-1".to_string());
-        state
-            .handle_start_trace(&store_arc, "rec-1".to_string(), "joints".to_string(), None)
-            .await;
-        state.handle_shutdown_without_end(&store_arc).await;
-
-        let trace = store
-            .get_trace("trace-1")
-            .await
-            .expect("get trace")
-            .expect("trace exists");
-        assert_eq!(trace.write_status, TraceWriteStatus::Failed);
-    }
-
-    fn ffmpeg_available() -> bool {
-        std::process::Command::new("which")
-            .arg("ffmpeg")
-            .output()
-            .map(|output| output.status.success() && !output.stdout.is_empty())
-            .unwrap_or(false)
     }
 }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import signal
 from pathlib import Path
+from typing import IO, cast
 
 import pytest
 
@@ -16,25 +17,16 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 )
 
 
-class _FakeStderr:
-    def __init__(self, content: bytes = b"") -> None:
-        self._content = content
-
-    def read(self) -> bytes:
-        return self._content
-
-
 class _FakePopen:
     def __init__(
         self,
         pid: int = 12345,
         poll_value: int | None = None,
-        stderr: _FakeStderr | None = None,
     ) -> None:
         self.pid = pid
         self._poll_value = poll_value
         self.returncode = poll_value
-        self.stderr = stderr
+        self.stderr = None
 
     def poll(self) -> int | None:
         return self._poll_value
@@ -93,7 +85,13 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
     assert captured["start_new_session"] is True
     assert captured["stdin"] is daemon_os_control.subprocess.DEVNULL
     assert captured["stdout"] is daemon_os_control.subprocess.DEVNULL
-    assert captured["stderr"] is daemon_os_control.subprocess.PIPE
+    # Background stderr is routed to a sibling log file (not an undrained PIPE
+    # that would deadlock the daemon, nor DEVNULL that would hide failures).
+    stderr_target = captured["stderr"]
+    assert stderr_target is not daemon_os_control.subprocess.PIPE
+    assert stderr_target is not daemon_os_control.subprocess.DEVNULL
+    assert Path(stderr_target.name) == db_path.parent / "daemon.log"
+    assert (db_path.parent / "daemon.log").exists()
     assert captured["close_fds"] is True
     assert captured["cwd"] == str(Path.cwd())
 
@@ -150,11 +148,11 @@ def test_launch_daemon_subprocess_premature_exit_includes_stderr(
     fake_socket_path = tmp_path / "management.sock"
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
-        return _FakePopen(
-            pid=99999,
-            poll_value=1,
-            stderr=_FakeStderr(b"ImportError: No module named 'foo'"),
-        )
+        # The real daemon writes its failure to the stderr target before it
+        # exits; emulate that so the parent can read it back from the log file.
+        stderr_target = cast(IO[bytes], kwargs["stderr"])
+        stderr_target.write(b"ImportError: No module named 'foo'")
+        return _FakePopen(pid=99999, poll_value=1)
 
     monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)

@@ -29,41 +29,48 @@ pub enum ConnectionState {
 /// across `broadcast` receivers without holding any backing buffer alive.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DaemonEvent {
+    /// A recording was opened by the producer. The recording row (and its
+    /// `recording_index`) already exists by the time this fires; the
+    /// recording-start notifier reacts by POSTing `/recording/start`.
+    RecordingStarted {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
     /// A trace finished writing to local disk and is ready for registration.
     TraceWritten {
         /// Trace identifier the event applies to.
         trace_id: String,
-        /// Parent recording identifier.
-        recording_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
     },
     /// A trace was successfully registered with the backend.
     TraceRegistered {
         /// Trace identifier the event applies to.
         trace_id: String,
-        /// Parent recording identifier.
-        recording_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
     },
     /// Registration completed and the trace is queued for upload.
     ReadyForUpload {
         /// Trace identifier the event applies to.
         trace_id: String,
-        /// Parent recording identifier.
-        recording_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
     },
     /// A trace has finished uploading.
     UploadComplete {
         /// Trace identifier the event applies to.
         trace_id: String,
-        /// Parent recording identifier.
-        recording_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
     },
     /// A trace's upload progressed by some number of bytes (used to drive the
     /// debounced status updater).
     UploadProgress {
         /// Trace identifier the event applies to.
         trace_id: String,
-        /// Parent recording identifier.
-        recording_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
         /// Bytes uploaded so far.
         bytes_uploaded: i64,
         /// Total bytes once finalised; reported when known.
@@ -71,16 +78,16 @@ pub enum DaemonEvent {
     },
     /// A recording was stopped by the producer.
     RecordingStopped {
-        /// Recording identifier the event applies to.
-        recording_id: String,
+        /// Local recording index the event applies to.
+        recording_index: i64,
     },
     /// A recording was cancelled by the producer. The dispatcher publishes
     /// this after every per-trace actor for the recording has been torn
     /// down, the on-disk artefacts have been deleted, and the recording's
     /// `cancelled_at` has been stamped.
     RecordingCancelled {
-        /// Recording identifier the event applies to.
-        recording_id: String,
+        /// Local recording index the event applies to.
+        recording_index: i64,
     },
     /// Connection state to the backend changed.
     ConnectionStateChanged(ConnectionState),
@@ -133,7 +140,7 @@ mod tests {
 
         let event = DaemonEvent::TraceWritten {
             trace_id: "trace-1".to_string(),
-            recording_id: "rec-1".to_string(),
+            recording_index: 1,
         };
         let delivered = bus.publish(event.clone());
         assert_eq!(delivered, 2);
@@ -145,9 +152,7 @@ mod tests {
     #[test]
     fn publish_with_no_subscribers_is_zero() {
         let bus = EventBus::new();
-        let delivered = bus.publish(DaemonEvent::RecordingStopped {
-            recording_id: "rec-2".to_string(),
-        });
+        let delivered = bus.publish(DaemonEvent::RecordingStopped { recording_index: 2 });
         assert_eq!(delivered, 0);
     }
 }

@@ -105,7 +105,7 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
 class RecordingExpectedTimestamps:
     """Expected timestamps per trace for one recording, keyed by semantic trace name.
 
-    Produced during the recording loop (once the recording ID is known) and
+    Produced during the recording loop (once the recording key is known) and
     consumed by :func:`~disk_helpers.assert_disk_recording_properties`
     to verify on-disk trace.json files match the manually-supplied timestamps
     that were logged.
@@ -124,7 +124,10 @@ class ContextExpectedTimestamps:
     """Expected timestamps for all recordings produced by one context worker.
 
     Attributes:
-        by_recording: Maps recording ID to its :class:`RecordingExpectedTimestamps`.
+        by_recording: Maps the on-disk recording directory name to its
+            :class:`RecordingExpectedTimestamps`. The directory name is the
+            integer ``recording_index`` (as a string) under the Rust daemon, or
+            the cloud ``recording_id`` under the legacy daemon.
     """
 
     by_recording: dict[str, RecordingExpectedTimestamps]
@@ -185,6 +188,27 @@ class ContextResult:
 
     Produced by :func:`context_worker` and consumed by assertion helpers
     and verification functions throughout the test suite.
+
+    A recording is addressed by:
+
+    - ``recording_ids`` — the cloud ``recording_id`` (TEXT) for each recording.
+      These are what cloud verification (``verify_cloud_results``) matches
+      against the dataset's ``recording.id``. Under the legacy daemon
+      ``nc.start_recording()`` returns this directly. Under the Rust daemon the
+      daemon mints it asynchronously, so an entry may be an empty string until
+      the test resolves it (via ``resolve_cloud_recording_ids``) once online.
+
+    The remaining fields apply only under the Rust daemon (the daemon owns
+    recording identity); they are left empty under the legacy daemon, which uses
+    ``recording_ids`` for every correlation:
+
+    - ``recording_indexes`` — the daemon-assigned local INTEGER
+      ``recording_index`` for each recording, resolved from the source DB.
+      These are the on-disk directory names and the daemon-DB join key.
+    - ``recording_markers`` — a wall-clock instant inside each recording window.
+    - ``source`` is the ``(robot_id, robot_instance)`` identity used to correlate
+      a worker's recordings to daemon-minted ``recording_index`` values without
+      relying on the local handle.
     """
 
     dataset_name: str
@@ -207,6 +231,17 @@ class ContextResult:
     timestamp_mode: str
     expected_timestamps: ContextExpectedTimestamps | None = None
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
+    # Thin-shipper correlation fields (see class docstring). Defaulted so the
+    # behavioural single-recording tests that build a ContextResult by hand can
+    # opt in incrementally; the matrix worker always populates them. They are
+    # only consumed under the Rust daemon — the legacy path uses recording_ids.
+    recording_indexes: list[int] = field(default_factory=list)
+    source: tuple[str, int] = ("", 0)
+    local_recording_handles: list[str] = field(default_factory=list)
+    # Per-recording wall-clock marker (time.time_ns()) captured just after each
+    # nc.start_recording(); lands inside that recording's window so the SDK helper
+    # nc.get_cloud_recording_id(timestamp_ns=marker) resolves the right cloud id.
+    recording_markers: list[int] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,12 +753,21 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
 
 def context_worker(spec: ContextSpec) -> ContextResult:
     """Execute recordings for a single parallel context."""
+    from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        wait_for_recording_index_for_source,
+    )
+
+    use_rust = rust_daemon_enabled()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
     marker_names: list[str] = []
     recording_ids: list[str] = []
+    recording_indexes: list[int] = []
+    recording_markers: list[int] = []
+    local_recording_handles: list[str] = []
     robot = None
 
     if spec.start_delay_s > 0.0:
@@ -737,13 +781,18 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
+        # Source identity (robot_id, robot_instance) is how the daemon DB and
+        # cloud verification correlate this worker's recordings — the local
+        # handle from get_current_recording_id() is never stored by the daemon.
+        source: tuple[str, int] = (str(robot.id), int(robot.instance))
+
         expected_by_recording: dict[str, RecordingExpectedTimestamps] | None = (
             {} if not use_real_timestamps else None
         )
 
-        for recording_index in range(spec.recordings_per_context):
+        for recording_ordinal in range(spec.recordings_per_context):
             recording_timestamp_start_s = (
-                spec.timestamp_start_s + recording_index * case.duration_sec
+                spec.timestamp_start_s + recording_ordinal * case.duration_sec
             )
 
             with Timer(
@@ -753,15 +802,52 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 assert_deadline=spec.assert_deadline,
             ):
                 nc.start_recording(robot_name=spec.robot_name)
+            # Wall-clock marker captured immediately after start lands inside this
+            # recording's window; the Rust path uses it to resolve the cloud id.
+            marker_ns = time.time_ns()
             if wall_started_at is None:
                 wall_started_at = time.time()
-            recording_id = str(robot.get_current_recording_id() or "")
-            recording_ids.append(recording_id)
 
-            # Build per-recording expected timestamps once the recording ID is known.
-            # Keys use "data_type/data_type_name" to match the semantic keys resolved
-            # from the DB in daemon_disk_helpers. data_type_name is the storage name
-            # produced by validate_safe_name (e.g. "vx300s_left\waist" for joint names).
+            if use_rust:
+                # Local correlation handle (UUID) — kept only for liveness/debug.
+                local_handle = str(robot.get_current_recording_id() or "")
+                local_recording_handles.append(local_handle)
+
+                # The daemon assigns the INTEGER recording_index (disk dir name +
+                # DB join key); resolve it from the source as the
+                # (recording_ordinal) newest recording for this source.
+                daemon_recording_index = wait_for_recording_index_for_source(
+                    source[0],
+                    source[1],
+                    expected_count=recording_ordinal + 1,
+                    timeout_s=MAX_TIME_TO_START_S,
+                )
+                recording_indexes.append(daemon_recording_index)
+                recording_markers.append(marker_ns)
+
+                # Cloud recording_id (TEXT) is minted asynchronously by the
+                # daemon. Online it resolves quickly; offline it stays NULL until
+                # upload-time mint-on-demand, so an empty string is recorded and
+                # the test re-resolves it (via the marker) after going online.
+                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                recording_ids.append(str(cloud_recording_id or ""))
+
+                # On-disk recordings + the expected-timestamp map are keyed by the
+                # integer recording_index directory name under the Rust daemon.
+                disk_recording_key = str(daemon_recording_index)
+            else:
+                # Legacy daemon: start_recording returns the cloud recording_id,
+                # which is the on-disk directory name, DB join key, and the
+                # expected-timestamp map key.
+                recording_id = str(robot.get_current_recording_id() or "")
+                recording_ids.append(recording_id)
+                disk_recording_key = recording_id
+
+            # Build per-recording expected timestamps once the recording key is
+            # known. Trace keys use "data_type/data_type_name" to match the
+            # semantic keys resolved from the DB in disk_helpers. data_type_name is
+            # the storage name produced by validate_safe_name (e.g.
+            # "vx300s_left\waist" for joint names).
             if expected_by_recording is not None:
                 from neuracore_types.utils import validate_safe_name
 
@@ -798,13 +884,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 else:
                     safe_marker = validate_safe_name("marker_synchronous")
                     by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                expected_by_recording[recording_id] = RecordingExpectedTimestamps(
+                expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
                     by_trace=by_trace
                 )
 
             current_marker_names = log_frames(
                 spec,
-                recording_index=recording_index,
+                recording_index=recording_ordinal,
                 marker_name="marker_synchronous",
             )
             if not marker_names:
@@ -823,6 +909,10 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         return ContextResult(
             dataset_name=spec.dataset_name,
             recording_ids=recording_ids,
+            recording_indexes=recording_indexes,
+            recording_markers=recording_markers,
+            source=source,
+            local_recording_handles=local_recording_handles,
             robot_name=spec.robot_name,
             joint_names=joint_name_list,
             camera_names=camera_name_list,
