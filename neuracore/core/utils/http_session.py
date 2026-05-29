@@ -1,13 +1,15 @@
-"""HTTP session with keep-alive disabled.
+"""Thread- and process-local HTTP session with shared retry policy.
 
-All Neuracore API calls should use ``Session()`` as a context manager rather than
-the bare ``requests.*`` module-level functions to ensure keep-alive is disabled and
-avoid stale connection issues in multi-threaded contexts.
-
-Example:
-    with Session() as session:
-        response = session.get(url)
+All Neuracore API calls should obtain a session via ``thread_local_session()``
+rather than constructing fresh ``requests.Session`` instances or using the
+module-level ``requests.*`` helpers. The returned session is cached per OS
+thread and per process: forks get a fresh session (since urllib3 connection
+pools are not safe to share across forks), and threads do not share a session
+with one another.
 """
+
+import os
+import threading
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,14 +24,24 @@ _RETRY = Retry(
     allowed_methods=False,  # type: ignore[arg-type]  # False = retry all methods
 )
 
+_thread_local = threading.local()
 
-class Session(requests.Session):
-    """A requests Session with keep-alive disabled."""
 
-    def __init__(self, *, keep_alive: bool = False) -> None:
-        """Initialize the session and configure retry-enabled HTTP adapters."""
-        super().__init__()
+def thread_local_session() -> requests.Session:
+    """Return a retry-enabled Session cached per thread and process."""
+    pid = os.getpid()
+
+    session = getattr(_thread_local, "session", None)
+    session_pid = getattr(_thread_local, "pid", None)
+
+    if session is None or session_pid != pid:
+        session = requests.Session()
+
         adapter = HTTPAdapter(max_retries=_RETRY)
-        self.mount("https://", adapter)
-        self.mount("http://", adapter)
-        self.keep_alive = keep_alive
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        _thread_local.session = session
+        _thread_local.pid = pid
+
+    return session

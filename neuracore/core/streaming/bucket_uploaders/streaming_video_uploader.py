@@ -25,7 +25,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import EncodingError
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 
 from .bucket_uploader import TRACE_FILE, BucketUploader
 from .resumable_upload import ResumableUpload
@@ -394,12 +394,12 @@ class StreamingVideoUploader(BucketUploader):
         }
         org_id = get_current_org()
         try:
-            with Session() as session:
-                upload_url_response = session.get(
-                    f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
-                    params=params,
-                    headers=get_auth().get_headers(),
-                )
+            session = thread_local_session()
+            upload_url_response = session.get(
+                f"{API_URL}/org/{org_id}/recording/{self.uploader.recording_id}/resumable_upload_url",
+                params=params,
+                headers=get_auth().get_headers(),
+            )
         except requests.exceptions.RequestException as e:
             logger.debug(e)
             pass
@@ -408,9 +408,9 @@ class StreamingVideoUploader(BucketUploader):
         for i in range(0, len(self.frame_metadatas)):
             self.frame_metadatas[i].frame_idx = i
         data = json.dumps([fm.model_dump(mode="json") for fm in self.frame_metadatas])
-        with Session() as session:
-            response = session.put(
-                upload_url, headers={"Content-Length": str(len(data))}, data=data
-            )
+        session = thread_local_session()
+        response = session.put(
+            upload_url, headers={"Content-Length": str(len(data))}, data=data
+        )
         response.raise_for_status()
         self.frame_metadatas = []

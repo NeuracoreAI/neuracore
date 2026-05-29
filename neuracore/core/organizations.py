@@ -5,7 +5,7 @@ from pydantic import BaseModel, ValidationError
 
 from neuracore.core.auth import get_auth
 from neuracore.core.exceptions import AuthenticationError, OrganizationError
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 
 from .const import API_URL
 
@@ -35,10 +35,10 @@ def list_my_orgs() -> list[Organization]:
     """
     auth = get_auth()
     try:
-        with Session() as session:
-            org_response = session.get(
-                f"{API_URL}/org-management/my-orgs", headers=auth.get_headers()
-            )
+        session = thread_local_session()
+        org_response = session.get(
+            f"{API_URL}/org-management/my-orgs", headers=auth.get_headers()
+        )
         org_response.raise_for_status()
         orgs_raw = org_response.json()
         assert isinstance(

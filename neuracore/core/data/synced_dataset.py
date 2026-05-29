@@ -15,7 +15,7 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
@@ -208,15 +208,15 @@ class SynchronizedDataset:
         Returns:
             SynchronizedDatasetStatistics containing the calculated statistics.
         """
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
-                json=SynchronizedDatasetStatistics(
-                    synchronized_dataset_id=self.id,
-                    input_cross_embodiment_description=input_cross_embodiment_description,
-                    output_cross_embodiment_description=output_cross_embodiment_description,
-                ).model_dump(mode="json"),
-                headers=get_auth().get_headers(),
-            )
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
+            json=SynchronizedDatasetStatistics(
+                synchronized_dataset_id=self.id,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
+            ).model_dump(mode="json"),
+            headers=get_auth().get_headers(),
+        )
         response.raise_for_status()
         return SynchronizedDatasetStatistics.model_validate(response.json())
