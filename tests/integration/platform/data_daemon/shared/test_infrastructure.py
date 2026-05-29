@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
 import time
 from collections.abc import Generator
@@ -166,22 +167,18 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     recordings_root = get_daemon_recordings_root_path()
 
     if storage_state_action == STORAGE_STATE_EMPTY:
-        db_state_paths = (
-            db_path,
-            Path(str(db_path) + "-wal"),
-            Path(str(db_path) + "-shm"),
-        )
-
-        for db_state_path in db_state_paths:
+        if db_path.exists():
+            connection = sqlite3.connect(str(db_path))
             try:
-                db_state_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "Failed to remove daemon DB state file during test cleanup: %s",
-                    db_state_path,
-                    exc_info=True,
-                )
-
+                for table in ("traces", "recordings"):
+                    try:
+                        connection.execute(f"DELETE FROM {table}")
+                    except sqlite3.OperationalError:
+                        pass
+                connection.commit()
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                connection.close()
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)
         recordings_root.mkdir(parents=True, exist_ok=True)
