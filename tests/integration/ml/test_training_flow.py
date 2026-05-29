@@ -19,6 +19,7 @@ from neuracore_types import (
     EmbodimentDescription,
     JointData,
     LanguageData,
+    ParallelGripperOpenAmountData,
     RGBCameraData,
     SynchronizedPoint,
 )
@@ -26,8 +27,6 @@ from neuracore_types import (
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.endpoint import Policy
-from neuracore.core.robot import get_robot
-from neuracore.core.utils import backend_utils
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
@@ -35,6 +34,14 @@ sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 from common.base_env import BimanualViperXTask
 from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
+
+from tests.integration.platform.data_daemon.shared.assertions import (
+    assert_exactly_one_daemon_pid,
+)
+from tests.integration.platform.data_daemon.shared.db_helpers import (
+    wait_for_dataset_ready,
+)
+from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -45,11 +52,12 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-SHARED_DATASET_NAME = "ASU Table Top"
+SHARED_DATASET_NAME = "NYU ROT"
 COLLECTED_DEMO_EPISODES = 3
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 20
+TIMESTAMP_JITTER_FRAC = 0.05  # ±X% on nominal frame interval
 NC_CAM_NAME = "rgb_angle"
 MJ_CAM_NAME = "angle"
 ROBOT_NAME = "integration_test_robot"
@@ -85,10 +93,11 @@ INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
     DataType.RGB_IMAGES: {0: NC_CAM_NAME},
     DataType.JOINT_POSITIONS: _indexed_names(names=JOINT_NAMES),
     DataType.LANGUAGE: {0: LANGUAGE_LABEL},
-    DataType.JOINT_VELOCITIES: _indexed_names(names=JOINT_NAMES),
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: _indexed_names(names=GRIPPER_NAMES),
 }
 OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
-    DataType.JOINT_POSITIONS: _indexed_names(names=JOINT_NAMES),
+    DataType.JOINT_TARGET_POSITIONS: _indexed_names(names=JOINT_NAMES),
+    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: _indexed_names(names=GRIPPER_NAMES),
 }
 
 INPUT_DATA_TYPES = list(INPUT_EMBODIMENT_DESCRIPTION.keys())
@@ -96,7 +105,7 @@ OUTPUT_DATA_TYPES = list(OUTPUT_EMBODIMENT_DESCRIPTION.keys())
 
 # "auto" lets the backend select an appropriate batch size automatically
 CNNMLP_CONFIG = {
-    "batch_size": "auto",
+    "batch_size": 64,
     "epochs": 1,
     "output_prediction_horizon": 5,
 }
@@ -126,7 +135,6 @@ BACK_TO_BACK_CNNMLP_CONFIG = {
     "output_prediction_horizon": 5,
 }
 RECORDING_STOP_TIMEOUT_SECONDS = 500
-RECORDING_STOP_POLL_SECONDS = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +155,13 @@ def _make_sync_point(obs) -> SynchronizedPoint:
             DataType.RGB_IMAGES: {
                 NC_CAM_NAME: RGBCameraData(frame=obs.cameras[MJ_CAM_NAME].rgb)
             },
-            DataType.JOINT_VELOCITIES: {
-                name: JointData(value=obs.qvel[name]) for name in JOINT_NAMES
-            },
             DataType.LANGUAGE: {LANGUAGE_LABEL: LanguageData(text="pick and place")},
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {
+                name: ParallelGripperOpenAmountData(
+                    open_amount=float(obs.gripper_open_amounts[name])
+                )
+                for name in GRIPPER_NAMES
+            },
         }
     )
 
@@ -183,135 +194,113 @@ def _collect_demo_data(
     )
     dataset = nc.create_dataset(name=dataset_name)
 
-    for ep_idx in range(num_episodes):
-        logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
-        action_traj = rollout_policy()
-        expanded_action_traj = [
-            action_dict
-            for action_dict in action_traj
-            for _ in range(episode_length_multiplier)
-        ]
-        nc.start_recording(robot_name=robot_name, instance=instance_id)
-        recording_id = get_robot(robot_name, instance_id).get_current_recording_id()
-        t = time.time()
-        for frame_idx, action_dict in enumerate(expanded_action_traj):
-            t += 1.0 / FREQUENCY
-            joint_positions = {
-                k: v for k, v in action_dict.items() if "gripper" not in k
-            }
-            joint_torques = {
-                name: float(0.01 * ((index + frame_idx) % 5))
-                for index, name in enumerate(JOINT_NAMES)
-            }
-            joint_velocities = {
-                name: float(0.05 * ((index + frame_idx) % 7))
-                for index, name in enumerate(JOINT_NAMES)
-            }
-            gripper_open_amounts = {
-                name: float(0.25 + 0.5 * ((frame_idx % 2) == 0))
-                for name in GRIPPER_NAMES
-            }
-            pose = np.array([0.1 + frame_idx * 0.001, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0])
-            img = np.zeros((84, 84, 3), dtype=np.uint8)
-            img.fill(50 + frame_idx % 200)
-            # np.full((64, 64), 0.75 + 0.01 * (frame_idx % 10), dtype=np.float32)
-            # point_cloud = np.linspace(0.0, 1.0, 96, dtype=np.float16).reshape(
-            #     32, 3
-            # ) + np.float16(frame_idx * 0.001)
-            # np.full((point_cloud.shape[0], 3), 80 + frame_idx % 120, dtype=np.uint8)
-            nc.log_joint_positions(
-                positions=joint_positions,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
+    with online_daemon_running():
+        assert_exactly_one_daemon_pid()
+        for ep_idx in range(num_episodes):
+            logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
+            action_traj = rollout_policy()
+            expanded_action_traj = [
+                action_dict
+                for action_dict in action_traj
+                for _ in range(episode_length_multiplier)
+            ]
+            nc.start_recording(robot_name=robot_name, instance=instance_id)
+            t = time.time()
+            timestamp_rng = np.random.default_rng(ep_idx)
+            for frame_idx, action_dict in enumerate(expanded_action_traj):
+                dt = 1.0 / FREQUENCY
+                t += dt * float(
+                    timestamp_rng.uniform(
+                        1.0 - TIMESTAMP_JITTER_FRAC, 1.0 + TIMESTAMP_JITTER_FRAC
+                    )
+                )
+                joint_positions = {
+                    k: v for k, v in action_dict.items() if "gripper" not in k
+                }
+                joint_torques = {
+                    name: float(0.01 * ((index + frame_idx) % 5))
+                    for index, name in enumerate(JOINT_NAMES)
+                }
+                joint_velocities = {
+                    name: float(0.05 * ((index + frame_idx) % 7))
+                    for index, name in enumerate(JOINT_NAMES)
+                }
+                gripper_open_amounts = {
+                    name: float(0.25 + 0.5 * ((frame_idx % 2) == 0))
+                    for name in GRIPPER_NAMES
+                }
+                pose = np.array([0.1 + frame_idx * 0.001, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0])
+                img = np.zeros((84, 84, 3), dtype=np.uint8)
+                img.fill(50 + frame_idx % 200)
+
+                nc.log_joint_positions(
+                    positions=joint_positions,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_joint_target_positions(
+                    target_positions=joint_positions,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_joint_velocities(
+                    velocities=joint_velocities,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_joint_torques(
+                    torques=joint_torques,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_parallel_gripper_open_amounts(
+                    values=gripper_open_amounts,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_parallel_gripper_target_open_amounts(
+                    values=gripper_open_amounts,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_pose(
+                    name=POSE_SENSOR_NAME,
+                    pose=pose,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_language(
+                    name=LANGUAGE_LABEL,
+                    language="pick and place",
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+                nc.log_rgb(
+                    name=NC_CAM_NAME,
+                    rgb=img,
+                    timestamp=t,
+                    robot_name=robot_name,
+                    instance=instance_id,
+                )
+            nc.stop_recording(wait=False, robot_name=robot_name, instance=instance_id)
+            wait_for_dataset_ready(
+                dataset_name,
+                expected_recording_count=ep_idx + 1,
+                timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
+                poll_interval_s=MERGED_DATASET_RECORDING_POLL_SECONDS,
             )
-            nc.log_joint_velocities(
-                velocities=joint_velocities,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
+            logger.info(
+                f"Episode {ep_idx + 1} recorded ({len(expanded_action_traj)} frames)"
             )
-            nc.log_joint_torques(
-                torques=joint_torques,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_parallel_gripper_open_amounts(
-                values=gripper_open_amounts,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_pose(
-                name=POSE_SENSOR_NAME,
-                pose=pose,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_language(
-                name=LANGUAGE_LABEL,
-                language="pick and place",
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_rgb(
-                name=NC_CAM_NAME,
-                rgb=img,
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-            nc.log_parallel_gripper_open_amounts(
-                values={"gripper1": 0.5, "gripper2": 0.5},
-                timestamp=t,
-                robot_name=robot_name,
-                instance=instance_id,
-            )
-        _stop_recording_and_wait(
-            robot_name=robot_name,
-            instance_id=instance_id,
-            recording_id=recording_id,
-            dataset_name=dataset_name,
-            episode_number=ep_idx + 1,
-        )
-        logger.info(
-            f"Episode {ep_idx + 1} recorded ({len(expanded_action_traj)} frames)"
-        )
     return dataset
-
-
-def _stop_recording_and_wait(
-    robot_name: str,
-    instance_id: int,
-    recording_id: str,
-    dataset_name: str,
-    episode_number: int,
-    timeout_seconds: int = RECORDING_STOP_TIMEOUT_SECONDS,
-) -> None:
-    """Stop recording with a bounded wait for daemon/backend trace drain."""
-    nc.stop_recording(wait=False, robot_name=robot_name, instance=instance_id)
-
-    deadline = time.time() + timeout_seconds
-    saw_active_traces = False
-    last_trace_count: int | None = None
-    while time.time() < deadline:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
-        last_trace_count = len(data_traces)
-        if last_trace_count > 0:
-            saw_active_traces = True
-        elif saw_active_traces:
-            return
-        time.sleep(RECORDING_STOP_POLL_SECONDS)
-
-    raise AssertionError(
-        "Timed out waiting for recording traces to drain after stop: "
-        f"dataset={dataset_name} episode={episode_number} "
-        f"recording_id={recording_id} last_active_trace_count={last_trace_count} "
-        f"saw_active_traces={saw_active_traces}"
-    )
 
 
 def _wait_for_training(
@@ -448,13 +437,17 @@ def _build_cross_embodiment_descriptions(
     input_desc: dict = {}
     output_desc: dict = {}
     for robot_id in dataset.robot_ids:
-        embodiment = dataset.get_full_embodiment_description(robot_id)
+        embodiment_description = dataset.get_full_embodiment_description(robot_id)
         for data_type in input_types:
             assert (
-                data_type in embodiment
+                data_type in embodiment_description
             ), f"{data_type.value} missing from robot {robot_id} embodiment description"
-        input_desc[robot_id] = {dt: embodiment[dt] for dt in input_types}
-        output_desc[robot_id] = {dt: embodiment[dt] for dt in output_types}
+        input_desc[robot_id] = {dt: embodiment_description[dt] for dt in input_types}
+        for data_type in output_types:
+            assert (
+                data_type in embodiment_description
+            ), f"{data_type.value} missing from robot {robot_id} embodiment description"
+        output_desc[robot_id] = {dt: embodiment_description[dt] for dt in output_types}
     return input_desc, output_desc
 
 
@@ -480,15 +473,18 @@ def _run_policy_inference(policy: Policy) -> None:
             positions={name: float(obs.qpos[name]) for name in JOINT_NAMES}
         )
         nc.log_language(name=LANGUAGE_LABEL, language="pick and place")
-        nc.log_joint_velocities(
-            velocities={name: float(obs.qvel[name]) for name in JOINT_NAMES}
+        nc.log_parallel_gripper_open_amounts(
+            values={
+                name: float(obs.gripper_open_amounts[name]) for name in GRIPPER_NAMES
+            }
         )
         nc.log_rgb(name=NC_CAM_NAME, rgb=obs.cameras[MJ_CAM_NAME].rgb)
         predictions = policy.predict(timeout=30)
-        assert DataType.JOINT_POSITIONS in predictions, (
-            "Expected JOINT_POSITIONS in local "
-            f"server output, got: {list(predictions.keys())}"
-        )
+        for data_type in OUTPUT_DATA_TYPES:
+            assert data_type in predictions, (
+                f"Expected {data_type.value} in local "
+                f"server output, got: {list(predictions.keys())}"
+            )
         logger.info(f"Path 2 passed — output keys: {[k.value for k in predictions]}")
     finally:
         policy.disconnect()
@@ -503,6 +499,8 @@ class TestTrainingFlow:
     """End-to-end flow: collect → merge → train → logs → resume → infer → deploy."""
 
     # Shared state across test_step* methods within one pytest session
+    track_step_teardown = True
+    all_steps_passed: bool = True
     collected_dataset_name: str
     merged_dataset_name: str
     training_name: str
@@ -513,9 +511,10 @@ class TestTrainingFlow:
 
     @classmethod
     def setup_class(cls) -> None:
+        cls.all_steps_passed = True
         cls.collected_dataset_name = _unique_name(prefix="collected")
         cls.merged_dataset_name = _unique_name(prefix="merged")
-        cls.training_name = _unique_name(prefix="cnnmlp_flow")
+        cls.training_name = _unique_name(prefix="ml_integration_flow")
         cls.collected_dataset = None
         cls.merged_dataset = None
         cls.job_id = None
@@ -524,6 +523,11 @@ class TestTrainingFlow:
 
     @classmethod
     def teardown_class(cls) -> None:
+        if not cls.all_steps_passed:
+            logger.warning(
+                "Skipping TestTrainingFlow teardown cleanup: one or more steps failed"
+            )
+            return
         if cls.endpoint_id:
             try:
                 nc.delete_endpoint(cls.endpoint_id)
@@ -789,12 +793,15 @@ class TestTrainingFailureReporting:
        confirming that the error was propagated back to the server.
     """
 
+    track_step_teardown = True
+    all_steps_passed: bool = True
     job_id: str | None = None
     dataset: Dataset | None = None
     dataset_name: str
 
     @classmethod
     def setup_class(cls) -> None:
+        cls.all_steps_passed = True
         cls.dataset_name = _unique_name(prefix="failure_report_test")
         cls.job_id = None
         cls.dataset = None
@@ -802,6 +809,12 @@ class TestTrainingFailureReporting:
 
     @classmethod
     def teardown_class(cls) -> None:
+        if not cls.all_steps_passed:
+            logger.warning(
+                "Skipping TestTrainingFailureReporting teardown cleanup: "
+                "one or more steps failed"
+            )
+            return
         if cls.job_id:
             try:
                 nc.delete_training_job(cls.job_id)
@@ -881,6 +894,8 @@ class TestTrainingFailureReporting:
 class TestBackToBackTraining:
     """Launch multiple training jobs back-to-back against the same dataset."""
 
+    track_step_teardown = True
+    all_steps_passed: bool = True
     dataset: Dataset | None = None
     dataset_name: str
     job_ids: list[str]
@@ -888,9 +903,10 @@ class TestBackToBackTraining:
 
     @classmethod
     def setup_class(cls) -> None:
+        cls.all_steps_passed = True
         cls.dataset_name = _unique_name(prefix="back_to_back_training")
         cls.training_names = [
-            _unique_name(prefix="cnnmlp_back_to_back")
+            _unique_name(prefix="ml_integration_back_to_back")
             for _ in range(BACK_TO_BACK_NUM_JOBS)
         ]
         cls.job_ids = []
@@ -899,6 +915,12 @@ class TestBackToBackTraining:
 
     @classmethod
     def teardown_class(cls) -> None:
+        if not cls.all_steps_passed:
+            logger.warning(
+                "Skipping TestBackToBackTraining teardown cleanup: "
+                "one or more steps failed"
+            )
+            return
         for job_id in cls.job_ids:
             try:
                 nc.delete_training_job(job_id)
