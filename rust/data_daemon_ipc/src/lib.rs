@@ -158,6 +158,15 @@ pub enum Envelope {
     Frame {
         /// Trace this frame belongs to.
         trace_id: String,
+        /// Zero-based per-trace counter, assigned by the producer's per-trace
+        /// `AtomicU64` at publish time. The producer's
+        /// [`Envelope::StopRecording`] payload reports the post-stop counter
+        /// value (== total envelopes sent) per trace; the daemon's per-trace
+        /// actor counts received envelopes and finalises when the count
+        /// matches that promised total, closing the historical race where
+        /// `EndTrace` from one publisher could arrive before in-flight
+        /// `Frame`s from another.
+        sequence_number: u64,
         /// Caller-supplied capture time in nanoseconds since the Unix epoch.
         timestamp_ns: i64,
         /// Optional caller-supplied capture time in seconds (f64) since the
@@ -195,16 +204,21 @@ pub enum Envelope {
         /// Per-trace samples; each unpacks into one [`Envelope::Frame`].
         frames: Vec<BatchedFrameItem>,
     },
-    /// Producer closes a trace; no further frames will follow.
-    EndTrace {
-        /// Trace identifier supplied earlier in [`Envelope::StartTrace`].
-        trace_id: String,
-    },
-    /// Producer requests the daemon stop accepting recording data.
+    /// Producer requests the daemon stop accepting recording data and reports
+    /// how many envelopes were sent for every trace the recording minted.
+    ///
+    /// This envelope replaces the legacy per-trace `EndTrace`: each trace's
+    /// promised envelope count gates finalisation in the daemon, eliminating
+    /// the race where an `EndTrace` published from the stop thread could
+    /// reach the daemon before in-flight `Frame`s from another publisher
+    /// thread.
     StopRecording {
         /// Recording identifier supplied earlier in
         /// [`Envelope::StartRecording`].
         recording_id: String,
+        /// One [`TraceEnding`] per trace the producer minted within this
+        /// recording. Empty when the producer minted no traces.
+        trace_endings: Vec<TraceEnding>,
     },
     /// Producer cancels a recording — the daemon drops every in-flight
     /// per-trace actor, deletes the on-disk artefacts, marks the recording
@@ -260,21 +274,40 @@ pub enum Envelope {
 pub struct BatchedFrameItem {
     /// Trace this sample belongs to.
     pub trace_id: String,
+    /// Per-trace zero-based counter at publish time. The IPC listener carries
+    /// this through into the unpacked [`Envelope::Frame::sequence_number`].
+    pub sequence_number: u64,
     /// Opaque per-frame bytes. Transported length-prefix + raw, exactly as
     /// [`Envelope::Frame`]'s `payload`.
     pub payload: Vec<u8>,
+}
+
+/// One trace's stop record inside an [`Envelope::StopRecording`] payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TraceEnding {
+    /// Trace identifier supplied earlier in [`Envelope::StartTrace`].
+    pub trace_id: String,
+    /// Total envelopes the producer published for this trace
+    /// ([`Envelope::Frame`] count for scalar / joint traces,
+    /// [`Envelope::VideoChunkReady`] count for video traces). The daemon's
+    /// per-trace actor finalises the trace once its observed envelope count
+    /// reaches this value; a fixed wait deadline marks the trace failed if
+    /// promised envelopes never arrive (e.g. producer crash mid-publish).
+    pub final_sequence_number: u64,
 }
 
 impl Envelope {
     /// Convenience constructor for [`Envelope::Frame`].
     pub fn frame(
         trace_id: String,
+        sequence_number: u64,
         timestamp_ns: i64,
         timestamp_s: Option<f64>,
         payload: Vec<u8>,
     ) -> Self {
         Envelope::Frame {
             trace_id,
+            sequence_number,
             timestamp_ns,
             timestamp_s,
             payload,
@@ -288,7 +321,6 @@ impl Envelope {
             Envelope::StartTrace { .. } => "start_trace",
             Envelope::Frame { .. } => "frame",
             Envelope::BatchedFrames { .. } => "batched_frames",
-            Envelope::EndTrace { .. } => "end_trace",
             Envelope::StopRecording { .. } => "stop_recording",
             Envelope::CancelRecording { .. } => "cancel_recording",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
@@ -337,10 +369,25 @@ mod tests {
 
     #[test]
     fn frame_envelope_preserves_payload_bytes() {
-        let original = Envelope::frame("trace-1".into(), 1_000_000, None, vec![1, 2, 3, 4, 5, 6]);
+        let original =
+            Envelope::frame("trace-1".into(), 0, 1_000_000, None, vec![1, 2, 3, 4, 5, 6]);
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn frame_sequence_number_round_trips() {
+        let original = Envelope::frame("trace-1".into(), 42, 1, None, vec![0]);
+        let bytes = original.encode().expect("encode");
+        let decoded = Envelope::decode(&bytes).expect("decode");
+        match decoded {
+            Envelope::Frame {
+                sequence_number, ..
+            } => assert_eq!(sequence_number, 42),
+            other => panic!("decoded envelope was not a Frame: {other:?}"),
+        }
+        assert_eq!(original, Envelope::decode(&bytes).expect("decode"));
     }
 
     #[test]
@@ -351,6 +398,7 @@ mod tests {
         // exact-match assertion on the video sidecar timestamps.
         let original = Envelope::frame(
             "trace-1".into(),
+            0,
             116_666_666,
             Some(7.0_f64 / 60.0_f64),
             vec![0xAA, 0xBB],
@@ -375,7 +423,7 @@ mod tests {
         // and check the wire form is within a small constant of the raw
         // bytes (variant tag + length prefix + trace_id + timestamps).
         const PAYLOAD_LEN: usize = 1024 * 1024;
-        let original = Envelope::frame("trace-1".into(), 0, None, vec![0xAB; PAYLOAD_LEN]);
+        let original = Envelope::frame("trace-1".into(), 0, 0, None, vec![0xAB; PAYLOAD_LEN]);
         let bytes = original.encode().expect("encode");
         // Empirically postcard adds well under 256 bytes of framing on top
         // of the raw payload for this envelope. Allow a generous 4 KiB
@@ -401,10 +449,12 @@ mod tests {
             frames: vec![
                 BatchedFrameItem {
                     trace_id: "joint-0".into(),
+                    sequence_number: 0,
                     payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
                 },
                 BatchedFrameItem {
                     trace_id: "joint-1".into(),
+                    sequence_number: 7,
                     payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
                 },
             ],
@@ -424,6 +474,7 @@ mod tests {
         let frames: Vec<BatchedFrameItem> = (0..1000)
             .map(|index| BatchedFrameItem {
                 trace_id: format!("11111111-2222-3333-4444-{index:012}"),
+                sequence_number: index as u64,
                 payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
             })
             .collect();
@@ -445,8 +496,53 @@ mod tests {
     fn envelope_kind_label_is_stable() {
         let env = Envelope::StopRecording {
             recording_id: "rec-1".into(),
+            trace_endings: Vec::new(),
         };
         assert_eq!(env.kind(), "stop_recording");
+    }
+
+    #[test]
+    fn stop_recording_round_trips_with_trace_endings() {
+        let original = Envelope::StopRecording {
+            recording_id: "rec-1".into(),
+            trace_endings: vec![
+                TraceEnding {
+                    trace_id: "trace-a".into(),
+                    final_sequence_number: 17,
+                },
+                TraceEnding {
+                    trace_id: "trace-b".into(),
+                    final_sequence_number: 0,
+                },
+            ],
+        };
+        let bytes = original.encode().expect("encode");
+        let decoded = Envelope::decode(&bytes).expect("decode");
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn stop_recording_with_thousand_trace_endings_fits_commands_slice() {
+        // The integration matrix's 1000-joint recording mints up to 1000
+        // traces per recording. The combined StopRecording envelope must
+        // fit a single `commands` sample.
+        let trace_endings: Vec<TraceEnding> = (0..1000)
+            .map(|index| TraceEnding {
+                trace_id: format!("11111111-2222-3333-4444-{index:012}"),
+                final_sequence_number: index as u64,
+            })
+            .collect();
+        let envelope = Envelope::StopRecording {
+            recording_id: "11111111-2222-3333-4444-555555555555".into(),
+            trace_endings,
+        };
+        let bytes = envelope.encode().expect("encode");
+        assert!(
+            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+            "1000-trace stop envelope ({} bytes) must fit the commands slice ({} bytes)",
+            bytes.len(),
+            service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+        );
     }
 
     #[test]

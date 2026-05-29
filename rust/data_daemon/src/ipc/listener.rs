@@ -121,6 +121,7 @@ fn drain_subscriber(
                     for item in frames {
                         batch.push(Envelope::frame(
                             item.trace_id,
+                            item.sequence_number,
                             timestamp_ns,
                             timestamp_s,
                             item.payload,
