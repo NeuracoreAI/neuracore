@@ -73,13 +73,14 @@ pub mod nut_writer;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, Once};
 
 use data_daemon_ipc::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
     MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
 };
-use data_daemon_ipc::{BatchedFrameItem, Envelope};
+use data_daemon_ipc::{BatchedFrameItem, Envelope, TraceEnding};
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::prelude::{ipc, UnableToDeliverStrategy};
@@ -158,6 +159,14 @@ struct ProducerState {
 struct TraceEntry {
     /// Trace id sent to the daemon; never surfaced to Python.
     trace_id: String,
+    /// Per-trace zero-based counter stamped onto every published envelope
+    /// for this trace (`Frame.sequence_number` for scalar / joint traces,
+    /// `VideoChunkReady.chunk_index` for video traces). On `stop_recording`
+    /// the post-stop value is shipped as the trace's `final_sequence_number`
+    /// so the daemon's per-trace actor knows when it has seen everything the
+    /// producer promised. `Arc` because publisher threads and the stop
+    /// thread share the counter.
+    sequence_counter: Arc<AtomicU64>,
 }
 
 /// Every trace the producer has minted for one recording, keyed by
@@ -598,22 +607,34 @@ fn start_recording(
     })
 }
 
-/// Resolve a trace id for `(data_type, name)` within `recording`, minting a
-/// fresh one when the stream has not been seen yet. Returns the trace id and
-/// whether it was newly minted (so the caller can publish its `StartTrace`).
-fn resolve_trace(recording: &mut RecordingTraces, data_type: &str, name: &str) -> (String, bool) {
+/// Resolve a trace id and its shared sequence counter for `(data_type, name)`
+/// within `recording`, minting a fresh trace when the stream has not been
+/// seen yet. Returns the trace id, a clone of the trace's `Arc<AtomicU64>`
+/// counter, and whether the trace was newly minted (so the caller can
+/// publish its `StartTrace`).
+fn resolve_trace(
+    recording: &mut RecordingTraces,
+    data_type: &str,
+    name: &str,
+) -> (String, Arc<AtomicU64>, bool) {
     let key = stream_key(data_type, name);
     match recording.traces.get(&key) {
-        Some(entry) => (entry.trace_id.clone(), false),
+        Some(entry) => (
+            entry.trace_id.clone(),
+            Arc::clone(&entry.sequence_counter),
+            false,
+        ),
         None => {
             let trace_id = Uuid::new_v4().to_string();
+            let sequence_counter = Arc::new(AtomicU64::new(0));
             recording.traces.insert(
                 key,
                 TraceEntry {
                     trace_id: trace_id.clone(),
+                    sequence_counter: Arc::clone(&sequence_counter),
                 },
             );
-            (trace_id, true)
+            (trace_id, sequence_counter, true)
         }
     }
 }
@@ -659,17 +680,18 @@ fn log_joints(
         // phantom trace ids that the daemon never receives an `EndTrace`
         // for and which stay in `writing` forever.
         let mut new_traces: Vec<(String, String)> = Vec::new();
-        let mut trace_ids: Vec<String> = Vec::with_capacity(items.len());
+        let mut trace_handles: Vec<(String, Arc<AtomicU64>)> = Vec::with_capacity(items.len());
         let recording_known = with_registry(|recordings| {
             let Some(recording) = recordings.get_mut(&recording_id) else {
                 return false;
             };
             for (name, _) in &items {
-                let (trace_id, is_new) = resolve_trace(recording, &data_type, name);
+                let (trace_id, sequence_counter, is_new) =
+                    resolve_trace(recording, &data_type, name);
                 if is_new {
                     new_traces.push((trace_id.clone(), name.clone()));
                 }
-                trace_ids.push(trace_id);
+                trace_handles.push((trace_id, sequence_counter));
             }
             true
         });
@@ -687,7 +709,7 @@ fn log_joints(
         }
         // Pack every joint sample into one BatchedFrames envelope.
         let mut frames = Vec::with_capacity(items.len());
-        for ((_, value), trace_id) in items.iter().zip(trace_ids) {
+        for ((_, value), (trace_id, sequence_counter)) in items.iter().zip(trace_handles) {
             // serde_json (via ryu) always emits at least one fractional digit
             // for f64 — so integer-valued joint values land on disk as `1.0`,
             // not `1`, keeping the column consistently typed as a float.
@@ -698,7 +720,12 @@ fn log_joints(
             .map_err(|error| {
                 PyRuntimeError::new_err(format!("failed to encode joint frame JSON: {error}"))
             })?;
-            frames.push(BatchedFrameItem { trace_id, payload });
+            let sequence_number = sequence_counter.fetch_add(1, Ordering::Relaxed);
+            frames.push(BatchedFrameItem {
+                trace_id,
+                sequence_number,
+                payload,
+            });
         }
         publish(&Envelope::BatchedFrames {
             timestamp_ns,
@@ -755,8 +782,7 @@ fn log_frame(
     // Resolve `timestamp_s` once. Fall back to ns→s so the chunk envelope's
     // per-frame timestamp matches the integration matrix's exact-match
     // sidecar assertion even when the SDK omitted the f64.
-    let resolved_timestamp_s =
-        timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
+    let resolved_timestamp_s = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
 
     // SAFETY: PyO3 guarantees the GIL is held for the entire body of a
     // `#[pyfunction]`, the buffer is `u8` (`PyBuffer::<u8>::get` validated
@@ -775,7 +801,7 @@ fn log_frame(
     let payload_slice: &[u8] =
         unsafe { std::slice::from_raw_parts(payload.buf_ptr() as *const u8, actual_bytes) };
 
-    let Some((trace_id, is_new)) = with_registry(|recordings| {
+    let Some((trace_id, sequence_counter, is_new)) = with_registry(|recordings| {
         recordings
             .get_mut(&recording_id)
             .map(|recording| resolve_trace(recording, &data_type, &name))
@@ -794,6 +820,7 @@ fn log_frame(
         &recording_id,
         &data_type,
         &trace_id,
+        &sequence_counter,
         width,
         height,
         payload_slice,
@@ -816,6 +843,7 @@ fn record_video_frame(
     recording_id: &str,
     data_type: &str,
     trace_id: &str,
+    sequence_counter: &Arc<AtomicU64>,
     width: u32,
     height: u32,
     payload: &[u8],
@@ -851,9 +879,7 @@ fn record_video_frame(
     // per-trace mutex across that block would stall this camera's next
     // frame.
     let flush_envelope = {
-        let mut state = slot
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
         // Compute PTS first; if monotonicity logic rejects the frame we want
         // to bail out before opening the file. Producer-side mirror of the
@@ -915,6 +941,13 @@ fn record_video_frame(
     };
 
     if let Some(envelope) = flush_envelope {
+        // The producer-side sequence counter advances per *envelope* delivered
+        // to the daemon. Video traces emit one VideoChunkReady per flushed
+        // chunk, so increment the counter alongside each successful flush.
+        // Keeping the increment outside the per-trace mutex avoids holding
+        // the lock across the publish (which can block on iceoryx2 buffer
+        // space).
+        sequence_counter.fetch_add(1, Ordering::Relaxed);
         publish(&envelope)?;
     }
     Ok(())
@@ -990,7 +1023,7 @@ fn log_scalar(
     py.allow_threads(|| -> PyResult<()> {
         // Silent drop if the recording isn't registered — see the
         // matching no-auto-register comment in `log_joints`.
-        let Some((trace_id, is_new)) = with_registry(|recordings| {
+        let Some((trace_id, sequence_counter, is_new)) = with_registry(|recordings| {
             recordings
                 .get_mut(&recording_id)
                 .map(|recording| resolve_trace(recording, &data_type, &name))
@@ -1005,8 +1038,10 @@ fn log_scalar(
                 data_type_name: Some(name),
             })?;
         }
+        let sequence_number = sequence_counter.fetch_add(1, Ordering::Relaxed);
         publish(&Envelope::frame(
             trace_id,
+            sequence_number,
             timestamp_ns,
             timestamp_s,
             owned_payload,
@@ -1015,12 +1050,16 @@ fn log_scalar(
     })
 }
 
-/// End every trace the recording minted, then announce the recording stopped.
+/// Flush any tail video chunks, then publish one `StopRecording` carrying
+/// the producer's per-trace envelope counts.
 ///
-/// For each video trace with a partial chunk in [`VIDEO_CHUNKS`] the tail
-/// chunk is flushed (and its `VideoChunkReady` published) *before* the
-/// trace's `EndTrace` lands, so the in-order delivery contract on the
-/// commands service guarantees the daemon sees the chunk first.
+/// The chunk flush happens *before* the `StopRecording` publish, so the
+/// in-order delivery contract on the publishing thread's `commands`
+/// publisher guarantees the daemon sees the chunk first. Frames from *other*
+/// publisher threads may still race past the stop envelope — the daemon's
+/// per-trace actor uses each [`TraceEnding::final_sequence_number`] as the
+/// gate that closes only once the matching count of envelopes has been
+/// observed.
 ///
 /// Idempotent: if the recording is not registered it was already stopped (or
 /// never started), so a mistaken `stop, stop` — or a stray `stop` before
@@ -1036,6 +1075,7 @@ fn stop_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
         let Some(recording) = take_recording(&recording_id) else {
             return Ok(());
         };
+        let mut trace_endings: Vec<TraceEnding> = Vec::with_capacity(recording.traces.len());
         for entry in recording.traces.into_values() {
             // Drain the trace's chunk state — even if there's no partial
             // chunk we want to drop the slot so a re-used trace id (post
@@ -1044,19 +1084,25 @@ fn stop_recording(py: Python<'_>, recording_id: &str) -> PyResult<()> {
             // the global lock short.
             let slot = with_video_chunks(|traces| traces.remove(&entry.trace_id));
             let flush_envelope = slot.and_then(|slot| {
-                let mut state = slot
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 flush_chunk_locked(&entry.trace_id, &mut state)
             });
             if let Some(envelope) = flush_envelope {
+                // Bump the counter for the flushed chunk so the stop snapshot
+                // includes it, matching the per-frame increment in
+                // [`record_video_frame`].
+                entry.sequence_counter.fetch_add(1, Ordering::Relaxed);
                 publish(&envelope)?;
             }
-            publish(&Envelope::EndTrace {
+            trace_endings.push(TraceEnding {
                 trace_id: entry.trace_id,
-            })?;
+                final_sequence_number: entry.sequence_counter.load(Ordering::Relaxed),
+            });
         }
-        publish(&Envelope::StopRecording { recording_id })?;
+        publish(&Envelope::StopRecording {
+            recording_id,
+            trace_endings,
+        })?;
         Ok(())
     })
 }
@@ -1125,5 +1171,35 @@ mod tests {
 
         // A stray stop for a recording that never started is a no-op.
         assert!(take_recording("rec-never-started-test-001").is_none());
+    }
+
+    /// `resolve_trace` mints one counter per trace and re-hands the same
+    /// `Arc` on subsequent calls for the same stream so multiple publisher
+    /// threads can stamp monotonically increasing sequence numbers without
+    /// fighting over the registry lock.
+    #[test]
+    fn resolve_trace_shares_sequence_counter_across_calls() {
+        let mut recording = RecordingTraces::default();
+        let (trace_id_first, counter_first, is_new_first) =
+            resolve_trace(&mut recording, "joints", "joint_0");
+        assert!(is_new_first);
+        assert_eq!(counter_first.load(Ordering::Relaxed), 0);
+        // Producer-side increment as in `log_scalar` / `log_joints`.
+        let seq_zero = counter_first.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(seq_zero, 0);
+
+        let (trace_id_second, counter_second, is_new_second) =
+            resolve_trace(&mut recording, "joints", "joint_0");
+        assert!(!is_new_second);
+        assert_eq!(trace_id_first, trace_id_second);
+        // The Arc is the same one — a second publisher thread observes the
+        // first increment.
+        assert_eq!(counter_second.load(Ordering::Relaxed), 1);
+        assert!(Arc::ptr_eq(&counter_first, &counter_second));
+
+        // A different stream gets a brand-new counter starting at 0.
+        let (_, joint_one_counter, _) = resolve_trace(&mut recording, "joints", "joint_1");
+        assert_eq!(joint_one_counter.load(Ordering::Relaxed), 0);
+        assert!(!Arc::ptr_eq(&counter_first, &joint_one_counter));
     }
 }

@@ -155,7 +155,7 @@ async fn run(
                     tracing::debug!("dispatcher inbox closed; exiting");
                     break;
                 };
-                if let Some(handle) = handle_envelope(
+                let spawned = handle_envelope(
                     &store,
                     &actor_context,
                     &context,
@@ -163,10 +163,8 @@ async fn run(
                     &recording_traces,
                     envelope,
                 )
-                .await
-                {
-                    actor_handles.push(handle);
-                }
+                .await;
+                actor_handles.extend(spawned);
             }
         }
     }
@@ -185,9 +183,10 @@ async fn run(
 
 /// Route a single envelope to the appropriate per-trace actor.
 ///
-/// Returns the join handle of a newly-spawned actor when one was created so
-/// the dispatcher can await it on shutdown. Returns `None` for envelopes that
-/// don't trigger actor creation (or that target an actor already running).
+/// Returns the join handles of any newly-spawned actors so the dispatcher
+/// can await them on shutdown. `StopRecording` may spawn one actor per
+/// `TraceEnding` whose trace never had a routed envelope; every other
+/// envelope spawns at most one actor.
 async fn handle_envelope(
     store: &Arc<SqliteStateStore>,
     actor_context: &Arc<TraceActorContext>,
@@ -195,7 +194,7 @@ async fn handle_envelope(
     routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
     recording_traces: &Arc<DashMap<String, HashSet<TraceKey>>>,
     envelope: Envelope,
-) -> Option<JoinHandle<()>> {
+) -> Vec<JoinHandle<()>> {
     let Some(key) = trace_key(&envelope) else {
         match envelope {
             Envelope::StartRecording { recording_id, .. } => {
@@ -207,9 +206,26 @@ async fn handle_envelope(
                         tracing::warn!(%error, recording_id, "failed to stamp recording org_id");
                     }
                 }
+                return Vec::new();
             }
-            Envelope::StopRecording { recording_id } => {
-                tracing::info!(recording_id, "recording stop received");
+            Envelope::StopRecording {
+                recording_id,
+                trace_endings,
+            } => {
+                tracing::info!(
+                    recording_id,
+                    trace_count = trace_endings.len(),
+                    "recording stop received"
+                );
+                let spawned = handle_stop_recording(
+                    store,
+                    actor_context,
+                    routing,
+                    recording_traces,
+                    &recording_id,
+                    trace_endings,
+                )
+                .await;
                 match store.mark_recording_stopped(&recording_id).await {
                     Ok(row) => {
                         tracing::info!(
@@ -227,23 +243,24 @@ async fn handle_envelope(
                         tracing::warn!(%error, recording_id, "failed to mark recording stopped");
                     }
                 }
+                return spawned;
             }
             Envelope::CancelRecording { recording_id } => {
                 handle_cancel_recording(store, context, routing, recording_traces, recording_id)
                     .await;
+                return Vec::new();
             }
             // `trace_key` also returns `None` for `BatchedFrames`, but the
             // IPC listener expands that into per-trace `Frame`s before the
             // dispatcher ever sees it — so it cannot reach this branch.
             _ => unreachable!("only recording-scoped envelopes reach this branch"),
         }
-        return None;
     };
 
     // Maintain the recording → trace_id reverse index so `CancelRecording`
     // can reach every actor. We learn the recording from `StartTrace`; later
-    // envelopes (`Frame`, `OpenFrameStream`, `EndTrace`) only carry the
-    // trace id and don't update the index.
+    // envelopes (`Frame`, `VideoChunkReady`) only carry the trace id and
+    // don't update the index.
     if let Envelope::StartTrace { recording_id, .. } = &envelope {
         recording_traces
             .entry(recording_id.clone())
@@ -262,18 +279,11 @@ async fn handle_envelope(
                 "trace actor inbox closed; dropping envelope"
             );
         }
-        return None;
+        return Vec::new();
     }
 
     // First message for this trace — spawn the actor.
-    let (tx, actor_rx) = mpsc::channel(TRACE_QUEUE_CAPACITY);
-    routing.insert(key.clone(), tx.clone());
-    let actor_store = Arc::clone(store);
-    let actor_context = Arc::clone(actor_context);
-    let actor_key = key.clone();
-    let join = tokio::spawn(async move {
-        trace_actor::run(actor_store, actor_context, actor_key, actor_rx).await;
-    });
+    let (tx, join) = spawn_actor(store, actor_context, routing, key.clone());
 
     if tx
         .send(TraceActorMessage::Envelope(envelope))
@@ -285,7 +295,71 @@ async fn handle_envelope(
             "trace actor inbox closed before first envelope"
         );
     }
-    Some(join)
+    vec![join]
+}
+
+/// Fan a `StopRecording` envelope's `trace_endings` out to per-trace actors.
+///
+/// For each `TraceEnding` we send a [`TraceActorMessage::StopAtSequence`] to
+/// the trace's actor. If the trace has never had a routed envelope (its
+/// `StartTrace` and any data have not yet been observed) we spawn the actor
+/// first so it can hold the stop signal — the producer's lossless delivery
+/// guarantees the missing envelopes are still in flight; the actor's
+/// pre-`StartTrace` buffer absorbs them and the 5 s timer is the watchdog.
+async fn handle_stop_recording(
+    store: &Arc<SqliteStateStore>,
+    actor_context: &Arc<TraceActorContext>,
+    routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
+    recording_traces: &Arc<DashMap<String, HashSet<TraceKey>>>,
+    recording_id: &str,
+    trace_endings: Vec<data_daemon_ipc::TraceEnding>,
+) -> Vec<JoinHandle<()>> {
+    let mut spawned = Vec::new();
+    for ending in trace_endings {
+        let trace_id = ending.trace_id;
+        let stop = TraceActorMessage::StopAtSequence {
+            final_sequence_number: ending.final_sequence_number,
+        };
+        let sender = match routing.get(&trace_id) {
+            Some(existing) => existing.clone(),
+            None => {
+                // No envelope has been routed for this trace yet — spawn the
+                // actor so it can buffer pending envelopes and observe the
+                // stop signal.
+                recording_traces
+                    .entry(recording_id.to_string())
+                    .or_default()
+                    .insert(trace_id.clone());
+                let (tx, join) = spawn_actor(store, actor_context, routing, trace_id.clone());
+                spawned.push(join);
+                tx
+            }
+        };
+        if sender.send(stop).await.is_err() {
+            tracing::warn!(
+                trace_id,
+                "trace actor inbox closed; dropping stop_at_sequence"
+            );
+        }
+    }
+    spawned
+}
+
+/// Spawn a per-trace actor task and register its sender in the routing map.
+fn spawn_actor(
+    store: &Arc<SqliteStateStore>,
+    actor_context: &Arc<TraceActorContext>,
+    routing: &Arc<DashMap<TraceKey, mpsc::Sender<TraceActorMessage>>>,
+    key: TraceKey,
+) -> (mpsc::Sender<TraceActorMessage>, JoinHandle<()>) {
+    let (tx, actor_rx) = mpsc::channel(TRACE_QUEUE_CAPACITY);
+    routing.insert(key.clone(), tx.clone());
+    let actor_store = Arc::clone(store);
+    let actor_context = Arc::clone(actor_context);
+    let join = tokio::spawn(async move {
+        trace_actor::run(actor_store, actor_context, key, actor_rx).await;
+    });
+    (tx, join)
 }
 
 /// Tear down every per-trace actor that belongs to `recording_id`, then mark
@@ -423,9 +497,15 @@ mod tests {
         // directory exists on disk before cancellation lands.
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&serde_json::json!({"i": index})).unwrap();
-            tx.send(Envelope::frame("trace-cancel".into(), index, None, payload))
-                .await
-                .expect("frame");
+            tx.send(Envelope::frame(
+                "trace-cancel".into(),
+                index as u64,
+                index,
+                None,
+                payload,
+            ))
+            .await
+            .expect("frame");
         }
 
         // Give the actor a chance to apply the first frames before we cancel
@@ -487,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatcher_drives_trace_to_written_on_end_trace() {
+    async fn dispatcher_drives_trace_to_written_on_stop_recording() {
         let (store, dir) = open_store().await;
         let context = test_context(dir.path().join("recordings"));
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
@@ -514,15 +594,25 @@ mod tests {
             // Send valid JSON payloads so the actor writes structured entries
             // into the trace.json array (rather than the byte-count fallback).
             let payload = serde_json::to_vec(&serde_json::json!({"i": index})).unwrap();
-            tx.send(Envelope::frame("trace-1".into(), index, None, payload))
-                .await
-                .expect("frame");
+            tx.send(Envelope::frame(
+                "trace-1".into(),
+                index as u64,
+                index,
+                None,
+                payload,
+            ))
+            .await
+            .expect("frame");
         }
-        tx.send(Envelope::EndTrace {
-            trace_id: "trace-1".into(),
+        tx.send(Envelope::StopRecording {
+            recording_id: "rec-1".into(),
+            trace_endings: vec![data_daemon_ipc::TraceEnding {
+                trace_id: "trace-1".into(),
+                final_sequence_number: 5,
+            }],
         })
         .await
-        .expect("end trace");
+        .expect("stop recording");
 
         // Close the dispatcher inbox so the actor observes EOF after draining.
         drop(tx);
