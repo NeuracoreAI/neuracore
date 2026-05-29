@@ -15,10 +15,23 @@
 //! schema is forward-compatible: postcard's enum representation tags variants
 //! with a u32 discriminant, so new envelope variants append cleanly.
 //!
-//! All envelopes — lifecycle, joints/scalars, and the chunk-ready notifications
-//! for video traces — travel over a single `commands` service. Video pixel
-//! buffers themselves are *not* on the IPC bus: the producer spools them to
-//! disk as NUT chunks and announces each finished chunk with a
+//! # The thin-shipper model
+//!
+//! The producer is a *thin shipper*: it knows nothing about recordings. Every
+//! envelope is tagged only with its **source** (`robot_id`, `robot_instance`)
+//! and — for data — its **sensor** (`data_type`, `sensor_name`) and capture
+//! `timestamp_ns`. The producer publishes three fire-and-forget lifecycle
+//! events ([`Envelope::StartRecording`] / [`Envelope::StopRecording`] /
+//! [`Envelope::CancelRecording`]) carrying the lifecycle wall-clock timestamp,
+//! and the daemon decides — from its per-source active-window map — which
+//! recording (if any) each datum belongs to. There is **no** `recording_id`,
+//! `recording_index`, `trace_id`, or `sequence_number` on the wire; the daemon
+//! assigns and stores those after routing.
+//!
+//! All envelopes — lifecycle, joints/scalars, and the chunk-ready
+//! notifications for video traces — travel over a single `commands` service.
+//! Video pixel buffers themselves are *not* on the IPC bus: the producer
+//! spools them to disk as NUT chunks and announces each finished chunk with an
 //! [`Envelope::VideoChunkReady`] envelope. See [`service_name`].
 
 use serde::{Deserialize, Serialize};
@@ -27,10 +40,9 @@ use thiserror::Error;
 /// iceoryx2 service-name conventions shared by daemon and producer.
 pub mod service_name {
     /// Pub/sub service carrying every IPC envelope: lifecycle
-    /// (`start_recording`, `start_trace`, `stop_recording`,
-    /// `cancel_recording`), non-video `frame` / `batched_frames` envelopes
-    /// (joints, scalars, custom streams), and the
-    /// [`Envelope::VideoChunkReady`] notifications that hand off
+    /// (`start_recording`, `stop_recording`, `cancel_recording`), non-video
+    /// `data` / `batched_data` envelopes (joints, scalars, custom streams),
+    /// and the [`Envelope::VideoChunkReady`] notifications that hand off
     /// disk-spooled video chunks to the daemon.
     ///
     /// There is no longer a dedicated video service — the producer writes
@@ -53,25 +65,23 @@ pub mod service_name {
     /// service is opened with `enable_safe_overflow(false)`, so a full
     /// buffer makes the producer's `Block` strategy wait rather than silently
     /// evict the oldest sample. (Were overflow left at iceoryx2's default the
-    /// oldest sample — typically a `StartTrace` — would be dropped, stranding
-    /// the per-trace actor.) The depth therefore only trades producer-blocking
-    /// frequency against memory.
+    /// oldest sample would be dropped, stranding the daemon's per-source
+    /// routing.) The depth therefore only trades producer-blocking frequency
+    /// against memory.
     ///
     /// The depth is bounded from *above* by memory, not just throughput.
     /// iceoryx2 sizes a publisher's data segment as
     /// `max_subscribers × (buffer + borrowed) × initial_max_slice_len`, and
     /// the resident footprint is `buffer × actual_sample_size`. The largest
-    /// `commands` sample is now a [`Envelope::BatchedFrames`] envelope — the
+    /// `commands` sample is a [`Envelope::BatchedData`] envelope — the
     /// integration matrix's 1000-joint worst case encodes to ~90 KiB — so a
     /// 1024-deep buffer would retain ~94 MiB of pages per publisher and
     /// exhaust the 64 MiB devcontainer `/dev/shm`.
     ///
     /// 64 keeps that worst case at ~6 MiB per publisher while staying deep
-    /// enough for steady state: the daemon drains every 10 ms and batched
+    /// enough for steady state: the daemon drains every 1 ms and batched
     /// joint logging emits one envelope per timestep, so the buffer never
-    /// fills under normal load. The one-time `StartTrace` burst at recording
-    /// setup (one envelope per trace) briefly blocks the producer once the
-    /// buffer is full — acceptable for a setup-path cost.
+    /// fills under normal load.
     pub const LIFECYCLE_SUBSCRIBER_BUFFER_SIZE: usize = 64;
 
     /// Maximum number of concurrent publishers per service.
@@ -116,140 +126,155 @@ pub mod service_name {
 
 /// A single message exchanged between the producer and the daemon.
 ///
-/// Variants cover the full recording / trace lifecycle.
+/// Every variant is tagged with its **source** (`robot_id`, `robot_instance`).
+/// Data variants additionally carry their **sensor** (`data_type`,
+/// `sensor_name`) and capture `timestamp_ns`. No recording or trace identity
+/// travels on the wire — the daemon owns it (see the crate-level docs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Envelope {
-    /// Producer announces a new recording session.
+    /// Producer announces that a recording has started for a source.
+    ///
+    /// The daemon opens an active window for `(robot_id, robot_instance)` at
+    /// `started_at_ns`, allocates the local `recording_index`, and inserts the
+    /// recording row. Processed immediately on arrival (bypasses the holdback).
     StartRecording {
-        /// Recording identifier supplied by the SDK.
-        recording_id: String,
-        /// Optional robot identifier.
-        robot_id: Option<String>,
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
         /// Optional robot human-readable name.
         robot_name: Option<String>,
         /// Optional dataset identifier.
         dataset_id: Option<String>,
         /// Optional dataset human-readable name.
         dataset_name: Option<String>,
+        /// Producer capture-clock timestamp (Unix nanoseconds) at which the
+        /// recording window opens. Forms the inclusive lower bound of the
+        /// window's `[started_at_ns, stopped_at_ns)` membership range.
+        started_at_ns: i64,
     },
-    /// Producer opens a new trace within an active recording.
-    StartTrace {
-        /// Recording this trace belongs to.
-        recording_id: String,
-        /// Trace identifier supplied by the SDK.
-        trace_id: String,
-        /// Wire data-type label (e.g. `"video"`, `"joints"`).
-        data_type: String,
-        /// Optional per-stream label (e.g. joint name or camera id). When
-        /// present it disambiguates traces that share a `data_type` — joint
-        /// streams produce one trace per joint name, video streams one per
-        /// camera id — so downstream tooling (and the integration test
-        /// matrix) can identify the producing stream from the DB row alone.
-        data_type_name: Option<String>,
+    /// Producer announces that the source's active recording has stopped.
+    ///
+    /// The daemon sets the window's exclusive upper bound and begins the
+    /// drain/finalise countdown. Processed immediately on arrival.
+    StopRecording {
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
+        /// Producer capture-clock timestamp (Unix nanoseconds) at which the
+        /// recording window closes. Exclusive upper bound of the membership
+        /// range.
+        stopped_at_ns: i64,
     },
-    /// Producer delivers one frame/sample for a trace.
+    /// Producer cancels the source's active recording — the daemon drops every
+    /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
+    /// recording row cancelled, and uploads nothing. Processed immediately on
+    /// arrival; the daemon is idempotent.
+    CancelRecording {
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
+        /// Producer capture-clock timestamp (Unix nanoseconds) of the cancel.
+        cancelled_at_ns: i64,
+    },
+    /// Producer delivers one sensor sample.
     ///
     /// The payload is opaque to the IPC layer; the per-trace actor parses it
-    /// according to `data_type` and writes it through the JSON writer.
+    /// according to `data_type` and writes it through the JSON writer. The
+    /// daemon holds the datum for the configured holdback, then routes it into
+    /// the source's window whose `[started_at_ns, stopped_at_ns)` contains
+    /// `timestamp_ns`.
     ///
-    /// Video frames do *not* travel as `Frame` envelopes — they are spooled
-    /// to disk by the producer and announced via
-    /// [`Envelope::VideoChunkReady`] instead.
-    Frame {
-        /// Trace this frame belongs to.
-        trace_id: String,
-        /// Zero-based per-trace counter, assigned by the producer's per-trace
-        /// `AtomicU64` at publish time. The producer's
-        /// [`Envelope::StopRecording`] payload reports the post-stop counter
-        /// value (== total envelopes sent) per trace; the daemon's per-trace
-        /// actor counts received envelopes and finalises when the count
-        /// matches that promised total, closing the historical race where
-        /// `EndTrace` from one publisher could arrive before in-flight
-        /// `Frame`s from another.
-        sequence_number: u64,
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch.
+    /// Video frames do *not* travel as `Data` envelopes — they are spooled to
+    /// disk by the producer and announced via [`Envelope::VideoChunkReady`]
+    /// instead.
+    Data {
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
+        /// Wire data-type label (e.g. `"JOINT_POSITIONS"`, `"RGB_IMAGES"`).
+        data_type: String,
+        /// Per-stream sensor label (joint name, camera id, …) — disambiguates
+        /// traces that share a `data_type`. Persisted to the trace row's
+        /// `data_type_name` column.
+        sensor_name: Option<String>,
+        /// Producer wall-clock time (Unix nanoseconds) stamped at the moment
+        /// this envelope is published. This is the **only** key used for
+        /// window membership — it is decoupled from the data's own capture
+        /// time, so the daemon's routing never depends on what clock the
+        /// caller timestamps data with. Lifecycle events carry the same kind
+        /// of publish-clock timestamp, so a datum belongs to the window whose
+        /// `[started_at_ns, stopped_at_ns)` brackets its publish time.
+        publish_timestamp_ns: i64,
+        /// Caller-supplied capture time in nanoseconds since the Unix epoch —
+        /// the data's *own* clock, written into the trace content. Not used
+        /// for routing.
         timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds (f64) since the
-        /// Unix epoch. Postcard writes this as 8 raw IEEE-754 bytes so the
-        /// value round-trips bit-exact — required for the integration
-        /// matrix's exact-match timestamp assertion on the video sidecar.
+        /// Optional caller-supplied capture time in seconds (f64). Postcard
+        /// writes this bit-exact.
         timestamp_s: Option<f64>,
-        /// Opaque per-frame bytes. Postcard transports these as
+        /// Opaque per-sample bytes. Postcard transports these as
         /// length-prefix + raw bytes (no expansion).
         payload: Vec<u8>,
     },
-    /// Producer delivers one sample for each of several traces captured at
-    /// the same instant — used by scalar joint logging, where a robot's N
-    /// joints are sampled together.
+    /// Producer delivers one sample for each of several sensors captured at the
+    /// same instant — used by scalar joint logging, where a robot's N joints
+    /// are sampled together.
     ///
-    /// Collapsing N [`Envelope::Frame`] envelopes into one IPC message cuts
-    /// the per-call iceoryx2 publish count (and the pressure on the deep
-    /// lifecycle buffer) by a factor of N. The daemon's listener unpacks each
-    /// item into a standalone [`Envelope::Frame`] before dispatch, so nothing
-    /// downstream of the wire boundary has to know this variant exists.
-    ///
-    /// Joint payloads are tiny (a `{"timestamp":..,"value":..}` JSON object,
-    /// ~50 bytes) so even the integration matrix's 1000-joint worst case
-    /// encodes to ~90 KiB — comfortably inside [`COMMANDS_MAX_PAYLOAD_BYTES`].
-    ///
-    /// [`COMMANDS_MAX_PAYLOAD_BYTES`]: service_name::COMMANDS_MAX_PAYLOAD_BYTES
-    BatchedFrames {
-        /// Capture time in nanoseconds since the Unix epoch, shared by every
-        /// item in the batch.
+    /// Collapsing N [`Envelope::Data`] envelopes into one IPC message cuts the
+    /// per-call iceoryx2 publish count (and the pressure on the lifecycle
+    /// buffer) by a factor of N. Because every item shares the batch's
+    /// `timestamp_ns`, the whole batch belongs to one window — the daemon
+    /// holds and routes it as a single unit.
+    BatchedData {
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds), shared by every
+        /// item. The sole key for window membership (see [`Envelope::Data`]).
+        publish_timestamp_ns: i64,
+        /// Caller-supplied capture time (ns), shared by every item — content,
+        /// not routing.
         timestamp_ns: i64,
-        /// Optional capture time in seconds since the Unix epoch, shared by
-        /// every item. See [`Envelope::Frame`]'s `timestamp_s` for the
-        /// bit-exactness contract postcard provides.
+        /// Optional caller-supplied capture time in seconds, shared by every
+        /// item.
         timestamp_s: Option<f64>,
-        /// Per-trace samples; each unpacks into one [`Envelope::Frame`].
-        frames: Vec<BatchedFrameItem>,
-    },
-    /// Producer requests the daemon stop accepting recording data and reports
-    /// how many envelopes were sent for every trace the recording minted.
-    ///
-    /// This envelope replaces the legacy per-trace `EndTrace`: each trace's
-    /// promised envelope count gates finalisation in the daemon, eliminating
-    /// the race where an `EndTrace` published from the stop thread could
-    /// reach the daemon before in-flight `Frame`s from another publisher
-    /// thread.
-    StopRecording {
-        /// Recording identifier supplied earlier in
-        /// [`Envelope::StartRecording`].
-        recording_id: String,
-        /// One [`TraceEnding`] per trace the producer minted within this
-        /// recording. Empty when the producer minted no traces.
-        trace_endings: Vec<TraceEnding>,
-    },
-    /// Producer cancels a recording — the daemon drops every in-flight
-    /// per-trace actor, deletes the on-disk artefacts, marks the recording
-    /// row as cancelled, and does not upload any of its traces.
-    ///
-    /// Sent in lieu of (or after) a [`StopRecording`] envelope when the
-    /// producer decides the recording should be discarded entirely. The
-    /// daemon is idempotent: a CancelRecording after a successful upload is
-    /// a no-op (the recording row already records what was uploaded).
-    CancelRecording {
-        /// Recording identifier supplied earlier in
-        /// [`Envelope::StartRecording`].
-        recording_id: String,
+        /// Per-sensor samples; each routes to one trace actor.
+        items: Vec<BatchedDataItem>,
     },
     /// Producer announces a finished NUT chunk for a video trace.
     ///
     /// The producer spools captured RGB frames to disk as a sequence of NUT
-    /// chunks. When a chunk crosses the flush threshold (or the trace ends)
-    /// the producer renames `chunk_NNNN.nut.tmp` → `chunk_NNNN.nut`, then
-    /// publishes this envelope so the daemon can encode the chunk to a
-    /// sealed MP4 segment. Per-frame `timestamp_s` values are carried
-    /// inline so the daemon-side `trace.json` sidecar matches the bit-exact
-    /// assertion that today travels through [`Envelope::Frame::timestamp_s`].
+    /// chunks under a recording-independent inbox keyed by source + sensor.
+    /// When a chunk crosses the flush threshold (or a lifecycle event rolls
+    /// it) the producer finishes the NUT and publishes this envelope so the
+    /// daemon can bucket the chunk's frames into the right recording window
+    /// (by `frame_timestamps_ns`), relink the NUT under the recording, and
+    /// encode it to a sealed MP4 segment. Per-frame `timestamp_s` values are
+    /// carried inline so the daemon-side `trace.json` sidecar matches the
+    /// bit-exact assertion.
     VideoChunkReady {
-        /// Recording this trace belongs to. Carried so the daemon can resolve
-        /// the on-disk path without a roundtrip through `StartTrace`.
-        recording_id: String,
-        /// Trace these frames belong to.
-        trace_id: String,
-        /// Zero-based chunk index within the trace.
-        chunk_index: u32,
+        /// Robot identifier — the first half of the source key.
+        robot_id: String,
+        /// Robot instance — the second half of the source key.
+        robot_instance: i64,
+        /// Wire data-type label (e.g. `"RGB_IMAGES"`).
+        data_type: String,
+        /// Per-stream sensor label (camera id).
+        sensor_name: Option<String>,
+        /// Producer wall-clock time (Unix nanoseconds) the chunk was announced
+        /// — the key used to route the whole chunk into a recording window
+        /// (the producer rolls a chunk on every lifecycle event, so a chunk's
+        /// announce time falls inside exactly one window).
+        publish_timestamp_ns: i64,
+        /// Producer-monotonic spool sequence for this `(source, sensor)`. Used
+        /// only to order inbox chunks deterministically; the daemon assigns
+        /// its own per-trace chunk index at relink time.
+        spool_seq: u64,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels (constant across a trace).
@@ -258,56 +283,53 @@ pub enum Envelope {
         byte_count: u64,
         /// Number of frames packed into this chunk.
         frame_count: u32,
+        /// Per-frame capture time in nanoseconds since the Unix epoch, in
+        /// arrival order. Length equals `frame_count`. Used to bucket the
+        /// chunk's frames against the source's active-window map.
+        frame_timestamps_ns: Vec<i64>,
         /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
         /// Length equals `frame_count`; values round-trip bit-exact through
-        /// postcard.
+        /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
     },
 }
 
-/// One trace's sample inside an [`Envelope::BatchedFrames`] batch.
+/// One sensor's sample inside an [`Envelope::BatchedData`] batch.
 ///
 /// Carries only the fields that differ between items — the `timestamp_ns` /
-/// `timestamp_s` are hoisted onto the parent envelope because every joint in
-/// a batch is captured at the same instant.
+/// `timestamp_s` are hoisted onto the parent envelope because every sensor in
+/// a batch is captured at the same instant. Each item self-tags its sensor
+/// because there is no pre-registered trace to look up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct BatchedFrameItem {
-    /// Trace this sample belongs to.
-    pub trace_id: String,
-    /// Per-trace zero-based counter at publish time. The IPC listener carries
-    /// this through into the unpacked [`Envelope::Frame::sequence_number`].
-    pub sequence_number: u64,
-    /// Opaque per-frame bytes. Transported length-prefix + raw, exactly as
-    /// [`Envelope::Frame`]'s `payload`.
+pub struct BatchedDataItem {
+    /// Wire data-type label for this item.
+    pub data_type: String,
+    /// Per-stream sensor label (joint name, …).
+    pub sensor_name: Option<String>,
+    /// Opaque per-sample bytes. Transported length-prefix + raw, exactly as
+    /// [`Envelope::Data`]'s `payload`.
     pub payload: Vec<u8>,
 }
 
-/// One trace's stop record inside an [`Envelope::StopRecording`] payload.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TraceEnding {
-    /// Trace identifier supplied earlier in [`Envelope::StartTrace`].
-    pub trace_id: String,
-    /// Total envelopes the producer published for this trace
-    /// ([`Envelope::Frame`] count for scalar / joint traces,
-    /// [`Envelope::VideoChunkReady`] count for video traces). The daemon's
-    /// per-trace actor finalises the trace once its observed envelope count
-    /// reaches this value; a fixed wait deadline marks the trace failed if
-    /// promised envelopes never arrive (e.g. producer crash mid-publish).
-    pub final_sequence_number: u64,
-}
-
 impl Envelope {
-    /// Convenience constructor for [`Envelope::Frame`].
-    pub fn frame(
-        trace_id: String,
-        sequence_number: u64,
+    /// Convenience constructor for [`Envelope::Data`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn data(
+        robot_id: String,
+        robot_instance: i64,
+        data_type: String,
+        sensor_name: Option<String>,
+        publish_timestamp_ns: i64,
         timestamp_ns: i64,
         timestamp_s: Option<f64>,
         payload: Vec<u8>,
     ) -> Self {
-        Envelope::Frame {
-            trace_id,
-            sequence_number,
+        Envelope::Data {
+            robot_id,
+            robot_instance,
+            data_type,
+            sensor_name,
+            publish_timestamp_ns,
             timestamp_ns,
             timestamp_s,
             payload,
@@ -318,11 +340,10 @@ impl Envelope {
     pub fn kind(&self) -> &'static str {
         match self {
             Envelope::StartRecording { .. } => "start_recording",
-            Envelope::StartTrace { .. } => "start_trace",
-            Envelope::Frame { .. } => "frame",
-            Envelope::BatchedFrames { .. } => "batched_frames",
             Envelope::StopRecording { .. } => "stop_recording",
             Envelope::CancelRecording { .. } => "cancel_recording",
+            Envelope::Data { .. } => "data",
+            Envelope::BatchedData { .. } => "batched_data",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
         }
     }
@@ -355,50 +376,51 @@ mod tests {
     use super::*;
 
     #[test]
-    fn envelope_round_trips_through_postcard() {
-        let original = Envelope::StartTrace {
-            recording_id: "rec-1".into(),
-            trace_id: "trace-1".into(),
-            data_type: "video".into(),
-            data_type_name: Some("camera_0".into()),
+    fn start_recording_round_trips_through_postcard() {
+        let original = Envelope::StartRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            robot_name: Some("arm".into()),
+            dataset_id: Some("ds-1".into()),
+            dataset_name: Some("warehouse".into()),
+            started_at_ns: 1_700_000_000_000_000_000,
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
+        assert_eq!(original.kind(), "start_recording");
     }
 
     #[test]
-    fn frame_envelope_preserves_payload_bytes() {
-        let original =
-            Envelope::frame("trace-1".into(), 0, 1_000_000, None, vec![1, 2, 3, 4, 5, 6]);
+    fn data_envelope_preserves_payload_bytes() {
+        let original = Envelope::data(
+            "robot-1".into(),
+            0,
+            "JOINT_POSITIONS".into(),
+            Some("waist".into()),
+            1_700_000_000_000_000_000,
+            1_000_000,
+            None,
+            vec![1, 2, 3, 4, 5, 6],
+        );
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
+        assert_eq!(original.kind(), "data");
     }
 
     #[test]
-    fn frame_sequence_number_round_trips() {
-        let original = Envelope::frame("trace-1".into(), 42, 1, None, vec![0]);
-        let bytes = original.encode().expect("encode");
-        let decoded = Envelope::decode(&bytes).expect("decode");
-        match decoded {
-            Envelope::Frame {
-                sequence_number, ..
-            } => assert_eq!(sequence_number, 42),
-            other => panic!("decoded envelope was not a Frame: {other:?}"),
-        }
-        assert_eq!(original, Envelope::decode(&bytes).expect("decode"));
-    }
-
-    #[test]
-    fn frame_timestamp_s_is_bit_exact_over_postcard_wire() {
+    fn data_timestamp_s_is_bit_exact_over_postcard_wire() {
         // Postcard writes `f64` as 8 raw IEEE-754 bytes, so values that
         // would shift under a decimal parser (e.g. `7/60`) round-trip
         // bit-identically — required for the integration matrix's
         // exact-match assertion on the video sidecar timestamps.
-        let original = Envelope::frame(
-            "trace-1".into(),
+        let original = Envelope::data(
+            "robot-1".into(),
             0,
+            "RGB_IMAGES".into(),
+            Some("camera_right".into()),
+            1_700_000_000_000_000_000,
             116_666_666,
             Some(7.0_f64 / 60.0_f64),
             vec![0xAA, 0xBB],
@@ -406,29 +428,34 @@ mod tests {
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
-        if let Envelope::Frame { timestamp_s, .. } = decoded {
+        if let Envelope::Data { timestamp_s, .. } = decoded {
             assert_eq!(
                 timestamp_s.map(f64::to_bits),
                 Some((7.0_f64 / 60.0_f64).to_bits()),
             );
         } else {
-            panic!("decoded envelope was not a Frame");
+            panic!("decoded envelope was not Data");
         }
     }
 
     #[test]
-    fn frame_payload_does_not_expand_under_postcard() {
+    fn data_payload_does_not_expand_under_postcard() {
         // The whole point of moving off JSON is that `Vec<u8>` no longer
         // expands ~3× as a JSON array of integers. Encode a 1 MiB payload
         // and check the wire form is within a small constant of the raw
-        // bytes (variant tag + length prefix + trace_id + timestamps).
+        // bytes (variant tag + length prefix + source/sensor + timestamps).
         const PAYLOAD_LEN: usize = 1024 * 1024;
-        let original = Envelope::frame("trace-1".into(), 0, 0, None, vec![0xAB; PAYLOAD_LEN]);
+        let original = Envelope::data(
+            "robot-1".into(),
+            0,
+            "RGB_IMAGES".into(),
+            None,
+            0,
+            0,
+            None,
+            vec![0xAB; PAYLOAD_LEN],
+        );
         let bytes = original.encode().expect("encode");
-        // Empirically postcard adds well under 256 bytes of framing on top
-        // of the raw payload for this envelope. Allow a generous 4 KiB
-        // headroom so the test stays stable across minor postcard / serde
-        // revisions without losing its teeth.
         assert!(
             bytes.len() <= PAYLOAD_LEN + 4096,
             "postcard wire form ({} bytes) is too far from raw payload ({} bytes)",
@@ -442,19 +469,22 @@ mod tests {
     }
 
     #[test]
-    fn batched_frames_round_trips() {
-        let original = Envelope::BatchedFrames {
+    fn batched_data_round_trips() {
+        let original = Envelope::BatchedData {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_s: Some(1_700_000_000.5),
-            frames: vec![
-                BatchedFrameItem {
-                    trace_id: "joint-0".into(),
-                    sequence_number: 0,
+            items: vec![
+                BatchedDataItem {
+                    data_type: "JOINT_POSITIONS".into(),
+                    sensor_name: Some("joint-0".into()),
                     payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
                 },
-                BatchedFrameItem {
-                    trace_id: "joint-1".into(),
-                    sequence_number: 7,
+                BatchedDataItem {
+                    data_type: "JOINT_POSITIONS".into(),
+                    sensor_name: Some("joint-1".into()),
                     payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
                 },
             ],
@@ -462,26 +492,30 @@ mod tests {
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
-        assert_eq!(original.kind(), "batched_frames");
+        assert_eq!(original.kind(), "batched_data");
     }
 
     #[test]
-    fn batched_frames_worst_case_fits_commands_slice() {
+    fn batched_data_worst_case_fits_commands_slice() {
         // The integration matrix's high-dimensionality case logs 1000 joints
         // per call. Each joint payload is a small `{"timestamp":..,"value":..}`
-        // JSON object plus a UUID trace_id; the whole batch must fit inside a
-        // single `commands` sample so the producer can publish it in one go.
-        let frames: Vec<BatchedFrameItem> = (0..1000)
-            .map(|index| BatchedFrameItem {
-                trace_id: format!("11111111-2222-3333-4444-{index:012}"),
-                sequence_number: index as u64,
+        // JSON object plus a data_type label and sensor name; the whole batch
+        // must fit inside a single `commands` sample so the producer can
+        // publish it in one go.
+        let items: Vec<BatchedDataItem> = (0..1000)
+            .map(|index| BatchedDataItem {
+                data_type: "JOINT_POSITIONS".into(),
+                sensor_name: Some(format!("vx300s_left_joint_{index:04}")),
                 payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
             })
             .collect();
-        let envelope = Envelope::BatchedFrames {
+        let envelope = Envelope::BatchedData {
+            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            robot_instance: 0,
+            publish_timestamp_ns: 1_747_740_000_123_456_700,
             timestamp_ns: 1_747_740_000_123_456_700,
             timestamp_s: Some(1_747_740_000.123_456_7),
-            frames,
+            items,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -493,87 +527,50 @@ mod tests {
     }
 
     #[test]
-    fn envelope_kind_label_is_stable() {
-        let env = Envelope::StopRecording {
-            recording_id: "rec-1".into(),
-            trace_endings: Vec::new(),
+    fn stop_and_cancel_round_trip() {
+        let stop = Envelope::StopRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 2,
+            stopped_at_ns: 1_700_000_000_000_000_000,
         };
-        assert_eq!(env.kind(), "stop_recording");
-    }
+        let bytes = stop.encode().expect("encode");
+        assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(stop.kind(), "stop_recording");
 
-    #[test]
-    fn stop_recording_round_trips_with_trace_endings() {
-        let original = Envelope::StopRecording {
-            recording_id: "rec-1".into(),
-            trace_endings: vec![
-                TraceEnding {
-                    trace_id: "trace-a".into(),
-                    final_sequence_number: 17,
-                },
-                TraceEnding {
-                    trace_id: "trace-b".into(),
-                    final_sequence_number: 0,
-                },
-            ],
+        let cancel = Envelope::CancelRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 2,
+            cancelled_at_ns: 1_700_000_000_000_000_001,
         };
-        let bytes = original.encode().expect("encode");
-        let decoded = Envelope::decode(&bytes).expect("decode");
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn stop_recording_with_thousand_trace_endings_fits_commands_slice() {
-        // The integration matrix's 1000-joint recording mints up to 1000
-        // traces per recording. The combined StopRecording envelope must
-        // fit a single `commands` sample.
-        let trace_endings: Vec<TraceEnding> = (0..1000)
-            .map(|index| TraceEnding {
-                trace_id: format!("11111111-2222-3333-4444-{index:012}"),
-                final_sequence_number: index as u64,
-            })
-            .collect();
-        let envelope = Envelope::StopRecording {
-            recording_id: "11111111-2222-3333-4444-555555555555".into(),
-            trace_endings,
-        };
-        let bytes = envelope.encode().expect("encode");
-        assert!(
-            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
-            "1000-trace stop envelope ({} bytes) must fit the commands slice ({} bytes)",
-            bytes.len(),
-            service_name::COMMANDS_MAX_PAYLOAD_BYTES,
-        );
-    }
-
-    #[test]
-    fn cancel_recording_round_trips() {
-        let original = Envelope::CancelRecording {
-            recording_id: "rec-1".into(),
-        };
-        let bytes = original.encode().expect("encode");
-        let decoded = Envelope::decode(&bytes).expect("decode");
-        assert_eq!(original, decoded);
-        assert_eq!(original.kind(), "cancel_recording");
+        let bytes = cancel.encode().expect("encode");
+        assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(cancel.kind(), "cancel_recording");
     }
 
     #[test]
     fn video_chunk_ready_round_trips() {
         let original = Envelope::VideoChunkReady {
-            recording_id: "rec-1".into(),
-            trace_id: "trace-1".into(),
-            chunk_index: 3,
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            data_type: "RGB_IMAGES".into(),
+            sensor_name: Some("camera_right".into()),
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            spool_seq: 3,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
-            frame_count: 7,
+            frame_count: 4,
+            frame_timestamps_ns: vec![
+                1_700_000_000_000_000_000,
+                1_700_000_000_016_666_700,
+                1_700_000_000_033_333_300,
+                1_700_000_000_050_000_000,
+            ],
             frame_timestamps_s: vec![
                 1_700_000_000.0,
                 1_700_000_000.016_666_7,
                 1_700_000_000.033_333_3,
                 7.0_f64 / 60.0_f64,
-                1_700_000_000.066_666_7,
-                1_700_000_000.083_333_3,
-                1_700_000_000.1,
             ],
         };
         let bytes = original.encode().expect("encode");
@@ -584,18 +581,23 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // A 128 MiB 1080p chunk holds ~3800 frames; carry one f64 per frame.
-        // Even at 10_000 timestamps the envelope is comfortably under
-        // COMMANDS_MAX_PAYLOAD_BYTES.
+        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps per
+        // frame (ns + s). Even at 10_000 frames the envelope is comfortably
+        // under COMMANDS_MAX_PAYLOAD_BYTES.
+        let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
         let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
         let envelope = Envelope::VideoChunkReady {
-            recording_id: "11111111-2222-3333-4444-555555555555".into(),
-            trace_id: "66666666-7777-8888-9999-aaaaaaaaaaaa".into(),
-            chunk_index: 42,
+            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            robot_instance: 0,
+            data_type: "RGB_IMAGES".into(),
+            sensor_name: Some("camera_right".into()),
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            spool_seq: 42,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
-            frame_count: frame_timestamps_s.len() as u32,
+            frame_count: frame_timestamps_ns.len() as u32,
+            frame_timestamps_ns,
             frame_timestamps_s,
         };
         let bytes = envelope.encode().expect("encode");

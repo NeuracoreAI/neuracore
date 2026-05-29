@@ -45,40 +45,98 @@ pub enum StateStoreError {
     },
 }
 
+/// Parameters for inserting a new recording row.
+///
+/// The daemon supplies the source identity and metadata from the
+/// `StartRecording` envelope; the store allocates the `recording_index`.
+#[derive(Debug, Clone, Default)]
+pub struct NewRecording<'a> {
+    /// Robot identifier — first half of the source key.
+    pub robot_id: Option<&'a str>,
+    /// Robot instance — second half of the source key.
+    pub robot_instance: Option<i64>,
+    /// Robot human-readable name.
+    pub robot_name: Option<&'a str>,
+    /// Dataset identifier.
+    pub dataset_id: Option<&'a str>,
+    /// Dataset human-readable name.
+    pub dataset_name: Option<&'a str>,
+    /// Organisation that owns the recording.
+    pub org_id: Option<&'a str>,
+    /// Producer capture-clock window lower bound (Unix nanoseconds).
+    pub start_timestamp_ns: i64,
+}
+
 /// Persistence interface for daemon state.
 ///
 /// Covers the operations the dispatcher, per-trace actors, and cloud
 /// coordinators need: recording / trace lifecycle transitions, upload
-/// bookkeeping, and reconciliation queries.
+/// bookkeeping, and reconciliation queries. Recordings are keyed by the local
+/// `recording_index` the store allocates; the cloud `recording_id` is a
+/// separate, nullable column filled asynchronously.
 #[async_trait]
 pub trait StateStore: Send + Sync {
-    /// Insert a recording row if one does not already exist.
-    async fn create_recording(&self, recording_id: &str) -> Result<RecordingRow, StateStoreError>;
-
-    /// Stamp the recording's `org_id` if not already set.
-    ///
-    /// The org is supplied by the producer's `StartRecording` envelope; we
-    /// persist it so the upload coordinator can build the per-org URL paths
-    /// from the same source the registration coordinator used.
-    async fn set_recording_org(
+    /// Insert a new recording row, allocating its `recording_index`, and
+    /// return it. Each `StartRecording` envelope opens a distinct recording,
+    /// so this always inserts (never upserts).
+    async fn create_recording(
         &self,
-        recording_id: &str,
-        org_id: &str,
-    ) -> Result<Option<RecordingRow>, StateStoreError>;
+        new: NewRecording<'_>,
+    ) -> Result<RecordingRow, StateStoreError>;
 
-    /// Fetch a recording by ID, returning `None` when absent.
+    /// Fetch a recording by its local index, returning `None` when absent.
     async fn get_recording(
         &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Return the most recently created recordings for a source, ordered by
+    /// `recording_index` ascending. Used by the recovery sweep and the
+    /// integration tests to correlate a recorded session to its DB rows.
+    async fn recordings_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+    ) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Persist the cloud `recording_id` on the row (idempotent via COALESCE so
+    /// a start-notify success and a registration mint-on-demand cannot
+    /// clobber each other). Returns the row after the update.
+    async fn set_recording_cloud_id(
+        &self,
+        recording_index: i64,
         recording_id: &str,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
 
-    /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state.
-    ///
-    /// The parent recording is created on demand, since a `StartTrace` may
-    /// race ahead of any explicit recording creation.
+    /// Stamp the cloud `recording_id` **and** `backend_start_notified_at`
+    /// after the recording-start notifier successfully POSTed
+    /// `/recording/start`. Idempotent.
+    async fn mark_recording_start_notified(
+        &self,
+        recording_index: i64,
+        recording_id: &str,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Stamp `backend_start_failed_at` when the recording-start notifier
+    /// permanently skips `/recording/start` (older than the recency bound).
+    /// The recording is **not** cancelled — it still uploads best-effort via
+    /// registration mint-on-demand. Idempotent.
+    async fn mark_recording_start_failed(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// List recordings whose `/recording/start` POST has neither succeeded nor
+    /// been permanently skipped: `recording_id IS NULL` and both
+    /// `backend_start_notified_at` and `backend_start_failed_at` are NULL, and
+    /// the recording is not cancelled. The start notifier's startup sweep.
+    async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
+    /// an existing recording. Idempotent on `trace_id`.
     async fn create_trace(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         trace_id: &str,
         data_type: Option<&str>,
         data_type_name: Option<&str>,
@@ -101,7 +159,7 @@ pub trait StateStore: Send + Sync {
     /// Return all traces for the given recording, ordered by `created_at`.
     async fn list_traces_for_recording(
         &self,
-        recording_id: &str,
+        recording_index: i64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
     /// Claim up to `limit` traces in [`TraceWriteStatus::Written`] /
@@ -120,18 +178,44 @@ pub trait StateStore: Send + Sync {
         max_wait_secs: f64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
-    /// Mark a recording as stopped by setting its `stopped_at` to now.
+    /// Mark a recording as stopped, setting `stopped_at` (wall clock) and
+    /// `stop_timestamp_ns` (producer capture clock).
     ///
     /// Idempotent: re-stopping a recording that already has a `stopped_at`
-    /// leaves the existing timestamp untouched so duplicate `StopRecording`
-    /// envelopes (e.g. SDK retry on socket reconnect) do not slide the wall
-    /// time forward. The recording row is created on demand if it does not
-    /// already exist so a stop that races ahead of `create_recording` still
-    /// records the terminal state.
+    /// leaves the existing timestamps untouched so a duplicate `StopRecording`
+    /// envelope does not slide the window forward.
     async fn mark_recording_stopped(
         &self,
-        recording_id: &str,
+        recording_index: i64,
+        stop_timestamp_ns: i64,
     ) -> Result<RecordingRow, StateStoreError>;
+
+    /// Stamp `backend_stop_notified_at = now` after the recording-stop
+    /// notifier successfully POSTed `/recording/stop`. Idempotent: a second
+    /// call leaves the existing timestamp untouched.
+    async fn mark_recording_stop_notified(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// Stamp `backend_cancel_notified_at = now` after the recording-cancel
+    /// notifier successfully POSTed `/recording/cancel`. Idempotent.
+    async fn mark_recording_cancel_notified(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError>;
+
+    /// List recordings that have a cloud `recording_id` AND `cancelled_at IS
+    /// NOT NULL` but whose backend cancel notification has not yet been
+    /// delivered. Used by the recording-cancel notifier's startup sweep.
+    async fn recordings_pending_cancel_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// List recordings that have been stopped, have a cloud `recording_id`,
+    /// but whose backend `/recording/stop` notification has not yet been
+    /// delivered. Skips cancelled recordings and recordings whose `/start` was
+    /// never notified (a NULL `recording_id` means there is nothing to stop
+    /// server-side; the start notifier fills it first, then this sweep fires).
+    async fn recordings_pending_stop_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// List every recording row currently in the DB.
     ///
@@ -147,7 +231,7 @@ pub trait StateStore: Send + Sync {
     /// the recording is not present.
     async fn set_progress_report_status(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         expected: ProgressReportStatus,
         next: ProgressReportStatus,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
@@ -158,7 +242,7 @@ pub trait StateStore: Send + Sync {
     /// inconsistent state.
     async fn set_expected_trace_count(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         expected_trace_count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
 
@@ -168,7 +252,7 @@ pub trait StateStore: Send + Sync {
     /// both "reported" (non-zero) and "what we told the backend".
     async fn mark_expected_trace_count_reported(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
 
@@ -210,7 +294,7 @@ pub trait StateStore: Send + Sync {
     /// row after the update and the number of trace rows touched.
     async fn cancel_recording(
         &self,
-        recording_id: &str,
+        recording_index: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
 }
 
@@ -323,89 +407,62 @@ impl SqliteStateStore {
         self.pool.close().await;
     }
 
-    /// Insert the recording row if it does not exist. Cheap counterpart to
-    /// [`Self::upsert_recording_locked`] for callers (e.g. `create_trace`)
-    /// that only need the row to *exist*, not to read it back.
-    async fn ensure_recording_locked(
+    /// Fetch a recording row by its local index inside an open connection.
+    async fn fetch_recording_locked(
         conn: &mut SqliteConnection,
-        recording_id: &str,
-    ) -> Result<(), sqlx::Error> {
-        let now = Utc::now().naive_utc();
-        sqlx::query(
-            "INSERT INTO recordings (recording_id, created_at, last_updated) \
-             VALUES (?1, ?2, ?2) \
-             ON CONFLICT(recording_id) DO NOTHING",
-        )
-        .bind(recording_id)
-        .bind(now)
-        .execute(&mut *conn)
-        .await?;
-        Ok(())
-    }
-
-    async fn upsert_recording_locked(
-        conn: &mut SqliteConnection,
-        recording_id: &str,
-    ) -> Result<RecordingRow, sqlx::Error> {
-        Self::ensure_recording_locked(conn, recording_id).await?;
-
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_one(&mut *conn)
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, sqlx::Error> {
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_index = ?1")
+            .bind(recording_index)
+            .fetch_optional(&mut *conn)
             .await?;
-        RecordingRow::from_row(&row)
+        match row {
+            Some(row) => Ok(Some(RecordingRow::from_row(&row)?)),
+            None => Ok(None),
+        }
     }
 }
 
 #[async_trait]
 impl StateStore for SqliteStateStore {
-    async fn create_recording(&self, recording_id: &str) -> Result<RecordingRow, StateStoreError> {
+    async fn create_recording(
+        &self,
+        new: NewRecording<'_>,
+    ) -> Result<RecordingRow, StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
-        let row = Self::upsert_recording_locked(&mut tx, recording_id).await?;
+        let now = Utc::now().naive_utc();
+        let result = sqlx::query(
+            "INSERT INTO recordings ( \
+                 robot_id, robot_instance, robot_name, dataset_id, dataset_name, org_id, \
+                 start_timestamp_ns, started_at, created_at, last_updated \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8)",
+        )
+        .bind(new.robot_id)
+        .bind(new.robot_instance)
+        .bind(new.robot_name)
+        .bind(new.dataset_id)
+        .bind(new.dataset_name)
+        .bind(new.org_id)
+        .bind(new.start_timestamp_ns)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let recording_index = result.last_insert_rowid();
+        let row = Self::fetch_recording_locked(&mut tx, recording_index)
+            .await?
+            .ok_or_else(|| sqlx::Error::RowNotFound)?;
         tx.commit().await?;
         Ok(row)
     }
 
-    async fn set_recording_org(
-        &self,
-        recording_id: &str,
-        org_id: &str,
-    ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
-        let now = Utc::now().naive_utc();
-        // Only set org_id when not already set so the producer can't flip
-        // the recording to a different org mid-stream.
-        sqlx::query(
-            "UPDATE recordings \
-                SET org_id = COALESCE(org_id, ?1), last_updated = ?2 \
-              WHERE recording_id = ?3",
-        )
-        .bind(org_id)
-        .bind(now)
-        .bind(recording_id)
-        .execute(&mut *tx)
-        .await?;
-
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let record = match row {
-            Some(row) => Some(RecordingRow::from_row(&row)?),
-            None => None,
-        };
-        tx.commit().await?;
-        Ok(record)
-    }
-
     async fn get_recording(
         &self,
-        recording_id: &str,
+        recording_index: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
+        let row = sqlx::query("SELECT * FROM recordings WHERE recording_index = ?1")
+            .bind(recording_index)
             .fetch_optional(&self.pool)
             .await?;
         Ok(match row {
@@ -414,9 +471,118 @@ impl StateStore for SqliteStateStore {
         })
     }
 
+    async fn recordings_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE robot_id = ?1 AND robot_instance = ?2 \
+           ORDER BY recording_index ASC",
+        )
+        .bind(robot_id)
+        .bind(robot_instance)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn set_recording_cloud_id(
+        &self,
+        recording_index: i64,
+        recording_id: &str,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        // COALESCE so a registration mint-on-demand cannot clobber an id the
+        // start notifier already persisted (and vice versa).
+        sqlx::query(
+            "UPDATE recordings \
+                SET recording_id = COALESCE(recording_id, ?1), last_updated = ?2 \
+              WHERE recording_index = ?3",
+        )
+        .bind(recording_id)
+        .bind(now)
+        .bind(recording_index)
+        .execute(&mut *tx)
+        .await?;
+        let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn mark_recording_start_notified(
+        &self,
+        recording_index: i64,
+        recording_id: &str,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET recording_id = COALESCE(recording_id, ?1), \
+                    backend_start_notified_at = COALESCE(backend_start_notified_at, ?2), \
+                    last_updated = ?2 \
+              WHERE recording_index = ?3",
+        )
+        .bind(recording_id)
+        .bind(now)
+        .bind(recording_index)
+        .execute(&mut *tx)
+        .await?;
+        let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn mark_recording_start_failed(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET backend_start_failed_at = COALESCE(backend_start_failed_at, ?1), \
+                    last_updated = ?1 \
+              WHERE recording_index = ?2",
+        )
+        .bind(now)
+        .bind(recording_index)
+        .execute(&mut *tx)
+        .await?;
+        let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
+        tx.commit().await?;
+        Ok(row)
+    }
+
+    async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE recording_id IS NULL \
+                AND backend_start_notified_at IS NULL \
+                AND backend_start_failed_at IS NULL \
+                AND cancelled_at IS NULL \
+           ORDER BY recording_index ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn create_trace(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         trace_id: &str,
         data_type: Option<&str>,
         data_type_name: Option<&str>,
@@ -424,17 +590,15 @@ impl StateStore for SqliteStateStore {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
 
-        Self::ensure_recording_locked(&mut tx, recording_id).await?;
-
         let now = Utc::now().naive_utc();
         sqlx::query(
-            "INSERT INTO traces (trace_id, recording_id, write_status, data_type, \
+            "INSERT INTO traces (trace_id, recording_index, write_status, data_type, \
                                  data_type_name, created_at, last_updated) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
              ON CONFLICT(trace_id) DO NOTHING",
         )
         .bind(trace_id)
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(TraceWriteStatus::Initializing.as_str())
         .bind(data_type)
         .bind(data_type_name)
@@ -572,12 +736,12 @@ impl StateStore for SqliteStateStore {
 
     async fn list_traces_for_recording(
         &self,
-        recording_id: &str,
+        recording_index: i64,
     ) -> Result<Vec<TraceRecord>, StateStoreError> {
         let rows = sqlx::query(
-            "SELECT * FROM traces WHERE recording_id = ?1 ORDER BY created_at ASC, trace_id ASC",
+            "SELECT * FROM traces WHERE recording_index = ?1 ORDER BY created_at ASC, trace_id ASC",
         )
-        .bind(recording_id)
+        .bind(recording_index)
         .fetch_all(&self.pool)
         .await?;
         rows.iter()
@@ -664,31 +828,29 @@ impl StateStore for SqliteStateStore {
 
     async fn mark_recording_stopped(
         &self,
-        recording_id: &str,
+        recording_index: i64,
+        stop_timestamp_ns: i64,
     ) -> Result<RecordingRow, StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
-        // Ensure the recording row exists — the SDK may publish StopRecording
-        // before the StartRecording envelope under load.
-        Self::upsert_recording_locked(&mut tx, recording_id).await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
                 SET stopped_at = COALESCE(stopped_at, ?2), \
+                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?3), \
                     last_updated = ?2 \
-              WHERE recording_id = ?1",
+              WHERE recording_index = ?1",
         )
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(now)
+        .bind(stop_timestamp_ns)
         .execute(&mut *tx)
         .await?;
 
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let record = RecordingRow::from_row(&row)?;
+        let record = Self::fetch_recording_locked(&mut tx, recording_index)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
 
         tx.commit().await?;
         Ok(record)
@@ -704,9 +866,87 @@ impl StateStore for SqliteStateStore {
             .map_err(Into::into)
     }
 
+    async fn mark_recording_stop_notified(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET backend_stop_notified_at = COALESCE(backend_stop_notified_at, ?2), \
+                    last_updated = ?2 \
+              WHERE recording_index = ?1",
+        )
+        .bind(recording_index)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+
+        let record = Self::fetch_recording_locked(&mut tx, recording_index).await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn mark_recording_cancel_notified(
+        &self,
+        recording_index: i64,
+    ) -> Result<Option<RecordingRow>, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET backend_cancel_notified_at = COALESCE(backend_cancel_notified_at, ?2), \
+                    last_updated = ?2 \
+              WHERE recording_index = ?1",
+        )
+        .bind(recording_index)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        let record = Self::fetch_recording_locked(&mut tx, recording_index).await?;
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn recordings_pending_cancel_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE cancelled_at IS NOT NULL \
+                AND recording_id IS NOT NULL \
+                AND backend_cancel_notified_at IS NULL \
+           ORDER BY cancelled_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn recordings_pending_stop_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE stopped_at IS NOT NULL \
+                AND recording_id IS NOT NULL \
+                AND backend_stop_notified_at IS NULL \
+                AND cancelled_at IS NULL \
+           ORDER BY stopped_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn set_progress_report_status(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         expected: ProgressReportStatus,
         next: ProgressReportStatus,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
@@ -716,30 +956,23 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET progress_reported = ?1, last_updated = ?2 \
-              WHERE recording_id = ?3 AND progress_reported = ?4",
+              WHERE recording_index = ?3 AND progress_reported = ?4",
         )
         .bind(next.as_str())
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(expected.as_str())
         .execute(&mut *tx)
         .await?;
 
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let record = match row {
-            Some(row) => Some(RecordingRow::from_row(&row)?),
-            None => None,
-        };
+        let record = Self::fetch_recording_locked(&mut tx, recording_index).await?;
         tx.commit().await?;
         Ok(record)
     }
 
     async fn set_expected_trace_count(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         expected_trace_count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
         let _guard = self.write_guard.lock().await;
@@ -749,28 +982,21 @@ impl StateStore for SqliteStateStore {
             "UPDATE recordings \
                 SET expected_trace_count = COALESCE(expected_trace_count, ?1), \
                     last_updated = ?2 \
-              WHERE recording_id = ?3",
+              WHERE recording_index = ?3",
         )
         .bind(expected_trace_count)
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .execute(&mut *tx)
         .await?;
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let record = match row {
-            Some(row) => Some(RecordingRow::from_row(&row)?),
-            None => None,
-        };
+        let record = Self::fetch_recording_locked(&mut tx, recording_index).await?;
         tx.commit().await?;
         Ok(record)
     }
 
     async fn mark_expected_trace_count_reported(
         &self,
-        recording_id: &str,
+        recording_index: i64,
         count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
         let _guard = self.write_guard.lock().await;
@@ -780,21 +1006,14 @@ impl StateStore for SqliteStateStore {
             "UPDATE recordings \
                 SET expected_trace_count_reported = ?1, \
                     last_updated = ?2 \
-              WHERE recording_id = ?3",
+              WHERE recording_index = ?3",
         )
         .bind(count)
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .execute(&mut *tx)
         .await?;
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-        let record = match row {
-            Some(row) => Some(RecordingRow::from_row(&row)?),
-            None => None,
-        };
+        let record = Self::fetch_recording_locked(&mut tx, recording_index).await?;
         tx.commit().await?;
         Ok(record)
     }
@@ -866,14 +1085,10 @@ impl StateStore for SqliteStateStore {
 
     async fn cancel_recording(
         &self,
-        recording_id: &str,
+        recording_index: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
-        // Make sure the recording row exists — the producer may cancel
-        // before the StartRecording envelope is processed (e.g. fast
-        // start→cancel sequence under load).
-        Self::upsert_recording_locked(&mut tx, recording_id).await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
@@ -881,9 +1096,9 @@ impl StateStore for SqliteStateStore {
                 SET cancelled_at = COALESCE(cancelled_at, ?2), \
                     progress_reported = ?3, \
                     last_updated = ?2 \
-              WHERE recording_id = ?1",
+              WHERE recording_index = ?1",
         )
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(now)
         .bind(ProgressReportStatus::Reported.as_str())
         .execute(&mut *tx)
@@ -900,47 +1115,45 @@ impl StateStore for SqliteStateStore {
                     error_code = ?2, \
                     error_message = COALESCE(error_message, ?3), \
                     last_updated = ?4 \
-              WHERE recording_id = ?5 \
+              WHERE recording_index = ?5 \
                 AND write_status NOT IN (?6, ?1)",
         )
         .bind(TraceWriteStatus::Failed.as_str())
         .bind(TraceErrorCode::RecordingCancelled.as_str())
         .bind("recording cancelled by producer")
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(TraceWriteStatus::Written.as_str())
         .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE traces \
                 SET upload_status = ?1, last_updated = ?2 \
-              WHERE recording_id = ?3 \
+              WHERE recording_index = ?3 \
                 AND upload_status NOT IN (?1, ?4)",
         )
         .bind(TraceUploadStatus::Failed.as_str())
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(TraceUploadStatus::Uploaded.as_str())
         .execute(&mut *tx)
         .await?;
         sqlx::query(
             "UPDATE traces \
                 SET registration_status = ?1, last_updated = ?2 \
-              WHERE recording_id = ?3 \
+              WHERE recording_index = ?3 \
                 AND registration_status NOT IN (?1, ?4)",
         )
         .bind(TraceRegistrationStatus::Failed.as_str())
         .bind(now)
-        .bind(recording_id)
+        .bind(recording_index)
         .bind(TraceRegistrationStatus::Registered.as_str())
         .execute(&mut *tx)
         .await?;
 
-        let row = sqlx::query("SELECT * FROM recordings WHERE recording_id = ?1")
-            .bind(recording_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let record = RecordingRow::from_row(&row)?;
+        let record = Self::fetch_recording_locked(&mut tx, recording_index)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
 
         tx.commit().await?;
         Ok((record, write_result.rows_affected()))
@@ -957,6 +1170,126 @@ mod tests {
         let path = tempdir.path().join("state.db");
         let store = SqliteStateStore::open(&path).await.expect("open store");
         (store, tempdir)
+    }
+
+    /// Insert a recording for `(robot-1, instance)` and return its index.
+    async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
+        store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(instance),
+                robot_name: Some("arm"),
+                dataset_id: Some("ds-1"),
+                dataset_name: Some("warehouse"),
+                org_id: Some("org-1"),
+                start_timestamp_ns: 1_700_000_000_000_000_000,
+            })
+            .await
+            .expect("create_recording")
+            .recording_index
+    }
+
+    #[tokio::test]
+    async fn create_recording_allocates_increasing_indices() {
+        let (store, _tempdir) = open_store().await;
+        let first = seed_recording(&store, 0).await;
+        let second = seed_recording(&store, 1).await;
+        assert!(
+            second > first,
+            "recording_index must increase: {first} {second}"
+        );
+
+        let row = store.get_recording(first).await.unwrap().unwrap();
+        assert_eq!(row.recording_index, first);
+        assert_eq!(row.recording_id, None, "cloud id starts NULL");
+        assert_eq!(row.robot_id.as_deref(), Some("robot-1"));
+        assert_eq!(row.robot_instance, Some(0));
+        assert_eq!(row.org_id.as_deref(), Some("org-1"));
+    }
+
+    #[tokio::test]
+    async fn recordings_for_source_orders_by_index() {
+        let (store, _tempdir) = open_store().await;
+        let first = seed_recording(&store, 0).await;
+        let second = seed_recording(&store, 0).await;
+        // A different instance must not be returned.
+        seed_recording(&store, 9).await;
+
+        let rows = store.recordings_for_source("robot-1", 0).await.unwrap();
+        let indices: Vec<i64> = rows.iter().map(|row| row.recording_index).collect();
+        assert_eq!(indices, vec![first, second]);
+    }
+
+    #[tokio::test]
+    async fn cloud_id_and_start_notify_lifecycle() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+
+        // Pending until notified/failed.
+        let pending = store.recordings_pending_start_notify().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recording_index, index);
+
+        // Start notify stamps both the cloud id and the notified timestamp.
+        let row = store
+            .mark_recording_start_notified(index, "cloud-rec-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.recording_id.as_deref(), Some("cloud-rec-1"));
+        assert!(row.backend_start_notified_at.is_some());
+        assert!(store
+            .recordings_pending_start_notify()
+            .await
+            .unwrap()
+            .is_empty());
+
+        // COALESCE guard: a later mint-on-demand cannot clobber the id.
+        let row = store
+            .set_recording_cloud_id(index, "other-id")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.recording_id.as_deref(), Some("cloud-rec-1"));
+    }
+
+    #[tokio::test]
+    async fn start_failed_excludes_from_pending_without_cancelling() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        let row = store
+            .mark_recording_start_failed(index)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(row.backend_start_failed_at.is_some());
+        assert!(row.cancelled_at.is_none(), "recency skip must not cancel");
+        assert!(store
+            .recordings_pending_start_notify()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_notify_sweep_requires_a_cloud_id() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store.mark_recording_stopped(index, 2).await.unwrap();
+        // Stopped but no cloud id yet → not eligible for the stop sweep.
+        assert!(store
+            .recordings_pending_stop_notify()
+            .await
+            .unwrap()
+            .is_empty());
+
+        store
+            .mark_recording_start_notified(index, "cloud-rec-1")
+            .await
+            .unwrap();
+        let pending = store.recordings_pending_stop_notify().await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].recording_index, index);
     }
 
     #[tokio::test]
@@ -986,33 +1319,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_trace_inserts_recording_and_trace_rows() {
+    async fn create_trace_inserts_trace_rows() {
         let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
 
         let trace = store
-            .create_trace("rec-1", "trace-1", Some("video"), None)
+            .create_trace(index, "trace-1", Some("video"), None)
             .await
             .expect("create_trace");
         assert_eq!(trace.trace_id, "trace-1");
-        assert_eq!(trace.recording_id, "rec-1");
+        assert_eq!(trace.recording_index, index);
         assert_eq!(trace.write_status, TraceWriteStatus::Initializing);
         assert_eq!(trace.data_type.as_deref(), Some("video"));
 
-        // The parent recording row is created alongside the trace.
-        store
-            .get_recording("rec-1")
-            .await
-            .expect("get_recording")
-            .expect("recording row");
-
         // Creating the same trace twice is a no-op (write_status preserved).
         let again = store
-            .create_trace("rec-1", "trace-1", Some("video"), None)
+            .create_trace(index, "trace-1", Some("video"), None)
             .await
             .expect("idempotent create_trace");
         assert_eq!(again.trace_id, "trace-1");
         let traces = store
-            .list_traces_for_recording("rec-1")
+            .list_traces_for_recording(index)
             .await
             .expect("list_traces");
         assert_eq!(traces.len(), 1);
@@ -1021,8 +1348,9 @@ mod tests {
     #[tokio::test]
     async fn update_trace_overwrites_only_set_fields() {
         let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
         store
-            .create_trace("rec-1", "trace-1", None, None)
+            .create_trace(index, "trace-1", None, None)
             .await
             .expect("create_trace");
 
@@ -1060,10 +1388,11 @@ mod tests {
     #[tokio::test]
     async fn claim_for_registration_respects_size_trigger() {
         let (store, _tempdir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
         for index in 0..5 {
             let trace_id = format!("trace-{index}");
             store
-                .create_trace("rec-1", &trace_id, None, None)
+                .create_trace(recording_index, &trace_id, None, None)
                 .await
                 .expect("create_trace");
             store
@@ -1107,30 +1436,35 @@ mod tests {
     #[tokio::test]
     async fn reset_stale_pipeline_states_rearms_registering_and_uploading() {
         let (store, _tempdir) = open_store().await;
-        // Two recordings to make sure the sweep doesn't leak across rows.
-        for (recording_id, trace_id, reg, upload) in [
+        // Three recordings to make sure the sweep doesn't leak across rows.
+        for (instance, trace_id, reg, upload) in [
             (
-                "rec-stuck-reg",
+                0,
                 "trace-reg",
                 TraceRegistrationStatus::Registering,
                 TraceUploadStatus::Pending,
             ),
             (
-                "rec-stuck-up",
+                1,
                 "trace-up",
                 TraceRegistrationStatus::Registered,
                 TraceUploadStatus::Uploading,
             ),
             (
-                "rec-clean",
+                2,
                 "trace-clean",
                 TraceRegistrationStatus::Registered,
                 TraceUploadStatus::Queued,
             ),
         ] {
-            store.create_recording(recording_id).await.unwrap();
+            let recording_index = seed_recording(&store, instance).await;
             store
-                .create_trace(recording_id, trace_id, Some("JOINT_POSITIONS"), Some("arm"))
+                .create_trace(
+                    recording_index,
+                    trace_id,
+                    Some("JOINT_POSITIONS"),
+                    Some("arm"),
+                )
                 .await
                 .unwrap();
             store
@@ -1169,6 +1503,7 @@ mod tests {
     #[tokio::test]
     async fn mark_stale_writing_traces_failed_burns_old_rows_only() {
         let (store, _tempdir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
         for (trace_id, write_status) in [
             ("fresh-writing", TraceWriteStatus::Writing),
             ("stale-writing", TraceWriteStatus::Writing),
@@ -1178,7 +1513,12 @@ mod tests {
             ("failed", TraceWriteStatus::Failed),
         ] {
             store
-                .create_trace("rec-1", trace_id, Some("JOINT_POSITIONS"), Some("arm"))
+                .create_trace(
+                    recording_index,
+                    trace_id,
+                    Some("JOINT_POSITIONS"),
+                    Some("arm"),
+                )
                 .await
                 .unwrap();
             store
@@ -1225,7 +1565,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_recording_burns_traces_and_stamps_cancelled_at() {
         let (store, _tempdir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
+        let recording_index = seed_recording(&store, 0).await;
         for (trace_id, write, upload, reg) in [
             (
                 "in-flight",
@@ -1247,7 +1587,7 @@ mod tests {
             ),
         ] {
             store
-                .create_trace("rec-1", trace_id, Some("JOINT_POSITIONS"), None)
+                .create_trace(recording_index, trace_id, Some("JOINT_POSITIONS"), None)
                 .await
                 .unwrap();
             store
@@ -1264,12 +1604,13 @@ mod tests {
                 .unwrap();
         }
         // A trace belonging to another recording must not be touched.
+        let other_index = seed_recording(&store, 9).await;
         store
-            .create_trace("rec-other", "untouched", Some("JOINT_POSITIONS"), None)
+            .create_trace(other_index, "untouched", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
 
-        let (row, touched) = store.cancel_recording("rec-1").await.unwrap();
+        let (row, touched) = store.cancel_recording(recording_index).await.unwrap();
         assert!(row.cancelled_at.is_some(), "cancelled_at must be stamped");
         assert_eq!(row.progress_reported, ProgressReportStatus::Reported);
         assert_eq!(touched, 1, "only the non-Written trace's write was touched");
@@ -1301,17 +1642,17 @@ mod tests {
     #[tokio::test]
     async fn cancel_recording_is_idempotent() {
         let (store, _tempdir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
+        let recording_index = seed_recording(&store, 0).await;
         store
-            .create_trace("rec-1", "trace-1", Some("JOINT_POSITIONS"), None)
+            .create_trace(recording_index, "trace-1", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
 
-        let (first, _) = store.cancel_recording("rec-1").await.unwrap();
+        let (first, _) = store.cancel_recording(recording_index).await.unwrap();
         let first_at = first.cancelled_at.expect("cancelled_at set");
         // Sleep across a clock tick to make a date change observable.
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let (second, _) = store.cancel_recording("rec-1").await.unwrap();
+        let (second, _) = store.cancel_recording(recording_index).await.unwrap();
         assert_eq!(
             second.cancelled_at,
             Some(first_at),
@@ -1322,8 +1663,9 @@ mod tests {
     #[tokio::test]
     async fn claim_for_registration_respects_age_trigger() {
         let (store, _tempdir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
         store
-            .create_trace("rec-1", "trace-1", None, None)
+            .create_trace(recording_index, "trace-1", None, None)
             .await
             .expect("create_trace");
         store

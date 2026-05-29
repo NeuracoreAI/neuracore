@@ -91,6 +91,10 @@ pub async fn sweep_partial_recordings(
     recordings_root: &Path,
 ) -> Result<PartialSweepReport, StateStoreError> {
     let mut report = PartialSweepReport::default();
+    // Reclaim the producer video inbox up front: any recording in flight at
+    // restart is corrupt, so the spooled NUT chunks staged under the inbox
+    // are reclaimed wholesale rather than resumed.
+    let _ = std::fs::remove_dir_all(crate::storage::paths::inbox_root(recordings_root));
     let recordings = store.list_recordings().await?;
     for recording in recordings {
         if recording.cancelled_at.is_some() {
@@ -102,7 +106,7 @@ pub async fn sweep_partial_recordings(
             continue;
         }
         let traces = store
-            .list_traces_for_recording(&recording.recording_id)
+            .list_traces_for_recording(recording.recording_index)
             .await?;
         let any_non_written = traces
             .iter()
@@ -114,24 +118,24 @@ pub async fn sweep_partial_recordings(
             continue;
         }
 
-        let dir = recordings_root.join(&recording.recording_id);
+        let dir = recordings_root.join(recording.recording_index.to_string());
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    recording_id = %recording.recording_id,
+                    recording_index = recording.recording_index,
                     path = %dir.display(),
                     "failed to purge partial recording directory; continuing"
                 );
             }
         }
 
-        if let Err(error) = store.cancel_recording(&recording.recording_id).await {
+        if let Err(error) = store.cancel_recording(recording.recording_index).await {
             tracing::warn!(
                 %error,
-                recording_id = %recording.recording_id,
+                recording_index = recording.recording_index,
                 "failed to mark partial recording cancelled in state store; continuing"
             );
         }
@@ -221,6 +225,7 @@ mod tests {
     }
 
     use crate::state::store::TraceUpdate;
+    use crate::state::NewRecording;
     use crate::storage::paths::TracePath;
 
     #[tokio::test]
@@ -231,9 +236,17 @@ mod tests {
             .expect("open store");
         let recordings_root = dir.path().join("recordings");
 
-        store.create_recording("rec-1").await.unwrap();
+        let recording_index = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
         store
-            .create_trace("rec-1", "trace-1", Some("RGB"), None)
+            .create_trace(recording_index, "trace-1", Some("RGB"), None)
             .await
             .unwrap();
         store
@@ -249,7 +262,8 @@ mod tests {
 
         // Synthesise leftover on-disk state the previous daemon would have
         // produced — a chunks/ dir and a half-encoded segment.
-        let trace_dir = TracePath::new("rec-1", "RGB", "trace-1").directory(&recordings_root);
+        let trace_dir = TracePath::new(recording_index.to_string(), "RGB", "trace-1")
+            .directory(&recordings_root);
         let chunks_dir = trace_dir.join("chunks");
         std::fs::create_dir_all(&chunks_dir).unwrap();
         std::fs::write(chunks_dir.join("chunk_0000.nut"), b"stale-bytes").unwrap();
@@ -260,9 +274,9 @@ mod tests {
             .expect("sweep");
         assert_eq!(report.recordings_purged, 1);
         assert_eq!(report.recordings_preserved, 0);
-        assert!(!recordings_root.join("rec-1").exists(),);
+        assert!(!recordings_root.join(recording_index.to_string()).exists());
 
-        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(recording.cancelled_at.is_some());
     }
 
@@ -274,9 +288,17 @@ mod tests {
             .expect("open store");
         let recordings_root = dir.path().join("recordings");
 
-        store.create_recording("rec-2").await.unwrap();
+        let recording_index = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-2"),
+                robot_instance: Some(0),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
         store
-            .create_trace("rec-2", "trace-2", Some("RGB"), None)
+            .create_trace(recording_index, "trace-2", Some("RGB"), None)
             .await
             .unwrap();
         store
@@ -291,7 +313,8 @@ mod tests {
             .await
             .unwrap();
 
-        let trace_dir = TracePath::new("rec-2", "RGB", "trace-2").directory(&recordings_root);
+        let trace_dir = TracePath::new(recording_index.to_string(), "RGB", "trace-2")
+            .directory(&recordings_root);
         std::fs::create_dir_all(&trace_dir).unwrap();
         std::fs::write(trace_dir.join("lossy.mp4"), b"keep-me").unwrap();
         std::fs::write(trace_dir.join("lossless.mp4"), b"keep-me-too").unwrap();
@@ -304,7 +327,7 @@ mod tests {
         assert!(trace_dir.join("lossy.mp4").exists());
         assert!(trace_dir.join("lossless.mp4").exists());
 
-        let recording = store.get_recording("rec-2").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(recording.cancelled_at.is_none());
     }
 

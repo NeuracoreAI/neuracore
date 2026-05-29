@@ -138,12 +138,37 @@ string_enum! {
 }
 
 /// A row from the `recordings` table.
+///
+/// The daemon owns recording identity: `recording_index` is the local primary
+/// key (AUTOINCREMENT), allocated when the `StartRecording` envelope is first
+/// seen; `recording_id` is the cloud handle, filled asynchronously by the
+/// recording-start notifier or minted on demand by the registration
+/// coordinator. The two are independent — never aliased.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRow {
-    /// Primary key.
-    pub recording_id: String,
+    /// Local primary key (AUTOINCREMENT). The daemon keys every internal
+    /// structure and the `traces` foreign key on this.
+    pub recording_index: i64,
+    /// Cloud handle. `None` until `/recording/start` is notified (or a UUID is
+    /// minted on demand for an offline recording). Every cloud URL reads this
+    /// straight from the row.
+    pub recording_id: Option<String>,
     /// Organisation that owns the recording (backfilled when known).
     pub org_id: Option<String>,
+    /// Robot identifier — first half of the source key.
+    pub robot_id: Option<String>,
+    /// Robot instance — second half of the source key.
+    pub robot_instance: Option<i64>,
+    /// Robot human-readable name, when supplied.
+    pub robot_name: Option<String>,
+    /// Dataset identifier, when supplied.
+    pub dataset_id: Option<String>,
+    /// Dataset human-readable name, when supplied.
+    pub dataset_name: Option<String>,
+    /// Producer capture-clock window lower bound (Unix nanoseconds).
+    pub start_timestamp_ns: Option<i64>,
+    /// Producer capture-clock window upper bound (Unix nanoseconds).
+    pub stop_timestamp_ns: Option<i64>,
     /// Expected number of traces, set when the producer declares it.
     pub expected_trace_count: Option<i64>,
     /// `1` once the expected trace count has been reported to the backend.
@@ -152,12 +177,32 @@ pub struct RecordingRow {
     pub uploaded_trace_count: i64,
     /// Progress-report lifecycle for this recording.
     pub progress_reported: ProgressReportStatus,
+    /// Daemon wall-clock time the recording was opened.
+    pub started_at: Option<NaiveDateTime>,
     /// Set when the producer issues a stop command.
     pub stopped_at: Option<NaiveDateTime>,
     /// Set when the producer issues a cancel command. Cancelled recordings
     /// are ignored by the cloud coordinators and skipped by the progress
     /// reporter.
     pub cancelled_at: Option<NaiveDateTime>,
+    /// Set when the recording-start notifier successfully POSTed
+    /// `/recording/start` and persisted the cloud `recording_id`.
+    pub backend_start_notified_at: Option<NaiveDateTime>,
+    /// Set when the recording-start notifier permanently skipped
+    /// `/recording/start` because the recording is older than the recency
+    /// bound (the registration coordinator mints a cloud id on demand
+    /// instead). The recording row is **not** cancelled — it still uploads
+    /// best-effort.
+    pub backend_start_failed_at: Option<NaiveDateTime>,
+    /// Set when the recording-stop notifier successfully POSTed
+    /// `/recording/stop` to the backend. `None` means the backend has not
+    /// yet been notified — typically a recording stopped while the daemon
+    /// was offline; the notifier sweeps these on startup.
+    pub backend_stop_notified_at: Option<NaiveDateTime>,
+    /// Set when the recording-cancel notifier successfully POSTed
+    /// `/recording/cancel` to the backend. `None` means either the recording
+    /// was never cancelled, or cancellation has not yet been notified.
+    pub backend_cancel_notified_at: Option<NaiveDateTime>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -169,14 +214,27 @@ impl RecordingRow {
     pub(crate) fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Self, sqlx::Error> {
         let progress_reported = parse_column::<ProgressReportStatus>(row, "progress_reported")?;
         Ok(RecordingRow {
+            recording_index: row.try_get("recording_index")?,
             recording_id: row.try_get("recording_id")?,
             org_id: row.try_get("org_id")?,
+            robot_id: row.try_get("robot_id")?,
+            robot_instance: row.try_get("robot_instance")?,
+            robot_name: row.try_get("robot_name")?,
+            dataset_id: row.try_get("dataset_id")?,
+            dataset_name: row.try_get("dataset_name")?,
+            start_timestamp_ns: row.try_get("start_timestamp_ns")?,
+            stop_timestamp_ns: row.try_get("stop_timestamp_ns")?,
             expected_trace_count: row.try_get("expected_trace_count")?,
             expected_trace_count_reported: row.try_get("expected_trace_count_reported")?,
             uploaded_trace_count: row.try_get("uploaded_trace_count")?,
             progress_reported,
+            started_at: row.try_get("started_at")?,
             stopped_at: row.try_get("stopped_at")?,
             cancelled_at: row.try_get("cancelled_at")?,
+            backend_start_notified_at: row.try_get("backend_start_notified_at")?,
+            backend_start_failed_at: row.try_get("backend_start_failed_at")?,
+            backend_stop_notified_at: row.try_get("backend_stop_notified_at")?,
+            backend_cancel_notified_at: row.try_get("backend_cancel_notified_at")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })
@@ -186,10 +244,10 @@ impl RecordingRow {
 /// A row from the `traces` table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceRecord {
-    /// Primary key.
+    /// Primary key (daemon-minted UUID).
     pub trace_id: String,
-    /// Parent recording.
-    pub recording_id: String,
+    /// Parent recording (local `recording_index`).
+    pub recording_index: i64,
     /// Write lifecycle.
     pub write_status: TraceWriteStatus,
     /// Registration lifecycle.
@@ -251,7 +309,7 @@ impl TraceRecord {
             .transpose()?;
         Ok(TraceRecord {
             trace_id: row.try_get("trace_id")?,
-            recording_id: row.try_get("recording_id")?,
+            recording_index: row.try_get("recording_index")?,
             write_status,
             registration_status,
             upload_status,

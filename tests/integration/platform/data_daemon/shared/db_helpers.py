@@ -24,23 +24,33 @@ Contents:
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+if TYPE_CHECKING:
+    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+        ContextResult,
+    )
+
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_db_path
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_EXPECTED_TRACE_COUNT,
     COLUMN_EXPECTED_TRACE_COUNT_REPORTED,
     COLUMN_LAST_UPDATED,
     COLUMN_PROGRESS_REPORTED,
     COLUMN_RECORDING_ID,
+    COLUMN_RECORDING_INDEX,
     COLUMN_REGISTRATION_STATUS,
+    COLUMN_ROBOT_ID,
+    COLUMN_ROBOT_INSTANCE,
     COLUMN_STOPPED_AT,
     COLUMN_TRACE_ID,
     COLUMN_UPLOAD_STATUS,
@@ -70,7 +80,9 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
     list_recording_ids_on_disk,
+    list_recording_indexes_on_disk,
     normalize_recording_ids,
+    normalize_recording_indexes,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -78,6 +90,17 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recording_correlation_column() -> str:
+    """Return the recordings/traces correlation column for the active daemon.
+
+    Rust daemon: recordings are keyed by the local INTEGER ``recording_index``
+    (the cloud ``recording_id`` is a separate, nullable column). Legacy Python
+    daemon: recordings are keyed by the cloud ``recording_id`` (TEXT PK), which
+    is also the traces foreign key.
+    """
+    return COLUMN_RECORDING_INDEX if rust_daemon_enabled() else COLUMN_RECORDING_ID
 
 
 class DaemonDbStore:
@@ -142,28 +165,61 @@ class DaemonDbStore:
         rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()  # noqa: S608
         return {str(row[1]) for row in rows}
 
-    def fetch_recording(self, recording_id: str) -> dict[str, Any] | None:
-        """Return the recording row for ``recording_id`` if it exists."""
+    def fetch_recording(self, recording_key: int | str) -> dict[str, Any] | None:
+        """Return the recording row for ``recording_key`` if it exists.
+
+        ``recording_key`` is the daemon's correlation key for the active mode:
+        the local INTEGER ``recording_index`` under the Rust daemon, or the cloud
+        ``recording_id`` (TEXT) under the legacy Python daemon.
+        """
+        correlation_column = _recording_correlation_column()
         with self.connect() as conn:
             row = conn.execute(
-                f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {COLUMN_RECORDING_ID} = ?",
-                (recording_id,),
+                f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {correlation_column} = ?",
+                (recording_key,),
             ).fetchone()
         return dict(row) if row is not None else None
 
+    def fetch_recordings_for_source(
+        self,
+        robot_id: str,
+        robot_instance: int,
+    ) -> list[dict[str, Any]]:
+        """Return recording rows for one source ordered by ``recording_index``.
+
+        Source identity is ``(robot_id, robot_instance)``. This mirrors the
+        daemon's own source lookup (``idx_recordings_source``) and is how tests
+        correlate a worker's recordings to daemon-minted ``recording_index``
+        values without seeing the local handle.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM {RECORDINGS_TABLE} "
+                f"WHERE {COLUMN_ROBOT_ID} = ? AND {COLUMN_ROBOT_INSTANCE} = ? "
+                f"ORDER BY {COLUMN_RECORDING_INDEX}",
+                (robot_id, robot_instance),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def fetch_all_traces(
         self,
-        recording_id: str,
+        recording_key: int | str,
         *,
         columns: Iterable[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """Return trace rows for one recording, limited to available columns."""
+        """Return trace rows for one recording, limited to available columns.
+
+        Traces join to recordings on the active correlation column: the integer
+        ``recording_index`` under the Rust daemon, or the cloud ``recording_id``
+        under the legacy Python daemon.
+        """
+        correlation_column = _recording_correlation_column()
         with self.connect_read_only() as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
 
             trace_columns = self.table_columns(conn, TRACES_TABLE)
-            if COLUMN_RECORDING_ID not in trace_columns:
+            if correlation_column not in trace_columns:
                 return []
 
             if columns is None:
@@ -185,8 +241,8 @@ class DaemonDbStore:
             rows = conn.execute(
                 f"SELECT {', '.join(selected_columns)} "
                 f"FROM {TRACES_TABLE} "
-                f"WHERE {COLUMN_RECORDING_ID} = ?{order_by_clause}",
-                (recording_id,),
+                f"WHERE {correlation_column} = ?{order_by_clause}",
+                (recording_key,),
             ).fetchall()
 
         return [{column: row[column] for column in selected_columns} for row in rows]
@@ -228,18 +284,144 @@ def sqlite_table_columns(
     return _TEST_STORE.table_columns(conn, table)
 
 
-def fetch_recording(recording_id: str) -> dict[str, Any] | None:
-    """Return the recording row for ``recording_id`` if it exists."""
-    return _TEST_STORE.fetch_recording(recording_id)
+def fetch_recording(recording_key: int | str) -> dict[str, Any] | None:
+    """Return the recording row for the active-mode correlation key, if present."""
+    return _TEST_STORE.fetch_recording(recording_key)
+
+
+def fetch_recordings_for_source(
+    robot_id: str,
+    robot_instance: int,
+) -> list[dict[str, Any]]:
+    """Return recording rows for one source ordered by ``recording_index``."""
+    return _TEST_STORE.fetch_recordings_for_source(robot_id, robot_instance)
 
 
 def fetch_all_traces(
-    recording_id: str,
+    recording_key: int | str,
     *,
     columns: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return trace rows for one recording, limited to available columns."""
-    return _TEST_STORE.fetch_all_traces(recording_id, columns=columns)
+    return _TEST_STORE.fetch_all_traces(recording_key, columns=columns)
+
+
+def wait_for_recording_index_for_source(
+    robot_id: str,
+    robot_instance: int,
+    *,
+    expected_count: int,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.1,
+) -> int:
+    """Block until the daemon has assigned ``expected_count`` recordings to a source.
+
+    Returns the ``recording_index`` of the most-recent (highest-index)
+    recording for ``(robot_id, robot_instance)`` once at least
+    ``expected_count`` recordings exist. The daemon assigns ``recording_index``
+    the moment it sees ``StartRecording``, so a short poll covers the small
+    window between the producer's ``start_recording`` call and the daemon
+    persisting the row.
+
+    Raises:
+        TimeoutError: If ``expected_count`` recordings do not appear in time.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_count = 0
+    while True:
+        rows = fetch_recordings_for_source(robot_id, robot_instance)
+        last_count = len(rows)
+        if last_count >= expected_count:
+            # Rows are ordered ascending by recording_index; the newest is last.
+            return int(rows[-1][COLUMN_RECORDING_INDEX])
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                "Daemon did not assign recording_index for source "
+                f"({robot_id}, {robot_instance}); expected at least "
+                f"{expected_count} recording(s), saw {last_count} after "
+                f"{timeout_s}s."
+            )
+        time.sleep(poll_interval_s)
+
+
+def assert_offline_recordings_pending(results: list[ContextResult]) -> None:
+    """Assert offline recordings exist by ``recording_index`` with cloud id NULL.
+
+    Rust daemon only: in offline mode the daemon assigns ``recording_index``
+    immediately but the cloud ``recording_id`` stays NULL until upload-time
+    mint-on-demand. This confirms that contract per ``recording_index`` captured
+    by each worker. Under the legacy daemon the cloud ``recording_id`` is the
+    recording's identity from the moment recording starts, so this offline-NULL
+    contract does not apply and the check is a no-op.
+
+    Raises:
+        AssertionError: If a recording row is missing or already has a cloud id.
+    """
+    if not rust_daemon_enabled():
+        return
+    for result in results:
+        rows_by_index = {
+            row[COLUMN_RECORDING_INDEX]: row
+            for row in fetch_recordings_for_source(result.source[0], result.source[1])
+        }
+        for recording_index in result.recording_indexes:
+            row = rows_by_index.get(recording_index)
+            assert row is not None, (
+                f"Offline recording_index {recording_index} for source "
+                f"{result.source} has no recordings row"
+            )
+            assert row.get(COLUMN_RECORDING_ID) is None, (
+                f"Offline recording_index {recording_index} unexpectedly already "
+                f"has cloud recording_id={row.get(COLUMN_RECORDING_ID)!r}"
+            )
+
+
+def resolve_cloud_recording_ids(
+    results: list[ContextResult],
+    *,
+    timeout_s: float = 60.0,
+) -> list[ContextResult]:
+    """Return copies of *results* with cloud ``recording_ids`` resolved per mode.
+
+    Legacy Python daemon: ``nc.start_recording()`` already returns the cloud
+    ``recording_id``, so ``result.recording_ids`` is authoritative and the
+    results are returned unchanged.
+
+    Rust daemon: the daemon mints the cloud ``recording_id`` asynchronously, so
+    the captured ids may have been NULL (empty strings) at record time. This
+    asks the SDK (which queries the daemon, blocking up to ``timeout_s``) for the
+    cloud id of the recording whose window brackets each per-recording marker,
+    so cloud verification (which matches the dataset's ``recording.id``) has the
+    correct ids.
+
+    Raises:
+        AssertionError: If any recording's cloud id is not minted in time.
+    """
+    if not rust_daemon_enabled():
+        return results
+
+    resolved: list[ContextResult] = []
+    for result in results:
+        instance = result.source[1]
+        cloud_ids: list[str] = []
+        for recording_index, marker_ns in zip(
+            result.recording_indexes,
+            result.recording_markers,
+        ):
+            cloud_id = nc.get_cloud_recording_id(
+                robot_name=result.robot_name,
+                instance=instance,
+                timestamp_ns=marker_ns,
+                timeout_s=timeout_s,
+            )
+            assert cloud_id, (
+                f"Cloud recording_id never minted for recording_index "
+                f"{recording_index} (robot {result.robot_name!r}, instance "
+                f"{instance}) within {timeout_s}s"
+            )
+            cloud_ids.append(cloud_id)
+        resolved.append(dataclasses.replace(result, recording_ids=cloud_ids))
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -247,20 +429,22 @@ def fetch_all_traces(
 # ---------------------------------------------------------------------------
 
 
-def fetch_trace_registration_stats(recording_id: str) -> tuple[int, int]:
+def fetch_trace_registration_stats(recording_key: int | str) -> tuple[int, int]:
     """Return ``(total_traces, non_pending_traces)`` for a recording.
 
-    Queries the ``traces`` table and counts all rows for ``recording_id`` plus
-    the subset whose ``registration_status`` is not ``"pending"``.
+    Queries the ``traces`` table and counts all rows for ``recording_key``
+    plus the subset whose ``registration_status`` is not ``"pending"``.
 
     Args:
-        recording_id: The recording ID to query.
+        recording_key: The active-mode correlation key (``recording_index``
+            under the Rust daemon, cloud ``recording_id`` under the legacy
+            daemon) to query.
 
     Returns:
         A two-tuple of ``(total_trace_count, non_pending_registration_count)``.
     """
     traces = fetch_all_traces(
-        recording_id,
+        recording_key,
         columns=[COLUMN_REGISTRATION_STATUS],
     )
     non_pending = sum(
@@ -271,24 +455,26 @@ def fetch_trace_registration_stats(recording_id: str) -> tuple[int, int]:
     return len(traces), non_pending
 
 
-def fetch_expected_trace_count_reported(recording_id: str) -> int | None:
+def fetch_expected_trace_count_reported(recording_key: int | str) -> int | None:
     """Return the ``expected_trace_count_reported`` value for a recording row.
 
     Args:
-        recording_id: The recording ID to look up.
+        recording_key: The active-mode correlation key (``recording_index``
+            under the Rust daemon, cloud ``recording_id`` under the legacy
+            daemon) to look up.
 
     Returns:
         The integer value of ``expected_trace_count_reported``, or ``None``
         when the recording row is not found.
     """
-    row = fetch_recording(recording_id)
+    row = fetch_recording(recording_key)
     if row is None or row.get(COLUMN_EXPECTED_TRACE_COUNT_REPORTED) is None:
         return None
     return int(row[COLUMN_EXPECTED_TRACE_COUNT_REPORTED])
 
 
 def fetch_recording_online_verification_stats(
-    recording_id: str,
+    recording_key: int | str,
 ) -> dict[str, int | str | None]:
     """Fetch a comprehensive set of online-verification stats for one recording.
 
@@ -298,7 +484,9 @@ def fetch_recording_online_verification_stats(
     default dict.
 
     Args:
-        recording_id: The recording ID to inspect.
+        recording_key: The active-mode correlation key (``recording_index``
+            under the Rust daemon, cloud ``recording_id`` under the legacy
+            daemon) to inspect.
 
     Returns:
         A dict with the following keys:
@@ -328,9 +516,9 @@ def fetch_recording_online_verification_stats(
     }
 
     try:
-        recording_row = fetch_recording(recording_id)
+        recording_row = fetch_recording(recording_key)
         traces = fetch_all_traces(
-            recording_id,
+            recording_key,
             columns=[COLUMN_REGISTRATION_STATUS, COLUMN_UPLOAD_STATUS],
         )
     except sqlite3.OperationalError:
@@ -382,7 +570,9 @@ def fetch_recording_online_verification_stats(
     }
 
 
-def fetch_recording_trace_upload_stats(recording_id: str) -> dict[str, object]:
+def fetch_recording_trace_upload_stats(
+    recording_key: int | str,
+) -> dict[str, object]:
     """Fetch per-trace upload and registration status counts for a recording.
 
     Returns aggregate counts broken down by ``write_status``,
@@ -390,7 +580,9 @@ def fetch_recording_trace_upload_stats(recording_id: str) -> dict[str, object]:
     per-trace row snapshots.  Handles missing tables and columns gracefully.
 
     Args:
-        recording_id: The recording ID to inspect.
+        recording_key: The active-mode correlation key (``recording_index``
+            under the Rust daemon, cloud ``recording_id`` under the legacy
+            daemon) to inspect.
 
     Returns:
         A dict containing:
@@ -411,7 +603,7 @@ def fetch_recording_trace_upload_stats(recording_id: str) -> dict[str, object]:
     selected_columns = list(TRACE_UPLOAD_DETAIL_COLUMNS)
 
     try:
-        rows = fetch_all_traces(recording_id, columns=selected_columns)
+        rows = fetch_all_traces(recording_key, columns=selected_columns)
     except sqlite3.OperationalError:
         return default_result
 
@@ -593,7 +785,7 @@ def wait_for_recordings_finalized(
 def wait_for_offline_db_ready(
     timeout_s: float = MAX_TIME_TO_START_S,
     *,
-    expected_recording_ids: Iterable[str] | None = None,
+    expected_recording_keys: Iterable[int | str] | None = None,
 ) -> None:
     """Block until the offline daemon's SQLite DB schema is ready for queries.
 
@@ -604,9 +796,11 @@ def wait_for_offline_db_ready(
 
     Args:
         timeout_s: Maximum seconds to wait before raising.
-        expected_recording_ids: When supplied, also waits until at least one
-            of the expected recording directories exists on disk, preventing a
+        expected_recording_keys: When supplied, also waits until at least one of
+            the expected recording directories exists on disk, preventing a
             false-positive ``ready`` result from an empty-but-initialised DB.
+            Keys are ``recording_index`` values under the Rust daemon and cloud
+            ``recording_id`` strings under the legacy daemon.
 
     Raises:
         AssertionError: If the DB is not ready within ``timeout_s`` seconds.
@@ -617,7 +811,20 @@ def wait_for_offline_db_ready(
         RECORDINGS_TABLE,
         TRACES_TABLE,
     }
-    target_recording_ids = normalize_recording_ids(expected_recording_ids)
+    if rust_daemon_enabled():
+        target_recording_keys: set[int] | set[str] = normalize_recording_indexes(
+            expected_recording_keys
+        )
+        list_on_disk: Callable[[], set[int]] | Callable[[], set[str]] = (
+            list_recording_indexes_on_disk
+        )
+    else:
+        target_recording_keys = normalize_recording_ids(
+            None
+            if expected_recording_keys is None
+            else (str(key) for key in expected_recording_keys)
+        )
+        list_on_disk = list_recording_ids_on_disk
 
     with Timer(timeout_s, label="daemon.offline_db_ready", always_log=True):
         while time.monotonic() < deadline:
@@ -626,7 +833,7 @@ def wait_for_offline_db_ready(
                 time.sleep(0.1)
                 continue
 
-            if not target_recording_ids and not list_recording_ids_on_disk():
+            if not target_recording_keys and not list_on_disk():
                 time.sleep(0.1)
                 continue
 
@@ -653,7 +860,7 @@ def wait_for_offline_db_ready(
     raise AssertionError(
         "Offline daemon DB did not become ready within "
         f"{timeout_s}s. db_path={db_path} exists={db_path.exists()} "
-        f"recordings_on_disk={sorted(list_recording_ids_on_disk())} "
+        f"recordings_on_disk={sorted(list_on_disk())} "
         f"tables={sorted(existing_tables)} last_error={last_error!r}"
     )
 
@@ -665,21 +872,24 @@ def wait_for_all_traces_written(
 ) -> None:
     """Block until every trace for every recording in *results* has been written.
 
-    Uses the recordings root directory as the source of truth for which
-    recording IDs to check — this catches recordings the daemon started that
-    the client-side results list may not reflect (e.g. due to an
-    ``already_started`` race on reconnect).
+    Recordings are correlated by the active daemon's key: the daemon-assigned
+    INTEGER ``recording_index`` under the Rust daemon (the on-disk directory name
+    and the traces join key, since the cloud ``recording_id`` is nullable / minted
+    async), or the cloud ``recording_id`` under the legacy Python daemon. The
+    recordings root directory is the source of truth for which keys to check —
+    this catches recordings the daemon started that the client-side results may
+    not reflect (e.g. an ``already_started`` race on reconnect).
 
     Blocks until all of the following are true for every recording in scope:
 
     - A matching row exists in the DB with ``stopped_at`` set.
-    - ``trace_count`` on the recording row equals the number of trace rows.
+    - Every recording has at least one trace row.
     - Every trace row has ``write_status == 'written'``.
 
     Args:
         timeout_s: Maximum seconds to wait before raising.
         results: List of :class:`~build_test_case_context.ContextResult` objects
-            whose recording IDs are used to scope the check.
+            whose recording keys scope the check.
 
     Raises:
         AssertionError: If the condition is not met within ``timeout_s``.
@@ -687,10 +897,24 @@ def wait_for_all_traces_written(
     min_poll_interval_s = 0.05
     max_poll_interval_s = 1.0
 
+    use_rust = rust_daemon_enabled()
+    correlation_column = COLUMN_RECORDING_INDEX if use_rust else COLUMN_RECORDING_ID
+
+    def _raw_keys() -> list:
+        if use_rust:
+            return [key for result in results for key in result.recording_indexes]
+        return [key for result in results for key in result.recording_ids]
+
+    if use_rust:
+        expected_keys: set[int] | set[str] = normalize_recording_indexes(_raw_keys())
+        list_keys_on_disk: Callable[[], set[int]] | Callable[[], set[str]] = (
+            list_recording_indexes_on_disk
+        )
+    else:
+        expected_keys = normalize_recording_ids(_raw_keys())
+        list_keys_on_disk = list_recording_ids_on_disk
+
     deadline = time.monotonic() + timeout_s
-    expected_ids = normalize_recording_ids(
-        str(recording_id) for result in results for recording_id in result.recording_ids
-    )
     poll_interval_s = min_poll_interval_s
     last_state: tuple[int, int, int, int, int] | None = None
 
@@ -711,32 +935,32 @@ def wait_for_all_traces_written(
 
     wait_for_offline_db_ready(
         timeout_s=max(0.0, deadline - time.monotonic()),
-        expected_recording_ids=expected_ids,
+        expected_recording_keys=expected_keys,
     )
     while time.monotonic() < deadline:
-        recording_ids = expected_ids or list_recording_ids_on_disk()
-        if not recording_ids:
+        recording_keys = expected_keys or list_keys_on_disk()
+        if not recording_keys:
             _sleep_for_next_poll(progress_made=False)
             continue
 
         try:
             recordings = {
-                row[COLUMN_RECORDING_ID]: row
+                row[correlation_column]: row
                 for row in fetch_all_rows(RECORDINGS_TABLE)
-                if row[COLUMN_RECORDING_ID] in recording_ids
+                if row[correlation_column] in recording_keys
             }
             traces = [
                 trace
                 for trace in fetch_all_rows(TRACES_TABLE)
-                if trace[COLUMN_RECORDING_ID] in recording_ids
+                if trace[correlation_column] in recording_keys
             ]
         except sqlite3.OperationalError:
             _sleep_for_next_poll(progress_made=False)
             continue
 
-        traces_by_recording: dict[str, list[dict[str, Any]]] = {}
+        traces_by_recording: dict[Any, list[dict[str, Any]]] = {}
         for trace in traces:
-            traces_by_recording.setdefault(trace[COLUMN_RECORDING_ID], []).append(trace)
+            traces_by_recording.setdefault(trace[correlation_column], []).append(trace)
 
         stopped_count = sum(
             1 for row in recordings.values() if row[COLUMN_STOPPED_AT] is not None
@@ -745,7 +969,7 @@ def wait_for_all_traces_written(
             1 for trace in traces if trace[COLUMN_WRITE_STATUS] == TRACE_WRITE_WRITTEN
         )
         current_state = (
-            len(recording_ids),
+            len(recording_keys),
             len(recordings),
             stopped_count,
             len(traces),
@@ -754,7 +978,7 @@ def wait_for_all_traces_written(
         progress_made = current_state != last_state
         last_state = current_state
 
-        if len(recordings) < len(recording_ids):
+        if len(recordings) < len(recording_keys):
             _sleep_for_next_poll(progress_made=progress_made)
             continue
 
@@ -763,8 +987,8 @@ def wait_for_all_traces_written(
             continue
 
         all_have_traces = all(
-            len(traces_by_recording.get(recording_id, [])) > 0
-            for recording_id in recording_ids
+            len(traces_by_recording.get(recording_key, [])) > 0
+            for recording_key in recording_keys
         )
         if not all_have_traces:
             _sleep_for_next_poll(progress_made=progress_made)
@@ -774,7 +998,7 @@ def wait_for_all_traces_written(
             return
         _sleep_for_next_poll(progress_made=progress_made)
 
-    recording_ids = expected_ids or list_recording_ids_on_disk()
+    recording_keys = expected_keys or list_keys_on_disk()
     try:
         recordings = fetch_all_rows(RECORDINGS_TABLE)
         traces = fetch_all_rows(TRACES_TABLE)
@@ -785,32 +1009,34 @@ def wait_for_all_traces_written(
     unfinished = [
         {
             COLUMN_TRACE_ID: t[COLUMN_TRACE_ID],
-            COLUMN_RECORDING_ID: t[COLUMN_RECORDING_ID],
+            correlation_column: t[correlation_column],
             COLUMN_WRITE_STATUS: t[COLUMN_WRITE_STATUS],
         }
         for t in traces
-        if t[COLUMN_RECORDING_ID] in recording_ids
+        if t[correlation_column] in recording_keys
         and t[COLUMN_WRITE_STATUS] != TRACE_WRITE_WRITTEN
     ]
     missing_in_db = sorted(
-        recording_ids - {row[COLUMN_RECORDING_ID] for row in recordings}
+        recording_keys - {row[correlation_column] for row in recordings}
     )
     not_stopped = sorted(
-        row[COLUMN_RECORDING_ID]
+        row[correlation_column]
         for row in recordings
-        if row[COLUMN_RECORDING_ID] in recording_ids and row[COLUMN_STOPPED_AT] is None
+        if row[correlation_column] in recording_keys and row[COLUMN_STOPPED_AT] is None
     )
     recordings_without_traces = sorted(
-        recording_id
-        for recording_id in recording_ids
-        if not any(trace[COLUMN_RECORDING_ID] == recording_id for trace in traces)
+        recording_key
+        for recording_key in recording_keys
+        if not any(trace[correlation_column] == recording_key for trace in traces)
     )
-    all_raw_ids = [str(rec_id) for result in results for rec_id in result.recording_ids]
-    duplicate_ids = sorted({i for i in all_raw_ids if all_raw_ids.count(i) > 1})
+    all_raw_keys = _raw_keys()
+    duplicate_keys = sorted(
+        {key for key in all_raw_keys if all_raw_keys.count(key) > 1}
+    )
     raise AssertionError(
         f"Daemon did not finish writing all traces within {timeout_s}s.\n"
-        f"  Duplicate recording IDs across contexts: {duplicate_ids}\n"
-        f"  Recordings on disk with no DB row: {missing_in_db}\n"
+        f"  Duplicate recording keys across contexts: {duplicate_keys}\n"
+        f"  Recording keys on disk with no DB row: {missing_in_db}\n"
         f"  Recordings not yet stopped (stopped_at is NULL): {not_stopped}\n"
         f"  Recordings with no trace rows: {recordings_without_traces}\n"
         f"  Traces still in non-written state ({len(unfinished)}):\n"
@@ -819,7 +1045,7 @@ def wait_for_all_traces_written(
 
 
 def assert_recording_db_statuses(
-    recording_id: str,
+    recording_index: int,
     *,
     check_cloud_statuses: bool = False,
 ) -> None:
@@ -832,7 +1058,7 @@ def assert_recording_db_statuses(
     online upload cycle.
 
     Args:
-        recording_id: The recording ID to inspect.
+        recording_index: The local ``recording_index`` to inspect.
         check_cloud_statuses: When ``True``, also assert registration and
             upload statuses in addition to write status.  Pass this for cloud
             (online) test cases only.
@@ -842,7 +1068,7 @@ def assert_recording_db_statuses(
     """
     try:
         traces = fetch_all_traces(
-            recording_id,
+            recording_index,
             columns=[
                 COLUMN_TRACE_ID,
                 COLUMN_WRITE_STATUS,
@@ -852,10 +1078,10 @@ def assert_recording_db_statuses(
         )
     except sqlite3.OperationalError as exc:
         raise AssertionError(
-            f"Cannot query traces for recording {recording_id}: {exc}"
+            f"Cannot query traces for recording_index {recording_index}: {exc}"
         ) from exc
 
-    assert traces, f"No trace rows found in DB for recording {recording_id}"
+    assert traces, f"No trace rows found in DB for recording_index {recording_index}"
 
     non_written = [
         {
@@ -866,7 +1092,7 @@ def assert_recording_db_statuses(
         if t.get(COLUMN_WRITE_STATUS) != TRACE_WRITE_WRITTEN
     ]
     assert not non_written, (
-        f"Recording {recording_id}: traces not in 'written' state "
+        f"Recording {recording_index}: traces not in 'written' state "
         f"({len(non_written)}/{len(traces)}):\n"
         + "\n".join(f"  {t}" for t in non_written)
     )
@@ -883,7 +1109,7 @@ def assert_recording_db_statuses(
         if t.get(COLUMN_REGISTRATION_STATUS) != TRACE_REGISTRATION_REGISTERED
     ]
     assert not non_registered, (
-        f"Recording {recording_id}: traces not in 'registered' state "
+        f"Recording {recording_index}: traces not in 'registered' state "
         f"({len(non_registered)}/{len(traces)}):\n"
         + "\n".join(f"  {t}" for t in non_registered)
     )
@@ -897,14 +1123,14 @@ def assert_recording_db_statuses(
         if t.get(COLUMN_UPLOAD_STATUS) != TRACE_UPLOAD_UPLOADED
     ]
     assert not non_uploaded, (
-        f"Recording {recording_id}: traces not in 'uploaded' state "
+        f"Recording {recording_index}: traces not in 'uploaded' state "
         f"({len(non_uploaded)}/{len(traces)}):\n"
         + "\n".join(f"  {t}" for t in non_uploaded)
     )
 
 
 def wait_for_upload_complete_in_db(
-    recording_id: str,
+    recording_key: int | str,
     timeout_s: float = 90.0,
 ) -> None:
     """Block until all known traces for a recording are uploaded per the daemon DB.
@@ -923,7 +1149,9 @@ def wait_for_upload_complete_in_db(
     verify that data is present in the cloud.
 
     Args:
-        recording_id: The recording ID to wait on.
+        recording_key: The active-mode correlation key (``recording_index``
+            under the Rust daemon, cloud ``recording_id`` under the legacy
+            daemon) to wait on.
         timeout_s: Base no-progress timeout in seconds.
 
     Raises:
@@ -939,7 +1167,7 @@ def wait_for_upload_complete_in_db(
     last_state: tuple[int | str | None, ...] | None = None
 
     while time.monotonic() < deadline:
-        stats = fetch_recording_online_verification_stats(recording_id)
+        stats = fetch_recording_online_verification_stats(recording_key)
         if _is_online_upload_complete(stats):
             return
 
@@ -971,11 +1199,11 @@ def wait_for_upload_complete_in_db(
             time.sleep(sleep_s)
         poll_interval_s = min(max_poll_interval_s, poll_interval_s * 2)
 
-    stats = fetch_recording_online_verification_stats(recording_id)
-    trace_upload_stats = fetch_recording_trace_upload_stats(recording_id)
+    stats = fetch_recording_online_verification_stats(recording_key)
+    trace_upload_stats = fetch_recording_trace_upload_stats(recording_key)
     pytest.fail(
-        "Online upload did not complete for "
-        f"recording {recording_id} within {progress_timeout_s:.1f}s of last progress; "
+        "Online upload did not complete for recording "
+        f"{recording_key!r} within {progress_timeout_s:.1f}s of last progress; "
         f"stats={stats}; trace_upload_stats={trace_upload_stats}"
     )
 

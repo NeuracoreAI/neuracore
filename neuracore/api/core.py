@@ -20,6 +20,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
@@ -318,10 +319,20 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id, wait_for_producer_drain=wait)
-
-    if not wait:
-        return
+    if rust_daemon_enabled():
+        # Under the Rust daemon the daemon owns recording identity and the
+        # upload pipeline. Resolve the cloud recording id from the daemon
+        # (waiting for it to be minted) before stopping, then drive the same
+        # backend completion poll below.
+        cloud_recording_id = robot.get_cloud_recording_id() if wait else None
+        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        if not wait or not cloud_recording_id:
+            return
+        recording_id = cloud_recording_id
+    else:
+        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        if not wait:
+            return
 
     # TODO: We need to instead check that the specific recording is complete
     is_traces_registered = False
@@ -332,6 +343,34 @@ def stop_recording(
         elif len(data_traces) == 0 and is_traces_registered:
             break
         time.sleep(0.2)
+
+
+def get_cloud_recording_id(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp_ns: int | None = None,
+    timeout_s: float = 30.0,
+) -> str | None:
+    """Resolve the daemon-owned cloud recording id for a robot's recording.
+
+    Under the Rust daemon the cloud recording id is assigned asynchronously by
+    the daemon. This asks the daemon (it may block up to ``timeout_s``) for the
+    id of the recording whose window brackets ``timestamp_ns`` for this source
+    (defaulting to the most recently started recording). For
+    non-performance-critical use only (tests, ``stop_recording(wait=True)``).
+
+    Args:
+        robot_name: Robot identifier. Defaults to the active robot.
+        instance: Robot instance number.
+        timestamp_ns: A wall-clock instant inside the target recording window;
+            defaults to the most recent recording for the source.
+        timeout_s: Maximum time to wait for the daemon to mint the id.
+
+    Returns:
+        The cloud recording id, or ``None`` on timeout / legacy daemon.
+    """
+    robot = _get_robot(robot_name, instance)
+    return robot.get_cloud_recording_id(timestamp_ns=timestamp_ns, timeout_s=timeout_s)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:

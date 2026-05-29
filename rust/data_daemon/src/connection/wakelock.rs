@@ -77,7 +77,7 @@ pub fn spawn_wakelock(
                                 inhibitor.release();
                             }
                         }
-                        Ok(DaemonEvent::RecordingCancelled { recording_id }) => {
+                        Ok(DaemonEvent::RecordingCancelled { recording_index }) => {
                             // Cancellation tears down every per-trace actor
                             // we may have been counting; without an explicit
                             // sweep here a cancelled recording's
@@ -86,7 +86,7 @@ pub fn spawn_wakelock(
                             // the trace ids any more, so we conservatively
                             // drop them all when the cancellation arrives.
                             tracing::debug!(
-                                recording_id,
+                                recording_index,
                                 pending = active.len(),
                                 "wakelock dropping all pending traces on recording cancel"
                             );

@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     NETWORK_INTEGRITY_CASES,
 )
@@ -12,6 +13,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    resolve_cloud_recording_ids,
     wait_for_upload_complete_in_db,
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
@@ -51,10 +53,22 @@ def _assert_online_verification_invariants(
     """Block until every recording in *results* has reached ``upload_complete``
     in the platform DB.  Must be called before cloud frame verification so
     that downloaded data reflects the fully-committed upload state.
+
+    Upload completion is tracked in the daemon DB by the active correlation key:
+    the local ``recording_index`` under the Rust daemon, the cloud
+    ``recording_id`` under the legacy daemon.
     """
     for result in results:
-        for recording_id in result.recording_ids:
-            wait_for_upload_complete_in_db(str(recording_id), timeout_s=timeout_seconds)
+        if rust_daemon_enabled():
+            for recording_index in result.recording_indexes:
+                wait_for_upload_complete_in_db(
+                    recording_index, timeout_s=timeout_seconds
+                )
+        else:
+            for recording_id in result.recording_ids:
+                wait_for_upload_complete_in_db(
+                    str(recording_id), timeout_s=timeout_seconds
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +115,9 @@ def test_cloud_data_integrity(
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)
                 _assert_online_verification_invariants(results)
+                # Resolve the daemon-minted cloud recording_id for every
+                # recording so cloud verification can match recording.id.
+                results = resolve_cloud_recording_ids(results)
                 verify_cloud_results(results=results, case=case)
 
         finally:

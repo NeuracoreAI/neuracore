@@ -19,6 +19,9 @@
 
 pub mod cloud_files;
 pub mod progress;
+pub mod recording_cancel_notifier;
+pub mod recording_start_notifier;
+pub mod recording_stop_notifier;
 pub mod registration;
 pub mod status;
 pub mod uploader;
@@ -26,6 +29,11 @@ pub mod uploader;
 #[allow(unused_imports)]
 pub use cloud_files::{cloud_file_list, content_type_for, ContentKind};
 pub use progress::{spawn_progress_reporter, ProgressReporterHandle};
+pub use recording_cancel_notifier::{
+    spawn_recording_cancel_notifier, RecordingCancelNotifierHandle,
+};
+pub use recording_start_notifier::{spawn_recording_start_notifier, RecordingStartNotifierHandle};
+pub use recording_stop_notifier::{spawn_recording_stop_notifier, RecordingStopNotifierHandle};
 pub use registration::{spawn_registration, RegistrationCoordinatorHandle};
 pub use status::{spawn_status_updater, StatusUpdate, StatusUpdaterHandle};
 pub use uploader::{spawn_uploader, UploaderHandle};

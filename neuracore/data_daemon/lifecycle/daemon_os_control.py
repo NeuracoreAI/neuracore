@@ -169,8 +169,17 @@ def _start_daemon_subprocess(
     env_overrides: dict[str, str] | None = None,
     stdout: int | None = None,
     stderr: int | None = None,
-) -> subprocess.Popen:
-    """Start the daemon runner subprocess with the requested terminal mode."""
+) -> tuple[subprocess.Popen, Path | None]:
+    """Start the daemon runner subprocess with the requested terminal mode.
+
+    Returns the process together with the log path its stderr was routed to
+    in background mode (``None`` in the foreground). A long-lived background
+    daemon must not inherit an undrained ``subprocess.PIPE`` — once the pipe
+    buffer fills, the daemon blocks on its next stderr write and hangs. Sending
+    stderr to ``DEVNULL`` avoids that, but throws away the reason for a startup
+    failure. Routing to a file gets both: writes never block, and the caller
+    can read the daemon's own error output back if it exits prematurely.
+    """
     environment = _build_daemon_launch_env(
         pid_path=pid_path,
         db_path=db_path,
@@ -178,20 +187,29 @@ def _start_daemon_subprocess(
     )
     current_working_directory = str(Path.cwd())
 
-    debug_log_path: Path | None = None
-    debug_log_handle = None
-    if rust_daemon_enabled() and os.environ.get("NDD_DEBUG"):
-        # In debug mode mirror the rust daemon's stderr to a sibling log so
-        # tests can inspect tracing output even when the parent does not
-        # drain Popen.stderr.
-        debug_log_path = db_path.parent / "daemon.log"
-        debug_log_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_log_handle = open(debug_log_path, "ab", buffering=0)  # noqa: SIM115
+    daemon_log_path: Path | None = None
+    daemon_log_handle: IO[bytes] | None = None
+    if background:
+        candidate_log_path = db_path.parent / "daemon.log"
+        try:
+            candidate_log_path.parent.mkdir(parents=True, exist_ok=True)
+            # Truncate so the log reflects this run only; the daemon's own
+            # stderr (tracing output / early eprintln failures) lands here.
+            daemon_log_handle = open(
+                candidate_log_path, "wb", buffering=0
+            )  # noqa: SIM115
+        except OSError:
+            # Fall back to discarding stderr rather than failing the launch.
+            daemon_log_handle = None
+        else:
+            daemon_log_path = candidate_log_path
 
     try:
         if background:
             stderr_target: int | IO[bytes] = (
-                debug_log_handle if debug_log_handle is not None else subprocess.DEVNULL
+                daemon_log_handle
+                if daemon_log_handle is not None
+                else subprocess.DEVNULL
             )
             process = subprocess.Popen(
                 _build_daemon_runner_command(),
@@ -214,13 +232,41 @@ def _start_daemon_subprocess(
                 stderr=stderr,
             )
     except OSError as error:
-        if debug_log_handle is not None:
-            debug_log_handle.close()
+        if daemon_log_handle is not None:
+            daemon_log_handle.close()
         raise RuntimeError(f"Failed to start daemon: {error}") from error
 
-    if debug_log_handle is not None:
-        debug_log_handle.close()
-    return process
+    if daemon_log_handle is not None:
+        daemon_log_handle.close()
+    return process, daemon_log_path
+
+
+# Cap on how much of the daemon log we fold into a premature-exit error, so a
+# verbose-but-then-crashing daemon can't produce a multi-megabyte exception.
+_DAEMON_FAILURE_DETAIL_TAIL_BYTES = 8192
+
+
+def _read_daemon_failure_detail(
+    process: subprocess.Popen, daemon_log_path: Path | None
+) -> str:
+    """Return the trailing daemon output to append to a premature-exit error.
+
+    Background launches route the daemon's stderr to ``daemon_log_path``;
+    foreground launches may instead expose a readable ``process.stderr`` pipe.
+    Returns a newline-prefixed snippet, or an empty string when no output is
+    available.
+    """
+    output = ""
+    if daemon_log_path is not None:
+        try:
+            log_bytes = daemon_log_path.read_bytes()
+        except OSError:
+            log_bytes = b""
+        tail = log_bytes[-_DAEMON_FAILURE_DETAIL_TAIL_BYTES:]
+        output = tail.decode(errors="replace").strip()
+    elif process.stderr is not None:
+        output = process.stderr.read().decode(errors="replace").strip()
+    return f"\n{output}" if output else ""
 
 
 def launch_daemon_subprocess(
@@ -242,7 +288,7 @@ def launch_daemon_subprocess(
     """
     pid_path.parent.mkdir(parents=True, exist_ok=True)
 
-    process = _start_daemon_subprocess(
+    process, daemon_log_path = _start_daemon_subprocess(
         pid_path=pid_path,
         db_path=db_path,
         background=background,
@@ -266,10 +312,7 @@ def launch_daemon_subprocess(
 
     while time.monotonic() < daemon_startup_timeout_s:
         if process.poll() is not None:
-            stderr_output = ""
-            if process.stderr is not None:
-                stderr_output = process.stderr.read().decode(errors="replace").strip()
-            detail = f"\n{stderr_output}" if stderr_output else ""
+            detail = _read_daemon_failure_detail(process, daemon_log_path)
             raise RuntimeError(
                 f"Daemon process exited unexpectedly during startup "
                 f"(exit code {process.returncode}).{detail}"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from importlib import import_module
 from types import ModuleType
 
@@ -37,12 +38,14 @@ def _load_native() -> ModuleType:
 class RecordingContext:
     """Recording-scoped interface to the data daemon.
 
-    Under the Rust daemon this is the single entry point the logging layer
-    uses to drive the native producer: ``start_recording`` /
-    ``log_joints`` / ``log_frame`` / ``log_scalar`` / ``stop_recording`` /
+    Under the Rust daemon this is a *thin shipper* bridge: ``start_recording``
+    / ``log_joints`` / ``log_frame`` / ``log_scalar`` / ``stop_recording`` /
     ``cancel_recording`` forward straight through to ``_native_producer`` over
-    iceoryx2. The native crate owns all trace state — trace ids are minted and
-    discarded inside Rust — so this object holds only the recording id.
+    iceoryx2, tagged only with the **source** ``(robot_id, robot_instance)``.
+    The daemon owns all recording identity — there is no recording id on the
+    wire. Routing is by a producer-stamped *publish* timestamp (wall clock),
+    decoupled from the data's own capture timestamp, so the daemon partitions
+    recordings by when data was published rather than what clock it carries.
 
     Under the legacy daemon it keeps its original role: sending recording
     control messages over the ZMQ producer socket. That path is unchanged.
@@ -61,6 +64,13 @@ class RecordingContext:
         """
         self.recording_id = recording_id
         self._rust_mode = rust_daemon_enabled()
+        # Rust-mode source state. Set on ``start_recording``; the data path
+        # reads it to tag every envelope. ``_recording_marker_ns`` is a
+        # wall-clock instant inside the recording window used later to resolve
+        # the daemon-owned cloud recording id (see ``get_recording_id``).
+        self._robot_id: str | None = None
+        self._robot_instance: int = 0
+        self._recording_marker_ns: int = 0
         if self._rust_mode:
             self._comm = None
         else:
@@ -75,25 +85,36 @@ class RecordingContext:
 
     def start_recording(
         self,
-        recording_id: str,
-        robot_id: str | None = None,
+        robot_id: str,
+        robot_instance: int = 0,
         robot_name: str | None = None,
         dataset_id: str | None = None,
         dataset_name: str | None = None,
     ) -> None:
-        """Announce a recording to the Rust daemon.
+        """Announce a recording to the Rust daemon for a source.
 
-        Publishes exactly one ``StartRecording`` envelope. The native layer is
-        idempotent — a repeated call for the same recording is a no-op — so a
-        mistaken ``start, start`` does not emit a duplicate.
+        Publishes exactly one ``StartRecording`` envelope tagged with the
+        source ``(robot_id, robot_instance)``. No recording id is on the wire —
+        the daemon allocates and owns recording identity.
         """
         if not self._rust_mode:
             return
-        if not recording_id:
-            raise ValueError("recording_id is required to start a recording.")
-        self.recording_id = recording_id
+        if not robot_id:
+            raise ValueError("robot_id is required to start a recording.")
+        self._robot_id = robot_id
+        self._robot_instance = robot_instance
+        started_at_ns = time.time_ns()
+        # A wall-clock instant guaranteed to be inside the recording window
+        # (the producer stamps StartRecording with this same value), used to
+        # look up the daemon-assigned cloud recording id later.
+        self._recording_marker_ns = started_at_ns
         _load_native().start_recording(
-            recording_id, robot_id, robot_name, dataset_id, dataset_name
+            robot_id,
+            robot_instance,
+            robot_name,
+            dataset_id,
+            dataset_name,
+            started_at_ns,
         )
 
     def log_joints(
@@ -104,15 +125,15 @@ class RecordingContext:
     ) -> None:
         """Forward a batch of ``(joint_name, value)`` samples to the daemon.
 
-        The Rust crate lazily creates a trace per joint on first sight and
-        packs the whole batch into one IPC message.
+        The daemon lazily creates a trace per sensor and routes the whole batch
+        into the source's active recording window by ``timestamp``.
         """
         if not items:
             return
-        recording_id = self._require_recording_id("log_joints")
+        robot_id = self._require_source("log_joints")
         timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_joints(
-            recording_id, data_type, items, timestamp_ns, timestamp
+            robot_id, self._robot_instance, data_type, items, timestamp_ns, timestamp
         )
 
     def log_frame(
@@ -132,10 +153,11 @@ class RecordingContext:
         the NUT writer's destination, so there's no benefit to materialising
         a ``bytes`` first.
         """
-        recording_id = self._require_recording_id("log_frame")
+        robot_id = self._require_source("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_frame(
-            recording_id,
+            robot_id,
+            self._robot_instance,
             data_type,
             name,
             int(width),
@@ -153,30 +175,37 @@ class RecordingContext:
         timestamp: float,
     ) -> None:
         """Forward one scalar/custom sample to the daemon."""
-        recording_id = self._require_recording_id("log_scalar")
+        robot_id = self._require_source("log_scalar")
         timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_scalar(
-            recording_id, data_type, name, payload, timestamp_ns, timestamp
+            robot_id,
+            self._robot_instance,
+            data_type,
+            name,
+            payload,
+            timestamp_ns,
+            timestamp,
         )
 
     def cancel_recording(self, recording_id: str | None = None) -> None:
-        """Cancel a recording — the daemon discards every in-flight trace."""
-        effective_recording_id = recording_id or self.recording_id
-        if not effective_recording_id:
-            raise ValueError("recording_id is required to cancel a recording.")
-        if self._rust_mode:
-            _load_native().cancel_recording(effective_recording_id)
-        self.recording_id = effective_recording_id
+        """Cancel the source's active recording — the daemon discards it."""
+        if not self._rust_mode:
+            return
+        if not self._robot_id:
+            return
+        _load_native().cancel_recording(
+            self._robot_id, self._robot_instance, time.time_ns()
+        )
 
-    def _require_recording_id(self, operation: str) -> str:
-        """Return the active recording id or raise if logging before start."""
+    def _require_source(self, operation: str) -> str:
+        """Return the active source's robot id or raise if logging before start."""
         if not self._rust_mode:
             raise RuntimeError(f"{operation} is only available under the rust daemon.")
-        if not self.recording_id:
+        if not self._robot_id:
             raise RuntimeError(
-                f"{operation} called before start_recording set a recording id."
+                f"{operation} called before start_recording set a source."
             )
-        return self.recording_id
+        return self._robot_id
 
     # -- Lifecycle ----------------------------------------------------------
 
@@ -187,29 +216,89 @@ class RecordingContext:
     ) -> None:
         """Send a recording-stopped control message.
 
-        Under the Rust daemon this ends every trace the recording minted and
-        publishes one ``StopRecording``; the native layer is idempotent, so a
-        mistaken ``stop, stop`` is harmless.
+        Under the Rust daemon this publishes one ``StopRecording`` tagged with
+        the source and the publish-clock stop boundary (wall-clock now), which
+        the daemon uses to close the recording window. ``recording_id`` /
+        ``producer_stop_sequence_numbers`` are only used by the legacy path.
         """
+        if self._rust_mode:
+            if not self._robot_id:
+                return
+            _load_native().stop_recording(
+                self._robot_id, self._robot_instance, time.time_ns()
+            )
+            return
+
         effective_recording_id = recording_id or self.recording_id
         if not effective_recording_id:
             raise ValueError("recording_id is required to stop a recording.")
-
-        if self._rust_mode:
-            _load_native().stop_recording(effective_recording_id)
-        else:
-            recording_stopped_payload: dict[str, object] = {
-                "recording_id": effective_recording_id
-            }
-            if producer_stop_sequence_numbers:
-                recording_stopped_payload["producer_stop_sequence_numbers"] = (
-                    producer_stop_sequence_numbers
-                )
-            self._send(
-                CommandType.RECORDING_STOPPED,
-                {"recording_stopped": recording_stopped_payload},
+        recording_stopped_payload: dict[str, object] = {
+            "recording_id": effective_recording_id
+        }
+        if producer_stop_sequence_numbers:
+            recording_stopped_payload["producer_stop_sequence_numbers"] = (
+                producer_stop_sequence_numbers
             )
+        self._send(
+            CommandType.RECORDING_STOPPED,
+            {"recording_stopped": recording_stopped_payload},
+        )
         self.recording_id = effective_recording_id
+
+    def get_recording_id(
+        self,
+        timestamp_ns: int | None = None,
+        timeout_s: float = 30.0,
+    ) -> str | None:
+        """Resolve the daemon-owned cloud recording id for this source.
+
+        The thin-shipper producer never sees the cloud recording id — the
+        daemon allocates it and POSTs ``/recording/start`` asynchronously. This
+        method asks the native daemon for the id of the recording whose window
+        brackets ``timestamp_ns`` (defaulting to the marker captured at
+        ``start_recording``) for this source, polling the daemon's state until
+        the id has been minted or ``timeout_s`` elapses.
+
+        It MAY block and is for non-performance-critical paths only (tests,
+        ``nc.stop_recording(wait=True)``). Returns ``None`` on timeout or in the
+        legacy daemon mode.
+        """
+        if not self._rust_mode or not self._robot_id:
+            return None
+        marker_ns = (
+            timestamp_ns if timestamp_ns is not None else self._recording_marker_ns
+        )
+
+        # Imported here to avoid a module-load dependency on the daemon
+        # lifecycle helpers for callers that never resolve a cloud id.
+        import sqlite3
+
+        from neuracore.data_daemon.helpers import get_daemon_db_path
+
+        db_uri = f"file:{get_daemon_db_path()}?mode=ro"
+        deadline = time.monotonic() + timeout_s
+        query = (
+            "SELECT recording_id FROM recordings "
+            "WHERE robot_id = ? AND robot_instance = ? AND start_timestamp_ns <= ? "
+            "AND cancelled_at IS NULL "
+            "ORDER BY recording_index DESC LIMIT 1"
+        )
+        while True:
+            try:
+                connection = sqlite3.connect(db_uri, uri=True, timeout=1.0)
+                try:
+                    row = connection.execute(
+                        query, (self._robot_id, self._robot_instance, marker_ns)
+                    ).fetchone()
+                finally:
+                    connection.close()
+                if row is not None and row[0] is not None:
+                    return str(row[0])
+            except sqlite3.Error as error:
+                logger.debug("recording-id lookup query failed: %s", error)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
 
     def close(self) -> None:
         """Close sockets and cleanup context resources owned by this instance."""

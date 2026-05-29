@@ -95,24 +95,34 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         let Some(org_id) = recording.org_id.clone() else {
             continue;
         };
+        // Every cloud URL needs the backend `recording_id`. A None here means
+        // registration hasn't minted the cloud id yet — skip until it has.
+        let Some(recording_id) = recording.recording_id.clone() else {
+            tracing::warn!(
+                recording_index = recording.recording_index,
+                "progress reporter skipping recording with no cloud recording_id yet"
+            );
+            continue;
+        };
         let traces = match store
-            .list_traces_for_recording(&recording.recording_id)
+            .list_traces_for_recording(recording.recording_index)
             .await
         {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(%error, recording_id = recording.recording_id, "progress reporter could not list traces");
+                tracing::warn!(%error, recording_index = recording.recording_index, "progress reporter could not list traces");
                 continue;
             }
         };
         if traces.is_empty() {
             continue;
         }
-        report_expected_trace_count(store, client, &recording, &org_id, &traces).await;
+        report_expected_trace_count(store, client, &recording, &org_id, &recording_id, &traces)
+            .await;
         if matches!(recording.progress_reported, ProgressReportStatus::Reported) {
             continue;
         }
-        report_progress(store, client, &recording, &org_id, &traces).await;
+        report_progress(store, client, &recording, &org_id, &recording_id, &traces).await;
     }
 }
 
@@ -125,6 +135,7 @@ async fn report_expected_trace_count(
     client: &Arc<ApiClient>,
     recording: &RecordingRow,
     org_id: &str,
+    recording_id: &str,
     traces: &[TraceRecord],
 ) {
     if recording.expected_trace_count_reported > 0 {
@@ -141,35 +152,36 @@ async fn report_expected_trace_count(
     // Persist locally first so a transient PUT failure does not lose the
     // count, and so a re-claim by the next tick sees the same value.
     if let Err(error) = store
-        .set_expected_trace_count(&recording.recording_id, count)
+        .set_expected_trace_count(recording.recording_index, count)
         .await
     {
         tracing::warn!(
             %error,
-            recording_id = recording.recording_id,
+            recording_index = recording.recording_index,
             "failed to persist expected trace count"
         );
         return;
     }
 
     match client
-        .put_expected_trace_count(org_id, &recording.recording_id, count)
+        .put_expected_trace_count(org_id, recording_id, count)
         .await
     {
         Ok(()) => {
             if let Err(error) = store
-                .mark_expected_trace_count_reported(&recording.recording_id, count)
+                .mark_expected_trace_count_reported(recording.recording_index, count)
                 .await
             {
                 tracing::warn!(
                     %error,
-                    recording_id = recording.recording_id,
+                    recording_index = recording.recording_index,
                     "failed to mark expected trace count as reported"
                 );
                 return;
             }
             tracing::info!(
-                recording_id = recording.recording_id,
+                recording_index = recording.recording_index,
+                recording_id,
                 count,
                 "expected trace count reported"
             );
@@ -177,7 +189,7 @@ async fn report_expected_trace_count(
         Err(error) => {
             tracing::warn!(
                 %error,
-                recording_id = recording.recording_id,
+                recording_index = recording.recording_index,
                 "expected trace count PUT failed"
             );
         }
@@ -189,6 +201,7 @@ async fn report_progress(
     client: &Arc<ApiClient>,
     recording: &RecordingRow,
     org_id: &str,
+    recording_id: &str,
     traces: &[TraceRecord],
 ) {
     // Treat Failed as terminal alongside Uploaded so a single bad trace
@@ -212,7 +225,7 @@ async fn report_progress(
     // by the next tick.
     match store
         .set_progress_report_status(
-            &recording.recording_id,
+            recording.recording_index,
             ProgressReportStatus::Pending,
             ProgressReportStatus::Reporting,
         )
@@ -223,27 +236,28 @@ async fn report_progress(
     }
 
     match client
-        .report_progress(org_id, &recording.recording_id, &trace_map)
+        .report_progress(org_id, recording_id, &trace_map)
         .await
     {
         Ok(()) => {
             let _ = store
                 .set_progress_report_status(
-                    &recording.recording_id,
+                    recording.recording_index,
                     ProgressReportStatus::Reporting,
                     ProgressReportStatus::Reported,
                 )
                 .await;
             tracing::info!(
-                recording_id = recording.recording_id,
+                recording_index = recording.recording_index,
+                recording_id,
                 "progress report sent"
             );
         }
         Err(error) => {
-            tracing::warn!(%error, recording_id = recording.recording_id, "progress report failed");
+            tracing::warn!(%error, recording_index = recording.recording_index, "progress report failed");
             let _ = store
                 .set_progress_report_status(
-                    &recording.recording_id,
+                    recording.recording_index,
                     ProgressReportStatus::Reporting,
                     ProgressReportStatus::Pending,
                 )
@@ -264,7 +278,7 @@ mod tests {
     use super::*;
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
-    use crate::state::store::TraceUpdate;
+    use crate::state::store::{NewRecording, TraceUpdate};
     use crate::state::TraceWriteStatus;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
@@ -276,6 +290,24 @@ mod tests {
             .await
             .unwrap();
         (store, dir)
+    }
+
+    /// Create a recording stamped with `org-1` and the given cloud
+    /// `recording_id` so the wiremock URL expectations resolve. Returns the
+    /// local `recording_index`.
+    async fn seed_recording(store: &SqliteStateStore, cloud_recording_id: &str) -> i64 {
+        let recording = store
+            .create_recording(NewRecording {
+                org_id: Some("org-1"),
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(recording.recording_index, cloud_recording_id)
+            .await
+            .unwrap();
+        recording.recording_index
     }
 
     fn client(server: &MockServer) -> Arc<ApiClient> {
@@ -296,13 +328,12 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
-        store.set_recording_org("rec-1", "org-1").await.unwrap();
+        let recording_index = seed_recording(&store, "rec-1").await;
         // Two traces both finished writing but neither uploaded yet — the
         // expected-count PUT must fire before upload completion.
         for trace_id in ["t-1", "t-2"] {
             store
-                .create_trace("rec-1", trace_id, Some("JOINT_POSITIONS"), None)
+                .create_trace(recording_index, trace_id, Some("JOINT_POSITIONS"), None)
                 .await
                 .unwrap();
             store
@@ -316,12 +347,15 @@ mod tests {
                 .await
                 .unwrap();
         }
-        store.mark_recording_stopped("rec-1").await.unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
 
         let api = client(&server);
         sweep_once(&Arc::new(store.clone()), &api).await;
 
-        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, Some(2));
         assert_eq!(recording.expected_trace_count_reported, 2);
         // Progress report should not have fired — uploads aren't done.
@@ -337,10 +371,9 @@ mod tests {
         // No mock for the PUT — if the sweep fires it would 404 and we'd
         // catch a state-change side effect via the assertion below.
         let (store, _dir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
-        store.set_recording_org("rec-1", "org-1").await.unwrap();
+        let recording_index = seed_recording(&store, "rec-1").await;
         store
-            .create_trace("rec-1", "t-1", Some("JOINT_POSITIONS"), None)
+            .create_trace(recording_index, "t-1", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
         store
@@ -353,12 +386,15 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped("rec-1").await.unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
 
         let api = client(&server);
         sweep_once(&Arc::new(store.clone()), &api).await;
 
-        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, None);
         assert_eq!(recording.expected_trace_count_reported, 0);
     }
@@ -384,10 +420,9 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
-        store.set_recording_org("rec-1", "org-1").await.unwrap();
+        let recording_index = seed_recording(&store, "rec-1").await;
         store
-            .create_trace("rec-1", "ok", Some("JOINT_POSITIONS"), None)
+            .create_trace(recording_index, "ok", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
         store
@@ -404,7 +439,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .create_trace("rec-1", "bad", Some("JOINT_POSITIONS"), None)
+            .create_trace(recording_index, "bad", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
         store
@@ -418,12 +453,15 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped("rec-1").await.unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
 
         let api = client(&server);
         sweep_once(&Arc::new(store.clone()), &api).await;
 
-        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(
             matches!(recording.progress_reported, ProgressReportStatus::Reported),
             "progress should be reported even when one trace failed; \
@@ -449,10 +487,9 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        store.create_recording("rec-1").await.unwrap();
-        store.set_recording_org("rec-1", "org-1").await.unwrap();
+        let recording_index = seed_recording(&store, "rec-1").await;
         store
-            .create_trace("rec-1", "trace-1", Some("JOINT_POSITIONS"), None)
+            .create_trace(recording_index, "trace-1", Some("JOINT_POSITIONS"), None)
             .await
             .unwrap();
         store
@@ -468,12 +505,15 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped("rec-1").await.unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
 
         let api = client(&server);
         sweep_once(&Arc::new(store.clone()), &api).await;
 
-        let recording = store.get_recording("rec-1").await.unwrap().unwrap();
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(matches!(
             recording.progress_reported,
             ProgressReportStatus::Reported

@@ -9,6 +9,7 @@ state and remote recording triggers.
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
 
@@ -40,22 +41,26 @@ from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 logger = logging.getLogger(__name__)
 
 
-def _notify_native_producer_of_expiry(recording_id: str) -> None:
-    """Tell the Rust producer a recording has been locally auto-expired.
+def _notify_native_producer_of_expiry(robot_id: str, instance: int) -> None:
+    """Tell the Rust producer a source's recording has been locally auto-expired.
 
-    Calls the native ``stop_recording`` so the producer flushes any
-    in-progress NUT chunk and publishes ``EndTrace`` / ``StopRecording``.
-    The native layer is idempotent, so a later explicit
-    ``nc.stop_recording`` that races this is a no-op. Failures are logged
-    and swallowed: the local expiry must always succeed, even if the
-    native module fails to load.
+    Calls the native ``stop_recording`` for the source so the producer flushes
+    any in-progress NUT chunk and publishes ``StopRecording``. The daemon is
+    idempotent, so a later explicit ``nc.stop_recording`` that races this is a
+    no-op. The stop boundary is wall-clock here (the expiry path has no access
+    to the recording context's tracked data-clock timestamp) — acceptable for a
+    forced 5-minute timeout. Failures are logged and swallowed: the local
+    expiry must always succeed.
     """
     try:
-        _recording_context._load_native().stop_recording(recording_id)
+        _recording_context._load_native().stop_recording(
+            robot_id, instance, time.time_ns()
+        )
     except Exception:
         logger.exception(
-            "Failed to notify native producer of recording %s expiry",
-            recording_id,
+            "Failed to notify native producer of recording expiry for %s:%s",
+            robot_id,
+            instance,
         )
 
 
@@ -215,6 +220,11 @@ class RecordingStateManager(BaseSSEConsumer):
                 )
                 self._expired_recording_ids.add(recording_id)
                 self.recording_stopped(robot_id, instance, recording_id)
+                # Force the producer to stop. The normal stop path drives this
+                # through the recording context; the expiry timer has no such
+                # path, so it stops the source directly here.
+                if rust_daemon_enabled():
+                    _notify_native_producer_of_expiry(robot_id, instance)
 
         loop = get_running_loop()
 
@@ -243,7 +253,7 @@ class RecordingStateManager(BaseSSEConsumer):
         loop.call_soon_threadsafe(_cancel)
 
     def recording_stopped(
-        self, robot_id: str, instance: int, recording_id: str
+        self, robot_id: str, instance: int, recording_id: str | None
     ) -> None:
         """Handle recording stop for a robot instance.
 
@@ -262,9 +272,12 @@ class RecordingStateManager(BaseSSEConsumer):
         if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
-        if rust_daemon_enabled():
-            _notify_native_producer_of_expiry(recording_id)
-        self._cancel_recording_timers(recording_id)
+        # Note: the native producer stop is driven by the recording context
+        # (normal/remote stop) or the expiry timer — NOT here — so the daemon
+        # receives exactly one StopRecording carrying the correct data-clock
+        # boundary.
+        if recording_id is not None:
+            self._cancel_recording_timers(recording_id)
 
     def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
