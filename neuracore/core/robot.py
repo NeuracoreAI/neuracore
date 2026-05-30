@@ -24,7 +24,7 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream, MissingProducerChannelError
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context,
 )
@@ -178,20 +178,20 @@ class Robot:
             )
 
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
-                    json={
-                        "name": self.name,
-                        "instance": self.instance,
-                    },  # TODO: Add camera support
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
-                response_body = response.json()
-                self.id = response_body["robot_id"]
-                self.archived = response_body.get("archived")
-                has_urdf = response_body["has_urdf"]
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
+                json={
+                    "name": self.name,
+                    "instance": self.instance,
+                },  # TODO: Add camera support
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+            response_body = response.json()
+            self.id = response_body["robot_id"]
+            self.archived = response_body.get("archived")
+            has_urdf = response_body["has_urdf"]
             # Upload URDF and meshes if provided
             if self.urdf_path and (not has_urdf or self.overwrite):
                 self._upload_urdf_and_meshes()
@@ -280,24 +280,24 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{self.org_id}/recording/start",
-                    headers=self._auth.get_headers(),
-                    json={
-                        "robot_id": self.id,
-                        "instance": self.instance,
-                        "dataset_id": dataset_id,
-                    },
-                )
-                response.raise_for_status()
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/recording/start",
+                headers=self._auth.get_headers(),
+                json={
+                    "robot_id": self.id,
+                    "instance": self.instance,
+                    "dataset_id": dataset_id,
+                },
+            )
+            response.raise_for_status()
 
-                recording_details = response.json()
-                recording_id = recording_details["id"]
-                assert isinstance(recording_id, str)
+            recording_details = response.json()
+            recording_id = recording_details["id"]
+            assert isinstance(recording_id, str)
 
-                if "start_time" in recording_details:
-                    warn("This recording had already been started!")
+            if "start_time" in recording_details:
+                warn("This recording had already been started!")
 
             get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=recording_id
@@ -344,13 +344,13 @@ class Robot:
         )
 
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
-                    headers=self._auth.get_headers(),
-                )
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
+                headers=self._auth.get_headers(),
+            )
 
-                response.raise_for_status()
+            response.raise_for_status()
 
             if response.json() == "WrongUser":
                 raise RobotError("Cannot stop recording initiated by another user")
@@ -579,12 +579,12 @@ class Robot:
             )
 
         try:
-            with Session() as session:
-                response = session.get(
-                    f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
         except requests.exceptions.ConnectionError:
             raise RobotError(
                 "Failed to connect to neuracore server, "
@@ -627,12 +627,12 @@ class Robot:
             files = self._package_urdf()
 
             # Upload the package
-            with Session() as session:
-                response = session.put(
-                    f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
-                    headers=self._auth.get_headers(),
-                    files=files,
-                )
+            session = thread_local_session()
+            response = session.put(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/package?is_shared={self.shared}",
+                headers=self._auth.get_headers(),
+                files=files,
+            )
 
             # Log response for debugging
             logger.info(f"Upload response status: {response.status_code}")
@@ -717,12 +717,12 @@ class Robot:
         self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
 
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
-                    headers=self._auth.get_headers(),
-                )
-                response.raise_for_status()
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
 
             if response.json() == "WrongUser":
                 raise RobotError("Cannot cancel recording initiated by another user")
@@ -879,13 +879,13 @@ def update_robot_name(
         raise RobotError("No organization selected. Please call nc.select_org() first.")
     robot_id = _robot_name_id_mapping.get(robot_key, robot_key)
     try:
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
-                json={"name": new_robot_name, "instance": instance},
-                headers=get_auth().get_headers(),
-            )
-            response.raise_for_status()
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{resolved_org_id}/robots?is_shared={shared}&robot_id={robot_id}",
+            json={"name": new_robot_name, "instance": instance},
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
     except requests.exceptions.ConnectionError:
         raise RobotError(
             "Failed to connect to neuracore server, "
@@ -919,19 +919,19 @@ def list_organization_robots(
     start_after: dict | None = None
     try:
         while True:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{org_id}/robots/list",
-                    headers=get_auth().get_headers(),
-                    params={
-                        "is_shared": str(is_shared).lower(),
-                        "mode": mode,
-                        "limit": str(_ROBOTS_LIST_PAGE_SIZE),
-                    },
-                    json=start_after,
-                )
-                response.raise_for_status()
-                page = response.json()
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{org_id}/robots/list",
+                headers=get_auth().get_headers(),
+                params={
+                    "is_shared": str(is_shared).lower(),
+                    "mode": mode,
+                    "limit": str(_ROBOTS_LIST_PAGE_SIZE),
+                },
+                json=start_after,
+            )
+            response.raise_for_status()
+            page = response.json()
 
             batch = page.get("data", [])
             robots.extend(batch)

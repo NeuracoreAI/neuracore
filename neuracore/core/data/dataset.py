@@ -27,7 +27,7 @@ from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
 from ..exceptions import AuthenticationError, DatasetError
 from ..utils.http_errors import extract_error_detail
-from ..utils.http_session import Session
+from ..utils.http_session import thread_local_session
 
 PAGE_SIZE = 30
 SYNC_PROGRESS_POLL_INTERVAL_S = 5.0
@@ -118,14 +118,14 @@ class Dataset:
     def _initialize_num_recordings(self) -> None:
         """Fetch total number of recordings without loading them."""
         try:
-            with Session() as session:
-                response = session.post(
-                    f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
-                    headers=get_auth().get_headers(),
-                    params={"limit": 1, "is_shared": self.is_shared},
-                    json=None,
-                    timeout=10,
-                )
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+                headers=get_auth().get_headers(),
+                params={"limit": 1, "is_shared": self.is_shared},
+                json=None,
+                timeout=10,
+            )
             response.raise_for_status()
             data = response.json()
             self._num_recordings = data.get("total", 0)
@@ -144,13 +144,13 @@ class Dataset:
         params = {"limit": PAGE_SIZE, "is_shared": self.is_shared}
         payload = self._start_after or None
 
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
-                headers=get_auth().get_headers(),
-                params=params,
-                json=payload,
-            )
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+            headers=get_auth().get_headers(),
+            params=params,
+            json=payload,
+        )
         response.raise_for_status()
         data = response.json()
 
@@ -235,11 +235,11 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        with Session() as session:
-            req = session.get(
-                f"{API_URL}/org/{org_id}/datasets/{id}",
-                headers=auth.get_headers(),
-            )
+        session = thread_local_session()
+        req = session.get(
+            f"{API_URL}/org/{org_id}/datasets/{id}",
+            headers=auth.get_headers(),
+        )
         if req.status_code != 200:
             if non_exist_ok:
                 return None
@@ -277,12 +277,12 @@ class Dataset:
         auth: Auth = get_auth()
         org_id = get_current_org()
         try:
-            with Session() as session:
-                response = session.get(
-                    f"{API_URL}/org/{org_id}/datasets/search/by-name",
-                    params={"name": name},
-                    headers=auth.get_headers(),
-                )
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/org/{org_id}/datasets/search/by-name",
+                params={"name": name},
+                headers=auth.get_headers(),
+            )
             if response.status_code != 200:
                 if non_exist_ok:
                     return None
@@ -360,17 +360,17 @@ class Dataset:
         """
         auth: Auth = get_auth()
         org_id = get_current_org()
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{org_id}/datasets",
-                headers=auth.get_headers(),
-                json={
-                    "name": name,
-                    "description": description,
-                    "tags": tags,
-                    "is_shared": shared,
-                },
-            )
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{org_id}/datasets",
+            headers=auth.get_headers(),
+            json={
+                "name": name,
+                "description": description,
+                "tags": tags,
+                "is_shared": shared,
+            },
+        )
         if not response.ok:
             detail = extract_error_detail(response)
             error_message = detail or f"{response.status_code} {response.reason}"
@@ -390,11 +390,11 @@ class Dataset:
 
     def delete(self) -> None:
         """Delete this dataset from Neuracore."""
-        with Session() as session:
-            response = session.delete(
-                f"{API_URL}/org/{self.org_id}/datasets/{self.id}",
-                headers=get_auth().get_headers(),
-            )
+        session = thread_local_session()
+        response = session.delete(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}",
+            headers=get_auth().get_headers(),
+        )
         response.raise_for_status()
 
     def _format_failure_summary(self, failed_recording_ids: list[str]) -> str:
@@ -403,11 +403,11 @@ class Dataset:
         for recording_id in failed_recording_ids:
             if recording_id not in id_to_name:
                 try:
-                    with Session() as session:
-                        response = session.get(
-                            f"{API_URL}/org/{self.org_id}/recording/{recording_id}",
-                            headers=auth_headers,
-                        )
+                    session = thread_local_session()
+                    response = session.get(
+                        f"{API_URL}/org/{self.org_id}/recording/{recording_id}",
+                        headers=auth_headers,
+                    )
                     response.raise_for_status()
                     recording_model = RecordingModel.model_validate(response.json())
                     id_to_name[recording_id] = recording_model.metadata.name
@@ -464,21 +464,21 @@ class Dataset:
             requests.HTTPError: If the API request fails.
             DatasetError: If frequency is not greater than 0.
         """
-        with Session() as session:
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/synchronize/synchronize-dataset",
-                headers=get_auth().get_headers(),
-                json=SynchronizeDatasetRequest(
-                    dataset_id=self.id,
-                    synchronization_details=SynchronizationDetails(
-                        frequency=frequency,
-                        max_delay_s=max_delay_s,
-                        allow_duplicates=allow_duplicates,
-                        trim_start_end=trim_start_end,
-                        cross_embodiment_union=cross_embodiment_union,
-                    ),
-                ).model_dump(mode="json"),
-            )
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{self.org_id}/synchronize/synchronize-dataset",
+            headers=get_auth().get_headers(),
+            json=SynchronizeDatasetRequest(
+                dataset_id=self.id,
+                synchronization_details=SynchronizationDetails(
+                    frequency=frequency,
+                    max_delay_s=max_delay_s,
+                    allow_duplicates=allow_duplicates,
+                    trim_start_end=trim_start_end,
+                    cross_embodiment_union=cross_embodiment_union,
+                ),
+            ).model_dump(mode="json"),
+        )
         response.raise_for_status()
         return SynchronizedDatasetModel.model_validate(response.json())
 
@@ -490,11 +490,11 @@ class Dataset:
         Returns:
             Synchronization progress for the dataset.
         """
-        with Session() as session:
-            response = session.get(
-                f"{API_URL}/org/{self.org_id}/synchronize/synchronization-progress/{synchronized_dataset_id}",
-                headers=get_auth().get_headers(),
-            )
+        session = thread_local_session()
+        response = session.get(
+            f"{API_URL}/org/{self.org_id}/synchronize/synchronization-progress/{synchronized_dataset_id}",
+            headers=get_auth().get_headers(),
+        )
         if response.status_code == 409:
             detail = extract_error_detail(response) or "Synchronization failed."
             prefix = "Synchronization failed for recording(s): "
@@ -597,11 +597,11 @@ class Dataset:
         """
         # Best-effort resolution without additional network calls.
         # If we can resolve a robot_name to an ID, do so; otherwise delegate to server.
-        with Session() as session:
-            response = session.get(
-                f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-embodiment-description/{robot_id}",
-                headers=get_auth().get_headers(),
-            )
+        session = thread_local_session()
+        response = session.get(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}/full-embodiment-description/{robot_id}",
+            headers=get_auth().get_headers(),
+        )
         response.raise_for_status()
         raw_description = response.json()
         return {
@@ -619,11 +619,11 @@ class Dataset:
             List of robot IDs in the synchronized dataset.
         """
         if self._robot_ids is None:
-            with Session() as session:
-                response = session.get(
-                    f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robot_ids",
-                    headers=get_auth().get_headers(),
-                )
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robot_ids",
+                headers=get_auth().get_headers(),
+            )
             response.raise_for_status()
             self._robot_ids = response.json()
         return self._robot_ids
@@ -631,11 +631,11 @@ class Dataset:
     def get_robot_names(self) -> dict[str, str]:
         """Get robot names keyed by robot ID for this dataset."""
         if self._robot_names is None:
-            with Session() as session:
-                response = session.get(
-                    f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robots",
-                    headers=get_auth().get_headers(),
-                )
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/datasets/{self.id}/robots",
+                headers=get_auth().get_headers(),
+            )
             response.raise_for_status()
             robots = response.json()
             self._robot_names = {robot["id"]: robot["name"] for robot in robots}
@@ -714,11 +714,11 @@ class Dataset:
         auth = get_auth()
         org_id = get_current_org()
         try:
-            with Session() as session:
-                req = session.get(
-                    f"{API_URL}/org/{org_id}/datasets/{self.id}",
-                    headers=auth.get_headers(),
-                )
+            session = thread_local_session()
+            req = session.get(
+                f"{API_URL}/org/{org_id}/datasets/{self.id}",
+                headers=auth.get_headers(),
+            )
             req.raise_for_status()
             dataset_model = DatasetModel.model_validate(req.json())
             assert dataset_model.id == self.id
@@ -749,12 +749,12 @@ class Dataset:
         auth = get_auth()
         org_id = get_current_org()
         try:
-            with Session() as session:
-                response = session.put(
-                    f"{API_URL}/org/{org_id}/datasets/{self.id}",
-                    headers=auth.get_headers(),
-                    json=dataset_metadata.model_dump(mode="json"),
-                )
+            session = thread_local_session()
+            response = session.put(
+                f"{API_URL}/org/{org_id}/datasets/{self.id}",
+                headers=auth.get_headers(),
+                json=dataset_metadata.model_dump(mode="json"),
+            )
             response.raise_for_status()
             if dataset_metadata.name is not None:
                 self.name = dataset_metadata.name

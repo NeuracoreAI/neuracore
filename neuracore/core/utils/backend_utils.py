@@ -13,7 +13,7 @@ from neuracore_types import DataType, RecordingDataTrace
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 
 
 def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
@@ -33,11 +33,11 @@ def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
         ConfigError: If there is an error trying to get the current org.
     """
     org_id = get_current_org()
-    with Session() as session:
-        response = session.get(
-            f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
-            headers=get_auth().get_headers(),
-        )
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
+        headers=get_auth().get_headers(),
+    )
     if response.status_code == 404:
         return []
     response.raise_for_status()

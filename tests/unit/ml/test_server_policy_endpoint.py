@@ -316,7 +316,7 @@ def test_set_checkpoint_raises_endpoint_error_for_connection_error(
     endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
     mock_session.post.side_effect = requests.exceptions.ConnectionError()
     with patch(
-        "neuracore.core.endpoint.Session", return_value=mock_session
+        "neuracore.core.endpoint.thread_local_session", return_value=mock_session
     ), pytest.raises(
         EndpointError,
         match=(
@@ -339,7 +339,7 @@ def test_set_checkpoint_raises_endpoint_error_for_request_exception(
     endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
     mock_session.post.side_effect = requests.exceptions.Timeout("timeout")
     with patch(
-        "neuracore.core.endpoint.Session", return_value=mock_session
+        "neuracore.core.endpoint.thread_local_session", return_value=mock_session
     ), pytest.raises(EndpointError, match="Failed to set checkpoint: timeout"):
         endpoint.set_checkpoint(epoch=1)
 

@@ -12,7 +12,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 
 
 def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
@@ -66,12 +66,12 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
             raise DatasetError(f"Dataset '{dataset_name}' not found.")
         source_ids.append(ds.id)
 
-    with Session() as session:
-        response = session.post(
-            f"{API_URL}/org/{org_id}/datasets/merge",
-            headers=auth.get_headers(),
-            json={"name": name, "sourceDatasetIds": source_ids},
-        )
+    session = thread_local_session()
+    response = session.post(
+        f"{API_URL}/org/{org_id}/datasets/merge",
+        headers=auth.get_headers(),
+        json={"name": name, "sourceDatasetIds": source_ids},
+    )
     if not response.ok:
         raise DatasetError(
             f"Failed to merge datasets: {response.status_code} {response.text}"

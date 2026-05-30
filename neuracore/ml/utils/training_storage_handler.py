@@ -12,7 +12,7 @@ import neuracore as nc
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.utils.http_session import Session
+from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml.utils.nc_archive import create_nc_archive
 from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
@@ -199,8 +199,8 @@ class TrainingStorageHandler(UploadStorageMixin):
         load_path = self.local_dir / checkpoint_name
         if self.log_to_cloud:
             download_url = self._get_checkpoint_download_url(checkpoint_name)
-            with Session() as session:
-                response = session.get(download_url)
+            session = thread_local_session()
+            response = session.get(download_url)
             if response.status_code != 200:
                 raise ValueError(
                     f"Failed to download checkpoint {checkpoint_name}: {response.text}"
@@ -330,12 +330,12 @@ class TrainingStorageHandler(UploadStorageMixin):
             headers: Optional headers to include in the request.
         """
         headers = headers or get_auth().get_headers()
-        with Session() as session:
+        session = thread_local_session()
+        response = session.put(url, headers=headers, json=json, data=data)
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
             response = session.put(url, headers=headers, json=json, data=data)
-            if response.status_code == 401:
-                logger.warning("Unauthorized request. Token may have expired.")
-                nc.login()
-                response = session.put(url, headers=headers, json=json, data=data)
         return response
 
     def _get_request(self, url: str, params: dict | None = None) -> requests.Response:
@@ -345,14 +345,12 @@ class TrainingStorageHandler(UploadStorageMixin):
             url: The URL to send the request to.
             params: Optional parameters to include in the request.
         """
-        with Session() as session:
+        session = thread_local_session()
+        response = session.get(url, headers=get_auth().get_headers(), params=params)
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
             response = session.get(url, headers=get_auth().get_headers(), params=params)
-            if response.status_code == 401:
-                logger.warning("Unauthorized request. Token may have expired.")
-                nc.login()
-                response = session.get(
-                    url, headers=get_auth().get_headers(), params=params
-                )
         return response
 
     def _delete_request(self, url: str) -> requests.Response:
@@ -361,10 +359,10 @@ class TrainingStorageHandler(UploadStorageMixin):
         Args:
             url: The URL to send the request to.
         """
-        with Session() as session:
+        session = thread_local_session()
+        response = session.delete(url, headers=get_auth().get_headers())
+        if response.status_code == 401:
+            logger.warning("Unauthorized request. Token may have expired.")
+            nc.login()
             response = session.delete(url, headers=get_auth().get_headers())
-            if response.status_code == 401:
-                logger.warning("Unauthorized request. Token may have expired.")
-                nc.login()
-                response = session.delete(url, headers=get_auth().get_headers())
         return response
