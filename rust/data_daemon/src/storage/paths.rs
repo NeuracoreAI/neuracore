@@ -28,15 +28,15 @@ pub const CHUNKS_DIRNAME: &str = "chunks";
 /// daemon relinks a chunk under its recording once routing resolves a window,
 /// and reclaims the whole tree on startup (a daemon restart mid-recording
 /// corrupts that recording).
-pub const INBOX_DIRNAME: &str = "_inbox";
+pub const SPOOL_DIRNAME: &str = ".rgb_spool";
 
-/// Resolve the producer's video inbox directory for a `(source, sensor)`
-/// stream: `{recordings_root}/_inbox/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+/// Resolve the producer's video spool directory for a `(source, sensor)`
+/// stream: `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
 ///
 /// Both producer and daemon agree on this layout so the daemon can find and
 /// relink the producer's spooled NUTs. `sensor_name` is omitted from the path
 /// when absent.
-pub fn inbox_dir(
+pub fn spool_dir(
     recordings_root: &Path,
     robot_id: &str,
     robot_instance: i64,
@@ -44,7 +44,7 @@ pub fn inbox_dir(
     sensor_name: Option<&str>,
 ) -> PathBuf {
     let mut dir = recordings_root
-        .join(INBOX_DIRNAME)
+        .join(SPOOL_DIRNAME)
         .join(robot_id)
         .join(robot_instance.to_string())
         .join(data_type);
@@ -54,35 +54,43 @@ pub fn inbox_dir(
     dir
 }
 
-/// Build the inbox filename for a producer spool sequence: `chunk_NNNNNNNN.nut`.
-/// Wider than [`chunk_filename`] because the spool sequence is per-`(source,
-/// sensor)` over the whole process lifetime, not per-recording.
-pub fn inbox_chunk_filename(spool_seq: u64) -> String {
-    format!("chunk_{spool_seq:08}.nut")
+/// Build the spool filename for a chunk:
+/// `chunk_{publish_ns}_{thread_id}.nut`.
+///
+/// `publish_ns` (the chunk's `publish_timestamp_ns` — the wall-clock ns the
+/// producer opened the chunk) and the producing thread's `thread_id` make the
+/// name unique per `(source, sensor)` across recordings — a fresh recording no
+/// longer reuses a previous one's filename, so the daemon's relink can never
+/// collide with the next recording's spool. The daemon assigns its own
+/// per-trace [`chunk_filename`] at relink time, so these values are never
+/// otherwise interpreted.
+pub fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
+    format!("chunk_{publish_ns}_{thread_id}.nut")
 }
 
-/// Resolve the full inbox path for one spooled chunk.
-pub fn inbox_chunk_path(
+/// Resolve the full spool path for one spooled chunk.
+pub fn spool_chunk_path(
     recordings_root: &Path,
     robot_id: &str,
     robot_instance: i64,
     data_type: &str,
     sensor_name: Option<&str>,
-    spool_seq: u64,
+    publish_ns: i64,
+    thread_id: i64,
 ) -> PathBuf {
-    inbox_dir(
+    spool_dir(
         recordings_root,
         robot_id,
         robot_instance,
         data_type,
         sensor_name,
     )
-    .join(inbox_chunk_filename(spool_seq))
+    .join(spool_chunk_filename(publish_ns, thread_id))
 }
 
-/// Resolve the top-level inbox directory, reclaimed wholesale on daemon start.
-pub fn inbox_root(recordings_root: &Path) -> PathBuf {
-    recordings_root.join(INBOX_DIRNAME)
+/// Resolve the top-level spool directory, reclaimed wholesale on daemon start.
+pub fn spool_root(recordings_root: &Path) -> PathBuf {
+    recordings_root.join(SPOOL_DIRNAME)
 }
 
 /// Build the filename for a video chunk at `chunk_index` — `chunk_NNNN.nut`.
@@ -241,6 +249,41 @@ mod tests {
         assert_eq!(chunk_filename(1234), "chunk_1234.nut");
         assert_eq!(chunk_lossy_filename(5), "chunk_0005_lossy.mp4");
         assert_eq!(chunk_lossless_filename(5), "chunk_0005_lossless.mp4");
+    }
+
+    #[test]
+    fn spool_chunk_filename_is_unique_per_publish_ts_and_thread() {
+        // The whole point of keying on `(publish_ns, thread_id)` is that two
+        // recordings on the same `(source, sensor)` never collide on a spool
+        // filename — distinct opens yield distinct names; identical inputs are
+        // stable so the daemon reconstructs exactly what the producer wrote.
+        let first = spool_chunk_filename(1_700_000_000_000_000_000, 42);
+        let second = spool_chunk_filename(1_700_000_000_000_000_001, 42);
+        let other_thread = spool_chunk_filename(1_700_000_000_000_000_000, 43);
+        assert_eq!(first, "chunk_1700000000000000000_42.nut");
+        assert_ne!(first, second, "a later open must not reuse the filename");
+        assert_ne!(first, other_thread, "a different thread disambiguates");
+        assert_eq!(
+            first,
+            spool_chunk_filename(1_700_000_000_000_000_000, 42),
+            "identical inputs must be stable"
+        );
+    }
+
+    #[test]
+    fn spool_chunk_path_lives_under_the_spool_dir() {
+        let root = Path::new("/var/data/recordings");
+        let path = spool_chunk_path(root, "robot-1", 0, "RGB_IMAGES", Some("camera_0"), 150, 7);
+        assert_eq!(
+            path,
+            PathBuf::from(
+                "/var/data/recordings/.rgb_spool/robot-1/0/RGB_IMAGES/camera_0/chunk_150_7.nut"
+            )
+        );
+        assert_eq!(
+            spool_root(root),
+            PathBuf::from("/var/data/recordings/.rgb_spool")
+        );
     }
 
     #[test]

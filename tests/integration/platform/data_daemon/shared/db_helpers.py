@@ -348,11 +348,12 @@ def assert_offline_recordings_pending(results: list[ContextResult]) -> None:
     """Assert offline recordings exist by ``recording_index`` with cloud id NULL.
 
     Rust daemon only: in offline mode the daemon assigns ``recording_index``
-    immediately but the cloud ``recording_id`` stays NULL until upload-time
-    mint-on-demand. This confirms that contract per ``recording_index`` captured
-    by each worker. Under the legacy daemon the cloud ``recording_id`` is the
-    recording's identity from the moment recording starts, so this offline-NULL
-    contract does not apply and the check is a no-op.
+    immediately but the cloud ``recording_id`` stays NULL until the daemon is
+    online and ``/recording/start`` lands. This confirms that contract per
+    ``recording_index`` captured by each worker. Under the legacy daemon the
+    cloud ``recording_id`` is the recording's identity from the moment recording
+    starts, so this offline-NULL contract does not apply and the check is a
+    no-op.
 
     Raises:
         AssertionError: If a recording row is missing or already has a cloud id.
@@ -387,41 +388,56 @@ def resolve_cloud_recording_ids(
     ``recording_id``, so ``result.recording_ids`` is authoritative and the
     results are returned unchanged.
 
-    Rust daemon: the daemon mints the cloud ``recording_id`` asynchronously, so
-    the captured ids may have been NULL (empty strings) at record time. This
-    asks the SDK (which queries the daemon, blocking up to ``timeout_s``) for the
-    cloud id of the recording whose window brackets each per-recording marker,
-    so cloud verification (which matches the dataset's ``recording.id``) has the
-    correct ids.
+    Rust daemon: the cloud ``recording_id`` is populated asynchronously by the
+    start-notifier once the daemon is online, so the captured ids may have been
+    NULL at record time. This reads the daemon DB directly by ``recording_index``
+    (which the recording worker already captured) and waits until each row's
+    cloud ``recording_id`` is filled in, so cloud verification (which matches the
+    dataset's ``recording.id``) has the correct ids.
+
+    Resolving from the DB rather than ``nc.get_cloud_recording_id`` is required
+    here: recordings are made in worker subprocesses, so the verifying process
+    has no active recording context to resolve against — only the daemon-assigned
+    ``recording_index`` values carried on each result.
 
     Raises:
-        AssertionError: If any recording's cloud id is not minted in time.
+        AssertionError: If any recording's cloud id is not populated in time.
     """
     if not rust_daemon_enabled():
         return results
 
     resolved: list[ContextResult] = []
     for result in results:
-        instance = result.source[1]
         cloud_ids: list[str] = []
-        for recording_index, marker_ns in zip(
-            result.recording_indexes,
-            result.recording_markers,
-        ):
-            cloud_id = nc.get_cloud_recording_id(
-                robot_name=result.robot_name,
-                instance=instance,
-                timestamp_ns=marker_ns,
-                timeout_s=timeout_s,
+        for recording_index in result.recording_indexes:
+            cloud_id = _wait_for_cloud_recording_id(
+                recording_index, timeout_s=timeout_s
             )
             assert cloud_id, (
-                f"Cloud recording_id never minted for recording_index "
-                f"{recording_index} (robot {result.robot_name!r}, instance "
-                f"{instance}) within {timeout_s}s"
+                f"Cloud recording_id never populated for recording_index "
+                f"{recording_index} (robot {result.robot_name!r}) within "
+                f"{timeout_s}s"
             )
             cloud_ids.append(cloud_id)
         resolved.append(dataclasses.replace(result, recording_ids=cloud_ids))
     return resolved
+
+
+def _wait_for_cloud_recording_id(
+    recording_index: int,
+    *,
+    timeout_s: float,
+    poll_interval_s: float = 0.5,
+) -> str | None:
+    """Poll the daemon DB until ``recording_index`` has a cloud id, or time out."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        row = fetch_recording(recording_index)
+        if row is not None and row.get(COLUMN_RECORDING_ID):
+            return str(row[COLUMN_RECORDING_ID])
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(poll_interval_s)
 
 
 # ---------------------------------------------------------------------------

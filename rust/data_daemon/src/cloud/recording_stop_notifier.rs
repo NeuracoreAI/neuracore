@@ -72,7 +72,14 @@ pub fn spawn_recording_stop_notifier(
                 }
                 event = subscriber.recv() => {
                     match event {
-                        Ok(DaemonEvent::RecordingStopped { recording_index }) => {
+                        // `RecordingStopped` is the live path. `RecordingCloudIdAssigned`
+                        // covers offline recovery: a recording stopped while offline has
+                        // already fired its `RecordingStopped` (which no coordinator was
+                        // running to see), so the stop POST is unblocked only once the
+                        // start notifier later assigns the cloud id. `notify_backend`
+                        // no-ops for a recording that is not yet stopped.
+                        Ok(DaemonEvent::RecordingStopped { recording_index })
+                        | Ok(DaemonEvent::RecordingCloudIdAssigned { recording_index }) => {
                             notify_backend(&store, &client, recording_index).await;
                         }
                         Ok(_) => {}
@@ -141,6 +148,11 @@ async fn notify_backend(
     };
     if row.backend_stop_notified_at.is_some() {
         // Another path (sweep or earlier event) already notified.
+        return;
+    }
+    if row.stopped_at.is_none() {
+        // Not stopped yet. Reached here via `RecordingCloudIdAssigned` for a
+        // still-running recording; the stop will arrive on its own event.
         return;
     }
     let Some(recording_id) = row.recording_id else {
@@ -439,6 +451,93 @@ mod tests {
         assert!(
             received.is_empty(),
             "no backend POST expected when the cloud recording_id is absent"
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn cloud_id_assigned_event_notifies_a_recording_stopped_while_offline() {
+        // Offline recovery: a recording stopped while offline already fired its
+        // `RecordingStopped` (which no coordinator saw). Once the start notifier
+        // assigns the cloud id and publishes `RecordingCloudIdAssigned`, the
+        // stop notifier must POST `/recording/stop`.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .and(query_param("recording_id", "rec-recovered-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "org-1", "rec-recovered-1").await;
+        store
+            .mark_recording_stopped(index, 1)
+            .await
+            .expect("mark stopped");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            shutdown_tx.subscribe(),
+        );
+
+        // The cloud-id-assigned event — not RecordingStopped — drives the POST.
+        bus.publish(DaemonEvent::RecordingCloudIdAssigned {
+            recording_index: index,
+        });
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if !received.is_empty() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("cloud-id-assigned event must POST within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn cloud_id_assigned_event_ignores_a_running_recording() {
+        // A recording that just got its cloud id but has not stopped yet must
+        // not be stop-notified — the `stopped_at` guard holds the POST until the
+        // recording actually stops.
+        let server = MockServer::start().await;
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "org-1", "rec-running-1").await;
+        // Deliberately NOT stopped.
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle =
+            spawn_recording_stop_notifier(store, bus.clone(), client, shutdown_tx.subscribe());
+
+        bus.publish(DaemonEvent::RecordingCloudIdAssigned {
+            recording_index: index,
+        });
+
+        sleep(Duration::from_millis(150)).await;
+        let received = server.received_requests().await.unwrap_or_default();
+        assert!(
+            received.is_empty(),
+            "no backend POST expected for a recording that has not stopped"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);

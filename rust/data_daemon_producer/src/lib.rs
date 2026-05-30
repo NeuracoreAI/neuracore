@@ -81,9 +81,9 @@ use crate::nut_writer::{NutVideoConfig, NutWriter};
 /// only ever holds frames from one recording window.
 const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Inbox directory name — must match `storage::paths::INBOX_DIRNAME` on the
+/// Spool directory name — must match `storage::paths::SPOOL_DIRNAME` on the
 /// daemon side.
-const INBOX_DIRNAME: &str = "_inbox";
+const SPOOL_DIRNAME: &str = ".rgb_spool";
 
 /// Errors raised while publishing envelopes to the daemon.
 #[derive(Debug, Error)]
@@ -139,14 +139,19 @@ struct VideoChunkState {
     width: u32,
     /// Frame height in pixels (constant across a stream's chunks).
     height: u32,
-    /// `{recordings_root}/_inbox/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
-    inbox_dir: PathBuf,
+    /// `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
+    spool_dir: PathBuf,
     /// Active NUT writer for the in-progress chunk. `None` between chunks.
     nut_writer: Option<NutWriter>,
-    /// Producer-monotonic spool sequence for this stream — both the chunk
-    /// filename index and the `spool_seq` on the announcement, so the daemon
-    /// can reconstruct the inbox path.
-    spool_seq: u64,
+    /// `publish_timestamp_ns` of the in-progress chunk — captured with
+    /// `chunk_thread_id` when the chunk opened (its first frame). Keys both the
+    /// spool filename `chunk_{publish_ns}_{thread_id}.nut` and the window
+    /// routing on the announcement, so the daemon can reconstruct the spool
+    /// path. Re-stamped on every chunk open, so each chunk is named uniquely
+    /// and no two recordings collide on a filename. `0` between chunks.
+    chunk_publish_ns: i64,
+    /// OS thread id (`gettid`) of the thread that opened the in-progress chunk.
+    chunk_thread_id: i64,
     /// Frames already written into the in-progress chunk.
     frame_count: u32,
     /// Per-stream PTS origin, microseconds since the Unix epoch.
@@ -253,21 +258,21 @@ fn source_prefix(robot_id: &str, robot_instance: i64) -> String {
     format!("{robot_id}\u{0}{robot_instance}\u{0}")
 }
 
-/// Build the inbox directory for a `(source, sensor)` stream. Mirrors
-/// `storage::paths::inbox_dir` on the daemon side; the two must agree
+/// Build the spool directory for a `(source, sensor)` stream. Mirrors
+/// `storage::paths::spool_dir` on the daemon side; the two must agree
 /// byte-for-byte so the daemon finds exactly what the producer wrote.
-fn inbox_dir(robot_id: &str, robot_instance: i64, data_type: &str, sensor_name: &str) -> PathBuf {
+fn spool_dir(robot_id: &str, robot_instance: i64, data_type: &str, sensor_name: &str) -> PathBuf {
     RECORDINGS_ROOT
-        .join(INBOX_DIRNAME)
+        .join(SPOOL_DIRNAME)
         .join(robot_id)
         .join(robot_instance.to_string())
         .join(data_type)
         .join(sensor_name)
 }
 
-/// Inbox chunk filename — must match `storage::paths::inbox_chunk_filename`.
-fn inbox_chunk_filename(spool_seq: u64) -> String {
-    format!("chunk_{spool_seq:08}.nut")
+/// Spool chunk filename — must match `storage::paths::spool_chunk_filename`.
+fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
+    format!("chunk_{publish_ns}_{thread_id}.nut")
 }
 
 /// Run `f` against this thread's producer state, lazily building it on first
@@ -393,6 +398,14 @@ fn now_ns() -> i64 {
         .unwrap_or(0)
 }
 
+/// OS thread id of the calling thread (Linux `gettid`). Used to disambiguate a
+/// video chunk's spool filename across producer threads and as a breadcrumb
+/// when inspecting the spool directory.
+fn current_thread_id() -> i64 {
+    // SAFETY: `gettid` takes no arguments and cannot fail.
+    unsafe { libc::gettid() as i64 }
+}
+
 /// Encode `envelope` and publish it on the commands service.
 fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
@@ -423,9 +436,12 @@ struct ScalarFrameEntry {
 }
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
-/// daemon opens a window and owns all recording identity.
+/// daemon opens a window and owns all recording identity. The producer stamps
+/// the window's lower bound (`started_at_ns`) on the publish clock and returns
+/// it so the caller can use it as the marker that resolves the daemon-assigned
+/// cloud recording id (`get_recording_id`) for this exact recording.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, started_at_ns = 0))]
+#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None))]
 fn start_recording(
     py: Python<'_>,
     robot_id: &str,
@@ -433,13 +449,13 @@ fn start_recording(
     robot_name: Option<String>,
     dataset_id: Option<String>,
     dataset_name: Option<String>,
-    started_at_ns: i64,
-) -> PyResult<()> {
+) -> PyResult<i64> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
-    py.allow_threads(|| -> PyResult<()> {
+    py.allow_threads(|| -> PyResult<i64> {
+        let started_at_ns = now_ns();
         publish(&Envelope::StartRecording {
             robot_id,
             robot_instance,
@@ -448,7 +464,7 @@ fn start_recording(
             dataset_name,
             started_at_ns,
         })?;
-        Ok(())
+        Ok(started_at_ns)
     })
 }
 
@@ -600,9 +616,10 @@ fn record_video_frame(
                 Arc::new(Mutex::new(VideoChunkState {
                     width,
                     height,
-                    inbox_dir: inbox_dir(robot_id, robot_instance, data_type, sensor_name),
+                    spool_dir: spool_dir(robot_id, robot_instance, data_type, sensor_name),
                     nut_writer: None,
-                    spool_seq: 0,
+                    chunk_publish_ns: 0,
+                    chunk_thread_id: 0,
                     frame_count: 0,
                     pts_origin_us: None,
                     last_pts_us: None,
@@ -630,7 +647,16 @@ fn record_video_frame(
         }
 
         if state.nut_writer.is_none() {
-            let chunk_path = state.inbox_dir.join(inbox_chunk_filename(state.spool_seq));
+            // Stamp the chunk's identity at open: its `publish_timestamp_ns`
+            // (this instant — inside the active recording window) plus the
+            // opening thread's id. These name the spool file and ride the
+            // announcement so the daemon can both route and locate the chunk.
+            state.chunk_publish_ns = now_ns();
+            state.chunk_thread_id = current_thread_id();
+            let chunk_path = state.spool_dir.join(spool_chunk_filename(
+                state.chunk_publish_ns,
+                state.chunk_thread_id,
+            ));
             let config = NutVideoConfig {
                 width: state.width,
                 height: state.height,
@@ -703,25 +729,25 @@ fn flush_chunk_locked(
             state.frame_count = 0;
             state.frame_timestamps_ns.clear();
             state.frame_timestamps_s.clear();
-            state.spool_seq = state.spool_seq.saturating_add(1);
             return None;
         }
     };
-    let spool_seq = state.spool_seq;
+    // The chunk's open-time identity, stamped when its writer was created.
+    let publish_timestamp_ns = state.chunk_publish_ns;
+    let thread_id = state.chunk_thread_id;
     let frame_count = state.frame_count;
     let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
     let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
 
     state.frame_count = 0;
-    state.spool_seq = state.spool_seq.saturating_add(1);
 
     Some(Envelope::VideoChunkReady {
         robot_id: robot_id.to_string(),
         robot_instance,
         data_type: data_type.to_string(),
         sensor_name: Some(sensor_name.to_string()),
-        publish_timestamp_ns: now_ns(),
-        spool_seq,
+        publish_timestamp_ns,
+        thread_id,
         width: state.width,
         height: state.height,
         byte_count,
@@ -772,32 +798,25 @@ fn log_scalar(
 /// Flush any tail video chunks for the source, then publish one
 /// `StopRecording`. The flush happens before the stop publish so the in-order
 /// delivery contract on this thread's publisher delivers the chunk first.
+///
+/// The producer stamps the window's upper bound (`stopped_at_ns`) on the
+/// publish clock here, so the whole publish clock is owned by the producer
+/// (consistent with the data envelopes). Every video chunk routes by its
+/// *open* time, which is strictly inside the recording, so the exact value of
+/// this boundary no longer has to be reconciled with a tail chunk.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, stopped_at_ns = 0))]
-fn stop_recording(
-    py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
-    stopped_at_ns: i64,
-) -> PyResult<()> {
+#[pyo3(signature = (robot_id, robot_instance))]
+fn stop_recording(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
     py.allow_threads(|| -> PyResult<()> {
         flush_source_chunks(&robot_id, robot_instance)?;
-        // The window's exclusive upper bound must sit strictly after every tail
-        // chunk we just flushed. Each flushed chunk is announced with a
-        // `publish_timestamp_ns` of `now_ns()` taken *inside* the flush above,
-        // whereas the caller captured `stopped_at_ns` before entering the
-        // native call — so the pre-flush boundary would exclude the tail chunk
-        // and the dispatcher would drop it as out-of-window. Re-stamp the
-        // boundary here, after the flush, to keep the tail chunk in the window.
-        let boundary_ns = stopped_at_ns.max(now_ns());
         publish(&Envelope::StopRecording {
             robot_id,
             robot_instance,
-            stopped_at_ns: boundary_ns,
+            stopped_at_ns: now_ns(),
         })?;
         Ok(())
     })
@@ -849,15 +868,10 @@ fn split_stream_key(key: &str) -> (String, String) {
 
 /// Cancel a recording — drop the source's in-progress chunk state without
 /// flushing (the daemon's cancel handler removes the relinked artefacts and
-/// the recovery sweep reclaims any inbox NUTs).
+/// the recovery sweep reclaims any spooled NUTs).
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, cancelled_at_ns = 0))]
-fn cancel_recording(
-    py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
-    cancelled_at_ns: i64,
-) -> PyResult<()> {
+#[pyo3(signature = (robot_id, robot_instance))]
+fn cancel_recording(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
@@ -870,7 +884,6 @@ fn cancel_recording(
         publish(&Envelope::CancelRecording {
             robot_id,
             robot_instance,
-            cancelled_at_ns,
         })?;
         Ok(())
     })

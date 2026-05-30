@@ -91,10 +91,10 @@ pub async fn sweep_partial_recordings(
     recordings_root: &Path,
 ) -> Result<PartialSweepReport, StateStoreError> {
     let mut report = PartialSweepReport::default();
-    // Reclaim the producer video inbox up front: any recording in flight at
-    // restart is corrupt, so the spooled NUT chunks staged under the inbox
+    // Reclaim the producer video spool up front: any recording in flight at
+    // restart is corrupt, so the spooled NUT chunks staged under the spool dir
     // are reclaimed wholesale rather than resumed.
-    let _ = std::fs::remove_dir_all(crate::storage::paths::inbox_root(recordings_root));
+    let _ = std::fs::remove_dir_all(crate::storage::paths::spool_root(recordings_root));
     let recordings = store.list_recordings().await?;
     for recording in recordings {
         if recording.cancelled_at.is_some() {

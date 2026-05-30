@@ -224,8 +224,8 @@ async fn flush_batch(
         None => {
             // Re-queue with a fresh `opened_at` pushed
             // `ORG_RESOLVE_RETRY_BACKOFF` into the future so the next
-            // `flush_due` skips this batch until the producer/registration has
-            // had a chance to stamp the org and mint the cloud id. Without
+            // `flush_due` skips this batch until the producer has stamped the
+            // org and the start notifier has populated the cloud id. Without
             // this, a missing field pins `deadline()` permanently in the past
             // and the select loop becomes a busy-wait until the row is ready.
             batch.defer(ORG_RESOLVE_RETRY_BACKOFF);

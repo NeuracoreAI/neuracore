@@ -99,15 +99,6 @@ pub trait StateStore: Send + Sync {
         robot_instance: i64,
     ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
-    /// Persist the cloud `recording_id` on the row (idempotent via COALESCE so
-    /// a start-notify success and a registration mint-on-demand cannot
-    /// clobber each other). Returns the row after the update.
-    async fn set_recording_cloud_id(
-        &self,
-        recording_index: i64,
-        recording_id: &str,
-    ) -> Result<Option<RecordingRow>, StateStoreError>;
-
     /// Stamp the cloud `recording_id` **and** `backend_start_notified_at`
     /// after the recording-start notifier successfully POSTed
     /// `/recording/start`. Idempotent.
@@ -117,19 +108,9 @@ pub trait StateStore: Send + Sync {
         recording_id: &str,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
 
-    /// Stamp `backend_start_failed_at` when the recording-start notifier
-    /// permanently skips `/recording/start` (older than the recency bound).
-    /// The recording is **not** cancelled — it still uploads best-effort via
-    /// registration mint-on-demand. Idempotent.
-    async fn mark_recording_start_failed(
-        &self,
-        recording_index: i64,
-    ) -> Result<Option<RecordingRow>, StateStoreError>;
-
-    /// List recordings whose `/recording/start` POST has neither succeeded nor
-    /// been permanently skipped: `recording_id IS NULL` and both
-    /// `backend_start_notified_at` and `backend_start_failed_at` are NULL, and
-    /// the recording is not cancelled. The start notifier's startup sweep.
+    /// List recordings whose `/recording/start` POST has not yet succeeded:
+    /// `recording_id IS NULL`, `backend_start_notified_at IS NULL`, and the
+    /// recording is not cancelled. The start notifier's startup sweep.
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
@@ -491,31 +472,6 @@ impl StateStore for SqliteStateStore {
             .map_err(Into::into)
     }
 
-    async fn set_recording_cloud_id(
-        &self,
-        recording_index: i64,
-        recording_id: &str,
-    ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
-        let now = Utc::now().naive_utc();
-        // COALESCE so a registration mint-on-demand cannot clobber an id the
-        // start notifier already persisted (and vice versa).
-        sqlx::query(
-            "UPDATE recordings \
-                SET recording_id = COALESCE(recording_id, ?1), last_updated = ?2 \
-              WHERE recording_index = ?3",
-        )
-        .bind(recording_id)
-        .bind(now)
-        .bind(recording_index)
-        .execute(&mut *tx)
-        .await?;
-        let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
-        tx.commit().await?;
-        Ok(row)
-    }
-
     async fn mark_recording_start_notified(
         &self,
         recording_index: i64,
@@ -541,34 +497,11 @@ impl StateStore for SqliteStateStore {
         Ok(row)
     }
 
-    async fn mark_recording_start_failed(
-        &self,
-        recording_index: i64,
-    ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
-        let now = Utc::now().naive_utc();
-        sqlx::query(
-            "UPDATE recordings \
-                SET backend_start_failed_at = COALESCE(backend_start_failed_at, ?1), \
-                    last_updated = ?1 \
-              WHERE recording_index = ?2",
-        )
-        .bind(now)
-        .bind(recording_index)
-        .execute(&mut *tx)
-        .await?;
-        let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
-        tx.commit().await?;
-        Ok(row)
-    }
-
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
         let rows = sqlx::query(
             "SELECT * FROM recordings \
               WHERE recording_id IS NULL \
                 AND backend_start_notified_at IS NULL \
-                AND backend_start_failed_at IS NULL \
                 AND cancelled_at IS NULL \
            ORDER BY recording_index ASC",
         )
@@ -1230,7 +1163,8 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].recording_index, index);
 
-        // Start notify stamps both the cloud id and the notified timestamp.
+        // Start notify stamps both the cloud id and the notified timestamp,
+        // and is idempotent: a second call cannot clobber the persisted id.
         let row = store
             .mark_recording_start_notified(index, "cloud-rec-1")
             .await
@@ -1244,31 +1178,12 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        // COALESCE guard: a later mint-on-demand cannot clobber the id.
         let row = store
-            .set_recording_cloud_id(index, "other-id")
+            .mark_recording_start_notified(index, "other-id")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(row.recording_id.as_deref(), Some("cloud-rec-1"));
-    }
-
-    #[tokio::test]
-    async fn start_failed_excludes_from_pending_without_cancelling() {
-        let (store, _tempdir) = open_store().await;
-        let index = seed_recording(&store, 0).await;
-        let row = store
-            .mark_recording_start_failed(index)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(row.backend_start_failed_at.is_some());
-        assert!(row.cancelled_at.is_none(), "recency skip must not cancel");
-        assert!(store
-            .recordings_pending_start_notify()
-            .await
-            .unwrap()
-            .is_empty());
     }
 
     #[tokio::test]

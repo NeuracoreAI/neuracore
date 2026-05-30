@@ -142,16 +142,16 @@ string_enum! {
 /// The daemon owns recording identity: `recording_index` is the local primary
 /// key (AUTOINCREMENT), allocated when the `StartRecording` envelope is first
 /// seen; `recording_id` is the cloud handle, filled asynchronously by the
-/// recording-start notifier or minted on demand by the registration
-/// coordinator. The two are independent — never aliased.
+/// recording-start notifier once `/recording/start` lands. The two are
+/// independent — never aliased.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingRow {
     /// Local primary key (AUTOINCREMENT). The daemon keys every internal
     /// structure and the `traces` foreign key on this.
     pub recording_index: i64,
-    /// Cloud handle. `None` until `/recording/start` is notified (or a UUID is
-    /// minted on demand for an offline recording). Every cloud URL reads this
-    /// straight from the row.
+    /// Cloud handle. `None` until `/recording/start` is notified. Every cloud
+    /// URL reads this straight from the row; downstream coordinators wait for
+    /// it, so an offline recording stays pending until the daemon is online.
     pub recording_id: Option<String>,
     /// Organisation that owns the recording (backfilled when known).
     pub org_id: Option<String>,
@@ -188,12 +188,6 @@ pub struct RecordingRow {
     /// Set when the recording-start notifier successfully POSTed
     /// `/recording/start` and persisted the cloud `recording_id`.
     pub backend_start_notified_at: Option<NaiveDateTime>,
-    /// Set when the recording-start notifier permanently skipped
-    /// `/recording/start` because the recording is older than the recency
-    /// bound (the registration coordinator mints a cloud id on demand
-    /// instead). The recording row is **not** cancelled — it still uploads
-    /// best-effort.
-    pub backend_start_failed_at: Option<NaiveDateTime>,
     /// Set when the recording-stop notifier successfully POSTed
     /// `/recording/stop` to the backend. `None` means the backend has not
     /// yet been notified — typically a recording stopped while the daemon
@@ -232,7 +226,6 @@ impl RecordingRow {
             stopped_at: row.try_get("stopped_at")?,
             cancelled_at: row.try_get("cancelled_at")?,
             backend_start_notified_at: row.try_get("backend_start_notified_at")?,
-            backend_start_failed_at: row.try_get("backend_start_failed_at")?,
             backend_stop_notified_at: row.try_get("backend_stop_notified_at")?,
             backend_cancel_notified_at: row.try_get("backend_cancel_notified_at")?,
             created_at: row.try_get("created_at")?,

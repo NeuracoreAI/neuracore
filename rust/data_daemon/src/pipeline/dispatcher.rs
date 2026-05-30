@@ -219,7 +219,7 @@ enum HeldPayload {
     Video {
         data_type: String,
         sensor_name: Option<String>,
-        spool_seq: u64,
+        thread_id: i64,
         width: u32,
         height: u32,
         byte_count: u64,
@@ -337,7 +337,6 @@ impl Dispatcher {
             Envelope::CancelRecording {
                 robot_id,
                 robot_instance,
-                ..
             } => {
                 self.handle_cancel((robot_id, robot_instance)).await;
             }
@@ -393,7 +392,7 @@ impl Dispatcher {
                 data_type,
                 sensor_name,
                 publish_timestamp_ns,
-                spool_seq,
+                thread_id,
                 width,
                 height,
                 byte_count,
@@ -411,7 +410,7 @@ impl Dispatcher {
                     payload: HeldPayload::Video {
                         data_type,
                         sensor_name,
-                        spool_seq,
+                        thread_id,
                         width,
                         height,
                         byte_count,
@@ -694,7 +693,7 @@ impl Dispatcher {
             HeldPayload::Video {
                 data_type,
                 sensor_name,
-                spool_seq,
+                thread_id,
                 width,
                 height,
                 byte_count,
@@ -706,7 +705,7 @@ impl Dispatcher {
                     publish_ts,
                     data_type,
                     sensor_name,
-                    spool_seq,
+                    thread_id,
                     width,
                     height,
                     byte_count,
@@ -785,7 +784,7 @@ impl Dispatcher {
         publish_ts: i64,
         data_type: String,
         sensor_name: Option<String>,
-        spool_seq: u64,
+        thread_id: i64,
         width: u32,
         height: u32,
         byte_count: u64,
@@ -793,25 +792,29 @@ impl Dispatcher {
         frame_timestamps_s: Vec<f64>,
     ) {
         let recordings_root = self.actor_context.recordings_root.clone();
-        let inbox_nut = paths::inbox_chunk_path(
+        // The chunk's `publish_timestamp_ns` (its open time) keys both the
+        // spool filename and the window routing below.
+        let spool_nut = paths::spool_chunk_path(
             recordings_root.as_path(),
             &source.0,
             source.1,
             &data_type,
             sensor_name.as_deref(),
-            spool_seq,
+            publish_ts,
+            thread_id,
         );
 
-        // The whole chunk routes by its announce (publish) time. The producer
-        // rolls a chunk on every lifecycle event, so a chunk is announced
-        // inside exactly one recording window.
+        // The whole chunk routes by its open (publish) time, which lies inside
+        // exactly one recording window — so the tail chunk of a recording is
+        // routed by a timestamp strictly before the window's stop boundary,
+        // never on it.
         let Some(entry) = self.windows.get_mut(source) else {
-            remove_inbox_nut(&inbox_nut);
+            remove_spool_nut(&spool_nut);
             self.note_orphan();
             return;
         };
         let Some(window) = Self::window_for_mut(entry, publish_ts) else {
-            remove_inbox_nut(&inbox_nut);
+            remove_spool_nut(&spool_nut);
             self.note_orphan();
             return;
         };
@@ -830,20 +833,20 @@ impl Dispatcher {
         let sender = handle.sender.clone();
         let trace_id = handle.trace_id.clone();
 
-        // Relink the inbox NUT under the recording's trace directory at the
+        // Relink the spooled NUT under the recording's trace directory at the
         // path the actor expects: `{recording_index}/{data_type}/{trace_id}/chunks/chunk_NNNN.nut`.
         let chunks_dir = TracePath::new(recording_index.to_string(), data_type, trace_id)
             .chunks_dir(recordings_root.as_path());
         let dest = chunks_dir.join(paths::chunk_filename(chunk_index));
-        if let Err(error) = relink_nut(&inbox_nut, &chunks_dir, &dest) {
+        if let Err(error) = relink_nut(&spool_nut, &chunks_dir, &dest) {
             tracing::warn!(
                 %error,
                 recording_index,
-                src = %inbox_nut.display(),
+                src = %spool_nut.display(),
                 dst = %dest.display(),
                 "failed to relink video chunk into recording; dropping"
             );
-            remove_inbox_nut(&inbox_nut);
+            remove_spool_nut(&spool_nut);
             return;
         }
 
@@ -960,10 +963,10 @@ fn relink_nut(
     }
 }
 
-fn remove_inbox_nut(path: &std::path::Path) {
+fn remove_spool_nut(path: &std::path::Path) {
     if let Err(error) = std::fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::debug!(%error, path = %path.display(), "failed to remove orphan inbox NUT");
+            tracing::debug!(%error, path = %path.display(), "failed to remove orphan spool NUT");
         }
     }
 }
@@ -1140,6 +1143,136 @@ mod tests {
         assert_eq!(a, serde_json::json!([{"i": 1}]));
     }
 
+    /// Announce a finished video chunk whose open time is `publish_ts`. The
+    /// caller must have spooled the matching NUT under the spool dir first.
+    fn video_chunk(robot: &str, publish_ts: i64, thread_id: i64) -> Envelope {
+        Envelope::VideoChunkReady {
+            robot_id: robot.into(),
+            robot_instance: 0,
+            data_type: "RGB_IMAGES".into(),
+            sensor_name: Some("camera_0".into()),
+            publish_timestamp_ns: publish_ts,
+            thread_id,
+            width: 64,
+            height: 64,
+            byte_count: 9,
+            frame_count: 1,
+            frame_timestamps_ns: vec![publish_ts],
+            frame_timestamps_s: vec![publish_ts as f64 / 1e9],
+        }
+    }
+
+    /// Spool a placeholder NUT at the path the producer would have written, so
+    /// the dispatcher's relink has a file to move.
+    fn spool_placeholder_nut(recordings_root: &std::path::Path, publish_ts: i64, thread_id: i64) {
+        let path = paths::spool_chunk_path(
+            recordings_root,
+            "robot-1",
+            0,
+            "RGB_IMAGES",
+            Some("camera_0"),
+            publish_ts,
+            thread_id,
+        );
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"nut-bytes").unwrap();
+    }
+
+    #[tokio::test]
+    async fn video_chunk_routes_by_open_time_into_its_window() {
+        // A video chunk's `publish_timestamp_ns` is its *open* time — strictly
+        // inside the recording — so a recording's tail chunk (announced just
+        // before the stop) routes by a timestamp before the stop boundary and
+        // lands in the recording rather than being dropped at the boundary.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        let (publish_ts, thread_id) = (150, 7);
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+
+        // Window [100, 200); the chunk (open ts 150) is announced before stop.
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+            .await
+            .unwrap();
+        tx.send(stop("robot-1", 200)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(10), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let traces = store
+            .list_traces_for_recording(recordings[0].recording_index)
+            .await
+            .unwrap();
+        assert!(
+            traces
+                .iter()
+                .any(|trace| trace.data_type.as_deref() == Some("RGB_IMAGES")),
+            "the in-window video chunk must route to a video trace, not be dropped"
+        );
+        let spool_path = paths::spool_chunk_path(
+            &recordings_root,
+            "robot-1",
+            0,
+            "RGB_IMAGES",
+            Some("camera_0"),
+            publish_ts,
+            thread_id,
+        );
+        assert!(
+            !spool_path.exists(),
+            "the spooled NUT must be relinked out of the spool dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_chunk_published_after_stop_is_dropped() {
+        // A chunk whose open time falls after the window closed belongs to no
+        // window and is dropped — the contrast that proves routing is by the
+        // chunk's own timestamp, not by arrival order.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        let (publish_ts, thread_id) = (250, 7); // after the window's stop
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(stop("robot-1", 200)).await.unwrap();
+        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+            .await
+            .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(10), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let traces = store
+            .list_traces_for_recording(recordings[0].recording_index)
+            .await
+            .unwrap();
+        assert!(
+            !traces
+                .iter()
+                .any(|trace| trace.data_type.as_deref() == Some("RGB_IMAGES")),
+            "a chunk published after the window closed has no window and is dropped"
+        );
+    }
+
     #[tokio::test]
     async fn routing_is_decoupled_from_the_provided_timestamp() {
         // The integration matrix's manual timestamp mode logs data with
@@ -1225,7 +1358,6 @@ mod tests {
         tx.send(Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 0,
-            cancelled_at_ns: 120,
         })
         .await
         .unwrap();

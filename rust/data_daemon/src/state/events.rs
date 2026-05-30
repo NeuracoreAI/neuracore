@@ -36,6 +36,15 @@ pub enum DaemonEvent {
         /// Local recording index the event applies to.
         recording_index: i64,
     },
+    /// The recording-start notifier persisted the backend cloud `recording_id`
+    /// (via `/recording/start`). Fires once per recording, the moment its cloud
+    /// id becomes available. Coordinators that were waiting on the id — notably
+    /// the stop notifier, when a recording was stopped while offline before its
+    /// start had been notified — react to it without polling.
+    RecordingCloudIdAssigned {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
     /// A trace finished writing to local disk and is ready for registration.
     TraceWritten {
         /// Trace identifier the event applies to.
