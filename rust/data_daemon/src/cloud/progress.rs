@@ -96,7 +96,8 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
             continue;
         };
         // Every cloud URL needs the backend `recording_id`. A None here means
-        // registration hasn't minted the cloud id yet — skip until it has.
+        // the start notifier hasn't populated the cloud id yet — skip until it
+        // has (e.g. a recording made while the daemon was offline).
         let Some(recording_id) = recording.recording_id.clone() else {
             tracing::warn!(
                 recording_index = recording.recording_index,

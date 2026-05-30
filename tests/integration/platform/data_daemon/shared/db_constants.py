@@ -9,7 +9,8 @@ TRACES_TABLE = "traces"
 # ``recording_index`` is the local INTEGER PK of ``recordings`` and the
 # ``recording_index`` foreign key on ``traces`` (and the top on-disk directory
 # segment). ``recording_id`` is now a SEPARATE, NULLABLE cloud handle filled in
-# asynchronously by the start-notifier (or minted on demand when offline).
+# asynchronously by the start-notifier once ``/recording/start`` lands (NULL
+# while the daemon is offline).
 COLUMN_RECORDING_INDEX = "recording_index"
 COLUMN_RECORDING_ID = "recording_id"
 COLUMN_TRACE_ID = "trace_id"

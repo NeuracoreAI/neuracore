@@ -103,18 +103,17 @@ class RecordingContext:
             raise ValueError("robot_id is required to start a recording.")
         self._robot_id = robot_id
         self._robot_instance = robot_instance
-        started_at_ns = time.time_ns()
-        # A wall-clock instant guaranteed to be inside the recording window
-        # (the producer stamps StartRecording with this same value), used to
-        # look up the daemon-assigned cloud recording id later.
-        self._recording_marker_ns = started_at_ns
-        _load_native().start_recording(
+        # The producer owns the publish clock: it stamps the window's
+        # ``started_at_ns`` and returns it. That value is the daemon's
+        # ``start_timestamp_ns`` for this recording, so we keep it verbatim as
+        # the marker used to resolve the daemon-assigned cloud recording id
+        # later (``get_recording_id`` matches it exactly).
+        self._recording_marker_ns = _load_native().start_recording(
             robot_id,
             robot_instance,
             robot_name,
             dataset_id,
             dataset_name,
-            started_at_ns,
         )
 
     def log_joints(
@@ -193,9 +192,7 @@ class RecordingContext:
             return
         if not self._robot_id:
             return
-        _load_native().cancel_recording(
-            self._robot_id, self._robot_instance, time.time_ns()
-        )
+        _load_native().cancel_recording(self._robot_id, self._robot_instance)
 
     def _require_source(self, operation: str) -> str:
         """Return the active source's robot id or raise if logging before start."""
@@ -224,9 +221,7 @@ class RecordingContext:
         if self._rust_mode:
             if not self._robot_id:
                 return
-            _load_native().stop_recording(
-                self._robot_id, self._robot_instance, time.time_ns()
-            )
+            _load_native().stop_recording(self._robot_id, self._robot_instance)
             return
 
         effective_recording_id = recording_id or self.recording_id
@@ -277,9 +272,18 @@ class RecordingContext:
 
         db_uri = f"file:{get_daemon_db_path()}?mode=ro"
         deadline = time.monotonic() + timeout_s
+        # Match the recording whose start *equals* the marker rather than
+        # ``<=``. The marker is the producer's ``started_at_ns`` for a specific
+        # ``start_recording`` call, stored verbatim as the row's
+        # ``start_timestamp_ns``, so an exact match resolves precisely that
+        # recording. ``<=`` could otherwise fall back to an earlier recording
+        # for the same source during the window where this recording's row /
+        # cloud id has not landed yet (e.g. a just-cancelled prior recording
+        # whose ``cancelled_at`` the daemon has not stamped yet) — which would
+        # resolve a stale, soon-to-be-discarded cloud id.
         query = (
             "SELECT recording_id FROM recordings "
-            "WHERE robot_id = ? AND robot_instance = ? AND start_timestamp_ns <= ? "
+            "WHERE robot_id = ? AND robot_instance = ? AND start_timestamp_ns = ? "
             "AND cancelled_at IS NULL "
             "ORDER BY recording_index DESC LIMIT 1"
         )

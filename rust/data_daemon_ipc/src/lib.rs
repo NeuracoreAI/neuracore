@@ -176,8 +176,6 @@ pub enum Envelope {
         robot_id: String,
         /// Robot instance — the second half of the source key.
         robot_instance: i64,
-        /// Producer capture-clock timestamp (Unix nanoseconds) of the cancel.
-        cancelled_at_ns: i64,
     },
     /// Producer delivers one sensor sample.
     ///
@@ -249,12 +247,13 @@ pub enum Envelope {
     /// Producer announces a finished NUT chunk for a video trace.
     ///
     /// The producer spools captured RGB frames to disk as a sequence of NUT
-    /// chunks under a recording-independent inbox keyed by source + sensor.
-    /// When a chunk crosses the flush threshold (or a lifecycle event rolls
-    /// it) the producer finishes the NUT and publishes this envelope so the
-    /// daemon can bucket the chunk's frames into the right recording window
-    /// (by `frame_timestamps_ns`), relink the NUT under the recording, and
-    /// encode it to a sealed MP4 segment. Per-frame `timestamp_s` values are
+    /// chunks under a recording-independent spool dir keyed by source + sensor,
+    /// each named `chunk_{spool_ns}_{thread_id}.nut` so two recordings on the
+    /// same source never collide on a filename. When a chunk crosses the flush
+    /// threshold (or a lifecycle event rolls it) the producer finishes the NUT
+    /// and publishes this envelope so the daemon can route the chunk into the
+    /// right recording window (by `publish_timestamp_ns`), relink the NUT under
+    /// the recording, and encode it to a sealed MP4 segment. Per-frame `timestamp_s` values are
     /// carried inline so the daemon-side `trace.json` sidecar matches the
     /// bit-exact assertion.
     VideoChunkReady {
@@ -266,15 +265,18 @@ pub enum Envelope {
         data_type: String,
         /// Per-stream sensor label (camera id).
         sensor_name: Option<String>,
-        /// Producer wall-clock time (Unix nanoseconds) the chunk was announced
-        /// — the key used to route the whole chunk into a recording window
-        /// (the producer rolls a chunk on every lifecycle event, so a chunk's
-        /// announce time falls inside exactly one window).
+        /// Producer wall-clock ns stamped when the chunk's NUT file was opened
+        /// (its first frame). Serves two purposes: it is the key that routes
+        /// the whole chunk into a recording window — the open moment lies
+        /// strictly inside the recording, so membership is unambiguous — and,
+        /// with `thread_id`, it forms the chunk's spool filename
+        /// `chunk_{publish_timestamp_ns}_{thread_id}.nut` so the daemon can
+        /// reconstruct the spool path.
         publish_timestamp_ns: i64,
-        /// Producer-monotonic spool sequence for this `(source, sensor)`. Used
-        /// only to order inbox chunks deterministically; the daemon assigns
-        /// its own per-trace chunk index at relink time.
-        spool_seq: u64,
+        /// OS thread id (`gettid`) of the producer thread that spooled the
+        /// chunk. Disambiguates the spool filename across threads and is a
+        /// useful breadcrumb when inspecting the spool directory.
+        thread_id: i64,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels (constant across a trace).
@@ -540,7 +542,6 @@ mod tests {
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
-            cancelled_at_ns: 1_700_000_000_000_000_001,
         };
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
@@ -555,7 +556,7 @@ mod tests {
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            spool_seq: 3,
+            thread_id: 4242,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -592,7 +593,7 @@ mod tests {
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            spool_seq: 42,
+            thread_id: 42,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,

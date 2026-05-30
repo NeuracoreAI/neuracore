@@ -104,6 +104,7 @@ def logout() -> None:
     get_auth().logout()
     GlobalSingleton()._active_robot = None
     GlobalSingleton()._active_dataset_id = None
+    GlobalSingleton()._active_dataset = None
     GlobalSingleton()._has_validated_version = False
 
 
@@ -268,10 +269,16 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    try:
-        active_dataset = Dataset.get_by_id(active_dataset_id)
-    except DatasetError:
-        active_dataset = None
+    # Prefer the dataset object cached when it was made active — its metadata
+    # (notably ``is_shared``) is fixed at creation, so the shared/non-shared
+    # validation below needs no synchronous backend fetch on the hot path. Fall
+    # back to a fetch only if the cache is missing or stale (id set elsewhere).
+    active_dataset = GlobalSingleton()._active_dataset
+    if active_dataset is None or active_dataset.id != active_dataset_id:
+        try:
+            active_dataset = Dataset.get_by_id(active_dataset_id)
+        except DatasetError:
+            active_dataset = None
     if active_dataset is not None:
         if robot.shared and not active_dataset.is_shared:
             raise RobotError(

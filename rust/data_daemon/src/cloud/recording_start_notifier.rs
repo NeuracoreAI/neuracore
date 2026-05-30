@@ -10,25 +10,19 @@
 //!
 //! A direct mirror of [`recording_stop_notifier`](super::recording_stop_notifier):
 //! each event spawns a single retried request and failures are logged with the
-//! recording index but never surfaced to the SDK. The one wrinkle is the
-//! recency bound — a start that is more than [`START_RECENCY_BOUND`] old is
-//! permanently skipped (registration mint-on-demand will still upload it) so
-//! the daemon never reopens a long-dead recording server-side.
+//! recording index but never surfaced to the SDK. The cloud `recording_id` is
+//! always minted here — every downstream coordinator (registration, progress,
+//! upload) waits for this id, so an offline recording simply stays pending
+//! until the daemon is online and `/recording/start` lands.
 
 use std::sync::Arc;
 
-use chrono::Utc;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
-
-/// How stale a recording's `started_at` may be before the start notifier
-/// permanently skips `/recording/start`. Past this bound the recording is too
-/// old to reopen server-side; registration mint-on-demand uploads it instead.
-const START_RECENCY_BOUND: chrono::Duration = chrono::Duration::minutes(5);
 
 /// Handle returned by [`spawn_recording_start_notifier`].
 pub struct RecordingStartNotifierHandle {
@@ -47,9 +41,9 @@ impl RecordingStartNotifierHandle {
 /// Spawn the recording-start notifier on the current Tokio runtime.
 ///
 /// The task first sweeps any recordings opened while the daemon was offline
-/// (rows whose `/recording/start` POST has neither succeeded nor been
-/// permanently skipped), then drops into the event-bus loop and POSTs whenever
-/// a fresh `RecordingStarted` event fires.
+/// (rows whose `/recording/start` POST has not yet succeeded), then drops into
+/// the event-bus loop and POSTs whenever a fresh `RecordingStarted` event
+/// fires.
 pub fn spawn_recording_start_notifier(
     store: SqliteStateStore,
     bus: EventBus,
@@ -68,7 +62,7 @@ pub fn spawn_recording_start_notifier(
                 tracing::debug!(?signal, "recording-start notifier shutting down before sweep");
                 return;
             }
-            _ = sweep_pending(&store, &client) => {}
+            _ = sweep_pending(&store, &client, &bus) => {}
         }
         loop {
             tokio::select! {
@@ -80,7 +74,7 @@ pub fn spawn_recording_start_notifier(
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::RecordingStarted { recording_index }) => {
-                            notify(&store, &client, recording_index).await;
+                            notify(&store, &client, &bus, recording_index).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -89,7 +83,7 @@ pub fn spawn_recording_start_notifier(
                                 "recording-start notifier missed bus events; \
                                  re-sweeping pending notifications",
                             );
-                            sweep_pending(&store, &client).await;
+                            sweep_pending(&store, &client, &bus).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::debug!("event bus closed; recording-start notifier exiting");
@@ -103,7 +97,7 @@ pub fn spawn_recording_start_notifier(
     RecordingStartNotifierHandle { join }
 }
 
-async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
+async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, bus: &EventBus) {
     let pending = match store.recordings_pending_start_notify().await {
         Ok(rows) => rows,
         Err(error) => {
@@ -119,11 +113,16 @@ async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         "sweeping recordings with pending backend start notify",
     );
     for row in pending {
-        notify(store, client, row.recording_index).await;
+        notify(store, client, bus, row.recording_index).await;
     }
 }
 
-async fn notify(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, recording_index: i64) {
+async fn notify(
+    store: &Arc<SqliteStateStore>,
+    client: &Arc<ApiClient>,
+    bus: &EventBus,
+    recording_index: i64,
+) {
     let row = match store.get_recording(recording_index).await {
         Ok(Some(row)) => row,
         Ok(None) => {
@@ -142,33 +141,9 @@ async fn notify(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, recordin
             return;
         }
     };
-    if row.recording_id.is_some()
-        || row.backend_start_notified_at.is_some()
-        || row.backend_start_failed_at.is_some()
-    {
-        // Already notified, or permanently skipped — another path handled it.
+    if row.recording_id.is_some() || row.backend_start_notified_at.is_some() {
+        // Already notified — another path handled it.
         return;
-    }
-
-    // Recency bound: a start that is too old must not reopen the recording
-    // server-side. Stamp it failed (NOT cancelled) so the row still uploads
-    // best-effort via registration mint-on-demand.
-    if let Some(started_at) = row.started_at {
-        if Utc::now().naive_utc() - started_at > START_RECENCY_BOUND {
-            tracing::debug!(
-                recording_index,
-                "recording start is older than the recency bound; \
-                 skipping backend notify (mint-on-demand will upload it)",
-            );
-            if let Err(error) = store.mark_recording_start_failed(recording_index).await {
-                tracing::warn!(
-                    %error,
-                    recording_index,
-                    "failed to stamp backend_start_failed_at after recency skip",
-                );
-            }
-            return;
-        }
     }
 
     let Some(org_id) = row.org_id else {
@@ -218,6 +193,10 @@ async fn notify(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, recordin
                     recording_id,
                     "backend notified of recording start",
                 );
+                // The cloud id is now available. Wake any coordinator that was
+                // waiting on it — notably the stop notifier, for a recording
+                // that was stopped while offline before its start was notified.
+                bus.publish(DaemonEvent::RecordingCloudIdAssigned { recording_index });
             }
         }
         Err(error) => {
@@ -373,73 +352,6 @@ mod tests {
         })
         .await
         .expect("sweep must persist the minted cloud id within 3s");
-
-        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
-        handle.join().await;
-    }
-
-    #[tokio::test]
-    async fn recency_skip_marks_failed_without_cancelling() {
-        // A recording whose `started_at` is well past the recency bound must
-        // be skipped: no POST, `backend_start_failed_at` stamped, and the row
-        // left uncancelled for registration mint-on-demand.
-        let server = MockServer::start().await;
-        // No mock armed: any incoming POST would fail the test.
-
-        let (store, _dir) = open_store().await;
-        let index = seed_recording(&store, "org-1").await;
-        // Backdate `started_at` past the recency bound.
-        let stale_at = Utc::now().naive_utc() - chrono::Duration::minutes(10);
-        sqlx::query("UPDATE recordings SET started_at = ?1 WHERE recording_index = ?2")
-            .bind(stale_at)
-            .bind(index)
-            .execute(store.pool())
-            .await
-            .expect("backdate started_at");
-
-        let auth = Arc::new(StaticAuthProvider::new("token-1"));
-        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
-
-        let bus = EventBus::new();
-        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle = spawn_recording_start_notifier(
-            store.clone(),
-            bus.clone(),
-            client,
-            shutdown_tx.subscribe(),
-        );
-
-        bus.publish(DaemonEvent::RecordingStarted {
-            recording_index: index,
-        });
-
-        timeout(Duration::from_secs(3), async {
-            loop {
-                let row = store
-                    .get_recording(index)
-                    .await
-                    .expect("get")
-                    .expect("exists");
-                if row.backend_start_failed_at.is_some() {
-                    assert!(
-                        row.recording_id.is_none(),
-                        "recency skip must not mint an id"
-                    );
-                    assert!(row.cancelled_at.is_none(), "recency skip must not cancel");
-                    break;
-                }
-                sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .expect("backend_start_failed_at must be stamped within 3s");
-
-        // Confirm no POST was made.
-        let received = server.received_requests().await.unwrap_or_default();
-        assert!(
-            received.is_empty(),
-            "no backend POST expected for a recency-skipped recording"
-        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;

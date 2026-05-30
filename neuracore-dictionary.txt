@@ -159,6 +159,7 @@ getbuffer
 getenv
 getpgid
 getpid
+gettid
 ghjdidnia
 gptj
 GPTJ

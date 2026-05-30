@@ -15,16 +15,14 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use uuid::Uuid;
-
 use crate::api::models::RegisterTraceRequest;
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::cloud_file_list;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
-    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, TraceRecord,
-    TraceRegistrationStatus, TraceUploadStatus,
+    DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRecord, TraceRegistrationStatus,
+    TraceUploadStatus,
 };
 
 /// Maximum traces to register in a single call. Matches the
@@ -162,17 +160,14 @@ async fn submit_batch(
             continue;
         };
 
-        // Resolve the cloud recording_id required by the backend. For an
+        // The backend recording_id always comes from `/recording/start`. An
         // offline recording (or one whose `/recording/start` POST has not yet
-        // landed) the row carries no cloud id, so mint one on demand and
-        // persist it via COALESCE — preferring the persisted value so a
-        // concurrent start-notify cannot leave us double-minting.
-        let cloud_id = match resolve_cloud_id(store, &row).await {
-            Some(cloud_id) => cloud_id,
-            None => {
-                rollback_to_pending(store, &traces).await;
-                continue;
-            }
+        // landed) carries no cloud id, so there is nothing to register against
+        // yet — roll the traces back to pending and retry once the start
+        // notifier has populated the id.
+        let Some(cloud_id) = row.recording_id.clone() else {
+            rollback_to_pending(store, &traces).await;
+            continue;
         };
 
         let payload: Vec<RegisterTraceRequest> = traces
@@ -252,45 +247,6 @@ async fn submit_batch(
     }
 }
 
-/// Resolve the cloud `recording_id` for a recording row, minting one on demand
-/// when the row has none yet.
-///
-/// Offline recordings — and recordings whose `/recording/start` POST has not
-/// landed — carry a NULL cloud id. Registration cannot wait for the start
-/// notifier, so it mints a UUID and persists it via
-/// [`StateStore::set_recording_cloud_id`], which COALESCEs to avoid clobbering
-/// a concurrently-notified id. The persisted row's id is preferred so a race
-/// with the start notifier resolves to a single shared value. Returns `None`
-/// only when persistence fails, signalling the caller to roll back.
-async fn resolve_cloud_id(store: &Arc<SqliteStateStore>, row: &RecordingRow) -> Option<String> {
-    if let Some(cloud_id) = row.recording_id.clone() {
-        return Some(cloud_id);
-    }
-
-    let minted = Uuid::new_v4().to_string();
-    match store
-        .set_recording_cloud_id(row.recording_index, &minted)
-        .await
-    {
-        Ok(Some(persisted)) => persisted.recording_id.or(Some(minted)),
-        Ok(None) => {
-            tracing::warn!(
-                recording_index = row.recording_index,
-                "recording row vanished while minting cloud id"
-            );
-            None
-        }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                recording_index = row.recording_index,
-                "failed to persist minted cloud recording id"
-            );
-            None
-        }
-    }
-}
-
 async fn rollback_to_pending(store: &Arc<SqliteStateStore>, traces: &[TraceRecord]) {
     for trace in traces {
         rollback_single_to_pending(store, &trace.trace_id).await;
@@ -329,8 +285,9 @@ mod tests {
 
     /// Seed a recording (with `org_id` set) plus a single written trace under
     /// it, returning the local `recording_index`. When `cloud_id` is `Some`,
-    /// the recording's cloud `recording_id` is persisted so registration finds
-    /// one without minting; when `None`, registration mints on demand.
+    /// the recording's cloud `recording_id` is persisted (as the start notifier
+    /// would) so registration finds one; when `None`, the recording has no
+    /// cloud id yet and registration must defer.
     async fn seed_written_trace(
         store: &SqliteStateStore,
         trace_id: &str,
@@ -352,7 +309,7 @@ mod tests {
             .recording_index;
         if let Some(cloud_id) = cloud_id {
             store
-                .set_recording_cloud_id(recording_index, cloud_id)
+                .mark_recording_start_notified(recording_index, cloud_id)
                 .await
                 .unwrap();
         }
@@ -530,23 +487,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mints_cloud_id_on_demand_when_recording_has_none() {
+    async fn defers_registration_when_recording_has_no_cloud_id() {
         let server = MockServer::start().await;
+        // The recording has no cloud id yet, so registration must not POST.
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/traces/batch-register"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "registered_traces": [{
-                    "trace_id": "trace-1",
-                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
-                }],
-                "failed_traces": []
-            })))
-            .expect(1)
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
             .mount(&server)
             .await;
 
         let (store, _dir) = open_store().await;
-        // No cloud id seeded: registration must mint one on demand.
+        // No cloud id seeded: the start notifier hasn't populated one yet.
         let recording_index = seed_written_trace(&store, "trace-1", "org-1", None).await;
         assert_eq!(
             store
@@ -567,16 +519,14 @@ mod tests {
             .unwrap();
         submit_batch(&Arc::new(store.clone()), &bus, &api, claimed).await;
 
-        // A cloud id was minted and persisted on the recording row.
+        // The recording still has no cloud id — none is minted locally.
         let row = store.get_recording(recording_index).await.unwrap().unwrap();
-        assert!(
-            row.recording_id.is_some(),
-            "cloud id should be minted on demand"
-        );
-        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(
-            trace.registration_status,
-            TraceRegistrationStatus::Registered
+            row.recording_id, None,
+            "registration must not mint a cloud id"
         );
+        // The trace is rolled back to pending for a later retry.
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
     }
 }
