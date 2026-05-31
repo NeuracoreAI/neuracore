@@ -142,34 +142,45 @@ class PolicyInference:
         # We need to go from sync_point (single time step) to BatchedNCData
         for data_type in sync_point.data.keys():
             inputs[data_type] = []
-            max_items_for_this_data_type = len(sync_point.data[data_type])
+            embodiment_names = self.input_embodiment_description[data_type]
             trained_statistics = self.input_dataset_statistics.get(data_type)
             if trained_statistics is None:
                 raise ValueError(
                     f"Model was not trained with input statistics for {data_type}."
                 )
             max_items_trained_on = len(trained_statistics)
-            if max_items_for_this_data_type > max_items_trained_on:
+            max_items_received = len(sync_point.data[data_type])
+            if max_items_received > max_items_trained_on:
                 raise ValueError(
-                    f"Received {max_items_for_this_data_type} items for data type "
+                    f"Received {max_items_received} items for data type "
                     f"{data_type}, but model was trained on maximum of "
                     f"{max_items_trained_on} items."
                 )
-            inputs_mask[data_type] = torch.tensor(
-                [1.0] * max_items_for_this_data_type
-                + [0.0] * (max_items_trained_on - max_items_for_this_data_type),
-                dtype=torch.float32,
+
+            mask: list[float] = [0.0] * max_items_trained_on
+            batched_nc_data_class: type[BatchedNCData] = (
+                DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             )
-            inputs_mask[data_type].unsqueeze_(0)  # Add batch dimension
-            for _, nc_data in sync_point.data[data_type].items():
-                tensor = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type].from_nc_data(
-                    nc_data
-                )
+            preprocessing_methods = self.input_preprocessing_config.get(data_type, [])
+
+            for index in range(max_items_trained_on):
+                name = embodiment_names.get(index)
+                if name is None or name not in sync_point.data[data_type]:
+                    tensor = batched_nc_data_class.sample(batch_size=1, time_steps=1)
+                else:
+                    nc_data = sync_point.data[data_type][name]
+                    tensor = batched_nc_data_class.from_nc_data(nc_data)
+                    mask[index] = 1.0
+
                 tensor = apply_preprocessing_methods(
                     batched_data=tensor,
-                    methods=self.input_preprocessing_config.get(data_type, []),
+                    methods=preprocessing_methods,
                 )
                 inputs[data_type].append(tensor)
+
+            inputs_mask[data_type] = torch.tensor(mask, dtype=torch.float32).unsqueeze(
+                0
+            )
         return BatchedInferenceInputs(
             inputs=inputs,
             inputs_mask=inputs_mask,

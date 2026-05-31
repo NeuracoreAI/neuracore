@@ -392,76 +392,79 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         for data_type in self.input_cross_embodiment_description[robot_id]:
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             inputs[data_type] = []
-            mask = []
 
-            max_items_for_this_data_type = 0
+            max_items_trained_on = 0
             # Iterate through all robots and find the max index for this data
             # type across all robots to determine padding length.
             for other_robot_id in self.input_cross_embodiment_description:
                 for index in self.input_cross_embodiment_description[other_robot_id][
                     data_type
                 ].keys():
-                    if index > max_items_for_this_data_type:
-                        max_items_for_this_data_type = index
+                    if index > max_items_trained_on:
+                        max_items_trained_on = index
 
-            for index in range(max_items_for_this_data_type + 1):
+            max_items_trained_on += 1
+            input_mask_values: list[float] = [0.0] * max_items_trained_on
+            for index in range(max_items_trained_on):
                 name = self.input_cross_embodiment_description[robot_id][data_type].get(
                     index
                 )
 
-                if name is not None:
-                    # If the current robot has a name for this index, use it to
-                    # get the data. Otherwise, pad with zeros.
-                    nc_data = sync_point.data[data_type][name]
-                    batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
-                    batched_nc_data = apply_preprocessing_methods(
-                        batched_data=batched_nc_data,
-                        methods=self._input_preprocessing_config.get(data_type, []),
-                    )
-                    inputs[data_type].append(batched_nc_data)
-                    mask.append(1.0)
-
-                else:
-                    # Pad missing data with zeros
+                if name is None:
+                    # Pad missing data with zeros.
                     batched_nc_data = batched_nc_data_class.sample(
                         batch_size=1, time_steps=1
                     )
-                    batched_nc_data = apply_preprocessing_methods(
-                        batched_data=batched_nc_data,
-                        methods=self._input_preprocessing_config.get(data_type, []),
-                    )
-                    inputs[data_type].append(batched_nc_data)
-                    mask.append(0.0)
+                else:
+                    # If the current robot has a name for this index, use it to
+                    # get the data.
+                    nc_data = sync_point.data[data_type][name]
+                    batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
+                    input_mask_values[index] = 1.0
+
+                batched_nc_data = apply_preprocessing_methods(
+                    batched_data=batched_nc_data,
+                    methods=self._input_preprocessing_config.get(data_type, []),
+                )
+                inputs[data_type].append(batched_nc_data)
 
             # Create mask for inputs
-            inputs_mask[data_type] = torch.tensor(mask, dtype=torch.float32)
+            inputs_mask[data_type] = torch.tensor(
+                input_mask_values, dtype=torch.float32
+            )
 
         outputs: dict[DataType, list[BatchedNCData]] = {}
         outputs_mask: dict[DataType, torch.Tensor] = {}
         for data_type in self.output_cross_embodiment_description[robot_id]:
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             outputs[data_type] = []
-            mask = []
 
-            max_items_for_this_data_type = 0
+            max_items_trained_on = 0
             # Iterate through all robots and find the max index for this data
             # type across all robots to determine padding length.
             for other_robot_id in self.output_cross_embodiment_description:
                 for index in self.output_cross_embodiment_description[other_robot_id][
                     data_type
                 ].keys():
-                    if index > max_items_for_this_data_type:
-                        max_items_for_this_data_type = index
+                    if index > max_items_trained_on:
+                        max_items_trained_on = index
 
-            # Need to add action prediction horizon for outputs.
-            for index in range(max_items_for_this_data_type + 1):
+            max_items_trained_on += 1
+            output_mask_values: list[float] = [0.0] * max_items_trained_on
+            for index in range(max_items_trained_on):
                 name = self.output_cross_embodiment_description[robot_id][
                     data_type
                 ].get(index)
 
-                if name is not None:
+                if name is None:
+                    # Pad missing data with zeros.
+                    batched_nc_data = batched_nc_data_class.sample(
+                        batch_size=1,
+                        time_steps=self.output_prediction_horizon,
+                    )
+                else:
                     # If the current robot has a name for this index, use it to
-                    # get the data. Otherwise, pad with zeros.
+                    # get the data.
                     nc_data_list = [
                         future_sp.data[data_type][name]
                         for future_sp in future_sync_points
@@ -469,27 +472,18 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     batched_nc_data = batched_nc_data_class.from_nc_data_list(
                         nc_data_list
                     )
-                    batched_nc_data = apply_preprocessing_methods(
-                        batched_data=batched_nc_data,
-                        methods=self._output_preprocessing_config.get(data_type, []),
-                    )
-                    outputs[data_type].append(batched_nc_data)
-                    mask.append(1.0)
-                else:
-                    # Pad missing data with zeros.
-                    batched_nc_data = batched_nc_data_class.sample(
-                        batch_size=1,
-                        time_steps=self.output_prediction_horizon,
-                    )
-                    batched_nc_data = apply_preprocessing_methods(
-                        batched_data=batched_nc_data,
-                        methods=self._output_preprocessing_config.get(data_type, []),
-                    )
-                    outputs[data_type].append(batched_nc_data)
-                    mask.append(0.0)
+                    output_mask_values[index] = 1.0
+
+                batched_nc_data = apply_preprocessing_methods(
+                    batched_data=batched_nc_data,
+                    methods=self._output_preprocessing_config.get(data_type, []),
+                )
+                outputs[data_type].append(batched_nc_data)
 
             # Create mask for outputs.
-            outputs_mask[data_type] = torch.tensor(mask, dtype=torch.float32)
+            outputs_mask[data_type] = torch.tensor(
+                output_mask_values, dtype=torch.float32
+            )
 
         return TrainingSample(
             inputs=inputs,
