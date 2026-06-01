@@ -230,9 +230,26 @@ def mock_synchronized_dataset(
     return MockSynchronizedDataset()
 
 
-def _stats_cache_path(cache_root, sync_id, input_spec, output_spec):
+def _stats_cache_path(
+    cache_root,
+    synchronized_dataset,
+    input_spec,
+    output_spec,
+):
+    recording_fingerprint = [
+        {
+            "id": recording.id,
+            "total_bytes": recording.total_bytes,
+            "robot_id": recording.robot_id,
+            "instance": recording.instance,
+            "start_time": recording.start_time,
+            "end_time": recording.end_time,
+        }
+        for recording in synchronized_dataset.dataset
+    ]
     spec_key = json.dumps(
         {
+            "recordings": recording_fingerprint,
             "input_cross_embodiment_description": (
                 _cacheable_cross_embodiment_description(input_spec)
             ),
@@ -244,7 +261,11 @@ def _stats_cache_path(cache_root, sync_id, input_spec, output_spec):
         separators=(",", ":"),
     )
     spec_hash = hashlib.sha256(spec_key.encode("utf-8")).hexdigest()[:12]
-    return cache_root / "dataset_cache" / f"{sync_id}_statistics_{spec_hash}.json"
+    return (
+        cache_root
+        / "dataset_cache"
+        / f"{synchronized_dataset.id}_statistics_{spec_hash}.json"
+    )
 
 
 @pytest.fixture
@@ -1236,7 +1257,10 @@ class TestDatasetStatistics:
             dataset_statistics=dataset_statistics,
         )
         cache_path = _stats_cache_path(
-            tmp_path, mock_synchronized_dataset.id, input_spec, output_spec
+            tmp_path,
+            mock_synchronized_dataset,
+            input_spec,
+            output_spec,
         )
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w", encoding="utf-8") as handle:
@@ -1299,7 +1323,10 @@ class TestDatasetStatistics:
 
         assert mock_synchronized_dataset.calculate_statistics.call_count == 1
         cache_path = _stats_cache_path(
-            tmp_path, mock_synchronized_dataset.id, input_spec, output_spec
+            tmp_path,
+            mock_synchronized_dataset,
+            input_spec,
+            output_spec,
         )
         assert cache_path.exists()
 
