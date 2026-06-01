@@ -95,7 +95,19 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         # Try cached stats first; fall back to server computation if missing/unreadable.
         logger.info("Loading dataset statistics...")
+        recording_fingerprint = [
+            {
+                "id": recording.id,
+                "total_bytes": recording.total_bytes,
+                "robot_id": recording.robot_id,
+                "instance": recording.instance,
+                "start_time": recording.start_time,
+                "end_time": recording.end_time,
+            }
+            for recording in self.synchronized_dataset.dataset
+        ]
         stats_request_payload = {
+            "recordings": recording_fingerprint,
             "input_cross_embodiment_description": (
                 _cacheable_cross_embodiment_description(
                     self.input_cross_embodiment_description
