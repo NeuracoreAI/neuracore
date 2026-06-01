@@ -21,7 +21,7 @@
 //! - [`start_recording`] / [`stop_recording`] / [`cancel_recording`] publish
 //!   one lifecycle envelope each, carrying the lifecycle wall-clock
 //!   `*_at_ns`.
-//! - [`log_joints`] / [`log_scalar`] publish data envelopes tagged with the
+//! - [`log_joints`] / [`log_json`] publish data envelopes tagged with the
 //!   sensor `(data_type, sensor_name)` and capture `timestamp_ns`.
 //! - [`log_frame`] spools raw RGB into per-`(source, sensor)` NUT chunk files
 //!   under a recording-independent inbox and announces each finished chunk
@@ -757,11 +757,18 @@ fn flush_chunk_locked(
     })
 }
 
-/// Log one scalar/custom sample, delivered verbatim as a `Data` envelope.
+/// Log one JSON sample for any non-joint, non-video data type, delivered
+/// verbatim as a `Data` envelope.
+///
+/// `data_type` is an opaque wire label and `payload` is already-serialized
+/// bytes, so this is the generic single-sample path: scalars, poses, gripper
+/// amounts, language, point clouds and any future JSON type all flow through
+/// here unchanged. The daemon classifies the label downstream
+/// (see `content_type_for`); it imposes no allowlist.
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance, data_type, name, payload, timestamp_ns, timestamp_s = None))]
 #[allow(clippy::too_many_arguments)]
-fn log_scalar(
+fn log_json(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
@@ -895,7 +902,7 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
-    module.add_function(wrap_pyfunction!(log_scalar, module)?)?;
+    module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     Ok(())
