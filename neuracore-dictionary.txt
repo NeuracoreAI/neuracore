@@ -392,3 +392,6 @@ tinyxml
 assimp
 octomap
 delenv
+hookwrapper
+makereport
+tryfirst
