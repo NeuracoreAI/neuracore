@@ -124,6 +124,47 @@ def _publish_json_to_p2p(
     )
 
 
+def _record_json_to_daemon(
+    robot: Robot,
+    data_type: DataType,
+    storage_name: str,
+    data: (
+        JointData
+        | Custom1DData
+        | PoseData
+        | EndEffectorPoseData
+        | ParallelGripperOpenAmountData
+        | LanguageData
+        | PointCloudData
+    ),
+    timestamp: float,
+) -> None:
+    """Forward one JSON sample to the Rust daemon's recording pipeline.
+
+    The generic counterpart to :func:`_publish_json_to_p2p`: where that feeds
+    live consumers, this persists the sample into the active recording. Every
+    non-joint, non-video data type shares this single path — the daemon's
+    ``log_json`` entry point is datatype-agnostic, so adding a new JSON type
+    needs no daemon-side change.
+
+    A no-op unless the Rust daemon is active and a recording is in progress
+    (the legacy daemon is fed by :meth:`JsonDataStream.log` instead).
+
+    Args:
+        robot: Robot instance owning the daemon recording context.
+        data_type: Wire label for the sample's trace.
+        storage_name: Sensor name the trace is stored under.
+        data: Data object to serialize and persist.
+        timestamp: Capture timestamp in seconds.
+    """
+    if not (rust_daemon_enabled() and robot.get_current_recording_id() is not None):
+        return
+    payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
+    robot._get_daemon_recording_context().log_json(
+        data_type.value, storage_name, payload, timestamp
+    )
+
+
 def _publish_video_to_p2p(
     robot: Robot,
     name: str,
@@ -560,15 +601,9 @@ def log_custom_1d(
 
     custom_data = Custom1DData(timestamp=timestamp, data=data)
     stream.log(custom_data)
-
-    if rust_daemon_enabled() and robot.get_current_recording_id() is not None:
-        # Rust daemon: the recording-scoped native session owns the trace
-        # lifecycle; hand it the serialized sample.
-        payload = json.dumps(custom_data.model_dump(mode="json")).encode("utf-8")
-        robot._get_daemon_recording_context().log_scalar(
-            DataType.CUSTOM_1D.value, storage_name, payload, timestamp
-        )
-
+    _record_json_to_daemon(
+        robot, DataType.CUSTOM_1D, storage_name, custom_data, timestamp
+    )
     _publish_json_to_p2p(robot, str_id, DataType.CUSTOM_1D, custom_data)
 
 
@@ -953,6 +988,7 @@ def log_pose(
 
     pose_data = PoseData(timestamp=timestamp, pose=pose.tolist())
     stream.log(pose_data)
+    _record_json_to_daemon(robot, DataType.POSES, storage_name, pose_data, timestamp)
     _publish_json_to_p2p(robot, str_id, DataType.POSES, pose_data)
 
 
@@ -1016,6 +1052,9 @@ def log_end_effector_pose(
 
     ee_pose_data = EndEffectorPoseData(timestamp=timestamp, pose=pose.tolist())
     stream.log(ee_pose_data)
+    _record_json_to_daemon(
+        robot, DataType.END_EFFECTOR_POSES, storage_name, ee_pose_data, timestamp
+    )
     _publish_json_to_p2p(robot, str_id, DataType.END_EFFECTOR_POSES, ee_pose_data)
 
 
@@ -1071,6 +1110,13 @@ def log_parallel_gripper_open_amount(
         timestamp=timestamp, open_amount=value
     )
     stream.log(parallel_gripper_open_amount_data)
+    _record_json_to_daemon(
+        robot,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        storage_name,
+        parallel_gripper_open_amount_data,
+        timestamp,
+    )
     _publish_json_to_p2p(
         robot,
         str_id,
@@ -1167,6 +1213,13 @@ def log_parallel_gripper_target_open_amount(
         timestamp=timestamp, open_amount=value
     )
     stream.log(parallel_gripper_target_open_amount_data)
+    _record_json_to_daemon(
+        robot,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+        storage_name,
+        parallel_gripper_target_open_amount_data,
+        timestamp,
+    )
     _publish_json_to_p2p(
         robot,
         str_id,
@@ -1254,6 +1307,9 @@ def log_language(
 
     language_data = LanguageData(timestamp=timestamp, text=language)
     stream.log(language_data)
+    _record_json_to_daemon(
+        robot, DataType.LANGUAGE, storage_name, language_data, timestamp
+    )
     _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, language_data)
 
 
@@ -1445,4 +1501,7 @@ def log_point_cloud(
         intrinsics=intrinsics,
     )
     stream.log(point_data)
+    _record_json_to_daemon(
+        robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp
+    )
     _publish_json_to_p2p(robot, str_id, DataType.POINT_CLOUDS, point_data)

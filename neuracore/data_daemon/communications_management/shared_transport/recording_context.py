@@ -39,7 +39,7 @@ class RecordingContext:
     """Recording-scoped interface to the data daemon.
 
     Under the Rust daemon this is a *thin shipper* bridge: ``start_recording``
-    / ``log_joints`` / ``log_frame`` / ``log_scalar`` / ``stop_recording`` /
+    / ``log_joints`` / ``log_frame`` / ``log_json`` / ``stop_recording`` /
     ``cancel_recording`` forward straight through to ``_native_producer`` over
     iceoryx2, tagged only with the **source** ``(robot_id, robot_instance)``.
     The daemon owns all recording identity — there is no recording id on the
@@ -166,17 +166,23 @@ class RecordingContext:
             timestamp,
         )
 
-    def log_scalar(
+    def log_json(
         self,
         data_type: str,
         name: str,
         payload: bytes,
         timestamp: float,
     ) -> None:
-        """Forward one scalar/custom sample to the daemon."""
-        robot_id = self._require_source("log_scalar")
+        """Forward one JSON sample to the daemon.
+
+        The generic single-sample path for any non-joint, non-video data type
+        (scalars, poses, gripper amounts, language, point clouds, ...). The
+        ``data_type`` is an opaque wire label and ``payload`` is already
+        serialized, so the daemon stores it verbatim as a per-trace JSON sample.
+        """
+        robot_id = self._require_source("log_json")
         timestamp_ns = int(timestamp * 1_000_000_000)
-        _load_native().log_scalar(
+        _load_native().log_json(
             robot_id,
             self._robot_instance,
             data_type,
