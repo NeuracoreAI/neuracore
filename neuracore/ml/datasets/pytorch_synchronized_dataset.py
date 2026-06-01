@@ -158,8 +158,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self.synchronized_dataset_statistics.dataset_statistics
         )
 
-        self._max_error_count = 100
-        self._error_count = 0
         self._memory_monitor = MemoryMonitor(
             max_ram_utilization=0.8, max_gpu_utilization=1.0, gpu_id=None
         )
@@ -500,19 +498,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return self._num_samples_excluding_last
 
     def __getitem__(self, idx: int) -> TrainingSample:
-        """Get a training sample by index with error handling.
-
-        Implements the PyTorch Dataset interface with robust error handling
-        to manage data loading failures gracefully during training.
+        """Get a training sample by index.
 
         Args:
             idx: Index of the sample to retrieve.
 
         Returns:
             A TrainingSample containing the requested data.
-
-        Raises:
-            Exception: If sample loading fails after exhausting retry attempts.
         """
         if idx < 0:
             # Handle negative indices by wrapping around
@@ -521,19 +513,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             raise IndexError(
                 f"Index {idx} out of bounds for dataset of size {len(self)}"
             )
-        while self._error_count < self._max_error_count:
-            try:
-                episode_idx = self.episode_indices[idx]
-                timestep = idx - self.episode_indices.index(episode_idx)
-                return self.load_sample(episode_idx, timestep)
-            except Exception:
-                self._error_count += 1
-                logger.error(f"Error loading item {idx}.", exc_info=True)
-                if self._error_count >= self._max_error_count:
-                    raise
-        raise Exception(
-            f"Maximum error count ({self._max_error_count}) already reached"
-        )
+
+        episode_idx = self.episode_indices[idx]
+        timestep = idx - self.episode_indices.index(episode_idx)
+        return self.load_sample(episode_idx, timestep)
 
     @property
     def dataset_statistics(self) -> dict[str, dict[DataType, list[NCDataStats]]]:
