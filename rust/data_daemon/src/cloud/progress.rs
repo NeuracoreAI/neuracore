@@ -2,10 +2,13 @@
 //!
 //! Every [`PROGRESS_REPORT_INTERVAL`] ticks the reporter walks the
 //! recordings table and, for every stopped recording whose traces have all
-//! reached `Uploaded` (and whose `progress_reported` is still `Pending`),
-//! POSTs `/org/{org}/recording/{rec}/traces-metadata` with the bytes-
-//! uploaded snapshot. On success the recording row flips to
-//! `progress_reported = 'reported'`.
+//! finished *writing* (and whose `progress_reported` is still `Pending`),
+//! POSTs `/org/{org}/recording/{rec}/traces-metadata` with the per-trace
+//! `total_bytes` snapshot. This establishes the recording's upload
+//! denominators on the backend up front — before uploads finish — so the
+//! live per-trace `uploaded_bytes` stream renders as a partial-upload
+//! percentage rather than a single jump to 100%. On success the recording
+//! row flips to `progress_reported = 'reported'`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,8 +21,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::api::ApiClient;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{
-    ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord,
-    TraceUploadStatus, TraceWriteStatus,
+    ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord, TraceWriteStatus,
 };
 
 /// Interval between progress-report sweeps.
@@ -205,22 +207,21 @@ async fn report_progress(
     recording_id: &str,
     traces: &[TraceRecord],
 ) {
-    // Treat Failed as terminal alongside Uploaded so a single bad trace
-    // doesn't pin the recording in `progress_reported = pending` forever.
-    // The backend receives `bytes_uploaded = 0` for failed entries; the
-    // snapshot still includes every trace's `total_bytes`.
-    let all_settled = traces.iter().all(|trace| {
-        matches!(
-            trace.upload_status,
-            TraceUploadStatus::Uploaded | TraceUploadStatus::Failed
-        )
-    });
-    if !all_settled {
+    // Send the snapshot of per-trace sizes (`total_bytes`) as soon as every
+    // trace has finished *writing* — not once it has finished *uploading*.
+    // This establishes the recording's denominators on the backend early, so
+    // the live per-trace `uploaded_bytes` stream (sent via the batch-update
+    // endpoint) can render a partial-upload percentage. Gating on upload
+    // completion instead would withhold the denominators until the whole
+    // recording is already uploaded, collapsing progress to a single 0→100%
+    // jump. Failed writes are terminal too, so one bad trace can't pin the
+    // recording in `progress_reported = pending` forever.
+    if !traces.iter().all(write_status_is_terminal) {
         return;
     }
     let trace_map: HashMap<String, i64> = traces
         .iter()
-        .map(|trace| (trace.trace_id.clone(), trace.bytes_uploaded))
+        .map(|trace| (trace.trace_id.clone(), trace.total_bytes))
         .collect();
     // Move into a Reporting state so a slow request can't be re-issued
     // by the next tick.
@@ -280,9 +281,9 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
     use crate::state::store::{NewRecording, TraceUpdate};
-    use crate::state::TraceWriteStatus;
+    use crate::state::{TraceUploadStatus, TraceWriteStatus};
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -319,7 +320,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sweep_reports_expected_trace_count_once_writes_settle() {
+    async fn sweep_reports_count_and_progress_once_writes_settle() {
         let server = MockServer::start().await;
         Mock::given(method("PUT"))
             .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
@@ -327,12 +328,26 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
+        // The progress snapshot must carry each trace's `total_bytes` (the
+        // upload denominator), not its `uploaded_bytes` — and it must fire as
+        // soon as writes settle, before uploads finish, so the backend can
+        // render a live percentage from the streamed byte counts.
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .and(body_json(serde_json::json!({
+                "traces": { "t-1": 100, "t-2": 200 }
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
 
         let (store, _dir) = open_store().await;
         let recording_index = seed_recording(&store, "rec-1").await;
-        // Two traces both finished writing but neither uploaded yet — the
-        // expected-count PUT must fire before upload completion.
-        for trace_id in ["t-1", "t-2"] {
+        // Two traces finished writing (with known sizes) but neither has
+        // uploaded yet — both the expected-count PUT and the progress POST
+        // must fire on write completion, not upload completion.
+        for (trace_id, total_bytes) in [("t-1", 100), ("t-2", 200)] {
             store
                 .create_trace(recording_index, trace_id, Some("JOINT_POSITIONS"), None)
                 .await
@@ -342,6 +357,7 @@ mod tests {
                     trace_id,
                     TraceUpdate {
                         write_status: Some(TraceWriteStatus::Written),
+                        total_bytes: Some(total_bytes),
                         ..TraceUpdate::default()
                     },
                 )
@@ -359,10 +375,10 @@ mod tests {
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, Some(2));
         assert_eq!(recording.expected_trace_count_reported, 2);
-        // Progress report should not have fired — uploads aren't done.
+        // Progress reports once writes settle — uploads need not be done.
         assert!(matches!(
             recording.progress_reported,
-            ProgressReportStatus::Pending
+            ProgressReportStatus::Reported
         ));
     }
 

@@ -37,7 +37,15 @@ use crate::state::{
 use crate::storage::paths::TracePath;
 
 /// Chunk size used for resumable uploads.
-pub const CHUNK_SIZE: usize = 64 * 1024 * 1024;
+///
+/// Must be a multiple of 256 KiB (the GCS resumable-upload requirement for
+/// every non-final chunk); 4 MiB = 16 × 256 KiB. Smaller chunks trade a
+/// little peak throughput on fast links (more sequential PUTs) for finer
+/// upload-progress granularity, lower per-upload memory, and tolerance of
+/// slow links: a chunk must transfer within `CHUNK_UPLOAD_TIMEOUT`, so the
+/// minimum sustained speed is `CHUNK_SIZE / CHUNK_UPLOAD_TIMEOUT`
+/// (4 MiB / 120 s ≈ 0.28 Mbit/s, vs ≈ 4.5 Mbit/s at 64 MiB).
+pub const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// Cap on the exponential backoff for transient upload failures.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Maximum retries for a single chunk.
