@@ -28,6 +28,7 @@ use tokio::time::{interval, sleep, timeout, MissedTickBehavior};
 use crate::api::{ApiClient, ApiClientError};
 use crate::cloud::cloud_files::{content_type_for, ContentKind};
 use crate::cloud::status::StatusUpdate;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
@@ -80,6 +81,7 @@ pub fn spawn_uploader(
     bus: EventBus,
     client: Arc<ApiClient>,
     recordings_root: Arc<PathBuf>,
+    org_rx: OrgIdRx,
     status_tx: tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> UploaderHandle {
@@ -118,6 +120,7 @@ pub fn spawn_uploader(
                             &bus,
                             &client,
                             &recordings_root,
+                            &org_rx,
                             &status_tx,
                             &semaphore,
                             &mut in_flight,
@@ -136,6 +139,7 @@ pub fn spawn_uploader(
                                     &bus,
                                     &client,
                                     &recordings_root,
+                                    &org_rx,
                                     &status_tx,
                                     &semaphore,
                                     &mut in_flight,
@@ -154,6 +158,7 @@ pub fn spawn_uploader(
                                 &bus,
                                 &client,
                                 &recordings_root,
+                                &org_rx,
                                 &status_tx,
                                 &semaphore,
                                 &mut in_flight,
@@ -170,6 +175,7 @@ pub fn spawn_uploader(
                                     &bus,
                                     &client,
                                     &recordings_root,
+                                    &org_rx,
                                     &status_tx,
                                     &semaphore,
                                     &mut in_flight,
@@ -188,6 +194,7 @@ pub fn spawn_uploader(
                             &bus,
                             &client,
                             &recordings_root,
+                            &org_rx,
                             &status_tx,
                             &semaphore,
                             &mut in_flight,
@@ -209,6 +216,7 @@ async fn drain_ready_traces(
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
+    org_rx: &OrgIdRx,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     semaphore: &Arc<Semaphore>,
     in_flight: &mut JoinSet<String>,
@@ -242,6 +250,7 @@ async fn drain_ready_traces(
                     bus,
                     client,
                     recordings_root,
+                    org_rx,
                     status_tx,
                     semaphore,
                     in_flight,
@@ -259,6 +268,7 @@ fn spawn_upload_task(
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
+    org_rx: &OrgIdRx,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     semaphore: &Arc<Semaphore>,
     in_flight: &mut JoinSet<String>,
@@ -278,6 +288,7 @@ fn spawn_upload_task(
     let bus = bus.clone();
     let client = Arc::clone(client);
     let recordings_root = Arc::clone(recordings_root);
+    let org_rx = org_rx.clone();
     let status_tx = status_tx.clone();
     in_flight.spawn(async move {
         upload_single(
@@ -285,6 +296,7 @@ fn spawn_upload_task(
             &bus,
             &client,
             &recordings_root,
+            &org_rx,
             &status_tx,
             &trace_id,
         )
@@ -299,6 +311,7 @@ async fn upload_single(
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
+    org_rx: &OrgIdRx,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     trace_id: &str,
 ) {
@@ -410,6 +423,7 @@ async fn upload_single(
             client,
             store,
             bus,
+            org_rx,
             status_tx,
             &trace,
             &recording_id,
@@ -570,6 +584,7 @@ async fn upload_one_file(
     client: &Arc<ApiClient>,
     store: &Arc<SqliteStateStore>,
     bus: &EventBus,
+    org_rx: &OrgIdRx,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
     trace: &TraceRecord,
     recording_id: &str,
@@ -599,8 +614,8 @@ async fn upload_one_file(
     let mut session_uri = session_uri;
     let recording_index = trace.recording_index;
     let trace_id = trace.trace_id.clone();
-    let Some(org_id) = recording_org_id(store, recording_index).await else {
-        return Err("recording has no org_id; cannot refresh session URI".to_string());
+    let Some(org_id) = org_rx.borrow().clone() else {
+        return Err("no current org_id configured; cannot refresh session URI".to_string());
     };
 
     tracing::info!(
@@ -747,18 +762,6 @@ async fn upload_one_file(
         bytes_uploaded: total_bytes as i64,
         final_session_uri,
     })
-}
-
-/// Resolve the recording's `org_id` from its local `recording_index`.
-async fn recording_org_id(store: &Arc<SqliteStateStore>, recording_index: i64) -> Option<String> {
-    match store.get_recording(recording_index).await {
-        Ok(Some(row)) => row.org_id,
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(%error, recording_index, "uploader could not read recording org_id");
-            None
-        }
-    }
 }
 
 /// Resolve the cloud `recording_id` (the backend handle every cloud URL needs)
@@ -992,6 +995,14 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    /// A live-org receiver fixed at `org`. The sender is leaked so the channel
+    /// stays open for the test's duration.
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
+    }
+
     async fn open_store() -> (SqliteStateStore, TempDir) {
         let dir = TempDir::new().unwrap();
         let store = SqliteStateStore::open(&dir.path().join("state.db"))
@@ -1019,10 +1030,7 @@ mod tests {
         contents: &[u8],
     ) -> (i64, std::path::PathBuf) {
         let recording = store
-            .create_recording(NewRecording {
-                org_id: Some("org-1"),
-                ..NewRecording::default()
-            })
+            .create_recording(NewRecording::default())
             .await
             .unwrap();
         let recording_index = recording.recording_index;
@@ -1113,6 +1121,7 @@ mod tests {
             &bus,
             &api,
             &recordings_root,
+            &org_rx(Some("org-1")),
             &status_tx,
             "trace-1",
         )
@@ -1171,6 +1180,7 @@ mod tests {
             &bus,
             &api,
             &recordings_root,
+            &org_rx(Some("org-1")),
             &status_tx,
             "trace-1",
         )
@@ -1250,6 +1260,7 @@ mod tests {
             &bus,
             &api,
             &recordings_root,
+            &org_rx(Some("org-1")),
             &status_tx,
             "trace-1",
         )
@@ -1294,10 +1305,7 @@ mod tests {
         let recordings_root = tempdir.path().join("recordings");
 
         let recording = store
-            .create_recording(NewRecording {
-                org_id: Some("org-1"),
-                ..NewRecording::default()
-            })
+            .create_recording(NewRecording::default())
             .await
             .unwrap();
         let recording_index = recording.recording_index;
@@ -1340,6 +1348,7 @@ mod tests {
             &bus,
             &api,
             &recordings_root,
+            &org_rx(Some("org-1")),
             &status_tx,
             "trace-1",
         )

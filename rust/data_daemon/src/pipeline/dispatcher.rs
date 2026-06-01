@@ -108,9 +108,6 @@ impl DispatcherHandle {
 /// Optional runtime context passed to the dispatcher.
 #[derive(Clone, Default)]
 pub struct DispatcherContext {
-    /// Org identifier the daemon stamps on every new recording row. Left as
-    /// `None` when the daemon is running offline.
-    pub org_id: Option<String>,
     /// Daemon event bus, used to publish recording/trace lifecycle events.
     pub event_bus: Option<crate::state::EventBus>,
 }
@@ -441,7 +438,6 @@ impl Dispatcher {
             robot_name: robot_name.as_deref(),
             dataset_id: dataset_id.as_deref(),
             dataset_name: dataset_name.as_deref(),
-            org_id: self.context.org_id.as_deref(),
             start_timestamp_ns: started_at_ns,
         };
         let recording_index = match self.store.create_recording(new).await {
@@ -1056,7 +1052,6 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let bus = crate::state::EventBus::new();
         let dispatcher_context = DispatcherContext {
-            org_id: None,
             event_bus: Some(bus.clone()),
         };
         let (tx, handle) = spawn_with_context(
@@ -1343,7 +1338,6 @@ mod tests {
         let bus = crate::state::EventBus::new();
         let mut sub = bus.subscribe();
         let dispatcher_context = DispatcherContext {
-            org_id: None,
             event_bus: Some(bus.clone()),
         };
         let (tx, handle) = spawn_with_context(

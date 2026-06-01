@@ -20,6 +20,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::models::{TraceStatusUpdate, TraceStatusValue};
 use crate::api::ApiClient;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{RecordingRow, SqliteStateStore, StateStore};
 
@@ -29,10 +30,10 @@ pub const MAX_BATCH_SIZE: usize = 50;
 pub const IN_PROGRESS_MAX_WAIT: Duration = Duration::from_secs(4);
 /// Maximum age of a batch containing a completed trace.
 pub const COMPLETION_MAX_WAIT: Duration = Duration::from_millis(200);
-/// How long to wait before re-attempting a flush when the recording's
-/// `org_id` isn't yet stamped on the row. Picked larger than `MAX_WAIT`
-/// triggers above so a perpetually-missing org_id doesn't spin the executor
-/// while waiting for the producer's `StartRecording` envelope.
+/// How long to wait before re-attempting a flush when no current `org_id` is
+/// configured yet, or the recording's cloud id hasn't been assigned. Picked
+/// larger than the `MAX_WAIT` triggers above so a perpetually-missing org
+/// doesn't spin the executor while waiting for login / org selection.
 const ORG_RESOLVE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
 
 /// Update emitted by the uploader for the status coordinator to forward to
@@ -93,12 +94,13 @@ impl StatusUpdaterHandle {
 pub fn spawn_status_updater(
     store: SqliteStateStore,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     inbox: mpsc::UnboundedReceiver<StatusUpdate>,
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> StatusUpdaterHandle {
     let store = Arc::new(store);
     let join = tokio::spawn(async move {
-        run(store, client, inbox, shutdown_rx).await;
+        run(store, client, org_rx, inbox, shutdown_rx).await;
     });
     StatusUpdaterHandle { join }
 }
@@ -106,6 +108,7 @@ pub fn spawn_status_updater(
 async fn run(
     store: Arc<SqliteStateStore>,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut inbox: mpsc::UnboundedReceiver<StatusUpdate>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
@@ -130,7 +133,7 @@ async fn run(
                         pending.insert(deferred_batch.recording_index, deferred_batch);
                     }
                 }
-                flush_all(&store, &client, &mut pending).await;
+                flush_all(&store, &client, &org_rx, &mut pending).await;
                 break;
             }
             // Drain completed background flush tasks without blocking the loop.
@@ -148,7 +151,7 @@ async fn run(
                 }
             }
             _ = flush_ticker.tick() => {
-                flush_due(&store, &client, &mut pending, &mut background_flushes);
+                flush_due(&store, &client, &org_rx, &mut pending, &mut background_flushes);
             }
             maybe_update = inbox.recv() => {
                 let Some(update) = maybe_update else { break };
@@ -162,6 +165,7 @@ async fn run(
                         background_flushes.spawn(flush_batch(
                             Arc::clone(&store),
                             Arc::clone(&client),
+                            org_rx.clone(),
                             batch,
                         ));
                     }
@@ -176,6 +180,7 @@ async fn run(
 fn flush_due(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     pending: &mut HashMap<i64, RecordingBatch>,
     background_flushes: &mut JoinSet<Option<RecordingBatch>>,
 ) {
@@ -187,7 +192,12 @@ fn flush_due(
         .collect();
     for recording_index in &due_ids {
         if let Some(batch) = pending.remove(recording_index) {
-            background_flushes.spawn(flush_batch(Arc::clone(store), Arc::clone(client), batch));
+            background_flushes.spawn(flush_batch(
+                Arc::clone(store),
+                Arc::clone(client),
+                org_rx.clone(),
+                batch,
+            ));
         }
     }
 }
@@ -195,11 +205,17 @@ fn flush_due(
 async fn flush_all(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     pending: &mut HashMap<i64, RecordingBatch>,
 ) {
     let mut tasks: JoinSet<Option<RecordingBatch>> = JoinSet::new();
     for (_, batch) in pending.drain() {
-        tasks.spawn(flush_batch(Arc::clone(store), Arc::clone(client), batch));
+        tasks.spawn(flush_batch(
+            Arc::clone(store),
+            Arc::clone(client),
+            org_rx.clone(),
+            batch,
+        ));
     }
     while let Some(result) = tasks.join_next().await {
         if let Err(panic_err) = result {
@@ -216,6 +232,7 @@ async fn flush_all(
 async fn flush_batch(
     store: Arc<SqliteStateStore>,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut batch: RecordingBatch,
 ) -> Option<RecordingBatch> {
     let recording_index = batch.recording_index;
@@ -224,15 +241,15 @@ async fn flush_batch(
         None => {
             // Re-queue with a fresh `opened_at` pushed
             // `ORG_RESOLVE_RETRY_BACKOFF` into the future so the next
-            // `flush_due` skips this batch until the producer has stamped the
-            // org and the start notifier has populated the cloud id. Without
-            // this, a missing field pins `deadline()` permanently in the past
-            // and the select loop becomes a busy-wait until the row is ready.
+            // `flush_due` skips this batch until the start notifier has
+            // populated the cloud id. Without this, a missing field pins
+            // `deadline()` permanently in the past and the select loop becomes
+            // a busy-wait until the row is ready.
             batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
             return Some(batch);
         }
     };
-    let (Some(org_id), Some(recording_id)) = (row.org_id, row.recording_id) else {
+    let (Some(org_id), Some(recording_id)) = (org_rx.borrow().clone(), row.recording_id) else {
         batch.defer(ORG_RESOLVE_RETRY_BACKOFF);
         return Some(batch);
     };
@@ -356,8 +373,8 @@ mod tests {
 
     #[test]
     fn defer_slides_deadline_forward_into_future() {
-        // The defer path is invoked when the recording's org_id isn't
-        // stamped yet. Without it the batch's deadline stays in the past
+        // The defer path is invoked when no current org_id is configured
+        // yet. Without it the batch's deadline stays in the past
         // and the select loop spins; with it the next deadline is at
         // least `delay` from now.
         let mut batch = RecordingBatch::new(1);
