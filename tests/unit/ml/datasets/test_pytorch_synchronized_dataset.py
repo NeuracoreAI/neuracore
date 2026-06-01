@@ -1032,8 +1032,10 @@ class TestDatasetIntegration:
         assert len(dataset) == 45
 
     @patch("neuracore.login")
-    def test_error_handling_in_getitem(self, mock_login, mock_synchronized_dataset):
-        """Test error handling in __getitem__ method."""
+    def test_getitem_propagates_load_sample_error(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        """Test __getitem__ propagates load_sample failures."""
         input_spec: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
@@ -1059,9 +1061,10 @@ class TestDatasetIntegration:
         with patch.object(dataset, "load_sample") as mock_load_sample:
             mock_load_sample.side_effect = Exception("Load error")
 
-            # Should propagate the error after max retries
             with pytest.raises(Exception):
                 _ = dataset[0]
+
+            mock_load_sample.assert_called_once_with(0, 0)
 
 
 class TestPerformanceAndOptimization:
@@ -1125,38 +1128,6 @@ class TestPerformanceAndOptimization:
         # Check structure: first 9 should be episode 0, next 9 episode 1, etc.
         assert all(idx == 0 for idx in dataset.episode_indices[:9])
         assert all(idx == 1 for idx in dataset.episode_indices[9:18])
-
-
-class TestErrorRecovery:
-    """Test error recovery and robustness."""
-
-    def test_error_count_tracking(self, mock_synchronized_dataset):
-        """Test error count tracking in parent class."""
-        input_spec: CrossEmbodimentDescription = {
-            ROBOT_ID: {
-                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
-            }
-        }
-        output_spec: CrossEmbodimentDescription = {
-            ROBOT_ID: {
-                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
-                    DataType.JOINT_TARGET_POSITIONS, 3
-                )
-            }
-        }
-
-        dataset = PytorchSynchronizedDataset(
-            synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
-            output_prediction_horizon=3,
-            input_preprocessing_config=_default_preprocessing_config(),
-            output_preprocessing_config=_default_preprocessing_config(),
-        )
-
-        # Initial error count should be 0
-        assert dataset._error_count == 0
-        assert dataset._max_error_count == 100
 
 
 class TestIntegrationWithPyTorchDataLoader:
