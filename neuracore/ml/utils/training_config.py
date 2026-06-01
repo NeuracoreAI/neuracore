@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Any
 
 import hydra
+from names_generator import generate_name
 from neuracore_types import CrossEmbodimentDescription, DataType
 from omegaconf import DictConfig, OmegaConf
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms, get_algorithm
+from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.utils.robot_data_spec_utils import (
     convert_cross_embodiment_description_names_to_ids,
@@ -23,7 +25,99 @@ from neuracore.core.utils.training_input_args_validation import (
     validate_training_params,
 )
 
+# Packaged algorithm Hydra fragments live next to the base training config.
 ALGORITHM_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "algorithm"
+
+# Hydra may resolve ``local_output_dir`` more than once during a single process:
+#
+# 1. Hydra resolves ``hydra.run.dir`` before entering ``main`` and creates that
+#    directory.
+# 2. Our training setup later merges the default config again, which can resolve
+#    the same interpolation a second time.
+#
+# Without this cache, an auto-incremented name could move from ``run_1`` to
+# ``run_2`` after Hydra creates ``run_1``. The key includes the cache root,
+# requested name, and auto-increment flag so unrelated runs do not share names.
+_RESOLVED_TRAINING_RUN_NAMES: dict[tuple[str, str, bool], str] = {}
+
+
+def _resolve_training_run_name(
+    training_name: str | None,
+    training_name_auto_increment: bool | str = False,
+) -> str:
+    """Return the final directory name for a training run.
+
+    This resolver is intentionally scoped to the *name* segment only. The full
+    path remains regular Hydra/OmegaConf interpolation in ``config.yaml``:
+    ``$HOME/.neuracore/training/runs/${_resolved_training_name}``.
+
+    Behavior:
+      - Missing names get a random human-readable name from ``names_generator``.
+      - Explicit names fail if their run directory already exists.
+      - Explicit names auto-increment to ``name_1``, ``name_2``, etc. when
+        ``training_name_auto_increment`` is true.
+      - Repeated resolutions in one process return the same value, matching the
+        directory Hydra already created.
+    """
+    # Hydra CLI/config values can arrive as real bools or strings.
+    auto_increment = (
+        str(training_name_auto_increment).lower() == "true"
+        if not isinstance(training_name_auto_increment, bool)
+        else training_name_auto_increment
+    )
+
+    # Treat YAML null, CLI-style "null"/"None", and blank strings as "no name".
+    requested_name = "" if training_name is None else str(training_name).strip()
+
+    # Reuse the first answer for this run. This is what prevents duplicate
+    # folders when Hydra resolves once before main and our code resolves again.
+    cache_key = (str(DEFAULT_CACHE_DIR), requested_name, auto_increment)
+    if cache_key in _RESOLVED_TRAINING_RUN_NAMES:
+        return _RESOLVED_TRAINING_RUN_NAMES[cache_key]
+
+    # No explicit name: generate a readable random one, converting underscores
+    # to hyphens to match the existing run-name style.
+    if (
+        training_name is None
+        or requested_name.lower() in {"none", "null"}
+        or requested_name == ""
+    ):
+        resolved_name = generate_name(style="underscore").replace("_", "-")
+        _RESOLVED_TRAINING_RUN_NAMES[cache_key] = resolved_name
+        return resolved_name
+
+    run_name = requested_name
+    runs_dir = DEFAULT_CACHE_DIR / "runs"
+    run_dir = runs_dir / run_name
+
+    # The requested name is free, so keep it exactly as supplied.
+    if not run_dir.exists():
+        _RESOLVED_TRAINING_RUN_NAMES[cache_key] = run_name
+        return run_name
+
+    # The requested name is taken and the caller asked for strict behavior.
+    if not auto_increment:
+        raise FileExistsError(
+            f"A training named {run_name!r} already exists at {run_dir}. "
+            "Either use a different training_name, or set "
+            "training_name_auto_increment=true to use an incremented name."
+        )
+
+    # Find the first available suffix using the conventional ``name_N`` format.
+    suffix = 1
+    while (runs_dir / f"{run_name}_{suffix}").exists():
+        suffix += 1
+    resolved_name = f"{run_name}_{suffix}"
+    _RESOLVED_TRAINING_RUN_NAMES[cache_key] = resolved_name
+    return resolved_name
+
+
+OmegaConf.register_new_resolver(
+    "resolve_training_run_name",
+    _resolve_training_run_name,
+    use_cache=True,
+    replace=True,
+)
 
 
 def _normalize_algorithm_name(name: str) -> str:

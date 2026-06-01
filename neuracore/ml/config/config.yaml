@@ -75,8 +75,10 @@ preprocessing:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
         size: [224, 224]
 
-# Output directory (generated dynamically with the resolver)
-local_output_dir: ${resolve_output_dir:${training_name},${training_name_auto_increment}}
+# Resolve the name separately from the full path so Hydra can still own
+# hydra.run.dir creation while Neuracore controls duplicate-name behavior.
+_resolved_training_name: ${resolve_training_run_name:${training_name},${training_name_auto_increment}}
+local_output_dir: ${oc.env:HOME}/.neuracore/training/runs/${_resolved_training_name}
 
 # Hydra configuration
 hydra:

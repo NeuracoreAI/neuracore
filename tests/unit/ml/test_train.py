@@ -35,7 +35,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
-    _resolve_output_dir,
     _resolve_recording_cache_dir,
     assert_valid_batch_size,
     determine_optimal_batch_size,
@@ -47,9 +46,11 @@ from neuracore.ml.train import (
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
 from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
 from neuracore.ml.utils.training_config import (
+    _RESOLVED_TRAINING_RUN_NAMES,
     _resolve_algorithm_name_and_supported_data_types,
     _resolve_algorithm_name_config,
     _resolve_cross_embodiment_description,
+    _resolve_training_run_name,
     resolve_to_complete_config,
     resolve_user_input_config,
 )
@@ -633,85 +634,81 @@ class TestSetupLogging:
         assert (new_dir / "train.log").exists()
 
 
-class TestResolveOutputDir:
-    """Tests for local output directory resolver behavior."""
+class TestTrainingConfigMerge:
+    """Tests for native Hydra user config composition."""
 
-    def test_resolve_output_dir_fails_when_training_exists_and_auto_increment_false(
+    def test_training_run_name_fails_when_name_exists_and_auto_increment_false(
         self, monkeypatch, tmp_path
     ):
-        """Strict default: fail if training name already exists."""
+        """Strict mode rejects a user-provided name that already has a run dir."""
+        _RESOLVED_TRAINING_RUN_NAMES.clear()
         training_name = "duplicate-run"
-        base_dir = tmp_path / ".neuracore" / "training" / "runs"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / training_name).mkdir()
-
+        runs_dir = tmp_path / ".neuracore" / "training" / "runs"
+        (runs_dir / training_name).mkdir(parents=True)
         monkeypatch.setattr(
-            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+            "neuracore.ml.utils.training_config.DEFAULT_CACHE_DIR",
+            tmp_path / ".neuracore" / "training",
         )
 
         with pytest.raises(
             FileExistsError, match=r"A training named .* already exists"
         ):
-            _resolve_output_dir(training_name, training_name_auto_increment=False)
+            _resolve_training_run_name(
+                training_name, training_name_auto_increment=False
+            )
 
-    def test_resolve_output_dir_uses_suffix_when_auto_increment_true(
+    def test_training_run_name_uses_suffix_when_auto_increment_true(
         self, monkeypatch, tmp_path
     ):
-        """Opt-in auto-increment: use training_name_1 when training_name exists."""
+        """Auto-increment skips existing suffixes and returns the first free name."""
+        _RESOLVED_TRAINING_RUN_NAMES.clear()
         training_name = "duplicate-run"
-        base_dir = tmp_path / ".neuracore" / "training" / "runs"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / training_name).mkdir()
-
+        runs_dir = tmp_path / ".neuracore" / "training" / "runs"
+        (runs_dir / training_name).mkdir(parents=True)
+        (runs_dir / f"{training_name}_1").mkdir()
         monkeypatch.setattr(
-            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+            "neuracore.ml.utils.training_config.DEFAULT_CACHE_DIR",
+            tmp_path / ".neuracore" / "training",
         )
 
-        path = _resolve_output_dir(training_name, training_name_auto_increment=True)
-        assert path == str(base_dir / f"{training_name}_1")
-        assert not Path(path).exists()
+        assert (
+            _resolve_training_run_name(training_name, training_name_auto_increment=True)
+            == f"{training_name}_2"
+        )
 
-    def test_resolve_output_dir_uses_next_suffix_when_named_training_prefix_exists(
+    def test_training_run_name_reuses_first_resolution_after_hydra_creates_dir(
         self, monkeypatch, tmp_path
     ):
-        """Auto-increment finds next free suffix (training_name_2 when _1 exists)."""
+        """Second config resolution must reuse the directory Hydra already created."""
+        _RESOLVED_TRAINING_RUN_NAMES.clear()
         training_name = "duplicate-run"
-        base_dir = tmp_path / ".neuracore" / "training" / "runs"
-        base_dir.mkdir(parents=True, exist_ok=True)
-        (base_dir / training_name).mkdir()
-        (base_dir / f"{training_name}_1").mkdir()
-
+        runs_dir = tmp_path / ".neuracore" / "training" / "runs"
+        (runs_dir / training_name).mkdir(parents=True)
         monkeypatch.setattr(
-            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
+            "neuracore.ml.utils.training_config.DEFAULT_CACHE_DIR",
+            tmp_path / ".neuracore" / "training",
         )
 
-        path = _resolve_output_dir(training_name, training_name_auto_increment=True)
-        assert path == str(base_dir / f"{training_name}_2")
-        assert not Path(path).exists()
-
-    def test_resolve_output_dir_no_suffix_when_training_does_not_exist(
-        self, monkeypatch, tmp_path
-    ):
-        """When training name does not exist, use it as-is."""
-        training_name = "unique-run"
-        base_dir = tmp_path / ".neuracore" / "training" / "runs"
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        monkeypatch.setattr(
-            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
-        )
-
-        path_strict = _resolve_output_dir(
-            training_name, training_name_auto_increment=False
-        )
-        path_auto = _resolve_output_dir(
+        resolved_name = _resolve_training_run_name(
             training_name, training_name_auto_increment=True
         )
-        assert path_strict == path_auto == str(base_dir / training_name)
+        # Simulate Hydra creating hydra.run.dir before the training main runs.
+        (runs_dir / resolved_name).mkdir()
 
+        assert (
+            _resolve_training_run_name(training_name, training_name_auto_increment=True)
+            == resolved_name
+        )
 
-class TestTrainingConfigMerge:
-    """Tests for native Hydra user config composition."""
+    def test_training_run_name_generates_random_name_when_missing(self, monkeypatch):
+        """Missing names use names_generator and normalize underscores to hyphens."""
+        _RESOLVED_TRAINING_RUN_NAMES.clear()
+        monkeypatch.setattr(
+            "neuracore.ml.utils.training_config.generate_name",
+            Mock(return_value="random_run"),
+        )
+
+        assert _resolve_training_run_name(None) == "random-run"
 
     def test_main_passes_cfg_through_to_hydra_composed_config(self, monkeypatch):
         captured_configs: list[DictConfig] = []
@@ -778,9 +775,7 @@ class TestTrainingConfigMerge:
     def test_complete_config_uses_training_name_for_output_dir(
         self, monkeypatch, tmp_path
     ):
-        monkeypatch.setattr(
-            "neuracore.ml.train.DEFAULT_CACHE_DIR", tmp_path / ".neuracore" / "training"
-        )
+        monkeypatch.setenv("HOME", str(tmp_path))
 
         cfg = resolve_user_input_config(
             OmegaConf.create({
