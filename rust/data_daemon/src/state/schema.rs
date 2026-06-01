@@ -153,8 +153,6 @@ pub struct RecordingRow {
     /// URL reads this straight from the row; downstream coordinators wait for
     /// it, so an offline recording stays pending until the daemon is online.
     pub recording_id: Option<String>,
-    /// Organisation that owns the recording (backfilled when known).
-    pub org_id: Option<String>,
     /// Robot identifier — first half of the source key.
     pub robot_id: Option<String>,
     /// Robot instance — second half of the source key.
@@ -210,7 +208,6 @@ impl RecordingRow {
         Ok(RecordingRow {
             recording_index: row.try_get("recording_index")?,
             recording_id: row.try_get("recording_id")?,
-            org_id: row.try_get("org_id")?,
             robot_id: row.try_get("robot_id")?,
             robot_instance: row.try_get("robot_instance")?,
             robot_name: row.try_get("robot_name")?,

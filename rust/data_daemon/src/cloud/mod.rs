@@ -18,6 +18,7 @@
 //! routine can drive ordered shutdown by dropping the handle.
 
 pub mod cloud_files;
+pub mod org_watcher;
 pub mod progress;
 pub mod recording_cancel_notifier;
 pub mod recording_start_notifier;
@@ -28,6 +29,7 @@ pub mod uploader;
 
 #[allow(unused_imports)]
 pub use cloud_files::{cloud_file_list, content_type_for, ContentKind};
+pub use org_watcher::{spawn_org_watcher, OrgIdRx, OrgWatcherHandle};
 pub use progress::{spawn_progress_reporter, ProgressReporterHandle};
 pub use recording_cancel_notifier::{
     spawn_recording_cancel_notifier, RecordingCancelNotifierHandle,

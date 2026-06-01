@@ -20,6 +20,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
 
@@ -47,6 +48,7 @@ pub fn spawn_recording_stop_notifier(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> RecordingStopNotifierHandle {
     let mut subscriber = bus.subscribe();
@@ -61,7 +63,7 @@ pub fn spawn_recording_stop_notifier(
                 tracing::debug!(?signal, "recording-stop notifier shutting down before sweep");
                 return;
             }
-            _ = sweep_pending(&store, &client) => {}
+            _ = sweep_pending(&store, &client, &org_rx) => {}
         }
         loop {
             tokio::select! {
@@ -80,7 +82,7 @@ pub fn spawn_recording_stop_notifier(
                         // no-ops for a recording that is not yet stopped.
                         Ok(DaemonEvent::RecordingStopped { recording_index })
                         | Ok(DaemonEvent::RecordingCloudIdAssigned { recording_index }) => {
-                            notify_backend(&store, &client, recording_index).await;
+                            notify_backend(&store, &client, &org_rx, recording_index).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -89,7 +91,7 @@ pub fn spawn_recording_stop_notifier(
                                 "recording-stop notifier missed bus events; \
                                  re-sweeping pending notifications",
                             );
-                            sweep_pending(&store, &client).await;
+                            sweep_pending(&store, &client, &org_rx).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::debug!("event bus closed; recording-stop notifier exiting");
@@ -103,7 +105,7 @@ pub fn spawn_recording_stop_notifier(
     RecordingStopNotifierHandle { join }
 }
 
-async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
+async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
     let pending = match store.recordings_pending_stop_notify().await {
         Ok(rows) => rows,
         Err(error) => {
@@ -119,13 +121,14 @@ async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         "sweeping recordings with pending backend stop notify",
     );
     for row in pending {
-        notify_backend(store, client, row.recording_index).await;
+        notify_backend(store, client, org_rx, row.recording_index).await;
     }
 }
 
 async fn notify_backend(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     recording_index: i64,
 ) {
     let row = match store.get_recording(recording_index).await {
@@ -165,13 +168,13 @@ async fn notify_backend(
         );
         return;
     };
-    let Some(org_id) = row.org_id else {
-        // No org stamped yet — the producer never reached the daemon's
-        // recording row with one. Without it we can't address the POST.
+    let Some(org_id) = org_rx.borrow().clone() else {
+        // No current org configured yet. Without it we can't address the POST;
+        // the next sweep retries once the config watcher has a current org.
         tracing::warn!(
             recording_index,
             recording_id,
-            "recording has no org_id at stop time; skipping backend notify",
+            "no current org_id configured at stop time; skipping backend notify",
         );
         return;
     };
@@ -243,11 +246,7 @@ mod tests {
 
     /// Insert a recording, stamp its cloud id (as if `/start` was notified),
     /// and return its local index.
-    async fn seed_notified_recording(
-        store: &SqliteStateStore,
-        org_id: &str,
-        recording_id: &str,
-    ) -> i64 {
+    async fn seed_notified_recording(store: &SqliteStateStore, recording_id: &str) -> i64 {
         let index = store
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
@@ -255,7 +254,6 @@ mod tests {
                 robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
                 dataset_name: Some("warehouse"),
-                org_id: Some(org_id),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
@@ -266,6 +264,14 @@ mod tests {
             .await
             .expect("mark start notified");
         index
+    }
+
+    /// A live-org receiver fixed at `org`. The sender is leaked so the channel
+    /// stays open for the test's duration.
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
     }
 
     #[tokio::test]
@@ -279,7 +285,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        let index = seed_notified_recording(&store, "org-1", "rec-stop-1").await;
+        let index = seed_notified_recording(&store, "rec-stop-1").await;
         store
             .mark_recording_stopped(index, 1)
             .await
@@ -294,6 +300,7 @@ mod tests {
             store.clone(),
             bus.clone(),
             client,
+            org_rx(Some("org-1")),
             shutdown_tx.subscribe(),
         );
 
@@ -333,7 +340,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        let index = seed_notified_recording(&store, "org-1", "rec-offline-1").await;
+        let index = seed_notified_recording(&store, "rec-offline-1").await;
         store
             .mark_recording_stopped(index, 1)
             .await
@@ -344,8 +351,13 @@ mod tests {
 
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_stop_notifier(store.clone(), bus, client, shutdown_tx.subscribe());
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         timeout(Duration::from_secs(3), async {
             loop {
@@ -389,8 +401,13 @@ mod tests {
 
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_stop_notifier(store, bus.clone(), client, shutdown_tx.subscribe());
+        let handle = spawn_recording_stop_notifier(
+            store,
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         bus.publish(DaemonEvent::RecordingStopped {
             recording_index: 9_999,
@@ -422,7 +439,6 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                org_id: Some("org-1"),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
                 ..NewRecording::default()
             })
@@ -439,8 +455,13 @@ mod tests {
 
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_stop_notifier(store, bus.clone(), client, shutdown_tx.subscribe());
+        let handle = spawn_recording_stop_notifier(
+            store,
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         bus.publish(DaemonEvent::RecordingStopped {
             recording_index: index,
@@ -472,7 +493,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        let index = seed_notified_recording(&store, "org-1", "rec-recovered-1").await;
+        let index = seed_notified_recording(&store, "rec-recovered-1").await;
         store
             .mark_recording_stopped(index, 1)
             .await
@@ -487,6 +508,7 @@ mod tests {
             store.clone(),
             bus.clone(),
             client,
+            org_rx(Some("org-1")),
             shutdown_tx.subscribe(),
         );
 
@@ -518,7 +540,7 @@ mod tests {
         // recording actually stops.
         let server = MockServer::start().await;
         let (store, _dir) = open_store().await;
-        let index = seed_notified_recording(&store, "org-1", "rec-running-1").await;
+        let index = seed_notified_recording(&store, "rec-running-1").await;
         // Deliberately NOT stopped.
 
         let auth = Arc::new(StaticAuthProvider::new("token-1"));
@@ -526,8 +548,13 @@ mod tests {
 
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_stop_notifier(store, bus.clone(), client, shutdown_tx.subscribe());
+        let handle = spawn_recording_stop_notifier(
+            store,
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         bus.publish(DaemonEvent::RecordingCloudIdAssigned {
             recording_index: index,

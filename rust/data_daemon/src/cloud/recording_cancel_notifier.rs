@@ -18,6 +18,7 @@ use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
 
@@ -45,6 +46,7 @@ pub fn spawn_recording_cancel_notifier(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> RecordingCancelNotifierHandle {
     let mut subscriber = bus.subscribe();
@@ -56,7 +58,7 @@ pub fn spawn_recording_cancel_notifier(
                 tracing::debug!(?signal, "recording-cancel notifier shutting down before sweep");
                 return;
             }
-            _ = sweep_pending(&store, &client) => {}
+            _ = sweep_pending(&store, &client, &org_rx) => {}
         }
         loop {
             tokio::select! {
@@ -68,7 +70,7 @@ pub fn spawn_recording_cancel_notifier(
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::RecordingCancelled { recording_index }) => {
-                            notify_backend(&store, &client, recording_index).await;
+                            notify_backend(&store, &client, &org_rx, recording_index).await;
                         }
                         Ok(_) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -77,7 +79,7 @@ pub fn spawn_recording_cancel_notifier(
                                 "recording-cancel notifier missed bus events; \
                                  re-sweeping pending notifications",
                             );
-                            sweep_pending(&store, &client).await;
+                            sweep_pending(&store, &client, &org_rx).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             tracing::debug!("event bus closed; recording-cancel notifier exiting");
@@ -91,7 +93,7 @@ pub fn spawn_recording_cancel_notifier(
     RecordingCancelNotifierHandle { join }
 }
 
-async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
+async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
     let pending = match store.recordings_pending_cancel_notify().await {
         Ok(rows) => rows,
         Err(error) => {
@@ -107,13 +109,14 @@ async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         "sweeping recordings with pending backend cancel notify",
     );
     for row in pending {
-        notify_backend(store, client, row.recording_index).await;
+        notify_backend(store, client, org_rx, row.recording_index).await;
     }
 }
 
 async fn notify_backend(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     recording_index: i64,
 ) {
     let row = match store.get_recording(recording_index).await {
@@ -145,10 +148,10 @@ async fn notify_backend(
         return;
     };
 
-    let Some(org_id) = row.org_id else {
+    let Some(org_id) = org_rx.borrow().clone() else {
         tracing::warn!(
             recording_index,
-            "recording has no org_id at cancel time; skipping backend notify",
+            "no current org_id configured at cancel time; skipping backend notify",
         );
         return;
     };
@@ -218,13 +221,11 @@ mod tests {
     async fn seed_cancelled_recording_with_cloud_id(
         store: &SqliteStateStore,
         cloud_id: &str,
-        org_id: &str,
     ) -> i64 {
         let row = store
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                org_id: Some(org_id),
                 start_timestamp_ns: 0,
                 ..NewRecording::default()
             })
@@ -239,6 +240,14 @@ mod tests {
         index
     }
 
+    /// A live-org receiver fixed at `org`. The sender is leaked so the channel
+    /// stays open for the test's duration.
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
+    }
+
     #[tokio::test]
     async fn posts_backend_cancel_on_recording_cancelled_event() {
         let server = MockServer::start().await;
@@ -250,7 +259,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        seed_cancelled_recording_with_cloud_id(&store, "rec-cancel-1", "org-1").await;
+        seed_cancelled_recording_with_cloud_id(&store, "rec-cancel-1").await;
 
         let auth = Arc::new(StaticAuthProvider::new("token-1"));
         let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
@@ -260,6 +269,7 @@ mod tests {
             store.clone(),
             bus.clone(),
             client,
+            org_rx(Some("org-1")),
             shutdown_tx.subscribe(),
         );
 
@@ -292,15 +302,19 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        let index =
-            seed_cancelled_recording_with_cloud_id(&store, "rec-offline-cancel", "org-1").await;
+        let index = seed_cancelled_recording_with_cloud_id(&store, "rec-offline-cancel").await;
 
         let auth = Arc::new(StaticAuthProvider::new("token-1"));
         let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_cancel_notifier(store.clone(), bus, client, shutdown_tx.subscribe());
+        let handle = spawn_recording_cancel_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         timeout(Duration::from_secs(3), async {
             loop {
@@ -344,7 +358,6 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                org_id: Some("org-1"),
                 start_timestamp_ns: 0,
                 ..NewRecording::default()
             })
@@ -356,8 +369,13 @@ mod tests {
         let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
         let bus = EventBus::new();
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
-        let handle =
-            spawn_recording_cancel_notifier(store, bus.clone(), client, shutdown_tx.subscribe());
+        let handle = spawn_recording_cancel_notifier(
+            store,
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
 
         bus.publish(DaemonEvent::RecordingCancelled {
             recording_index: row.recording_index,

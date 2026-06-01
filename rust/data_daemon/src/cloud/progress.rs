@@ -19,6 +19,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::ApiClient;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{
     ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord, TraceWriteStatus,
@@ -50,6 +51,7 @@ impl ProgressReporterHandle {
 pub fn spawn_progress_reporter(
     store: SqliteStateStore,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> ProgressReporterHandle {
     let store = Arc::new(store);
@@ -65,7 +67,7 @@ pub fn spawn_progress_reporter(
                     break;
                 }
                 _ = ticker.tick() => {
-                    sweep_once(&store, &client).await;
+                    sweep_once(&store, &client, &org_rx).await;
                 }
             }
         }
@@ -73,7 +75,7 @@ pub fn spawn_progress_reporter(
     ProgressReporterHandle { join }
 }
 
-async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
+async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
     let recordings = match store.list_recordings().await {
         Ok(rows) => rows,
         Err(error) => {
@@ -94,7 +96,7 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>) {
         if recording.cancelled_at.is_some() {
             continue;
         }
-        let Some(org_id) = recording.org_id.clone() else {
+        let Some(org_id) = org_rx.borrow().clone() else {
             continue;
         };
         // Every cloud URL needs the backend `recording_id`. A None here means
@@ -299,10 +301,7 @@ mod tests {
     /// local `recording_index`.
     async fn seed_recording(store: &SqliteStateStore, cloud_recording_id: &str) -> i64 {
         let recording = store
-            .create_recording(NewRecording {
-                org_id: Some("org-1"),
-                ..NewRecording::default()
-            })
+            .create_recording(NewRecording::default())
             .await
             .unwrap();
         store
@@ -310,6 +309,14 @@ mod tests {
             .await
             .unwrap();
         recording.recording_index
+    }
+
+    /// A live-org receiver fixed at `org`. The sender is leaked so the channel
+    /// stays open for the test's duration.
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
     }
 
     fn client(server: &MockServer) -> Arc<ApiClient> {
@@ -370,7 +377,7 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api).await;
+        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, Some(2));
@@ -409,7 +416,7 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api).await;
+        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert_eq!(recording.expected_trace_count, None);
@@ -476,7 +483,7 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api).await;
+        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(
@@ -528,7 +535,7 @@ mod tests {
             .unwrap();
 
         let api = client(&server);
-        sweep_once(&Arc::new(store.clone()), &api).await;
+        sweep_once(&Arc::new(store.clone()), &api, &org_rx(Some("org-1"))).await;
 
         let recording = store.get_recording(recording_index).await.unwrap().unwrap();
         assert!(matches!(

@@ -18,6 +18,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::api::models::RegisterTraceRequest;
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::cloud_file_list;
+use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
@@ -52,6 +53,7 @@ pub fn spawn_registration(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> RegistrationCoordinatorHandle {
     let mut subscriber = bus.subscribe();
@@ -70,7 +72,7 @@ pub fn spawn_registration(
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::TraceWritten { .. }) => {
-                            drain_once(&store, &bus, &client, MAX_WAIT).await;
+                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -79,13 +81,13 @@ pub fn spawn_registration(
                                 "registration coordinator missed bus events; \
                                 falling back to a drain"
                             );
-                            drain_once(&store, &bus, &client, MAX_WAIT).await;
+                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_once(&store, &bus, &client, MAX_WAIT).await;
+                    drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
                 }
             }
         }
@@ -97,6 +99,7 @@ async fn drain_once(
     store: &Arc<SqliteStateStore>,
     bus: &EventBus,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     max_wait: Duration,
 ) {
     let claimed = match store
@@ -113,13 +116,14 @@ async fn drain_once(
         return;
     }
     tracing::debug!(count = claimed.len(), "claimed traces for registration");
-    submit_batch(store, bus, client, claimed).await;
+    submit_batch(store, bus, client, org_rx, claimed).await;
 }
 
 async fn submit_batch(
     store: &Arc<SqliteStateStore>,
     bus: &EventBus,
     client: &Arc<ApiClient>,
+    org_rx: &OrgIdRx,
     traces: Vec<TraceRecord>,
 ) {
     // Group by recording so we can look up the recording row once per
@@ -151,10 +155,10 @@ async fn submit_batch(
             }
         };
 
-        let Some(org_id) = row.org_id.clone() else {
+        let Some(org_id) = org_rx.borrow().clone() else {
             tracing::warn!(
                 recording_index,
-                "recording has no org_id yet; rolling traces back to pending"
+                "no current org_id configured yet; rolling traces back to pending"
             );
             rollback_to_pending(store, &traces).await;
             continue;
@@ -283,15 +287,23 @@ mod tests {
         (store, dir)
     }
 
-    /// Seed a recording (with `org_id` set) plus a single written trace under
-    /// it, returning the local `recording_index`. When `cloud_id` is `Some`,
-    /// the recording's cloud `recording_id` is persisted (as the start notifier
-    /// would) so registration finds one; when `None`, the recording has no
-    /// cloud id yet and registration must defer.
+    /// A live-org receiver fixed at `org` for the duration of a test. The
+    /// sender is leaked so the channel stays open and `borrow()` keeps
+    /// returning the seeded value.
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
+    }
+
+    /// Seed a recording plus a single written trace under it, returning the
+    /// local `recording_index`. When `cloud_id` is `Some`, the recording's
+    /// cloud `recording_id` is persisted (as the start notifier would) so
+    /// registration finds one; when `None`, the recording has no cloud id yet
+    /// and registration must defer.
     async fn seed_written_trace(
         store: &SqliteStateStore,
         trace_id: &str,
-        org_id: &str,
         cloud_id: Option<&str>,
     ) -> i64 {
         let recording_index = store
@@ -301,7 +313,6 @@ mod tests {
                 robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
                 dataset_name: Some("warehouse"),
-                org_id: Some(org_id),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
@@ -359,8 +370,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        let recording_index =
-            seed_written_trace(&store, "trace-1", "org-1", Some("cloud-rec-1")).await;
+        let recording_index = seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
         let bus = EventBus::new();
         let mut subscriber = bus.subscribe();
         let api = client(&server);
@@ -371,7 +381,14 @@ mod tests {
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
-        submit_batch(&Arc::new(store.clone()), &bus, &api, claimed).await;
+        submit_batch(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            claimed,
+        )
+        .await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(
@@ -423,7 +440,7 @@ mod tests {
             .await;
 
         let (store, _dir) = open_store().await;
-        seed_written_trace(&store, "trace-1", "org-1", Some("cloud-rec-1")).await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
         let bus = EventBus::new();
         let api = client(&server);
 
@@ -431,7 +448,14 @@ mod tests {
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
-        submit_batch(&Arc::new(store.clone()), &bus, &api, claimed).await;
+        submit_batch(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            claimed,
+        )
+        .await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
@@ -448,7 +472,6 @@ mod tests {
                 robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
                 dataset_name: Some("warehouse"),
-                org_id: None,
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
@@ -480,7 +503,7 @@ mod tests {
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
-        submit_batch(&Arc::new(store.clone()), &bus, &api, claimed).await;
+        submit_batch(&Arc::new(store.clone()), &bus, &api, &org_rx(None), claimed).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
@@ -499,7 +522,7 @@ mod tests {
 
         let (store, _dir) = open_store().await;
         // No cloud id seeded: the start notifier hasn't populated one yet.
-        let recording_index = seed_written_trace(&store, "trace-1", "org-1", None).await;
+        let recording_index = seed_written_trace(&store, "trace-1", None).await;
         assert_eq!(
             store
                 .get_recording(recording_index)
@@ -517,7 +540,14 @@ mod tests {
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
-        submit_batch(&Arc::new(store.clone()), &bus, &api, claimed).await;
+        submit_batch(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            claimed,
+        )
+        .await;
 
         // The recording still has no cloud id — none is minted locally.
         let row = store.get_recording(recording_index).await.unwrap().unwrap();

@@ -16,9 +16,9 @@ use anyhow::{Context, Result};
 use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
-    read_org_id_from_config, spawn_progress_reporter, spawn_recording_cancel_notifier,
-    spawn_recording_start_notifier, spawn_recording_stop_notifier, spawn_registration,
-    spawn_status_updater, spawn_uploader, StatusUpdate,
+    read_org_id_from_config, spawn_org_watcher, spawn_progress_reporter,
+    spawn_recording_cancel_notifier, spawn_recording_start_notifier, spawn_recording_stop_notifier,
+    spawn_registration, spawn_status_updater, spawn_uploader, OrgWatcherHandle, StatusUpdate,
 };
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
@@ -290,11 +290,13 @@ fn run_daemon(
             let transport =
                 IpcTransport::bring_up().context("failed to bring up iceoryx2 transport")?;
 
-            // Resolve the org_id from the local SDK-managed config first,
+            // Resolve the initial org_id from the local SDK-managed config,
             // falling back to the daemon profile (NCD_CURRENT_ORG_ID or the
-            // YAML profile override). Either source is fine — the local
-            // config file is the most up-to-date, and the profile override
-            // is the documented escape hatch for tests.
+            // YAML profile override). This is only the seed value: the cloud
+            // coordinators spawn a watcher over `config_path` and read the
+            // *current* org live, so an org selected after launch is picked up
+            // without restarting the daemon. The profile override remains the
+            // documented escape hatch for tests (the file watcher's fallback).
             let config_path = dirs::home_dir()
                 .map(|home| home.join(".neuracore").join("config.json"))
                 .unwrap_or_else(|| std::path::PathBuf::from(".neuracore/config.json"));
@@ -320,6 +322,8 @@ fn run_daemon(
                         event_bus.clone(),
                         api_client,
                         Arc::new(recordings_root.clone()),
+                        config_path.clone(),
+                        org_id.clone(),
                         shutdown_tx.clone(),
                     )),
                     Err(error) => {
@@ -343,7 +347,6 @@ fn run_daemon(
                 });
 
             let dispatcher_context = DispatcherContext {
-                org_id: org_id.clone(),
                 event_bus: Some(event_bus.clone()),
             };
             let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
@@ -514,6 +517,7 @@ fn ensure_default_profile_exists(profiles: &ProfileManager) -> Result<(), Profil
 /// Bundle of handles for the cloud coordinators.
 struct CloudHandles {
     connection: crate::connection::MonitorHandle,
+    org_watcher: OrgWatcherHandle,
     registration: crate::cloud::RegistrationCoordinatorHandle,
     uploader: crate::cloud::UploaderHandle,
     status: crate::cloud::StatusUpdaterHandle,
@@ -530,6 +534,7 @@ impl CloudHandles {
         // or pending requests that may need a moment to wrap up after the
         // shutdown signal fires.
         self.connection.join().await;
+        self.org_watcher.join().await;
         self.registration.join().await;
         self.uploader.join().await;
         self.status.join().await;
@@ -555,9 +560,16 @@ fn spawn_cloud_coordinators(
     event_bus: EventBus,
     client: Arc<ApiClient>,
     recordings_root: Arc<PathBuf>,
+    config_path: PathBuf,
+    fallback_org_id: Option<String>,
     shutdown_tx: crate::lifecycle::signals::ShutdownHandle,
 ) -> CloudHandles {
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
+    // Watch the SDK config for the current org; every coordinator reads the
+    // live value at the moment it POSTs rather than a value frozen onto the
+    // recording row at creation time.
+    let (org_rx, org_watcher) =
+        spawn_org_watcher(config_path, fallback_org_id, shutdown_tx.subscribe());
     let connection = spawn_connection_monitor(
         Arc::clone(&client),
         event_bus.clone(),
@@ -567,6 +579,7 @@ fn spawn_cloud_coordinators(
         state_store.clone(),
         event_bus.clone(),
         Arc::clone(&client),
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
     let uploader = spawn_uploader(
@@ -574,6 +587,7 @@ fn spawn_cloud_coordinators(
         event_bus.clone(),
         Arc::clone(&client),
         Arc::clone(&recordings_root),
+        org_rx.clone(),
         status_tx.clone(),
         shutdown_tx.subscribe(),
     );
@@ -584,35 +598,41 @@ fn spawn_cloud_coordinators(
     let status = spawn_status_updater(
         state_store.clone(),
         Arc::clone(&client),
+        org_rx.clone(),
         status_rx,
         shutdown_tx.subscribe(),
     );
     let progress = spawn_progress_reporter(
         state_store.clone(),
         Arc::clone(&client),
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
     let recording_start = spawn_recording_start_notifier(
         state_store.clone(),
         event_bus.clone(),
         Arc::clone(&client),
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
     let recording_stop = spawn_recording_stop_notifier(
         state_store.clone(),
         event_bus.clone(),
         Arc::clone(&client),
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
     let recording_cancel = spawn_recording_cancel_notifier(
         state_store,
         event_bus,
         Arc::clone(&client),
+        org_rx,
         shutdown_tx.subscribe(),
     );
 
     CloudHandles {
         connection,
+        org_watcher,
         registration,
         uploader,
         status,

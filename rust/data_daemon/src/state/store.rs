@@ -61,8 +61,6 @@ pub struct NewRecording<'a> {
     pub dataset_id: Option<&'a str>,
     /// Dataset human-readable name.
     pub dataset_name: Option<&'a str>,
-    /// Organisation that owns the recording.
-    pub org_id: Option<&'a str>,
     /// Producer capture-clock window lower bound (Unix nanoseconds).
     pub start_timestamp_ns: i64,
 }
@@ -415,16 +413,15 @@ impl StateStore for SqliteStateStore {
         let now = Utc::now().naive_utc();
         let result = sqlx::query(
             "INSERT INTO recordings ( \
-                 robot_id, robot_instance, robot_name, dataset_id, dataset_name, org_id, \
+                 robot_id, robot_instance, robot_name, dataset_id, dataset_name, \
                  start_timestamp_ns, started_at, created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?8)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
         .bind(new.robot_name)
         .bind(new.dataset_id)
         .bind(new.dataset_name)
-        .bind(new.org_id)
         .bind(new.start_timestamp_ns)
         .bind(now)
         .execute(&mut *tx)
@@ -1114,7 +1111,6 @@ mod tests {
                 robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
                 dataset_name: Some("warehouse"),
-                org_id: Some("org-1"),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
@@ -1137,7 +1133,6 @@ mod tests {
         assert_eq!(row.recording_id, None, "cloud id starts NULL");
         assert_eq!(row.robot_id.as_deref(), Some("robot-1"));
         assert_eq!(row.robot_instance, Some(0));
-        assert_eq!(row.org_id.as_deref(), Some("org-1"));
     }
 
     #[tokio::test]
