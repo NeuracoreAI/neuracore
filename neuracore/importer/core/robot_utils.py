@@ -1,11 +1,7 @@
 """Utility functions for kinematics calculations."""
 
 import numpy as np
-import pink
 import pinocchio
-from pink.limits import ConfigurationLimit
-from pink.tasks import FrameTask
-from pinocchio.robot_wrapper import RobotWrapper
 from scipy.spatial.transform import Rotation as R
 
 
@@ -19,25 +15,23 @@ class RobotUtils:
             urdf_path: Path to the URDF file.
             packages_dir: Path to the packages directory.
         """
-        self.urdf_path = urdf_path
-        self.packages_dir = packages_dir
-        self.robot = self.build_pinnochio_robot()
-
-    def build_pinnochio_robot(self) -> RobotWrapper:
-        """Build Pinnochio robot model from URDF."""
-        robot = RobotWrapper.BuildFromURDF(self.urdf_path, self.packages_dir)
-        return robot
+        self.model = pinocchio.buildModelFromUrdf(urdf_path)
+        self.data = self.model.createData()
 
     def _run_ik(
         self,
-        target_pose: pinocchio.SE3,
+        target_pos: np.ndarray,
+        target_rot: np.ndarray,
         ee_frame: str,
         q0: np.ndarray,
     ) -> dict[str, float]:
-        """Run IK to find joint positions for a given target pose.
+        """Run DLS IK to find joint positions for a given target pose.
+
+        Uses damped least squares: J^T (J J^T + λI)^{-1} error.
 
         Args:
-            target_pose: Target SE3 pose
+            target_pos: Target position [x, y, z]
+            target_rot: Target rotation matrix (3x3)
             ee_frame: End-effector frame name
             q0: Initial joint configuration
 
@@ -47,47 +41,53 @@ class RobotUtils:
         Raises:
             ValueError: If IK does not converge
         """
-        ee_task = FrameTask(ee_frame, [1.0, 1.0, 1.0], [1.0, 1.0, 1.0])
-        ee_task.set_target(target_pose)
+        frame_id = self.model.getFrameId(ee_frame)
+        lower = self.model.lowerPositionLimit
+        upper = self.model.upperPositionLimit
+        M_target = pinocchio.SE3(target_rot, target_pos)
 
-        config_limit = ConfigurationLimit(self.robot.model, config_limit_gain=0.5)
-        configuration = pink.Configuration(self.robot.model, self.robot.data, q0)
-
-        # IK parameters
-        dt = 1e-2
         stop_thres = 1e-6
-        max_steps = 1000
+        max_steps = 200
+        damping = 1e-4
+        n_restarts = 5
 
-        # Run IK
-        error_norm = np.linalg.norm(ee_task.compute_error(configuration))
-        nb_steps = 0
+        rng = np.random.default_rng(0)
+        candidates = [q0] + [rng.uniform(lower, upper) for _ in range(n_restarts - 1)]
 
-        while error_norm > stop_thres and nb_steps < max_steps:
-            dv = pink.solve_ik(
-                configuration,
-                tasks=[ee_task],
-                limits=[config_limit],
-                dt=dt,
-                damping=1e-6,
-                solver="quadprog",
-            )
-            q_out = pinocchio.integrate(self.robot.model, configuration.q, dv * dt)
-            configuration = pink.Configuration(self.robot.model, self.robot.data, q_out)
-            pinocchio.updateFramePlacements(self.robot.model, self.robot.data)
-            error_norm = np.linalg.norm(ee_task.compute_error(configuration))
-            nb_steps += 1
+        error_norm = float("inf")
+        for q_init in candidates:
+            q = np.clip(q_init, lower, upper)
+            for _ in range(max_steps):
+                pinocchio.computeJointJacobians(self.model, self.data, q)
+                pinocchio.updateFramePlacements(self.model, self.data)
 
-        if error_norm > stop_thres:
+                err = pinocchio.log6(
+                    self.data.oMf[frame_id].inverse() * M_target
+                ).vector
+                error_norm = float(np.linalg.norm(err))
+
+                if error_norm < stop_thres:
+                    break
+
+                J = pinocchio.getFrameJacobian(
+                    self.model, self.data, frame_id, pinocchio.ReferenceFrame.LOCAL
+                )
+                J_pinv = J.T @ np.linalg.inv(J @ J.T + damping * np.eye(6))
+                q = np.clip(q + J_pinv @ err, lower, upper)
+
+            if error_norm < stop_thres:
+                break
+
+        if error_norm >= stop_thres:
             raise ValueError("IK did not converge")
-        return {
-            j: q.item() for j, q in zip(self.robot.model.names[1:], configuration.q[:])
-        }
+
+        return {name: float(q[i]) for i, name in enumerate(self.model.names[1:])}
 
     def joint_positions_to_end_effector_pose(
         self,
         joint_positions: dict[str, float],
         ee_frame: str,
-    ) -> list[float]:
+    ) -> np.ndarray:
         """Compute end-effector pose from joint positions using forward kinematics.
 
         Args:
@@ -98,23 +98,21 @@ class RobotUtils:
             numpy array containing [x, y, z, qx, qy, qz, qw] (position and quaternion
             in xyzw order).
         """
-        q_default = pinocchio.neutral(self.robot.model)
+        q_default = pinocchio.neutral(self.model)
         q = np.array([
             joint_positions.get(name, q_default[i])
-            for i, name in enumerate(self.robot.model.names[1:])
+            for i, name in enumerate(self.model.names[1:])
         ])
-        pinocchio.forwardKinematics(self.robot.model, self.robot.data, q)
-        pinocchio.updateFramePlacements(self.robot.model, self.robot.data)
+        pinocchio.forwardKinematics(self.model, self.data, q)
+        pinocchio.updateFramePlacements(self.model, self.data)
 
-        frame_id = self.robot.model.getFrameId(ee_frame)
-        if frame_id >= len(self.robot.data.oMf):
+        frame_id = self.model.getFrameId(ee_frame)
+        if frame_id >= len(self.data.oMf):
             raise ValueError(f"Unknown frame: {ee_frame}")
 
-        placement = self.robot.data.oMf[frame_id]
-        xyz = placement.translation
+        placement = self.data.oMf[frame_id]
         quat_xyzw = R.from_matrix(placement.rotation).as_quat()
-
-        return np.concatenate([xyz, quat_xyzw])
+        return np.concatenate([placement.translation, quat_xyzw])
 
     def end_effector_to_joint_positions(
         self,
@@ -135,29 +133,16 @@ class RobotUtils:
         Raises:
             ValueError: If IK does not converge
         """
-        xyz = end_effector_pose[:3]
+        xyz = np.array(end_effector_pose[:3])
         quat = np.array(end_effector_pose[3:7])
-        quat = quat / np.linalg.norm(quat)
+        quat /= np.linalg.norm(quat)
+        rot = R.from_quat(quat).as_matrix()
 
-        # Convert to SE3 transform
-        rotation_matrix = R.from_quat(quat).as_matrix()
-        target_pose = pinocchio.SE3(rotation_matrix, np.array(xyz))
-
-        # Initialise with previous IK solution if available
         if prev_ik_solution is not None:
             try:
-                q0 = np.array(prev_ik_solution)
-                return self._run_ik(target_pose, ee_frame, q0)
+                return self._run_ik(xyz, rot, ee_frame, np.array(prev_ik_solution))
             except ValueError:
-                # Failed to find IK solution by initialising with previous solution
-                # Try to initialise with midpoint of joint limits
                 pass
 
-        # Initialise with midpoint of joint limits
-        q0 = (
-            self.robot.model.lowerPositionLimit + self.robot.model.upperPositionLimit
-        ) / 2
-        try:
-            return self._run_ik(target_pose, ee_frame, q0)
-        except ValueError:
-            raise
+        q0 = (self.model.lowerPositionLimit + self.model.upperPositionLimit) / 2
+        return self._run_ik(xyz, rot, ee_frame, q0)

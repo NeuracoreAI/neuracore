@@ -121,7 +121,6 @@ setup(
             "tensorflow-datasets>=4.9.9",
             "tensorflow-cpu>=2.20.0",
             "pin==3.9.0",
-            "pin-pink==4.2.0",
             "coal==3.0.2",
             "eigenpy==3.12.0",
             "cmeel-boost==1.89.0",
