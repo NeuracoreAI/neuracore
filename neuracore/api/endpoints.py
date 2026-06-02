@@ -5,6 +5,8 @@ managing local model endpoints, and handling the lifecycle of model deployments
 including deployment, status monitoring, and deletion operations.
 """
 
+import logging
+
 from neuracore_types import (
     DeploymentConfig,
     DeploymentRequest,
@@ -32,15 +34,25 @@ from neuracore.core.utils.robot_data_spec_utils import (
     resolve_embodiment_descriptions_with_override,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _resolve_robot_id(
     robot_id: str | None, robot_name: str | None, instance: int
 ) -> str | None:
-    """Resolve robot_id from explicit id or robot name."""
-    if robot_name is not None:
-        assert robot_id is None, "Specify only one of robot_id or robot_name."
-        return _get_robot(robot_name, instance).id
-    return robot_id
+    """Resolve robot_id from explicit id or robot name.
+
+    If both robot ID and robot name are provided, robot_id takes precedence.
+    If both are omitted, the active robot is used as a fallback.
+    """
+    if robot_id is not None:
+        if robot_name is not None:
+            logger.warning(
+                "Both robot_id and robot_name were provided; "
+                "using robot_id and ignoring robot_name."
+            )
+        return robot_id
+    return _get_robot(robot_name, instance).id
 
 
 def policy(
@@ -65,7 +77,8 @@ def policy(
         model_file: Path to the model file to load.
         device: Torch device to run the model on (CPU or GPU, or MPS).
         robot_id: Robot ID used to select embodiments from the model archive when
-            input/output embodiments are not provided.
+            input/output embodiments are not provided. If both robot_id and
+            robot_name are omitted, the active robot is used as a fallback.
         robot_name: Robot name to resolve to robot_id before model loading.
         instance: Robot instance number used with robot_name resolution.
 
@@ -76,7 +89,18 @@ def policy(
         EndpointError: If the model download or initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+    if not (input_embodiment_description and output_embodiment_description):
+        try:
+            robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+        except Exception:
+            raise ValueError(
+                "Missing input_embodiment_description or "
+                "output_embodiment_description for policy inference. "
+                "Tried to load from training metadata or the model archive "
+                "using robot_id/robot_name/active robot, but failed. "
+                "Please provide a robot_id/robot_name or connect to "
+                "a robot first."
+            )
 
     return _policy(
         input_embodiment_description=input_embodiment_description,
@@ -113,7 +137,8 @@ def policy_local_server(
         port: TCP port number where the local server will run.
         host: Host address to bind the server to. Defaults to localhost.
         robot_id: Robot ID used to select embodiments from the model archive when
-            input/output embodiments are not provided.
+            input/output embodiments are not provided. If both robot_id and
+            robot_name are omitted, the active robot is used as a fallback.
         robot_name: Robot name to resolve to robot_id before model loading.
         instance: Robot instance number used with robot_name resolution.
 
@@ -124,7 +149,18 @@ def policy_local_server(
         EndpointError: If the server startup or model initialization fails.
         ConfigError: If there is an error trying to get the current org.
     """
-    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+    if not (input_embodiment_description and output_embodiment_description):
+        try:
+            robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+        except Exception:
+            raise ValueError(
+                "Missing input_embodiment_description or "
+                "output_embodiment_description for policy inference. "
+                "Tried to load from training metadata or the model archive "
+                "using robot_id/robot_name/active robot, but failed. "
+                "Please provide a robot_id/robot_name or connect to "
+                "a robot first."
+            )
 
     return _policy_local_server(
         input_embodiment_description=input_embodiment_description,
@@ -188,7 +224,8 @@ def deploy_model(
             the endpoint will be automatically deleted after this duration.
         gpu_type: Type of GPU to use for deployment.
         robot_id: Robot ID used to select embodiments from the model archive when
-            input/output embodiments are not provided.
+            input/output embodiments are not provided. If both robot_id and
+            robot_name are omitted, the active robot is used as a fallback.
         robot_name: Robot name to resolve to robot_id before model loading.
         instance: Robot instance number used with robot_name resolution.
 
@@ -206,7 +243,19 @@ def deploy_model(
     """
     auth = get_auth()
     org_id = get_current_org()
-    robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+
+    if not (input_embodiment_description and output_embodiment_description):
+        try:
+            robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+        except Exception:
+            raise ValueError(
+                "Missing input_embodiment_description or "
+                "output_embodiment_description for policy inference. "
+                "Tried to load from training metadata or the model archive "
+                "using robot_id/robot_name/active robot, but failed. "
+                "Please provide a robot_id/robot_name or connect to "
+                "a robot first."
+            )
 
     (
         resolved_input_embodiment_description,

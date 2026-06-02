@@ -3,6 +3,7 @@
 This module tests the DirectPolicy and other core endpoint classes.
 """
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -18,10 +19,16 @@ from neuracore_types import (
 )
 
 import neuracore as nc
+import neuracore.api.endpoints as endpoints
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import DirectPolicy
+from neuracore.core.exceptions import RobotError
 
 TEST_API_KEY = "test_api_key"
+TEST_ROBOT_ID = "test_robot"
+TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
+TRAIN_RUN_NAME = "test_run"
+TRAIN_JOB_ID = "job_123"
 
 
 def _ordered_names(names_or_mapping):
@@ -50,6 +57,231 @@ def _mock_policy_output(output_embodiment_description):
             for name in _ordered_names(names_or_mapping)
         }
     return output
+
+
+def test_resolve_robot_id_returns_explicit_robot_id(monkeypatch):
+    """When only robot_id is provided, it should be returned without lookup."""
+
+    assert (
+        endpoints._resolve_robot_id(robot_id="robot-123", robot_name=None, instance=0)
+        == "robot-123"
+    )
+
+
+def test_resolve_robot_id_resolves_robot_name_via_get_robot(monkeypatch):
+    """When only robot_name is provided, it should resolve via get_robot."""
+    robot_name = "my-robot"
+    instance = 2
+    stub_robot = SimpleNamespace(id="resolved-robot-id")
+    mock_get_robot = MagicMock(return_value=stub_robot)
+    monkeypatch.setattr("neuracore.api.core.get_robot", mock_get_robot)
+
+    resolved = endpoints._resolve_robot_id(
+        robot_id=None, robot_name=robot_name, instance=instance
+    )
+    assert resolved == "resolved-robot-id"
+    mock_get_robot.assert_called_once_with(robot_name, instance)
+
+
+def test_resolve_robot_id_prioritizes_robot_id_when_both_are_provided(caplog):
+    """When both selectors are provided, robot_id should take precedence."""
+    resolved = endpoints._resolve_robot_id(
+        robot_id="robot-123", robot_name="my-robot", instance=0
+    )
+    assert resolved == "robot-123"
+
+
+def test_resolve_robot_id_falls_back_to_active_robot(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    monkeypatch,
+    mock_urdf,
+):
+    """When neither selector is provided, use the active robot."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    resolved = endpoints._resolve_robot_id(robot_id=None, robot_name=None, instance=0)
+    assert resolved == "mock_robot_id"
+
+
+def test_resolve_robot_id_raises_when_no_active_robot(reset_neuracore):
+    """When neither selector is provided and there is no active robot, raise."""
+    with pytest.raises(RobotError, match="No active robot"):
+        endpoints._resolve_robot_id(robot_id=None, robot_name=None, instance=0)
+
+
+def _login_and_connect_robot(
+    mock_auth_requests, mocked_org_id: str, *, mock_urdf: str | None = None
+) -> None:
+    nc.login(TEST_API_KEY)
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json=TEST_ROBOT_PAYLOAD,
+        status_code=200,
+    )
+    if mock_urdf is not None:
+        nc.connect_robot(TEST_ROBOT_ID, urdf_path=mock_urdf)
+    else:
+        nc.connect_robot(TEST_ROBOT_ID)
+
+
+def _mock_training_job_metadata(mock_auth_requests, mocked_org_id: str) -> None:
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/{TRAIN_JOB_ID}",
+        json={
+            "input_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_POSITIONS": {"0": "joint1"}}
+            },
+            "output_cross_embodiment_description": {
+                "mock_robot_id": {"JOINT_TARGET_POSITIONS": {"0": "joint1"}}
+            },
+        },
+        status_code=200,
+    )
+
+
+def _setup_direct_policy_train_run_mocks(
+    mock_auth_requests,
+    mocked_org_id: str,
+    port: int,
+    *,
+    job_id: str = TRAIN_JOB_ID,
+    train_run_name: str = TRAIN_RUN_NAME,
+) -> None:
+    localhost = f"http://127.0.0.1:{port}"
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=[{
+            "id": job_id,
+            "name": train_run_name,
+            "status": "completed",
+        }],
+        status_code=200,
+    )
+    _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/{job_id}/model_url",
+        json={"url": f"{localhost}/model.nc.zip"},
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{localhost}/model.nc.zip",
+        content=b"dummy model content",
+        status_code=200,
+    )
+
+
+def _patch_policy_inference_model_load(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_model = SimpleNamespace(
+        eval=lambda: None,
+        model_init_description=SimpleNamespace(
+            input_dataset_statistics={},
+            output_prediction_horizon=1,
+        ),
+    )
+    monkeypatch.setattr(
+        "neuracore.ml.utils.policy_inference.load_model_from_nc_archive",
+        lambda model_file, device=None: (
+            fake_model,
+            {},
+            {},
+            {"JOINT_POSITIONS": []},
+            {},
+        ),
+    )
+
+
+def _assert_policy_embodiments_from_job_metadata(direct_policy: DirectPolicy) -> None:
+    assert direct_policy._policy.input_embodiment_description[
+        DataType.JOINT_POSITIONS
+    ] == {"0": "joint1"}
+    assert direct_policy._policy.output_embodiment_description[
+        DataType.JOINT_TARGET_POSITIONS
+    ] == {"0": "joint1"}
+
+
+def test_policy_loads_embodiments_from_job_metadata_for_robot_id(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    monkeypatch,
+):
+    """Direct policy should load embodiments from job metadata when robot_id is set."""
+    nc.login(TEST_API_KEY)
+    port = np.random.randint(8000, 9000)
+    _setup_direct_policy_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    _patch_policy_inference_model_load(monkeypatch)
+
+    direct_policy = nc.policy(
+        train_run_name=TRAIN_RUN_NAME,
+        robot_id=TEST_ROBOT_PAYLOAD["robot_id"],
+    )
+
+    _assert_policy_embodiments_from_job_metadata(direct_policy)
+
+
+def test_policy_loads_embodiments_from_job_metadata_for_robot_name(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    monkeypatch,
+    mock_urdf,
+):
+    """Direct policy should resolve robot_name and load job metadata embodiments."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id, mock_urdf=mock_urdf)
+    port = np.random.randint(8000, 9000)
+    _setup_direct_policy_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    _patch_policy_inference_model_load(monkeypatch)
+
+    direct_policy = nc.policy(
+        train_run_name=TRAIN_RUN_NAME,
+        robot_name=TEST_ROBOT_ID,
+    )
+
+    _assert_policy_embodiments_from_job_metadata(direct_policy)
+
+
+def test_policy_loads_embodiments_from_job_metadata_for_active_robot(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    monkeypatch,
+    mock_urdf,
+):
+    """Direct policy should use the active robot when no robot selector is provided."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id, mock_urdf=mock_urdf)
+    port = np.random.randint(8000, 9000)
+    _setup_direct_policy_train_run_mocks(mock_auth_requests, mocked_org_id, port)
+    _patch_policy_inference_model_load(monkeypatch)
+
+    direct_policy = nc.policy(train_run_name=TRAIN_RUN_NAME)
+
+    _assert_policy_embodiments_from_job_metadata(direct_policy)
+
+
+def test_policy_raises_when_missing_embodiments_and_robot_selector(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_model_mar,
+    monkeypatch,
+):
+    """Direct policy requires embodiments or a robot_id/robot_name/active robot."""
+    nc.login(TEST_API_KEY)
+    _patch_policy_inference_model_load(monkeypatch)
+    with pytest.raises(ValueError, match="Missing input_embodiment_description"):
+        nc.policy(model_file=mock_model_mar)
 
 
 @pytest.fixture
@@ -575,26 +807,12 @@ def test_connect_direct_policy_with_train_run(
     """Test connecting to a direct in-process policy using a training run name."""
     nc.login(TEST_API_KEY)
     port = np.random.randint(8000, 9000)
-    localhost = f"http://127.0.0.1:{port}"
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[{
-            "id": "job_direct_123",
-            "name": "test_run_direct",
-            "status": "completed",
-        }],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_direct_123/model_url",
-        json={"url": f"{localhost}/model.nc.zip"},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{localhost}/model.nc.zip",
-        content=b"dummy model content",
-        status_code=200,
+    _setup_direct_policy_train_run_mocks(
+        mock_auth_requests,
+        mocked_org_id,
+        port,
+        job_id="job_direct_123",
+        train_run_name="test_run_direct",
     )
 
     input_embodiment_description = {

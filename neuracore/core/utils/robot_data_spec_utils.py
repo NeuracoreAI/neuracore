@@ -257,10 +257,9 @@ def resolve_embodiment_descriptions_with_override(
             or output_cross_embodiment_description is None
         ):
             raise ValueError(
-                "Must provide both input_cross_embodiment_description and "
-                "output_cross_embodiment_description, or provide robot_id "
-                "with job_id or model_file to load them from training "
-                "metadata or the model archive."
+                "Failed to load input_cross_embodiment_description and "
+                "output_cross_embodiment_description from training metadata "
+                "or the model archive."
             )
 
         (
@@ -282,6 +281,7 @@ def resolve_embodiment_descriptions_with_override(
         or resolved_output_embodiment_description is None
     ):
         raise ValueError(
+            "Failed to resolve embodiment descriptions. "
             "Must provide both input_embodiment_description and "
             "output_embodiment_description, or provide robot_id with job_id/model_file "
             "to load them from training metadata or the model archive."

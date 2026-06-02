@@ -8,6 +8,7 @@ import pytest
 import requests_mock
 
 import neuracore as nc
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
@@ -162,16 +163,26 @@ def mock_model_mar(tmp_path):
 def reset_neuracore():
     """Reset Neuracore global state between tests."""
     original_auth = nc.core.auth._auth
+    global_state = GlobalSingleton()
+    original_active_robot = global_state._active_robot
+    original_active_dataset_id = global_state._active_dataset_id
+    original_has_validated_version = global_state._has_validated_version
 
     nc.api._active_robot = None
     nc.api._active_dataset_id = None
     nc.api._active_recording_id = None
+    global_state._active_robot = None
+    global_state._active_dataset_id = None
+    global_state._has_validated_version = False
 
     nc.core.auth._auth = nc.core.auth.Auth()
 
     yield
 
     nc.core.auth._auth = original_auth
+    global_state._active_robot = original_active_robot
+    global_state._active_dataset_id = original_active_dataset_id
+    global_state._has_validated_version = original_has_validated_version
 
 
 @pytest.fixture
