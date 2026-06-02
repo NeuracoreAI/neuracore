@@ -178,6 +178,10 @@ def test_validate_input_sync_point_raises_when_required_data_type_missing() -> N
 
 def test_preprocess_builds_inputs_and_masks_for_multiple_data_types() -> None:
     policy_inference = _make_policy_inference()
+    policy_inference.input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {0: "joint1"},
+        DataType.JOINT_VELOCITIES: {0: "joint1"},
+    }
     policy_inference.input_dataset_statistics = {
         DataType.JOINT_POSITIONS: [{"joint1": {}}, {"joint2": {}}],
         DataType.JOINT_VELOCITIES: [{"joint1": {}}],
@@ -203,12 +207,47 @@ def test_preprocess_builds_inputs_and_masks_for_multiple_data_types() -> None:
     }
     assert batch.inputs_mask[DataType.JOINT_POSITIONS].tolist() == [[1.0, 0.0]]
     assert batch.inputs_mask[DataType.JOINT_VELOCITIES].tolist() == [[1.0]]
-    assert len(batch.inputs[DataType.JOINT_POSITIONS]) == 1
+    assert len(batch.inputs[DataType.JOINT_POSITIONS]) == 2
     assert len(batch.inputs[DataType.JOINT_VELOCITIES]) == 1
+
+
+def test_preprocess_pads_missing_cross_embodiment_indices() -> None:
+    policy_inference = _make_policy_inference()
+    policy_inference.input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {
+            0: "joint1",
+            1: "joint2",
+        },
+    }
+    policy_inference.input_dataset_statistics = {
+        DataType.JOINT_POSITIONS: [{"joint1": {}}, {"joint2": {}}, {"joint3": {}}],
+    }
+    sync_point = SynchronizedPoint(
+        timestamp=123.0,
+        data={
+            DataType.JOINT_POSITIONS: {
+                "joint1": JointData(timestamp=123.0, value=0.1),
+                "joint2": JointData(timestamp=123.0, value=0.2),
+            },
+        },
+    )
+
+    batch = policy_inference._preprocess(sync_point)
+
+    assert batch.inputs_mask[DataType.JOINT_POSITIONS].tolist() == [[1.0, 1.0, 0.0]]
+    assert len(batch.inputs[DataType.JOINT_POSITIONS]) == 3
+    joint_values = torch.cat(
+        [joint.value for joint in batch.inputs[DataType.JOINT_POSITIONS]], dim=-1
+    )
+    assert joint_values.shape[-1] == 3
+    assert joint_values[0, -1, 2].item() == 0.0
 
 
 def test_preprocess_raises_when_statistics_for_data_type_missing() -> None:
     policy_inference = _make_policy_inference()
+    policy_inference.input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {0: "joint1"},
+    }
     policy_inference.input_dataset_statistics = {}
     sync_point = SynchronizedPoint(
         timestamp=123.0,
@@ -228,6 +267,9 @@ def test_preprocess_raises_when_statistics_for_data_type_missing() -> None:
 
 def test_preprocess_raises_when_received_items_exceed_training_limit() -> None:
     policy_inference = _make_policy_inference()
+    policy_inference.input_embodiment_description = {
+        DataType.JOINT_POSITIONS: {0: "joint1", 1: "joint2"},
+    }
     policy_inference.input_dataset_statistics = {
         DataType.JOINT_POSITIONS: [{"joint1": {}}],
     }
