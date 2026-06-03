@@ -86,7 +86,7 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("CLI stop for daemon pid=%d", pid)
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon()
 
 
 def test_cli_stop_removes_pid_file() -> None:
@@ -95,7 +95,7 @@ def test_cli_stop_removes_pid_file() -> None:
     with online_daemon_running():
         pid_path = get_daemon_pid_path()
         assert pid_path.exists(), f"PID file missing before stop: {pid_path}"
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon()
 
     assert_no_pid_file()
 
@@ -104,7 +104,7 @@ def test_cli_stop_unlinks_socket() -> None:
     """Unix domain socket is removed after a clean CLI stop."""
 
     with online_daemon_running():
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon()
 
     assert_socket_unlinked()
 
@@ -125,14 +125,14 @@ def test_sigterm_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("SIGTERM to daemon pid=%d", pid)
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigterm")
 
 
 def test_sigterm_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGTERM."""
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigterm")
 
     assert_no_pid_file()
 
@@ -141,7 +141,7 @@ def test_sigterm_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGTERM."""
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigterm")
 
     assert_socket_unlinked()
 
@@ -162,14 +162,14 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
     with online_daemon_running():
         pid = _single_runner_pid()
         logger.info("SIGINT to daemon pid=%d", pid)
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigint")
 
 
 def test_sigint_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGINT."""
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigint")
 
     assert_no_pid_file()
 
@@ -178,7 +178,7 @@ def test_sigint_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGINT."""
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigint")
 
     assert_socket_unlinked()
 
@@ -244,9 +244,9 @@ def test_sigterm_then_cli_stop_is_idempotent() -> None:
     """
 
     with online_daemon_running():
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigterm")
         # Daemon is gone; CLI stop must handle the already-stopped case cleanly.
-        stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="cli")
 
 
 def test_sigint_then_sigterm_exits_cleanly() -> None:
@@ -257,8 +257,8 @@ def test_sigint_then_sigterm_exits_cleanly() -> None:
     """
 
     with online_daemon_running():
-        stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
-        stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
+        stop_daemon(method="sigint")
+        stop_daemon(method="sigterm")
 
 
 # ---------------------------------------------------------------------------
