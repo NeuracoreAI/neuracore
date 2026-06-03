@@ -1,0 +1,7 @@
+cases:
+  - algorithm: CNNMLP
+    gpu_type: NVIDIA_TESLA_T4
+  - algorithm: ACT
+    gpu_type: NVIDIA_TESLA_V100
+  - algorithm: Pi0
+    gpu_type: NVIDIA_A100_80GB

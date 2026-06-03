@@ -1,0 +1,114 @@
+name: Integration ML Auto Batch Size - Staging
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  discover-algorithms:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.ref_name }}
+    - name: List auto batch size cases
+      id: list
+      env:
+        STAGING_BRANCH: ${{ github.ref_name }}
+      run: |
+        pip install pyyaml -q
+        python3 << 'EOF' >> $GITHUB_OUTPUT
+        import json
+        import os
+
+        import yaml
+
+        staging_branch = os.environ["STAGING_BRANCH"]
+
+        with open("tests/integration/ml/auto_batch_size_cases.yaml") as f:
+            matrix = yaml.safe_load(f)["cases"]
+
+        for case in matrix:
+            test_case = f"{case['algorithm']}_{case['gpu_type']}"
+            if case["num_gpus"] != 1:
+                test_case = f"{test_case}_{case['num_gpus']}GPU"
+            case["test_case"] = test_case
+            case["environment"] = "staging"
+            case["python-version"] = "3.11"
+            case["test-harness-ref"] = staging_branch
+
+        print("matrix=" + json.dumps(matrix))
+        EOF
+
+  start-training:
+    needs: [discover-algorithms]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ matrix.test-harness-ref }}
+    - name: Pull LFS objects
+      run: git lfs pull
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --no-cache-dir --upgrade pip
+        pip install --no-cache-dir ".[dev,ml,examples]"
+
+    - name: Resolve test harness
+      run: |
+        echo "TEST_HARNESS_PATH=tests/integration/ml/test_auto_batch_size.py" >> "$GITHUB_ENV"
+        echo "Test harness environment: staging"
+        echo "Test harness ref: ${{ matrix.test-harness-ref }}"
+        echo "Test harness commit: $(git rev-parse HEAD)"
+        echo "Test harness path: tests/integration/ml/test_auto_batch_size.py"
+        python - << 'EOF'
+        import neuracore
+
+        print(f"Installed neuracore version: {neuracore.__version__}")
+        EOF
+
+    - name: Start training job
+      id: start-training
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+      run: |
+        pytest \
+          -o log_cli=true \
+          --log-cli-level=INFO \
+          --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
+          --log-cli-date-format="%H:%M:%S" \
+          -v \
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.test_case }}]"
+
+    - name: Wait for training terminal status
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+        TRAINING_JOB_ID: ${{ steps.start-training.outputs.training_job_id }}
+      run: |
+        pytest \
+          -o log_cli=true \
+          --log-cli-level=INFO \
+          --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
+          --log-cli-date-format="%H:%M:%S" \
+          -v \
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.test_case }}]"
