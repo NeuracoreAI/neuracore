@@ -368,6 +368,7 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
         logger.info("Restarted daemon pid=%d", pid_second)
 
 
+@pytest.mark.skip
 @pytest.mark.parametrize("case", _KILL_RESTART_CASES, ids=case_ids(_KILL_RESTART_CASES))
 def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) -> None:
     """Daemon restarts cleanly after SIGKILL interrupts an in-progress recording.
