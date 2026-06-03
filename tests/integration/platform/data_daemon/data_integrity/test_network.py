@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    PRE_NETWORK_INTEGRITY_CASES,
+    NETWORK_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
@@ -37,7 +37,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 _CASES = DataDaemonTestBatch(
-    cases=PRE_NETWORK_INTEGRITY_CASES,
+    cases=NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()

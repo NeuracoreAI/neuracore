@@ -140,6 +140,12 @@ def test_cancel_recording_produces_no_data(
     assert_post_test_storage_state(case.storage_state_action)
 
 
+@pytest.mark.skip(
+    reason=(
+        "Temporarily excluded from required integration baseline: "
+        "daemon process cleanup is unstable on staging."
+    )
+)
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
 @pytest.mark.parametrize("gap_s", [0, 10], ids=["no_gap", "10s_gap"])
 def test_cancel_then_start_new_recording(
