@@ -92,8 +92,9 @@ class Auth(metaclass=SingletonMetaclass):
                 # only clear if the saved org isn’t in the new account’s org list.
                 config_manager.config.current_org_id = None
 
-            # always persist the API key.
             config_manager.config.api_key = api_key
+
+            # Persist the config if the config has changed.
             config_manager.save_config()
 
         except requests.exceptions.ConnectionError:
