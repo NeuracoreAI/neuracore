@@ -72,12 +72,26 @@ class ConfigManager:
         """
         self._config = config
 
+    @staticmethod
+    def _read_persisted_config(config_file: Path) -> Config | None:
+        """Read on-disk config without updating the in-memory cache.
+
+        Returns:
+            Parsed config, or None if the file is missing, empty, or unreadable.
+        """
+        try:
+            content = config_file.read_text(encoding=CONFIG_ENCODING).strip()
+            return Config.model_validate_json(content) if content else None
+        except (OSError, ValidationError):
+            return None
+
     def save_config(self) -> None:
         """Save current authentication configuration to persistent storage.
 
         Creates the configuration directory if it doesn't exist and saves
         the current configuration to a JSON configuration file in the user's
         home directory.
+        Skips the write when on-disk config already matches the in-memory state.
 
         Raises:
             ConfigError: If saving the config fails.
@@ -86,8 +100,12 @@ class ConfigManager:
             # Nothing to save
             return
 
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         config_file = CONFIG_DIR / CONFIG_FILE
+        persisted = self._read_persisted_config(config_file)
+        if persisted is not None and persisted == self._config:
+            return
+
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
         try:
             with open(config_file, "w", encoding=CONFIG_ENCODING) as f:
