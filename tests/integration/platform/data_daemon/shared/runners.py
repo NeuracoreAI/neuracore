@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 )
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
+    drain_sse_triggered_daemons,
     stop_daemon,
 )
 from tests.integration.platform.data_daemon.shared.profiles import (
@@ -75,6 +76,7 @@ def online_daemon_running() -> Generator[None, None, None]:
     with scoped_online_mode():
         try:
             stop_daemon()
+            drain_sse_triggered_daemons()
             assert_daemon_cleanup()
             ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
 
@@ -83,4 +85,5 @@ def online_daemon_running() -> Generator[None, None, None]:
             yield
         finally:
             stop_daemon()
+            drain_sse_triggered_daemons()
             assert_daemon_cleanup()

@@ -332,6 +332,25 @@ def delete_recordings_folder() -> None:
         shutil.rmtree(recordings_root, ignore_errors=True)
 
 
+def drain_sse_triggered_daemons(
+    *,
+    settle_s: float = 0.5,
+    max_retries: int = 5,
+) -> None:
+    """Kill daemons that the SSE listener restarted while stop_daemon() was running.
+
+    Args:
+        settle_s: Seconds to wait per iteration for in-flight daemon starts to
+            become visible in the process table.
+        max_retries: Maximum kill-and-recheck cycles before giving up.
+    """
+    for _ in range(max_retries):
+        time.sleep(settle_s)
+        if not _live_daemon_pids():
+            return
+        stop_daemon(method=STOP_METHOD_SIGKILL)
+
+
 def wait_for_daemon_shutdown(
     *, timeout_s: float = 30.0, poll_interval_s: float = 0.5
 ) -> None:
