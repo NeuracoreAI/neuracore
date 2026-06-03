@@ -162,6 +162,44 @@ def _build_daemon_launch_env(
     return cast(dict[str, str], environment)
 
 
+def reset_daemon_state(*, pid_path: Path, db_path: Path, assume_yes: bool) -> int:
+    """Remove all daemon state via the bundled Rust binary's ``reset`` command.
+
+    The Rust ``reset`` subcommand owns the full wipe — it stops a running
+    daemon, then removes the recordings tree, the SQLite state database, the
+    PID file, and the iceoryx2 discovery files together with their
+    ``/dev/shm`` segments. Delegating keeps path resolution and IPC cleanup in
+    one place instead of duplicating it in Python. Returns the subprocess exit
+    code.
+
+    ``assume_yes`` forwards ``--yes`` so the binary skips its confirmation
+    prompt; otherwise the prompt is shown on the inherited terminal.
+
+    Raises:
+        DaemonLifecycleError: when the bundled Rust binary is unavailable.
+    """
+    binary = _rust_daemon_binary()
+    if binary is None:
+        raise DaemonLifecycleError(
+            "Reset requires the bundled Rust data-daemon binary, which is not "
+            "available in this installation."
+        )
+
+    command = [str(binary), "reset"]
+    if assume_yes:
+        command.append("--yes")
+
+    environment = os.environ.copy()
+    environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
+    environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
+    completed = subprocess.run(  # noqa: S603 - bundled binary, fixed argv
+        command,
+        env=environment,
+        check=False,
+    )
+    return completed.returncode
+
+
 def _start_daemon_subprocess(
     pid_path: Path,
     db_path: Path,

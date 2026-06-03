@@ -10,6 +10,7 @@ import typer
 from neuracore.core.exceptions import AuthenticationError
 from neuracore.data_daemon.config_manager.cli_options import (
     ApiKeyOption,
+    AssumeYesOption,
     BackgroundOption,
     BandwidthLimitOption,
     CurrentOrgIdOption,
@@ -41,6 +42,7 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
     launch_new_daemon_subprocess,
     pid_is_running,
     read_pid_from_file,
+    reset_daemon_state,
     terminate_pid,
     wait_for_exit,
 )
@@ -292,6 +294,23 @@ def run_stop() -> None:
 
     typer.echo(f"Failed to stop daemon (pid={pid_value}).", err=True)
     raise typer.Exit(code=1)
+
+
+def run_reset(yes: AssumeYesOption = False) -> None:
+    """Remove all daemon state: recordings, database, and IPC artefacts."""
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
+
+    try:
+        exit_code = reset_daemon_state(
+            pid_path=pid_path, db_path=db_path, assume_yes=yes
+        )
+    except DaemonLifecycleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
 
 
 def run_status() -> None:

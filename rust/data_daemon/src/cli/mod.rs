@@ -6,20 +6,31 @@
 
 mod launch;
 mod profile;
+mod reset;
 mod status;
 mod stop;
 
 use anyhow::Result;
+use clap::builder::styling::{AnsiColor, Styles};
 use clap::{Parser, Subcommand};
 
 use crate::config::env::parse_bytes;
+
+/// Colour scheme for `--help` output: green section headers/usage and cyan
+/// literals so commands and flags stand out from prose.
+const HELP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().bold())
+    .usage(AnsiColor::Green.on_default().bold())
+    .literal(AnsiColor::Cyan.on_default().bold())
+    .placeholder(AnsiColor::Cyan.on_default());
 
 /// Neuracore Data Daemon CLI.
 #[derive(Parser)]
 #[command(
     name = "data-daemon",
     about = "Neuracore Data Daemon CLI.",
-    disable_help_subcommand = true
+    disable_help_subcommand = true,
+    styles = HELP_STYLES
 )]
 struct Cli {
     #[command(subcommand)]
@@ -42,6 +53,12 @@ enum Command {
     },
     /// Stop the data daemon.
     Stop,
+    /// Remove all daemon state: recordings, database, and iceoryx2/shared-memory artefacts.
+    Reset {
+        /// Skip the confirmation prompt — required for non-interactive use.
+        #[arg(long, short = 'y', visible_alias = "force")]
+        yes: bool,
+    },
     /// Show daemon status.
     Status,
     /// Install the data daemon as a system service.
@@ -129,6 +146,7 @@ pub fn run() -> Result<()> {
             debug,
         } => launch::run(profile, background, debug),
         Command::Stop => stop::run(),
+        Command::Reset { yes } => reset::run(yes),
         Command::Status => status::run(),
         Command::Install => {
             println!("Install command is not implemented yet.");
