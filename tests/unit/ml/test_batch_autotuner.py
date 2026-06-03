@@ -61,6 +61,60 @@ class DummyModel(torch.nn.Module):
         return [torch.optim.SGD(self.parameters(), lr=0.1)]
 
 
+def _run_find_optimal_batch_size_with_mocked_bounds(
+    *,
+    cfg_max_batch_size=None,
+    memory_bound=32,
+    estimator_side_effect=None,
+    dataset_len=100,
+):
+    cfg_values = {
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    }
+    if cfg_max_batch_size is not None:
+        cfg_values["max_batch_size"] = cfg_max_batch_size
+    cfg = OmegaConf.create(cfg_values)
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=dataset_len)
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model_factory = functools.partial(DummyModel, device=device)
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+
+    mock_autotuner_instance = MagicMock()
+    mock_autotuner_instance.find_optimal_batch_size.return_value = 4
+
+    estimator_patch_kwargs = {"return_value": memory_bound}
+    if estimator_side_effect is not None:
+        estimator_patch_kwargs = {"side_effect": estimator_side_effect}
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner._estimate_gpu_memory_batch_upper_bound",
+            **estimator_patch_kwargs,
+        ) as mock_estimator,
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
+            return_value=mock_autotuner_instance,
+        ) as mock_autotuner_cls,
+    ):
+        result = find_optimal_batch_size(cfg, model_factory, mock_dataset, device)
+
+    return result, mock_estimator, mock_autotuner_cls
+
+
 def test_find_optimal_runs_probe_batch():
     train_dataset = DummyDataset(length=400)
     val_dataset = DummyDataset(length=100)
@@ -94,50 +148,64 @@ def test_find_optimal_runs_probe_batch():
     assert mock_test.call_args_list[-1][0][0] == int(497 * 0.7)
 
 
-def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner():
-    """When cfg omits min/max batch size, default range is [2, train_len]."""
-    cfg = OmegaConf.create({
-        "validation_split": 0.2,
-        "seed": 42,
-        "num_train_workers": 0,
-        "num_val_workers": 0,
-    })
-    assert "min_batch_size" not in cfg
-    assert "max_batch_size" not in cfg
-
-    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
-    mock_dataset.__len__ = Mock(return_value=100)
-    mock_dataset.collate_fn = lambda x: x
-
-    device = torch.device("cuda:0")
-    model_factory = functools.partial(DummyModel, device=device)
-
-    def fake_random_split(dataset, lengths, generator=None):
-        assert len(dataset) == 100
-        assert lengths == [80, 20]
-        return (DummyDataset(80), DummyDataset(20))
-
-    mock_autotuner_instance = MagicMock()
-    mock_autotuner_instance.find_optimal_batch_size.return_value = 4
-
-    with (
-        patch("torch.cuda.is_available", return_value=True),
-        patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
-        ),
-        patch(
-            "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
-            return_value=mock_autotuner_instance,
-        ) as mock_autotuner_cls,
-    ):
-        result = find_optimal_batch_size(cfg, model_factory, mock_dataset, device)
+def test_find_optimal_batch_size_uses_memory_bound_when_cfg_max_absent():
+    """When cfg omits max batch size, memory_bound is the primary upper bound."""
+    result, mock_estimator, mock_autotuner_cls = (
+        _run_find_optimal_batch_size_with_mocked_bounds(memory_bound=32)
+    )
 
     assert result == 4
-    mock_autotuner_cls.assert_called_once()
+    mock_estimator.assert_called_once()
     kwargs = mock_autotuner_cls.call_args.kwargs
     assert kwargs["min_batch_size"] == 2
-    assert kwargs["max_batch_size"] == 80  # clamp to train dataset length
+    assert kwargs["max_batch_size"] == 32
+
+
+def test_find_optimal_batch_size_cfg_max_caps_memory_bound():
+    """cfg.max_batch_size remains an optional user cap on memory_bound."""
+    _, _, mock_autotuner_cls = _run_find_optimal_batch_size_with_mocked_bounds(
+        cfg_max_batch_size=16,
+        memory_bound=64,
+    )
+
+    kwargs = mock_autotuner_cls.call_args.kwargs
+    assert kwargs["max_batch_size"] == 16
+
+
+def test_find_optimal_batch_size_train_len_caps_final_max():
+    """Train dataset length is still a hard cap on the final max batch size."""
+    _, _, mock_autotuner_cls = _run_find_optimal_batch_size_with_mocked_bounds(
+        memory_bound=512,
+        dataset_len=100,
+    )
+
+    kwargs = mock_autotuner_cls.call_args.kwargs
+    assert kwargs["max_batch_size"] == 80
+
+
+def test_find_optimal_batch_size_estimator_failure_falls_back_to_train_len():
+    """Estimator failures preserve the previous len(train_dataset) fallback."""
+    _, _, mock_autotuner_cls = _run_find_optimal_batch_size_with_mocked_bounds(
+        estimator_side_effect=RuntimeError("estimator failed"),
+    )
+
+    kwargs = mock_autotuner_cls.call_args.kwargs
+    assert kwargs["max_batch_size"] == 80
+
+
+def test_find_optimal_batch_size_logs_all_batch_size_bounds(caplog):
+    """Bounds log includes memory_bound, cfg_bound, train_len, and final_max."""
+    caplog.set_level("INFO", logger="neuracore.ml.trainers.batch_autotuner")
+
+    _run_find_optimal_batch_size_with_mocked_bounds(
+        cfg_max_batch_size=40,
+        memory_bound=64,
+    )
+
+    assert "memory_bound=64" in caplog.text
+    assert "cfg_bound=40" in caplog.text
+    assert "train_len=80" in caplog.text
+    assert "final_max=40" in caplog.text
 
 
 def test_batch_size_validator_test_batch_size_success():

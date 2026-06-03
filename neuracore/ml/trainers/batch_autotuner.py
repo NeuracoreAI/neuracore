@@ -364,6 +364,82 @@ def _validate_probe(
                 break
 
 
+def _estimate_gpu_memory_batch_upper_bound(
+    model_factory: Callable[[], NeuracoreModel],
+    train_dataset: Dataset,
+    train_dataloader_kwargs: dict[str, Any],
+    device: torch.device,
+    num_iterations: int = 2,
+    safety_factor: float = 0.5,
+) -> int:
+    """Estimate a conservative max batch size from a batch_size=1 GPU probe."""
+    train_len = len(train_dataset)
+    if train_len <= 0:
+        return 1
+
+    if not torch.cuda.is_available() or "cuda" not in device.type:
+        return train_len
+
+    model = None
+    optimizers = None
+    train_loader = None
+    try:
+        torch.cuda.empty_cache()
+        gc.collect()
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.mem_get_info(device)
+
+        model = model_factory().to(device)
+        optimizers = model.configure_optimizers()
+        setup_peak_bytes = torch.cuda.max_memory_allocated(device)
+        free_after_setup_bytes, _ = torch.cuda.mem_get_info(device)
+
+        train_loader = DataLoader(
+            train_dataset,
+            **{
+                **train_dataloader_kwargs,
+                "batch_size": 1,
+                "shuffle": False,
+                "drop_last": False,
+            },
+        )
+        memory_monitor = MemoryMonitor(
+            max_ram_utilization=0.8, max_gpu_utilization=0.95
+        )
+
+        torch.cuda.reset_peak_memory_stats(device)
+        _train_probe(
+            model=model,
+            data_loader=train_loader,
+            optimizers=optimizers,
+            memory_monitor=memory_monitor,
+            num_iterations=num_iterations,
+            device=device,
+        )
+        probe_peak_bytes = torch.cuda.max_memory_allocated(device)
+
+        incremental_per_sample_bytes = max(1, probe_peak_bytes - setup_peak_bytes)
+        memory_bound = int(
+            (free_after_setup_bytes * safety_factor) / incremental_per_sample_bytes
+        )
+        memory_bound = max(1, min(memory_bound, train_len))
+
+        logger.info(
+            "Estimated batch size memory bound: %s "
+            "(setup_peak=%.2f GB, probe_peak=%.2f GB, free_after_setup=%.2f GB)",
+            memory_bound,
+            setup_peak_bytes / (1024**3),
+            probe_peak_bytes / (1024**3),
+            free_after_setup_bytes / (1024**3),
+        )
+        return memory_bound
+    finally:
+        del train_loader, optimizers, model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+
 class BatchSizeAutotuner:
     """Auto-tuner for finding the optimal batch size for model training."""
 
@@ -503,17 +579,51 @@ def find_optimal_batch_size(
     """Tune the batch size automatically via binary search."""
     train_dataset, val_dataset = _split_train_val_dataset(cfg, dataset)
 
-    max_batch_size = (
-        cfg.max_batch_size if "max_batch_size" in cfg else len(train_dataset)
-    )
-    max_batch_size = min(max_batch_size, len(train_dataset))  # Clamp to train len
     min_batch_size = cfg.min_batch_size if "min_batch_size" in cfg else 2
 
     num_train_workers = min(cfg.num_train_workers, cpu_count())
     num_val_workers = min(cfg.num_val_workers, cpu_count())
 
+    train_dataloader_kwargs = {
+        "collate_fn": dataset.collate_fn,
+        "num_workers": num_train_workers,
+        "persistent_workers": num_train_workers > 0,
+        "pin_memory": True,
+    }
+    val_dataloader_kwargs = {
+        "collate_fn": dataset.collate_fn,
+        "num_workers": num_val_workers,
+        "persistent_workers": num_val_workers > 0,
+        "pin_memory": True,
+    }
+
+    train_len = len(train_dataset)
+    cfg_bound = cfg.max_batch_size if "max_batch_size" in cfg else None
+    try:
+        memory_bound = _estimate_gpu_memory_batch_upper_bound(
+            model_factory=model_factory,
+            train_dataset=train_dataset,
+            train_dataloader_kwargs=train_dataloader_kwargs,
+            device=device,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep autotuning available
+        logger.warning(
+            "Failed to estimate GPU-aware max batch size; falling back to "
+            "train dataset length: %s",
+            exc,
+            exc_info=True,
+        )
+        memory_bound = train_len
+
+    max_batch_size = min(
+        cfg_bound if cfg_bound is not None else memory_bound,
+        memory_bound,
+        train_len,
+    )
+
     logger.info(
-        f"Autotuning batch size with max_batch_size: {max_batch_size}, "
+        f"Autotuning batch size bounds: memory_bound={memory_bound}, "
+        f"cfg_bound={cfg_bound}, train_len={train_len}, final_max={max_batch_size}, "
         f"min_batch_size: {min_batch_size}, "
         f"num_train_workers: {num_train_workers}, "
         f"num_val_workers: {num_val_workers}"
@@ -526,18 +636,8 @@ def find_optimal_batch_size(
         device=device,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
-        train_dataloader_kwargs={
-            "collate_fn": dataset.collate_fn,
-            "num_workers": num_train_workers,
-            "persistent_workers": num_train_workers > 0,
-            "pin_memory": True,
-        },
-        val_dataloader_kwargs={
-            "collate_fn": dataset.collate_fn,
-            "num_workers": num_val_workers,
-            "persistent_workers": num_val_workers > 0,
-            "pin_memory": True,
-        },
+        train_dataloader_kwargs=train_dataloader_kwargs,
+        val_dataloader_kwargs=val_dataloader_kwargs,
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
     )
