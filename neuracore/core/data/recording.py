@@ -11,8 +11,8 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import AuthenticationError, SynchronizationError
+from neuracore.core.utils.embodiment_description_utils import extract_data_types
 from neuracore.core.utils.http_session import thread_local_session
-from neuracore.core.utils.robot_data_spec_utils import extract_data_types
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset

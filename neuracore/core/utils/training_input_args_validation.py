@@ -10,7 +10,7 @@ from neuracore_types import CrossEmbodimentDescription, DataType
 from omegaconf import DictConfig
 
 from neuracore.core.data.dataset import Dataset, EmbodimentDescription
-from neuracore.core.utils.robot_data_spec_utils import is_robot_id
+from neuracore.core.utils.embodiment_description_utils import is_robot_id
 
 
 def _validate_algorithm_exists(algorithm_id: str | None, algorithm_name: str) -> None:

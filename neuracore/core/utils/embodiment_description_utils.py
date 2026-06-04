@@ -1,4 +1,4 @@
-"""Utility functions for robot data specifications.
+"""Utility functions for embodiment descriptions.
 
 TODO: Consider moving these functions to neuracore_types/utils/ to avoid
 duplication with neuracore_backend/utils.py which has its own copy of

@@ -18,10 +18,10 @@ from neuracore_types import (
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.utils.download import download_with_progress
-from neuracore.core.utils.http_session import thread_local_session
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     resolve_embodiment_descriptions_with_override,
 )
+from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive

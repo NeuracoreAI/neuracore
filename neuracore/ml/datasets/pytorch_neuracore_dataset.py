@@ -17,7 +17,7 @@ from neuracore_types import (
 )
 from torch.utils.data import Dataset
 
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
 from neuracore.ml import BatchedTrainingSamples

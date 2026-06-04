@@ -29,7 +29,7 @@ from neuracore_types import (
 from omegaconf import DictConfig, OmegaConf
 
 from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
-from neuracore.core.utils.robot_data_spec_utils import extract_data_types
+from neuracore.core.utils.embodiment_description_utils import extract_data_types
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,

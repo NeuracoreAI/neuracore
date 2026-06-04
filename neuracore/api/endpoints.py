@@ -29,10 +29,10 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.get_latest_sync_point import (
     get_latest_sync_point as _get_latest_sync_point,
 )
-from neuracore.core.utils.http_session import thread_local_session
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     resolve_embodiment_descriptions_with_override,
 )
+from neuracore.core.utils.http_session import thread_local_session
 
 logger = logging.getLogger(__name__)
 
