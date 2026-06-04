@@ -32,10 +32,6 @@ jobs:
             matrix = yaml.safe_load(f)["cases"]
 
         for case in matrix:
-            test_case = f"{case['algorithm']}_{case['gpu_type']}"
-            if case["num_gpus"] != 1:
-                test_case = f"{test_case}_{case['num_gpus']}GPU"
-            case["test_case"] = test_case
             case["environment"] = "staging"
             case["python-version"] = "3.11"
             case["test-harness-ref"] = staging_branch
@@ -96,7 +92,7 @@ jobs:
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
           -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.test_case }}]"
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
 
     - name: Wait for training terminal status
       env:
@@ -111,4 +107,4 @@ jobs:
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
           -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.test_case }}]"
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
