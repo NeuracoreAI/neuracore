@@ -9,6 +9,7 @@ state and remote recording triggers.
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
 
@@ -81,6 +82,7 @@ class RecordingStateManager(BaseSSEConsumer):
         self.org_id = org_id or get_current_org()
         self.auth = auth if auth is not None else get_auth()
 
+        self._session_start: float = time.time()
         self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
@@ -129,7 +131,11 @@ class RecordingStateManager(BaseSSEConsumer):
         return recording_id in self._expired_recording_ids
 
     def recording_started(
-        self, robot_id: str, instance: int, recording_id: str
+        self,
+        robot_id: str,
+        instance: int,
+        recording_id: str,
+        start_time: float | None = None,
     ) -> None:
         """Handle recording start for a robot instance.
 
@@ -140,6 +146,7 @@ class RecordingStateManager(BaseSSEConsumer):
             robot_id: Robot ID
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
+            start_time: Unix timestamp when recording started
         """
         instance_key = RobotInstanceIdentifier(
             robot_id=robot_id, robot_instance=instance
@@ -151,11 +158,12 @@ class RecordingStateManager(BaseSSEConsumer):
         if previous_recording_id is not None:
             self.recording_stopped(robot_id, instance, previous_recording_id)
 
-        try:
-            ensure_daemon_running()
-        except Exception:
-            logger.exception("Failed to ensure data daemon is running")
-            return
+        if start_time is None or start_time >= self._session_start:
+            try:
+                ensure_daemon_running()
+            except Exception:
+                logger.exception("Failed to ensure data daemon is running")
+                return
 
         self.recording_robot_instances[instance_key] = recording_id
         self._schedule_recording_timers(
@@ -287,6 +295,7 @@ class RecordingStateManager(BaseSSEConsumer):
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
+                start_time=details.start_time,
             )
         else:
             instance_key = RobotInstanceIdentifier(
