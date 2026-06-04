@@ -51,3 +51,9 @@ class TrainingRunError(Exception):
     """Exception raised for errors related to training runs."""
 
     pass
+
+
+class RobotMismatchError(ValueError):
+    """Raised when inference robot_id is not in the model's training spec."""
+
+    pass

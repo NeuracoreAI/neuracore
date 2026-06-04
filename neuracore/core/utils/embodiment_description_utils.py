@@ -6,6 +6,7 @@ merge_cross_embodiment_description. Both packages depend on neuracore_types, so 
 would be the natural home for these shared utilities.
 """
 
+import logging
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -22,7 +23,10 @@ from ordered_set import OrderedSet
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import RobotMismatchError
 from neuracore.core.robot import get_robot_id_from_name
+
+logger = logging.getLogger(__name__)
 
 ID_REGEX = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE
@@ -165,20 +169,122 @@ def normalize_embodiment_description(
     }
 
 
+def _trained_robot_ids_for_model(
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
+) -> list[str]:
+    """Return robot IDs that the model was trained to support."""
+    input_ids = set(input_cross_embodiment_description)
+    output_ids = set(output_cross_embodiment_description)
+    trained_ids = sorted(input_ids & output_ids)
+    if trained_ids:
+        return trained_ids
+    return sorted(input_ids | output_ids)
+
+
+def _resolve_robot_display_names(robot_ids: list[str]) -> dict[str, str]:
+    """Best-effort lookup of robot display names; returns partial results on failure."""
+    if not robot_ids:
+        return {}
+    try:
+        from neuracore.core.robot import get_robot_names_by_ids
+
+        return get_robot_names_by_ids(robot_ids)
+    except Exception:
+        logger.debug(
+            "Failed to resolve robot names for embodiment mismatch", exc_info=True
+        )
+        return {}
+
+
+def _format_robot_label(robot_id: str, names_by_id: dict[str, str]) -> str:
+    """Format a robot for user-facing error text."""
+    name = names_by_id.get(robot_id)
+    if name:
+        return f'"{name}" ({robot_id})'
+    return robot_id
+
+
+def _build_robot_mismatch_message(
+    *,
+    robot_id: str,
+    trained_robot_ids: list[str],
+    names_by_id: dict[str, str],
+    current_org_id: str | None,
+) -> str:
+    """Build a user-facing error for robot-record mismatch at inference time."""
+    requested_name = names_by_id.get(robot_id)
+    if trained_robot_ids:
+        trained_lines = "\n".join(
+            f"  - {_format_robot_label(trained_id, names_by_id)}"
+            for trained_id in trained_robot_ids
+        )
+        trained_section = (
+            f"This model was trained only for these robot records:\n{trained_lines}"
+        )
+    else:
+        trained_section = (
+            "This model has no robots registered in its training specification."
+        )
+
+    lines = ["This model cannot run on the requested robot record."]
+    if requested_name:
+        lines.append(f'Requested robot name: "{requested_name}"')
+    lines.append(f"Requested robot ID: {robot_id}")
+    if current_org_id:
+        lines.append(f"Current organization: {current_org_id}")
+    lines.extend([
+        trained_section,
+        "",
+        "Neuracore matches inference by globally unique robot record ID, "
+        "not by robot name or physical hardware type. A robot with the same "
+        "name or the same hardware in another organization is still a "
+        "different robot record.",
+        "",
+        "This commonly happens when a model.nc.zip file is downloaded from "
+        "one organization and used with the matching physical robot in "
+        "another organization: the robot name may resolve successfully, but "
+        "it resolves to a different robot record ID than the one used "
+        "during training.",
+        "",
+        "What you can do:",
+        "  1. Connect to or select one of the robot records listed above "
+        "(the exact record used during training).",
+        "  2. Pass explicit input_embodiment_description and "
+        "output_embodiment_description to policy().",
+        "  3. Re-train the model using recordings from your current robot record.",
+    ])
+    return "\n".join(lines)
+
+
 def resolve_embodiment_descriptions(
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
     robot_id: str,
 ) -> tuple[EmbodimentDescription, EmbodimentDescription]:
     """Resolve concrete input/output embodiments for a specific robot."""
+    trained_robot_ids = _trained_robot_ids_for_model(
+        input_cross_embodiment_description,
+        output_cross_embodiment_description,
+    )
+    names_by_id = _resolve_robot_display_names(
+        list(dict.fromkeys([robot_id, *trained_robot_ids]))
+    )
+    try:
+        current_org_id = get_current_org()
+    except Exception:
+        current_org_id = None
+    mismatch_message = _build_robot_mismatch_message(
+        robot_id=robot_id,
+        trained_robot_ids=trained_robot_ids,
+        names_by_id=names_by_id,
+        current_org_id=current_org_id,
+    )
+
     if robot_id not in input_cross_embodiment_description:
-        raise ValueError(
-            f"Robot ID '{robot_id}' not found in input cross-embodiment description."
-        )
+        raise RobotMismatchError(mismatch_message)
     if robot_id not in output_cross_embodiment_description:
-        raise ValueError(
-            f"Robot ID '{robot_id}' not found in output cross-embodiment description."
-        )
+        raise RobotMismatchError(mismatch_message)
     return (
         normalize_embodiment_description(input_cross_embodiment_description[robot_id]),
         normalize_embodiment_description(output_cross_embodiment_description[robot_id]),
