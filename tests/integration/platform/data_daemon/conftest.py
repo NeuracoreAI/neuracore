@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable
+from unittest.mock import patch
 
 import pytest
 
@@ -64,6 +65,15 @@ def daemon_test_state_env():
             os.environ.pop("NEURACORE_DAEMON_DB_PATH", None)
         else:
             os.environ["NEURACORE_DAEMON_DB_PATH"] = previous_db_path
+
+
+@pytest.fixture(autouse=True, scope="session")
+def suppress_sse_daemon_autostart():
+    """Block SSE-triggered daemon restarts for the entire test session."""
+    with patch(
+        "neuracore.core.streaming.recording_state_manager.ensure_daemon_running"
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
