@@ -26,7 +26,7 @@ from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
 from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
 )

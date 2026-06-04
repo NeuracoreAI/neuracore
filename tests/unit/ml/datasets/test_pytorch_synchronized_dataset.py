@@ -17,7 +17,7 @@ from omegaconf import OmegaConf
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
 from neuracore.ml import BatchedTrainingSamples

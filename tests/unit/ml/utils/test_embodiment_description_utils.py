@@ -5,7 +5,7 @@ from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     convert_cross_embodiment_description_names_to_ids,
     resolve_embodiment_descriptions_with_override,
 )
@@ -157,11 +157,11 @@ def test_resolve_embodiments_with_override_loads_from_job_metadata(
             return {"Authorization": "Bearer test-token"}
 
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_auth",
+        "neuracore.core.utils.embodiment_description_utils.get_auth",
         lambda: _Auth(),
     )
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_current_org",
+        "neuracore.core.utils.embodiment_description_utils.get_current_org",
         lambda: "test-org-id",
     )
     requests_mock.get(
@@ -222,11 +222,11 @@ def test_resolve_embodiments_with_override_raises_when_training_job_not_found(
             return {"Authorization": "Bearer test-token"}
 
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_auth",
+        "neuracore.core.utils.embodiment_description_utils.get_auth",
         lambda: _Auth(),
     )
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_current_org",
+        "neuracore.core.utils.embodiment_description_utils.get_current_org",
         lambda: "test-org-id",
     )
     requests_mock.get(
@@ -255,11 +255,11 @@ def test_resolve_embodiments_override_raises_when_job_lacks_cross_embodiment(
             return {"Authorization": "Bearer test-token"}
 
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_auth",
+        "neuracore.core.utils.embodiment_description_utils.get_auth",
         lambda: _Auth(),
     )
     monkeypatch.setattr(
-        "neuracore.core.utils.robot_data_spec_utils.get_current_org",
+        "neuracore.core.utils.embodiment_description_utils.get_current_org",
         lambda: "test-org-id",
     )
     requests_mock.get(

@@ -16,10 +16,10 @@ from neuracore_types import (
 )
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.utils.http_session import thread_local_session
-from neuracore.core.utils.robot_data_spec_utils import (
+from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
+from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.training_input_args_validation import (
     _get_data_types_for_algorithms,
     get_algorithm_id,
