@@ -60,9 +60,6 @@ GRACEFUL_TIMEOUT_STOP_S = 15
 SIGKILL_TIMEOUT_STOP_S = 60
 """Seconds to wait for exit after sending SIGKILL in stop_daemon()."""
 
-SIGKILL_MAX_RETRIES = 5
-"""Maximum number of retries for SIGKILL escalation in stop_daemon()."""
-
 # ---------------------------------------------------------------------------
 # Timer
 # ---------------------------------------------------------------------------
@@ -253,25 +250,17 @@ def _wait_and_escalate(
     *,
     graceful_timeout_s: float = GRACEFUL_TIMEOUT_STOP_S,
     sigkill_timeout_s: float = SIGKILL_TIMEOUT_STOP_S,
-    max_retries: int = SIGKILL_MAX_RETRIES,
 ) -> None:
-    """Wait for each PID to exit, escalating to SIGKILL on timeout.
-
-    After escalating, re-collect the live daemon PIDs and repeat while any
-    remain, up to ``max_retries`` attempts.  This handles PIDs that are
-    re-spawned or only become visible after the first pass.
-    """
-    with Timer(sigkill_timeout_s, label="stop_daemon_escalated", assert_deadline=False):
-        for _ in range(max_retries):
-            for pid in sorted(candidate_pids):
-                if not pid_is_running(pid):
-                    continue
-                if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-                    force_kill(pid)
-                    wait_for_exit(pid, timeout_s=5.0)
-            candidate_pids = _collect_candidate_pids()
-            if not candidate_pids:
-                return
+    """Wait for each PID to exit, escalating to SIGKILL on timeout."""
+    for pid in sorted(candidate_pids):
+        if not pid_is_running(pid):
+            continue
+        if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
+            with Timer(
+                sigkill_timeout_s, label="stop_daemon_escalated", assert_deadline=False
+            ):
+                force_kill(pid)
+                wait_for_exit(pid, timeout_s=sigkill_timeout_s)
 
 
 def _remove_ipc_artefacts() -> None:
