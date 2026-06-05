@@ -81,6 +81,7 @@ class RecordingStateManager(BaseSSEConsumer):
         self.org_id = org_id or get_current_org()
         self.auth = auth if auth is not None else get_auth()
 
+        self._connected_robot_id: str | None = None
         self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
@@ -270,6 +271,11 @@ class RecordingStateManager(BaseSSEConsumer):
                 details, RecordingStartPayload
             ), "recording must be started by a start event"
 
+            # Only react to the robot this client connected to, not other
+            # robots in the org that may be recording concurrently.
+            if robot_id != self._connected_robot_id:
+                return
+
             assert (
                 len(details.dataset_ids) == 1
             ), "Recording can only be started in one dataset"
@@ -306,6 +312,14 @@ class RecordingStateManager(BaseSSEConsumer):
                 instance=instance,
                 recording_id=recording_id,
             )
+
+    def register_connected_robot(self, robot_id: str) -> None:
+        """Register the robot that this client is connected to.
+
+        Args:
+            robot_id: The ID of the robot that was connected.
+        """
+        self._connected_robot_id = robot_id
 
     def register_remote_stop_handler(
         self, robot_id: str, instance: int, callback: Callable[[str], None]
