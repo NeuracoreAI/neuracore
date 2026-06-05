@@ -82,7 +82,7 @@ def importer(mock_dataset_config, mock_joint_info, tmp_path):
     return ConcreteTestImporter(
         dataset_dir=tmp_path,
         dataset_config=mock_dataset_config,
-        output_dataset_name="test_dataset",
+        output_dataset_id="test-dataset-id",
         joint_info=mock_joint_info,
     )
 

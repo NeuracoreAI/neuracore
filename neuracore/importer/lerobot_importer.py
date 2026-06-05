@@ -38,9 +38,9 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
     def __init__(
         self,
         input_dataset_name: str,
-        output_dataset_name: str,
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
+        output_dataset_id: str,
         joint_info: dict[str, JointInfo] = {},
         urdf_path: str | None = None,
         ik_init_config: list[float] | None = None,
@@ -57,7 +57,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
         Args:
             input_dataset_name: Name of the dataset to import.
-            output_dataset_name: Name of the dataset to create.
+            output_dataset_id: Neuracore dataset ID for workers and resume cache.
             dataset_dir: Directory containing the dataset.
             dataset_config: Dataset configuration.
             joint_info: Joint info to use for validation.
@@ -77,7 +77,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         super().__init__(
             dataset_dir=dataset_dir,
             dataset_config=dataset_config,
-            output_dataset_name=output_dataset_name,
+            output_dataset_id=output_dataset_id,
             max_workers=max_workers,
             joint_info=joint_info,
             urdf_path=urdf_path,

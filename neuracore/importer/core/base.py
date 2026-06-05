@@ -115,7 +115,7 @@ class NeuracoreDatasetImporter(ABC):
         self,
         dataset_dir: Path,
         dataset_config: DatasetImportConfig,
-        output_dataset_name: str,
+        output_dataset_id: str,
         max_workers: int | None = 1,
         min_workers: int = 1,
         skip_on_error: str = "episode",
@@ -135,7 +135,7 @@ class NeuracoreDatasetImporter(ABC):
         Args:
             dataset_dir: Root directory of the source dataset.
             dataset_config: Dataset configuration (robot, frequency, etc.).
-            output_dataset_name: Name of the dataset to create.
+            output_dataset_id: Neuracore dataset ID for workers and resume cache.
             max_workers: Maximum number of worker processes; None for auto.
             min_workers: Minimum number of workers to use.
             skip_on_error: "episode" to skip a failed episode; "step" to skip only
@@ -157,7 +157,7 @@ class NeuracoreDatasetImporter(ABC):
         self.dataset_config = dataset_config
         self.ordered_import_configs = self._get_ordered_import_configs()
         self.data_config = dataset_config  # Backwards-compat alias used by callers
-        self.output_dataset_name = output_dataset_name
+        self.output_dataset_id = output_dataset_id
         self.robot_name = dataset_config.robot.name
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
@@ -901,7 +901,7 @@ class NeuracoreDatasetImporter(ABC):
         """Log in and connect to Neuracore dataset for the worker."""
         nc.login()
         nc.connect_robot(self.robot_name, instance=worker_id, shared=self.shared)
-        nc.get_dataset(self.output_dataset_name)
+        nc.get_dataset(id=self.output_dataset_id)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)
             self.robot_utils = RobotUtils(self.urdf_path, urdf_packages_dir)
@@ -1241,8 +1241,8 @@ class NeuracoreDatasetImporter(ABC):
 
     def _resolve_completed_items_file(self) -> Path:
         """Return the file path used to persist completed imports."""
-        safe_dataset_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.output_dataset_name)
-        return self.dataset_dir / f".neuracore_import_completed_{safe_dataset_name}.txt"
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.output_dataset_id)
+        return self.dataset_dir / f".neuracore_import_completed_{safe_id}.txt"
 
     def _item_key(self, item: ImportItem) -> str:
         """Build a stable key for an import item."""

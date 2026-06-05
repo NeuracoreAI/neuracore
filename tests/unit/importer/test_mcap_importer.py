@@ -206,7 +206,7 @@ def _make_importer(
 
     return MCAPDatasetImporter(
         input_dataset_name="in",
-        output_dataset_name="out",
+        output_dataset_id="out-dataset-id",
         dataset_dir=tmp_path,
         dataset_config=_make_dataset_config({
             DataType.CUSTOM_1D: _make_import_config(

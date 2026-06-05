@@ -1,0 +1,174 @@
+name: Integration Importer (Production)
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, tag, or branch to test. Leave empty to use the latest release tag."
+        required: false
+        type: string
+        default: ""
+
+env:
+  IMPORTER_DATASETS_REPO: NeuracoreAI/integration_test_data
+  IMPORTER_DATASETS_REF: main
+  IMPORTER_DATASETS_PATH: integration_test_data
+  IMPORTER_DATASETS_CACHE_SUBDIR: importer
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+      - uses: pre-commit/action@v3.0.1
+
+  test:
+    needs: pre-commit
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Checkout repository metadata
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve latest release tag
+        id: release-tag
+        run: |
+          latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest_release_tag" ]; then
+            echo "::error::No release tag matching v* found"
+            exit 1
+          fi
+          echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
+          echo "Latest release tag: $latest_release_tag"
+
+      - name: Resolve test harness ref
+        id: harness-ref
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
+        run: |
+          if [ -n "$INPUT_REF" ]; then
+            harness_ref="$INPUT_REF"
+          else
+            harness_ref="$RELEASE_TAG"
+          fi
+          echo "harness_ref=$harness_ref" >> "$GITHUB_OUTPUT"
+          echo "Resolved test harness ref: $harness_ref"
+
+      - name: Checkout test harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.harness-ref.outputs.harness_ref }}
+          fetch-depth: 0
+
+      - name: Verify production test harness ref
+        if: ${{ inputs.ref == '' }}
+        run: |
+          checked_out_ref="$(git describe --tags --exact-match HEAD)"
+          expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
+          if [ "$checked_out_ref" != "$expected_ref" ]; then
+            echo "::error::Expected production test harness ref $expected_ref, got $checked_out_ref"
+            exit 1
+          fi
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Verify importer datasets token
+        run: |
+          if [ -z "${{ secrets.INTEGRATION_TEST_DATA_GITHUB_TOKEN }}" ]; then
+            echo "::error::INTEGRATION_TEST_DATA_GITHUB_TOKEN is not set. Add a PAT with read access to ${IMPORTER_DATASETS_REPO} as a neuracore repository secret."
+            exit 1
+          fi
+
+      - name: Checkout importer integration test datasets
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.IMPORTER_DATASETS_REPO }}
+          ref: ${{ env.IMPORTER_DATASETS_REF }}
+          path: ${{ env.IMPORTER_DATASETS_PATH }}
+          lfs: true
+          token: ${{ secrets.INTEGRATION_TEST_DATA_GITHUB_TOKEN }}
+
+      - name: Resolve importer dataset cache root
+        run: |
+          set -euo pipefail
+          repo_root="${GITHUB_WORKSPACE}/${IMPORTER_DATASETS_PATH}"
+          cache_root="${repo_root}/${IMPORTER_DATASETS_CACHE_SUBDIR}"
+          for dataset_dir in rlds lerobot mcap; do
+            if [ ! -e "${cache_root}/${dataset_dir}" ]; then
+              echo "::error::Missing ${dataset_dir}/ under ${cache_root}"
+              ls -la "${repo_root}" || true
+              ls -la "${cache_root}" || true
+              exit 1
+            fi
+          done
+          echo "IMPORTER_RLDS_CACHE_DIR=${cache_root}" >> "$GITHUB_ENV"
+          echo "IMPORTER_LEROBOT_CACHE_DIR=${cache_root}" >> "$GITHUB_ENV"
+          echo "IMPORTER_MCAP_CACHE_DIR=${cache_root}" >> "$GITHUB_ENV"
+          echo "Importer dataset cache root: ${cache_root}"
+          echo "Importer datasets ref: ${IMPORTER_DATASETS_REF}"
+          echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --no-cache-dir --upgrade pip
+          VERSION="${{ steps.release-tag.outputs.latest_release_tag }}"
+          pip install --no-cache-dir "neuracore[dev,import]==${VERSION#v}" \
+            --extra-index-url https://download.pytorch.org/whl/cpu
+
+      - name: Resolve test harness
+        run: |
+          echo "Test harness environment: production"
+          echo "Test harness ref: ${{ steps.harness-ref.outputs.harness_ref }}"
+          echo "Test harness commit: $(git rev-parse HEAD)"
+          echo "Test harness path: tests/integration/importer/"
+          python - << 'EOF'
+          import neuracore
+
+          print(f"Installed neuracore version: {neuracore.__version__}")
+          EOF
+
+      - name: Run Importer Integration Tests
+        env:
+          NEURACORE_API_URL: https://api.neuracore.com/api
+          NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
+          NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
+          NEURACORE_ENDPOINT_TIMEOUT: 30
+        run: |
+          set -euo pipefail
+          pytest_args=(
+            -o log_cli=true
+            --log-cli-level=INFO
+            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s"
+            --log-cli-date-format="%H:%M:%S"
+            -v
+            -k "not shared"
+          )
+          pytest "${pytest_args[@]}" tests/integration/importer/

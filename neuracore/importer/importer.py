@@ -20,6 +20,7 @@ from rich.logging import RichHandler
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
+from neuracore.core.robot import Robot
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -194,6 +195,7 @@ def _run_import(
 
     dataset_name = output_dataset.name
     dataset = Dataset.get_by_name(dataset_name, non_exist_ok=True)
+    dry_run_cleanup_dataset = False
     if dataset is not None:
         if args.overwrite:
             logger.warning(
@@ -226,6 +228,7 @@ def _run_import(
             shared=args.shared,
             deleted_dataset_id=deleted_dataset_id,
         )
+        dry_run_cleanup_dataset = args.dry_run
     logger.info(
         "Output dataset ready: %s (id=%s), shared=%s",
         dataset.name,
@@ -299,6 +302,37 @@ def _run_import(
     logger.info("Setup complete; beginning import.")
 
     skip_on_error = args.skip_on_error
+    try:
+        _run_dataset_import(
+            dataset_type=dataset_type,
+            dataconfig=dataconfig,
+            args=args,
+            dataset_dir=dataset_dir,
+            robot=robot,
+            urdf_path=urdf_path,
+            ik_init_config=ik_init_config,
+            skip_on_error=skip_on_error,
+            output_dataset_id=dataset.id,
+        )
+    finally:
+        if args.dry_run and dry_run_cleanup_dataset:
+            _cleanup_dry_run_dataset(dataset_name=dataset_name, dataset=dataset)
+
+    logger.info("Finished importing dataset.")
+
+
+def _run_dataset_import(
+    *,
+    dataset_type: DatasetTypeConfig,
+    dataconfig: DatasetImportConfig,
+    args: SimpleNamespace,
+    dataset_dir: Path,
+    robot: Robot,
+    urdf_path: str | None,
+    ik_init_config: list[float] | None,
+    skip_on_error: str,
+    output_dataset_id: str,
+) -> None:
     importer: (
         TFDSDatasetImporter
         | RLDSDatasetImporter
@@ -309,7 +343,7 @@ def _run_import(
         logger.info("Starting TFDS dataset import from %s", args.dataset_dir)
         importer = TFDSDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
-            output_dataset_name=dataconfig.output_dataset.name,
+            output_dataset_id=output_dataset_id,
             dataset_dir=args.dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
@@ -329,7 +363,7 @@ def _run_import(
         logger.info(f"Starting MCAP dataset import from {args.dataset_dir}")
         importer = MCAPDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
-            output_dataset_name=dataconfig.output_dataset.name,
+            output_dataset_id=output_dataset_id,
             dataset_dir=args.dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
@@ -349,7 +383,7 @@ def _run_import(
         logger.info("Starting RLDS dataset import from %s", args.dataset_dir)
         importer = RLDSDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
-            output_dataset_name=dataconfig.output_dataset.name,
+            output_dataset_id=output_dataset_id,
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
@@ -369,7 +403,7 @@ def _run_import(
         logger.info("Starting LeRobot dataset import from %s", args.dataset_dir)
         importer = LeRobotDatasetImporter(
             input_dataset_name=dataconfig.input_dataset_name,
-            output_dataset_name=dataconfig.output_dataset.name,
+            output_dataset_id=output_dataset_id,
             dataset_dir=dataset_dir,
             dataset_config=dataconfig,
             joint_info=robot.joint_info,
@@ -388,7 +422,20 @@ def _run_import(
     else:
         raise DatasetOperationError(f"Unsupported dataset type: {dataset_type}")
 
-    logger.info("Finished importing dataset.")
+
+def _cleanup_dry_run_dataset(*, dataset_name: str, dataset: Dataset) -> None:
+    """Delete a dataset created solely for a dry-run import."""
+    logger.info(
+        "Dry-run complete; deleting temporary dataset '%s' (id=%s).",
+        dataset_name,
+        dataset.id,
+    )
+    try:
+        dataset.delete()
+    except Exception as exc:  # noqa: BLE001 - preserve traceback for user
+        raise DatasetOperationError(
+            f"Failed to delete dry-run dataset '{dataset_name}': {exc}"
+        ) from exc
 
 
 def _create_dataset_with_overwrite_guard(

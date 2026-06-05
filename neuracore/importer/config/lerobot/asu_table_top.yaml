@@ -1,0 +1,95 @@
+input_dataset_name: asu_table_top_converted_externally_to_rlds
+dataset_type: LEROBOT
+
+output_dataset:
+  name: asu_table_top
+  tags: [ur5, table, pushing, picking, rotating]
+  description: "This dataset contains top-view images of tables from Arizona State University (ASU)."
+
+robot:
+  name: asu_robot
+  urdf_path: ""
+  overwrite_existing: true
+
+frequency: 12.5
+
+data_import_config:
+  RGB_IMAGES:
+    source: observation.images
+    format:
+      image_convention: CHANNELS_FIRST
+      order_of_channels: RGB
+      normalized_pixel_values: true
+    mapping: 
+      - name: image
+        source_name: image
+
+  JOINT_POSITIONS:
+    source: observation.state
+    format:
+      angle_units: RADIANS
+    mapping:
+      - name: shoulder_pan_joint
+        offset: 0.0
+        index: 0
+
+      - name: shoulder_lift_joint
+        offset: -1.5707963267948966
+        index: 1
+
+      - name: elbow_joint
+        offset: 0.0
+        inverted: true
+        index: 2
+
+      - name: wrist_1_joint
+        offset: -1.5707963267948966
+        index: 3
+
+      - name: wrist_2_joint
+        offset: 0.0
+        index: 4
+
+      - name: wrist_3_joint
+        offset: 0.0
+        index: 5
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    source: observation.state
+    format:
+      normalize:
+        min: 0.0
+        max: 1.0
+    mapping:
+      - name: gripper
+        index: 6
+
+  VISUAL_JOINT_POSITIONS:
+    source: observation.state
+    format:
+      visual_joint_input_type: GRIPPER
+    mapping:
+      - name: finger_joint
+        index: 6
+      - name: left_inner_knuckle_joint
+        index: 6
+      - name: left_inner_finger_joint
+        inverted: true
+        index: 6
+      - name: right_inner_knuckle_joint
+        inverted: true
+        index: 6
+      - name: right_inner_finger_joint
+        index: 6
+      - name: right_outer_knuckle_joint
+        inverted: true
+        offset: -0.7853981633974483
+        index: 6
+
+  LANGUAGE:
+    source: task
+    format:
+      language_type: STRING
+    mapping:
+      - name: instruction
+

@@ -1,0 +1,6 @@
+datasets:
+  - name: example_openarm_dataset
+    cache_relative_path: mcap
+    dataset_config: neuracore/importer/config/mcap/example_openarm.yaml
+    robot_keyword: openarm_description
+    max_workers: 1

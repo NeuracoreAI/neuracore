@@ -238,6 +238,8 @@ oieb
 Oieb
 OIEB
 opencv
+openarm
+openarm_description
 openpi
 OPENPI
 optim

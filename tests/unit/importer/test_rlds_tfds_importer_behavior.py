@@ -162,7 +162,7 @@ def test_rlds_init_forwards_ik_args_to_base(monkeypatch):
 
     RLDSDatasetImporter(
         input_dataset_name="in",
-        output_dataset_name="out",
+        output_dataset_id="out-dataset-id",
         dataset_dir=SimpleNamespace(),
         dataset_config=SimpleNamespace(),
         joint_info={},
