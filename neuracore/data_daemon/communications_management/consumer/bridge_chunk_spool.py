@@ -1,4 +1,4 @@
-"""Disk-backed chunk spool for shared-slot completion work."""
+"""Disk-backed chunk spool for video-frame completion work."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class BridgeChunkSpool:
         )
 
     def append(self, chunk: bytes | bytearray | memoryview) -> ChunkSpoolRef:
-        """Copy one chunk from shared memory into the spool and return its ref."""
+        """Copy one video chunk into the spool and return its ref."""
         chunk_view = chunk if isinstance(chunk, memoryview) else memoryview(chunk)
         chunk_len = len(chunk_view)
 

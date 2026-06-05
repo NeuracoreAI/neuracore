@@ -24,7 +24,7 @@ from neuracore.data_daemon.recording_encoding_disk_manager import (
 )
 
 from ..shared_transport.communications_manager import CommunicationsManager
-from ..shared_transport.shared_slot_daemon_handler import SharedSlotDaemonHandler
+from ..shared_transport.iox2_daemon_drain import Iox2DaemonDrain
 from .completion_worker import CompletionWorker
 from .helpers import str_or_none
 from .models import (
@@ -32,14 +32,26 @@ from .models import (
     ChannelState,
     ClosedProducerRegistry,
     RecordingDataDropRequest,
-    SharedSlotSequenceProgressRequest,
     TraceMetadataRegistrationRequest,
     TraceMetadataSnapshot,
     TraceRecordingLookupRequest,
     TransportMode,
+    VideoFrameSequenceProgressRequest,
 )
 from .spool_worker import SpoolWorker
 from .trace_lifecycle_coordinator import TraceLifecycleCoordinator
+
+# Data types whose frames travel over the iceoryx2 zero-copy video transport
+# instead of the ZMQ control channel.
+_VIDEO_DATA_TYPES = frozenset(
+    {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS}
+)
+
+
+def _data_type_uses_video_transport(data_type: DataType | None) -> bool:
+    """Return True when the channel's frames arrive over iceoryx2."""
+    return data_type in _VIDEO_DATA_TYPES
+
 
 RecordingDiskManager = rdm_module.RecordingDiskManager
 
@@ -77,7 +89,7 @@ class DataBridge:
         self.recording_disk_manager = recording_disk_manager
         self.channels = ChannelRegistry()
         self._closed_producers = ClosedProducerRegistry()
-        self._shared_slot_handler = SharedSlotDaemonHandler(self.comm)
+        self._iox2_drain = Iox2DaemonDrain()
         self._spool_admission = threading.BoundedSemaphore(DEFAULT_MAX_SPOOLED_CHUNKS)
         self._completion_worker = CompletionWorker(
             recording_disk_manager=self.recording_disk_manager,
@@ -90,13 +102,12 @@ class DataBridge:
         )
         self._spool_worker = SpoolWorker(
             root=get_daemon_recordings_root_path() / ".bridge_chunk_spool",
-            shared_slot_handler=self._shared_slot_handler,
             completion_worker=self._completion_worker,
             acquire_spool_admission=self._spool_admission.acquire,
             release_spool_admission=self._spool_admission.release,
             should_drop_recording_data=self._trace_lifecycle.should_drop_recording_data,
             mark_sequence_completed=(
-                self._trace_lifecycle.mark_shared_slot_sequence_completed
+                self._trace_lifecycle.mark_video_frame_sequence_completed
             ),
             register_trace=self._trace_lifecycle.register_trace,
             register_trace_metadata=self._trace_lifecycle.register_trace_metadata,
@@ -105,8 +116,6 @@ class DataBridge:
             shard_count=4,
         )
         self._command_handlers: dict[CommandType, CommandHandler] = {
-            CommandType.OPEN_FIXED_SHARED_SLOTS: self._handle_open_fixed_shared_slots,
-            CommandType.SHARED_SLOT_DESCRIPTOR: self._handle_shared_slot_descriptor,
             CommandType.DATA_CHUNK: self._handle_write_data_chunk,
             CommandType.BATCHED_JOINT_DATA: self._handle_batched_joint_data,
             CommandType.HEARTBEAT: self._handle_heartbeat,
@@ -145,14 +154,15 @@ class DataBridge:
                 if raw:
                     self.process_raw_message(raw)
 
+                self._iox2_drain.drain_all(self._on_iox2_frame)
                 self._cleanup_expired_channels()
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._iox2_drain.close()
             self._spool_worker.close()
             self._completion_worker.close()
             self._spool_worker.cleanup()
-            self._shared_slot_handler.close()
             self.comm.cleanup_daemon()
 
     def stop(
@@ -208,16 +218,12 @@ class DataBridge:
             self._trace_lifecycle.handle_recording_stopped(message)
             return
 
-        if (
-            self._closed_producers.contains(producer_id)
-            and cmd != CommandType.OPEN_FIXED_SHARED_SLOTS
-        ):
-            return
-
-        if (
-            cmd == CommandType.OPEN_FIXED_SHARED_SLOTS
-            and self._closed_producers.contains(producer_id)
-        ):
+        if self._closed_producers.contains(producer_id):
+            # A heartbeat from a previously closed producer means it has come
+            # back for a new recording session; revive the channel. Any other
+            # late command from a closed producer is ignored.
+            if cmd != CommandType.HEARTBEAT:
+                return
             self._closed_producers.discard(producer_id)
 
         existing = self.channels.get(producer_id)
@@ -256,74 +262,45 @@ class DataBridge:
                 producer_id,
             )
 
-    def _handle_open_fixed_shared_slots(
-        self, channel: ChannelState, message: MessageEnvelope
-    ) -> None:
-        """Handle an OPEN_FIXED_SHARED_SLOTS command from a producer."""
-        payload = message.payload.get(message.command.value, {})
-        previous_trace_id = channel.trace_id
-        self._shared_slot_handler.handle_open(
-            channel,
-            payload,
-            on_abandoned_sequences=self._handle_abandoned_shared_slot_sequences,
-        )
-        if previous_trace_id is not None:
-            self.channels.set_trace_id(channel, None)
-
-    def _handle_shared_slot_descriptor(
-        self, channel: ChannelState, message: MessageEnvelope
-    ) -> None:
-        """Queue one shared-slot descriptor for sharded spool processing."""
-        descriptor_payload = message.payload.get(message.command.value, {})
-        sequence_number = message.sequence_number
-        if sequence_number is None:
-            raise ValueError("Shared-slot descriptor missing sequence_number")
-
-        descriptor = self._shared_slot_handler.mark_descriptor_pending(
-            channel,
-            descriptor_payload,
-        )
-        self._mark_shared_slot_sequence_pending(
-            SharedSlotSequenceProgressRequest(
-                producer_id=channel.producer_id,
-                sequence_number=sequence_number,
-            )
-        )
-        try:
-            self._spool_worker.enqueue(channel, descriptor_payload)
-        except Exception:
-            self._shared_slot_handler.mark_descriptor_completed(
-                channel.producer_id,
-                descriptor,
-            )
-            self._mark_shared_slot_sequence_completed(
-                SharedSlotSequenceProgressRequest(
-                    producer_id=channel.producer_id,
-                    sequence_number=sequence_number,
-                )
-            )
-            raise
-
-    def _handle_abandoned_shared_slot_sequences(
+    def _on_iox2_frame(
         self,
-        producer_id: str,
-        sequence_numbers: list[int],
+        channel_id: str,
+        sequence_id: int,
+        metadata: dict,
+        chunk: bytes,
     ) -> None:
-        """Unblock recording finalization for abandoned shared-slot descriptors."""
-        if not sequence_numbers:
-            return
-        for sequence_number in sequence_numbers:
-            self._mark_shared_slot_sequence_completed(
-                SharedSlotSequenceProgressRequest(
-                    producer_id=producer_id,
-                    sequence_number=sequence_number,
-                )
+        """Handle one video frame drained from an iceoryx2 subscriber.
+
+        Advances the producer sequence (so end-of-recording cutoffs account for
+        video frames), marks the sequence pending, and hands the decoded chunk to
+        the spool worker. The spool worker marks the sequence completed once the
+        chunk has been enqueued to the completion worker, which preserves the
+        ordering guarantee that a trace is never finalized before its frames are
+        spooled.
+        """
+        channel = self.channels.get(channel_id)
+        if channel is None:
+            logger.debug(
+                "Iox2 frame for unknown channel channel_id=%s sequence_id=%s",
+                channel_id,
+                sequence_id,
             )
-        self._trace_lifecycle.set_max_producer_sequence(
-            producer_id,
-            max(sequence_numbers),
+            return
+
+        if sequence_id > channel.last_sequence_number:
+            channel.last_sequence_number = sequence_id
+        self._trace_lifecycle.set_max_producer_sequence(channel_id, sequence_id)
+
+        request = VideoFrameSequenceProgressRequest(
+            producer_id=channel_id,
+            sequence_number=sequence_id,
         )
-        self._trace_lifecycle.finalize_closing_recordings()
+        self._mark_video_frame_sequence_pending(request)
+        try:
+            self._spool_worker.enqueue_frame(channel, sequence_id, metadata, chunk)
+        except Exception:
+            self._mark_video_frame_sequence_completed(request)
+            raise
 
     def _on_complete_message(
         self,
@@ -377,27 +354,54 @@ class DataBridge:
                 channel.producer_id,
             )
 
-    def _handle_heartbeat(self, channel: ChannelState, _: MessageEnvelope) -> None:
-        """Update the heartbeat timestamp for a producer.
+    def _handle_heartbeat(
+        self, channel: ChannelState, message: MessageEnvelope
+    ) -> None:
+        """Update heartbeat state and register video subscribers on first contact.
 
-        This does not perform any logic beyond updating the timestamp, so it is
-        suitable for use in a high-throughput system.
+        The heartbeat payload must carry the producer's data type. For video
+        data types the daemon creates the matching iceoryx2 subscriber
+        (idempotent), so frames published by the producer are received.
+        Non-video channels fall back to the ZMQ socket transport.
         """
         channel.touch()
-        if channel.transport_mode is TransportMode.NONE:
+
+        raw_data_type = message.payload.get("data_type") if message.payload else None
+        if raw_data_type is None:
+            logger.warning(
+                "HEARTBEAT from producer_id=%s missing required data_type",
+                channel.producer_id,
+            )
+            return
+        try:
+            data_type = DataType(raw_data_type)
+        except ValueError:
+            logger.warning(
+                "HEARTBEAT from producer_id=%s carried unknown data_type=%r",
+                channel.producer_id,
+                raw_data_type,
+            )
+            return
+
+        channel.data_type = data_type
+
+        if _data_type_uses_video_transport(data_type):
+            channel.mark_video_transport_open()
+            self._iox2_drain.register_channel(channel.producer_id)
+        elif channel.transport_mode is TransportMode.NONE:
             channel.mark_socket_transport_open()
 
-    def _mark_shared_slot_sequence_pending(
-        self, request: SharedSlotSequenceProgressRequest
+    def _mark_video_frame_sequence_pending(
+        self, request: VideoFrameSequenceProgressRequest
     ) -> None:
-        """Record that one shared-slot descriptor still needs spool processing."""
-        self._trace_lifecycle.mark_shared_slot_sequence_pending(request)
+        """Record that one video frame still needs spool processing."""
+        self._trace_lifecycle.mark_video_frame_sequence_pending(request)
 
-    def _mark_shared_slot_sequence_completed(
-        self, request: SharedSlotSequenceProgressRequest
+    def _mark_video_frame_sequence_completed(
+        self, request: VideoFrameSequenceProgressRequest
     ) -> None:
-        """Record that one shared-slot descriptor reached completion handoff."""
-        self._trace_lifecycle.mark_shared_slot_sequence_completed(request)
+        """Record that one video frame reached completion handoff."""
+        self._trace_lifecycle.mark_video_frame_sequence_completed(request)
 
     def _should_drop_recording_data(self, request: RecordingDataDropRequest) -> bool:
         """Return True when recording state says this data should be dropped."""
@@ -563,23 +567,17 @@ class DataBridge:
         *,
         reason: str = "producer_trace_end",
     ) -> None:
-        """Handle an END_TRACE command from a producer."""
-        self._trace_lifecycle.handle_trace_end(channel, message)
+        """Handle an END_TRACE command from a producer.
 
-        sequence_number = message.sequence_number
-        has_pending_shared_slots = (
-            sequence_number is not None
-            and self._trace_lifecycle.has_pending_shared_slot_sequences_at_or_before(
-                channel.producer_id,
-                sequence_number,
-            )
-        )
-        if (
-            channel.uses_shared_memory_transport()
-            and channel.shared_slot.shm_name is not None
-            and not has_pending_shared_slots
-        ):
-            self._shared_slot_handler.cleanup_channel_resources(channel)
+        TRACE_END is sent over ZMQ after all video frames have been published to
+        iceoryx2, so any frame still buffered in the ring was produced before
+        this trace ended. Drain them now (marking their sequences pending) before
+        finalizing, so finalization defers until those frames are spooled. The
+        iceoryx2 subscriber itself is left in place; it persists for the lifetime
+        of the channel across recording sessions.
+        """
+        self._iox2_drain.drain_all(self._on_iox2_frame)
+        self._trace_lifecycle.handle_trace_end(channel, message)
 
     def cleanup_channel_on_trace_written(
         self,
@@ -600,22 +598,10 @@ class DataBridge:
 
         channel = self.channels.get_by_trace_id(trace_id)
         if channel is not None:
-            if channel.uses_shared_memory_transport() and (
-                channel.shared_slot.shm_name is not None
-                or channel.socket_pending_messages
-            ):
-                logger.debug(
-                    "Cleaning up channel after TRACE_WRITTEN producer_id=%s "
-                    "trace_id=%s shm_name=%s pending_partial_traces=%d",
-                    channel.producer_id,
-                    trace_id,
-                    channel.shared_slot.shm_name,
-                    len(channel.socket_pending_messages),
-                )
+            # Keep the iceoryx2 subscriber registered: the channel may record
+            # further traces. It is unregistered only when the channel itself is
+            # removed on heartbeat expiry.
             self.channels.set_trace_id(channel, None)
-            if channel.uses_shared_memory_transport():
-                self._shared_slot_handler.cleanup_channel_resources(channel)
-            channel.clear_transport_state()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -649,7 +635,7 @@ class DataBridge:
                 continue
 
             if cutoff_sequence_number is not None and (
-                self._trace_lifecycle.has_pending_shared_slot_sequences_at_or_before(
+                self._trace_lifecycle.has_pending_video_frame_sequences_at_or_before(
                     producer_id,
                     cutoff_sequence_number,
                 )
@@ -685,8 +671,7 @@ class DataBridge:
                 self._trace_lifecycle.set_max_producer_sequence(
                     channel.producer_id, channel.last_sequence_number
                 )
-            if channel.uses_shared_memory_transport():
-                self._shared_slot_handler.cleanup_channel_resources(channel)
+            self._iox2_drain.unregister_channel(producer_id)
             channel.clear_transport_state()
             self.channels.remove(producer_id)
             self._closed_producers.add(producer_id)

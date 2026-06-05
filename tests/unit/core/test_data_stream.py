@@ -28,10 +28,10 @@ class _FakeProducerChannel:
         recording_id: str | None = None,
         chunk_size: int | None = None,
         send_queue_maxsize: int | None = None,
-        shared_memory_size: int | None = None,
+        max_frame_bytes: int | None = None,
         **_: object,
     ) -> None:
-        default_chunk_size, default_shared_memory_size, default_send_queue_maxsize = (
+        default_chunk_size, default_max_frame_bytes, default_send_queue_maxsize = (
             producer_transport_args_for_data_type(data_type)
         )
         self.id = id
@@ -43,16 +43,14 @@ class _FakeProducerChannel:
             if send_queue_maxsize is None
             else send_queue_maxsize
         )
-        self.init_shared_memory_size: int | None = None
-        self.default_shared_memory_size = (
-            default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
+        self.init_max_frame_bytes: int | None = None
+        self.default_max_frame_bytes = (
+            default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
         )
-        self.opened_shared_memory_sizes: list[int] = []
+        self.opened_max_frame_bytes: list[int] = []
         self.send_data_parts_calls: list[dict[str, object]] = []
-        self.cleanup_wait_for_slot_drain_calls: list[bool] = []
-        self.stop_wait_for_slot_drain_calls: list[bool] = []
+        self.cleanup_wait_for_transport_drain_calls: list[bool] = []
+        self.stop_wait_for_transport_drain_calls: list[bool] = []
         self.trace_id = None
         _FakeProducerChannel.instances.append(self)
 
@@ -60,24 +58,20 @@ class _FakeProducerChannel:
         self,
         *,
         recording_id: str | None = None,
-        shared_memory_size: int | None = None,
+        max_frame_bytes: int | None = None,
     ) -> None:
         if recording_id is not None:
             self.recording_id = recording_id
         self.trace_id = "trace-1"
-        self.opened_shared_memory_sizes.append(
-            self.default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
+        self.opened_max_frame_bytes.append(
+            self.default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
         )
 
     def initialize_new_producer_channel(
-        self, shared_memory_size: int | None = None
+        self, max_frame_bytes: int | None = None
     ) -> None:
-        self.init_shared_memory_size = (
-            self.default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
+        self.init_max_frame_bytes = (
+            self.default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
         )
 
     def set_recording_id(self, recording_id: str | None) -> None:
@@ -89,15 +83,10 @@ class _FakeProducerChannel:
     def stop_producer_channel(
         self,
         *,
-        wait_for_slot_drain: bool = True,
+        wait_for_transport_drain: bool = True,
     ) -> None:
-        self.stop_wait_for_slot_drain_calls.append(wait_for_slot_drain)
+        self.stop_wait_for_transport_drain_calls.append(wait_for_transport_drain)
         return
-
-    def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
-        self.opened_shared_memory_sizes.append(
-            self.default_shared_memory_size if slot_size is None else slot_size
-        )
 
     def start_new_trace(self) -> None:
         self.trace_id = "trace-1"
@@ -106,10 +95,10 @@ class _FakeProducerChannel:
         self,
         *,
         stop_cutoff_sequence_number: int | None = None,
-        wait_for_slot_drain: bool = True,
+        wait_for_transport_drain: bool = True,
     ) -> None:
         del stop_cutoff_sequence_number
-        self.cleanup_wait_for_slot_drain_calls.append(wait_for_slot_drain)
+        self.cleanup_wait_for_transport_drain_calls.append(wait_for_transport_drain)
         return
 
     def send_data_parts(self, **kwargs: object) -> None:
@@ -157,7 +146,7 @@ def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
     assert producer.data_type == DataType.RGB_IMAGES
     assert producer.chunk_size == DEFAULT_VIDEO_CHUNK_SIZE
     assert producer.send_queue_maxsize == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
-    assert producer.opened_shared_memory_sizes == [DEFAULT_VIDEO_SLOT_SIZE]
+    assert producer.opened_max_frame_bytes == [DEFAULT_VIDEO_SLOT_SIZE]
 
 
 def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
@@ -201,7 +190,7 @@ def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
     assert total_bytes == len(header) + len(metadata_json) + frame.nbytes
 
 
-def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
+def test_stream_stop_recording_wait_false_skips_transport_drain(monkeypatch) -> None:
     _FakeProducerChannel.instances.clear()
     monkeypatch.setattr(
         "neuracore.core.streaming.data_stream.ProducerChannel",
@@ -217,8 +206,8 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
         wait_for_producer_drain=False,
     )
 
-    assert producer.cleanup_wait_for_slot_drain_calls == [False]
-    assert producer.stop_wait_for_slot_drain_calls == [False]
+    assert producer.cleanup_wait_for_transport_drain_calls == [False]
+    assert producer.stop_wait_for_transport_drain_calls == [False]
     assert stream.get_recording_context() is None
     assert stream.get_producer_channel() is None
     assert stream.is_recording() is False

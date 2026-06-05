@@ -51,6 +51,7 @@ setup(
         "neuracore_types>=7.1.0",
         "ordered_set",
         "pyzmq==27.1.0",
+        "iceoryx2>=0.9.0",
         "sqlalchemy>=2.0.0",
         "aiosqlite>=0.19.0",
         "aiohttp>=3.9.0",

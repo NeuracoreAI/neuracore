@@ -134,15 +134,9 @@ def test_create_producer_socket_returns_continues_without_daemon(
 def test_message_envelope_round_trip_bytes() -> None:
     envelope = MessageEnvelope(
         producer_id="producer-abc",
-        command=CommandType.OPEN_FIXED_SHARED_SLOTS,
-        payload={
-            "open_fixed_shared_slots": {
-                "transport_mode": "FIXED_SHARED_SLOTS_DAEMON_OWNED",
-                "control_endpoint": "ipc://test-envelope-round-trip",
-                "slot_size": 4096,
-                "slot_count": 16,
-            }
-        },
+        command=CommandType.HEARTBEAT,
+        payload={"data_type": "rgb_image"},
+        sequence_number=7,
     )
 
     parsed = MessageEnvelope.from_bytes(envelope.to_bytes())
@@ -384,7 +378,7 @@ def test_interleaved_chunks_reassemble_per_producer(
             MessageEnvelope(
                 producer_id=producer_id,
                 command=CommandType.HEARTBEAT,
-                payload={CommandType.HEARTBEAT.value: {}},
+                payload={"data_type": DataType.CUSTOM_1D.value},
             ),
         )
 
@@ -508,7 +502,7 @@ def test_unknown_command_logs_warning_and_continues(
         MessageEnvelope(
             producer_id="producer-1",
             command=CommandType.HEARTBEAT,
-            payload={CommandType.HEARTBEAT.value: {}},
+            payload={"data_type": DataType.CUSTOM_1D.value},
         )
     )
     assert daemon.channels.get("producer-1").is_open()
@@ -560,7 +554,7 @@ def test_garbage_messages_are_logged_and_daemon_survives(
         MessageEnvelope(
             producer_id="prod",
             command=CommandType.HEARTBEAT,
-            payload={CommandType.HEARTBEAT.value: {}},
+            payload={"data_type": DataType.CUSTOM_1D.value},
         ).to_bytes()
     )
     raw = daemon_comm._consumer_socket.recv()

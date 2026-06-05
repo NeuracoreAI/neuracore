@@ -18,33 +18,41 @@ CHUNK_HEADER_FORMAT = f"!{TRACE_ID_FIELD_SIZE}s{DATA_TYPE_FIELD_SIZE}sIII"
 # uint32 total_chunks, uint32 chunk_len
 CHUNK_HEADER_SIZE = struct.calcsize(CHUNK_HEADER_FORMAT)
 
-SHARED_MEMORY_RECORD_MAGIC = b"NCR1"
-SHARED_MEMORY_RECORD_HEADER_FORMAT = "!4sII"
-SHARED_MEMORY_RECORD_HEADER_SIZE = struct.calcsize(SHARED_MEMORY_RECORD_HEADER_FORMAT)
-SHARED_SLOT_SHM_PREFIX = "ncs-"
+VIDEO_TRANSPORT_PACKET_MAGIC = b"NCR1"
+VIDEO_TRANSPORT_PACKET_HEADER_FORMAT = "!4sII"
+VIDEO_TRANSPORT_PACKET_HEADER_SIZE = struct.calcsize(
+    VIDEO_TRANSPORT_PACKET_HEADER_FORMAT
+)
 
-# Shared transport sizing.
+# Transport sizing.
 # Keep these aligned with frontend/PFE expectations.
 DEFAULT_CHUNK_SIZE = 64 * 1024  # 64 KiB
-DEFAULT_SHARED_MEMORY_SIZE = 8 * 1024 * 1024  # 8 MiB
+DEFAULT_TRANSPORT_BUFFER_SIZE = 8 * 1024 * 1024  # 8 MiB
 
 # 4K RGB frame: 3840 * 2160 * 3 = 24,883,200 bytes ~= 23.73 MiB.
-# A video record must fit in one shared-memory slot, including header + metadata.
+# A video chunk must fit in one loaned transport sample, including header + metadata.
 DEFAULT_VIDEO_CHUNK_SIZE = 4 * 1024 * 1024  # 4 MiB
 DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE = 0
 DEFAULT_VIDEO_SLOT_SIZE = DEFAULT_VIDEO_CHUNK_SIZE + (
     64 * 1024
 )  # metadata + header headroom
-DEFAULT_VIDEO_SLOT_COUNT = max(
-    1, (32 * 1024 * 1024) // DEFAULT_VIDEO_SLOT_SIZE  # 32 MiB total budget
-)
-DEFAULT_VIDEO_ACK_TIMEOUT_SECONDS = 5.0
-DEFAULT_VIDEO_SLOT_ALLOCATE_TIMEOUT_SECONDS = 5.0
+
+# iceoryx2 video transport settings.
+# One zero-copy publish/subscribe service per producer channel, named
+# f"{IOX2_SERVICE_PREFIX}{channel_id}".
+IOX2_SERVICE_PREFIX = "neuracore/video/"
+# Slots in the daemon subscriber ring buffer per channel. Under overload the
+# oldest frames are overwritten (DiscardData semantics).
+IOX2_SUBSCRIBER_BUFFER_SIZE = 16
+# Historical samples retained so a daemon subscriber that registers slightly
+# after the producer starts publishing can still catch up on recent frames.
+IOX2_HISTORY_SIZE = 16
+# Maximum encoded frame packet (header + metadata + chunk) per loaned slot.
+IOX2_MAX_FRAME_BYTES = DEFAULT_VIDEO_SLOT_SIZE
 
 
 BASE_DIR = Path("/tmp/ndd")
 SOCKET_PATH = BASE_DIR / "management.sock"
-ACK_BASE_DIR = BASE_DIR / "slot_acks"
 
 # Uploads Configuration paths and files
 CONFIG_DIR = Path.home() / ".neuracore"
@@ -85,3 +93,6 @@ COMPLETED_RECORDING_RETENTION_HOURS = 24 * 30
 
 # default profile name
 DEFAULT_PROFILE_NAME = "default_profile"
+
+DEFAULT_UPLOAD_WAIT_TIMEOUT_SECONDS = 180
+DURATION_VARIATION_TOLERANCE_SECONDS = 4

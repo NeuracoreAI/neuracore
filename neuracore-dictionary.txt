@@ -6,6 +6,7 @@ addfinalizer
 addinivalue
 agentview
 agilex
+iceoryx
 aiolimiter
 aiortc
 allclose
@@ -16,6 +17,7 @@ attns
 autocast
 Autoencoders
 autoregressively
+uninit
 autoset
 autouse
 avgpool

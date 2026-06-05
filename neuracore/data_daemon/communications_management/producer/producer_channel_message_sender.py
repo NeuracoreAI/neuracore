@@ -108,9 +108,9 @@ class ProducerChannelMessageSender:
     ) -> None:
         """Enqueue a prebuilt envelope for ordered socket delivery.
 
-        Prebuilt envelopes are used by shared-slot transport. They must still
-        update sender sequence progress so stop cutoffs and flush waits observe
-        them correctly.
+        Prebuilt envelopes may carry pre-reserved sequence numbers. They must
+        still update sender sequence progress so stop cutoffs and flush waits
+        observe them correctly.
         """
         with self._enqueue_lock:
             if envelope.sequence_number is None:

@@ -22,9 +22,10 @@ from neuracore.data_daemon.config_manager.profiles import (
 )
 from neuracore.data_daemon.const import (
     DEFAULT_PROFILE_NAME,
-    DEFAULT_SHARED_MEMORY_SIZE,
-    DEFAULT_VIDEO_SLOT_COUNT,
-    DEFAULT_VIDEO_SLOT_SIZE,
+    DEFAULT_TRANSPORT_BUFFER_SIZE,
+    IOX2_HISTORY_SIZE,
+    IOX2_MAX_FRAME_BYTES,
+    IOX2_SUBSCRIBER_BUFFER_SIZE,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
@@ -94,11 +95,12 @@ class DaemonRuntime:
         try:
             free_shared_bytes = shared_memory_free_bytes()
             min_required_bytes = shared_memory_required_bytes(
-                DEFAULT_SHARED_MEMORY_SIZE,
+                DEFAULT_TRANSPORT_BUFFER_SIZE,
                 metadata_size=4096,
             )
             video_required_bytes = shared_memory_required_bytes(
-                DEFAULT_VIDEO_SLOT_SIZE * DEFAULT_VIDEO_SLOT_COUNT,
+                IOX2_MAX_FRAME_BYTES
+                * (IOX2_SUBSCRIBER_BUFFER_SIZE + IOX2_HISTORY_SIZE),
                 metadata_size=4096,
             )
             if free_shared_bytes < min_required_bytes:

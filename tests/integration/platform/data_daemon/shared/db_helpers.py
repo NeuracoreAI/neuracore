@@ -33,6 +33,7 @@ from typing import Any
 import pytest
 
 import neuracore as nc
+from neuracore.data_daemon.const import DEFAULT_UPLOAD_WAIT_TIMEOUT_SECONDS
 from neuracore.data_daemon.helpers import get_daemon_db_path
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_EXPECTED_TRACE_COUNT,
@@ -914,7 +915,7 @@ def assert_recording_db_statuses(
 
 def wait_for_upload_complete_in_db(
     recording_id: str,
-    timeout_s: float = 90.0,
+    timeout_s: float = DEFAULT_UPLOAD_WAIT_TIMEOUT_SECONDS,
 ) -> None:
     """Block until all known traces for a recording are uploaded per the daemon DB.
 
