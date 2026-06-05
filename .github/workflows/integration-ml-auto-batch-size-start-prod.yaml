@@ -122,7 +122,7 @@ jobs:
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
           -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.algorithm }}_${{ matrix.num_gpus }}_${{ matrix.gpu_type }}]"
 
     - name: Wait for training terminal status
       env:
@@ -137,4 +137,4 @@ jobs:
           --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
           --log-cli-date-format="%H:%M:%S" \
           -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
+          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.algorithm }}_${{ matrix.num_gpus }}_${{ matrix.gpu_type }}]"

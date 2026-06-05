@@ -32,12 +32,11 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 DATASET_NAME = "Conq Hose Manipulation"
-TRAINING_NAME = "Integration Test Auto Batch Size"
+# IT-ABS = Integration Test Auto Batch Size
+TRAINING_NAME = "IT-ABS"
 DEFAULT_FREQUENCY = 10
 TRAINING_TIMEOUT_MINUTES = 60
 TRAINING_POLL_SECONDS = 60
-NUM_GPUS = 1
-
 ALGORITHM_CONFIGS_FILE = Path(__file__).with_name("algorithm_configs.yaml")
 AUTO_BATCH_SIZE_CASES_FILE = Path(__file__).with_name("auto_batch_size_cases.yaml")
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
@@ -56,18 +55,35 @@ def load_auto_batch_size_cases() -> list[dict]:
 def build_auto_batch_size_test_case(
     algorithm_name: str,
     gpu_type: str,
+    num_gpus: int,
 ) -> str:
     """Build the pytest case id for one configured training setup."""
-    return f"{algorithm_name}_{gpu_type}"
+    return f"{algorithm_name}_{num_gpus}_{gpu_type}"
+
+
+def build_training_name(
+    algorithm_name: str,
+    num_gpus: int,
+    gpu_type: str,
+    timestamp: str,
+) -> str:
+    """Build a readable name that stays safe for current backend VM naming."""
+    short_gpu_type = gpu_type.removeprefix("NVIDIA_TESLA_").removeprefix("NVIDIA_")
+    return (
+        f"{TRAINING_NAME} - "
+        f"{algorithm_name}-{num_gpus}-gpus-{short_gpu_type}-{timestamp}"
+    )
 
 
 AUTO_BATCH_SIZE_CASES = tuple(
     pytest.param(
         auto_batch_size_case["algorithm"],
         auto_batch_size_case["gpu_type"],
+        auto_batch_size_case["num_gpus"],
         id=build_auto_batch_size_test_case(
             algorithm_name=auto_batch_size_case["algorithm"],
             gpu_type=auto_batch_size_case["gpu_type"],
+            num_gpus=auto_batch_size_case["num_gpus"],
         ),
     )
     for auto_batch_size_case in load_auto_batch_size_cases()
@@ -185,7 +201,7 @@ def build_algorithm_config(algorithm_config_entry: dict) -> dict:
 
 
 @pytest.mark.parametrize(
-    ("algorithm_name", "gpu_type"),
+    ("algorithm_name", "gpu_type", "num_gpus"),
     AUTO_BATCH_SIZE_CASES,
 )
 class TestAutoBatchSize:
@@ -193,16 +209,21 @@ class TestAutoBatchSize:
         self,
         algorithm_name: str,
         gpu_type: str,
+        num_gpus: int,
     ) -> None:
         """Phase 1: submit an auto batch-size training job and record its ID."""
         test_case = build_auto_batch_size_test_case(
             algorithm_name=algorithm_name,
             gpu_type=gpu_type,
+            num_gpus=num_gpus,
         )
         algorithm_config_entry = get_algorithm_config_entry(algorithm_name)
         nc.login()
 
-        logger.info(f"[{test_case}] Starting auto batch-size training on {gpu_type}")
+        logger.info(
+            f"[{test_case}] Starting auto batch-size training on "
+            f"{num_gpus} {gpu_type} GPU(s)"
+        )
 
         logger.info(f"[{test_case}] Fetching dataset {DATASET_NAME}")
         dataset = nc.get_dataset(DATASET_NAME)
@@ -210,7 +231,7 @@ class TestAutoBatchSize:
             build_cross_embodiment_descriptions(dataset)
         )
 
-        timestamp = int(time.time())
+        timestamp = time.strftime("%y%m%d%H%M%S")
         logger.info(f"[{test_case}] Launching training job")
         algorithm_config = build_algorithm_config(algorithm_config_entry)
         logger.info(
@@ -218,12 +239,17 @@ class TestAutoBatchSize:
             f"{pprint.pformat(algorithm_config)}"
         )
         job_data = nc.start_training_run(
-            name=f"{TRAINING_NAME} - {test_case} - {timestamp}",
+            name=build_training_name(
+                algorithm_name=algorithm_name,
+                num_gpus=num_gpus,
+                gpu_type=gpu_type,
+                timestamp=timestamp,
+            ),
             dataset_name=DATASET_NAME,
             algorithm_name=algorithm_name,
             algorithm_config=algorithm_config,
             gpu_type=gpu_type,
-            num_gpus=NUM_GPUS,
+            num_gpus=num_gpus,
             frequency=DEFAULT_FREQUENCY,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
@@ -246,11 +272,13 @@ class TestAutoBatchSize:
         self,
         algorithm_name: str,
         gpu_type: str,
+        num_gpus: int,
     ) -> None:
         """Phase 2: verify that the submitted training job reaches COMPLETED."""
         test_case = build_auto_batch_size_test_case(
             algorithm_name=algorithm_name,
             gpu_type=gpu_type,
+            num_gpus=num_gpus,
         )
         nc.login()
 

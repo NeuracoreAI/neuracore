@@ -1,7 +1,13 @@
 cases:
   - algorithm: CNNMLP
     gpu_type: NVIDIA_TESLA_T4
+    num_gpus: 1
   - algorithm: ACT
     gpu_type: NVIDIA_TESLA_V100
+    num_gpus: 1
+  - algorithm: DiffusionPolicy
+    gpu_type: NVIDIA_TESLA_T4
+    num_gpus: 2
   - algorithm: Pi0
     gpu_type: NVIDIA_A100_80GB
+    num_gpus: 1
