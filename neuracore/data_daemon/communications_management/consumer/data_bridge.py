@@ -366,26 +366,11 @@ class DataBridge:
         """
         channel.touch()
 
-        raw_data_type = message.payload.get("data_type") if message.payload else None
-        if raw_data_type is None:
-            logger.warning(
-                "HEARTBEAT from producer_id=%s missing required data_type",
-                channel.producer_id,
-            )
-            return
-        try:
-            data_type = DataType(raw_data_type)
-        except ValueError:
-            logger.warning(
-                "HEARTBEAT from producer_id=%s carried unknown data_type=%r",
-                channel.producer_id,
-                raw_data_type,
-            )
-            return
+        raw = message.payload.get("data_type") if message.payload else None
 
-        channel.data_type = data_type
+        channel.data_type = DataType(raw)
 
-        if _data_type_uses_video_transport(data_type):
+        if _data_type_uses_video_transport(raw):
             channel.mark_video_transport_open()
             self._iox2_drain.register_channel(channel.producer_id)
         elif channel.transport_mode is TransportMode.NONE:
@@ -602,6 +587,7 @@ class DataBridge:
             # further traces. It is unregistered only when the channel itself is
             # removed on heartbeat expiry.
             self.channels.set_trace_id(channel, None)
+            channel.clear_transport_state()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
