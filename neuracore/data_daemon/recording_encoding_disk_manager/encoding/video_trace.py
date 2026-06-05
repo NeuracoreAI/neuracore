@@ -221,9 +221,9 @@ class VideoTrace:
                 filepath=self.lossless_path,
                 width=self.width,
                 height=self.height,
-                codec="libx264",
-                pixel_format="yuv444p10le",
-                codec_context_options={"qp": "0", "preset": "ultrafast"},
+                codec="libx264rgb",
+                pixel_format="rgb24",
+                codec_context_options={"crf": "0", "preset": "ultrafast"},
                 chunk_size=self.chunk_size,
             )
 

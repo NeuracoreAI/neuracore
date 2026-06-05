@@ -56,8 +56,8 @@ class StreamingVideoUploader(BucketUploader):
         width: int,
         height: int,
         transform_frame: Callable[[np.ndarray], np.ndarray] | None = None,
-        codec: str = "libx264",
-        pixel_format: str = "yuv444p10le",
+        codec: str = "libx264rgb",
+        pixel_format: str = "rgb24",
         chunk_size: int = CHUNK_SIZE,
         video_name: str = "lossless.mp4",
         codec_context_options: dict[str, str] | None = None,
@@ -77,8 +77,8 @@ class StreamingVideoUploader(BucketUploader):
             height: Frame height in pixels.
             transform_frame: Optional function to transform frames before encoding.
                 Should accept and return numpy arrays of shape (height, width, 3).
-            codec: Video codec to use for encoding (e.g., "libx264", "libx265").
-            pixel_format: Pixel format for encoding (e.g., "yuv444p10le", "yuv420p").
+            codec: Video codec to use for encoding (e.g., "libx264rgb", "libx264").
+            pixel_format: Pixel format for encoding (e.g., "rgb24", "yuv420p").
             chunk_size: Size in bytes of each upload chunk. Will be adjusted
                 to be a multiple of 256 KiB if necessary.
             video_name: Filename for the output video file.
@@ -93,7 +93,11 @@ class StreamingVideoUploader(BucketUploader):
         self.pixel_format = pixel_format
         self.chunk_size = chunk_size
         self.video_name = video_name
-        self.codec_context_options = codec_context_options
+        self.codec_context_options = (
+            {"crf": "0", "preset": "ultrafast"}
+            if codec_context_options is None
+            else codec_context_options
+        )
         self._streaming_done = False
         self.container_format = "mp4"
         self._check_codec_support()
