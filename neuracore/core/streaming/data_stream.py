@@ -2,27 +2,27 @@
 
 This module provides abstract and concrete data stream implementations for
 recording various types of robot sensor data including JSON events, RGB video,
-and depth data. All streams support recording lifecycle management and
-daemon-based data persistence.
+and depth data. Streams are lightweight local objects: instead of owning their
+own sockets and threads, they register a :class:`StreamSession` with the robot's
+:class:`RobotProducerCoordinator` and enqueue recording payloads into it.
 """
 
 import json
 import logging
 import struct
-import uuid
 from abc import ABC
 from dataclasses import dataclass
 
 import numpy as np
 from neuracore_types import CameraData, DataType, NCData
 
-from neuracore.data_daemon.communications_management.producer import ProducerChannel
+from neuracore.data_daemon.communications_management.producer import (
+    RobotProducerCoordinator,
+    StreamPayload,
+    StreamSession,
+)
 
 logger = logging.getLogger(__name__)
-
-
-class MissingProducerChannelError(RuntimeError):
-    """Raised when a stream is stopped without an active producer channel."""
 
 
 @dataclass
@@ -44,9 +44,10 @@ class DataRecordingContext:
 class DataStream(ABC):
     """Base class for data streams.
 
-    Provides common functionality for managing recording state and data
-    storage across different types of sensor data streams. Each stream
-    has its own ProducerChannel for sending data to the daemon.
+    Provides common functionality for managing recording state and the latest
+    logged data across different types of sensor data streams. Transport is owned
+    by the robot-scoped :class:`RobotProducerCoordinator`; each stream registers a
+    :class:`StreamSession` while recording and enqueues payloads into it.
     """
 
     def __init__(self, data_type: DataType, stream_name: str) -> None:
@@ -54,7 +55,7 @@ class DataStream(ABC):
 
         Args:
             data_type: The type of data this stream handles.
-            stream_name: Unique name for this stream (used as channel ID).
+            stream_name: Unique name for this stream within its data type.
 
         Note:
             This must be kept lightweight and not perform any blocking operations.
@@ -64,98 +65,58 @@ class DataStream(ABC):
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
-        self._producer_channel: ProducerChannel | None = None
+        self._coordinator: RobotProducerCoordinator | None = None
+        self._session: StreamSession | None = None
 
     @property
     def data_type(self) -> DataType:
         """Get the data type of this stream."""
         return self._data_type
 
-    def start_recording(self, context: DataRecordingContext) -> None:
-        """Start recording data for this stream.
-
-        If the stream is already recording, stop it first. Then, set the
-        recording state to True and store the recording context. Finally,
-        ensure a producer is available for this stream and start a new trace.
+    def start_recording(
+        self,
+        context: DataRecordingContext,
+        coordinator: RobotProducerCoordinator,
+    ) -> None:
+        """Start recording by registering a session with the robot coordinator.
 
         Args:
-            context: Recording context containing identifiers for the recording
-                session, robot, and dataset.
-
-        Returns:
-            None
+            context: Recording context identifiers for the recording session,
+                robot, and dataset.
+            coordinator: The robot-scoped producer coordinator that owns the
+                socket, sender, heartbeat, and video transports.
         """
         if self.is_recording():
-            _, stop_cutoff_sequence_number = self.prepare_recording_stopped()
-            self.stop_recording(
-                wait_for_producer_drain=False,
-                stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-            )
+            if (
+                self._context is not None
+                and self._context.recording_id == context.recording_id
+            ):
+                return
+            self.mark_recording_stopped()
         self._recording = True
         self._context = context
-        self._handle_ensure_producer_channel(context)
-
-    def _handle_ensure_producer_channel(self, context: DataRecordingContext) -> None:
-        """Ensures a producer is available for this data stream.
-
-        If the producer does not exist, it is created with the given context.
-        Afterwards, the producer channel starts a fresh recording session for
-        the supplied recording context.
-
-        Args:
-            context: Recording context containing identifiers for
-                the recording session, robot, and dataset.
-        """
-        if self._producer_channel is None:
-            channel_id = f"{self._data_type.value}:\
-            {self._stream_name}:{uuid.uuid4().hex[:8]}"
-            self._producer_channel = ProducerChannel(
-                id=channel_id,
-                recording_id=context.recording_id,
-                data_type=self._data_type,
-            )
-
-        self._producer_channel.start_recording_session(
-            recording_id=context.recording_id
+        self._coordinator = coordinator
+        self._session = coordinator.register_stream_session(
+            stream_name=self._stream_name,
+            data_type=self._data_type,
+            recording_id=context.recording_id,
+            robot_instance=context.robot_instance,
+            robot_id=context.robot_id,
+            robot_name=context.robot_name,
+            dataset_id=context.dataset_id,
+            dataset_name=context.dataset_name,
         )
 
-    def prepare_recording_stopped(self) -> tuple[ProducerChannel, int]:
-        """Mark the producer channel as stopping and return it."""
-        producer_channel = self.get_producer_channel()
+    def mark_recording_stopped(self) -> None:
+        """Mark this stream as no longer recording.
 
-        if not isinstance(producer_channel, ProducerChannel):
-            raise MissingProducerChannelError(
-                f"Stream {self._stream_name} has no ProducerChannel"
-            )
-
-        stop_cutoff_sequence_number = producer_channel.mark_recording_stop_requested()
-
-        return producer_channel, stop_cutoff_sequence_number
-
-    def stop_recording(
-        self,
-        stop_cutoff_sequence_number: int,
-        wait_for_producer_drain: bool = True,
-    ) -> None:
-        """Stop recording data and tear down the active producer, if any."""
+        Transport teardown (TRACE_END, drains, stop cutoff) is owned by the
+        coordinator; this only clears the stream's local recording state.
+        """
         self._recording = False
         self._context = None
-        producer_channel = self._producer_channel
-        self._producer_channel = None
-
-        if not isinstance(producer_channel, ProducerChannel):
-            raise MissingProducerChannelError("Stream has no ProducerChannel")
-
-        try:
-            if producer_channel.trace_id:
-                producer_channel.cleanup_producer_channel(
-                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-                    wait_for_transport_drain=wait_for_producer_drain,
-                )
-        finally:
-            producer_channel.stop_producer_channel(
-                wait_for_transport_drain=wait_for_producer_drain,
-            )
+        self._coordinator = None
+        self._session = None
 
     def is_recording(self) -> bool:
         """Check if recording is active.
@@ -173,31 +134,28 @@ class DataStream(ABC):
         """
         return self._latest_data
 
-    def get_producer_channel(self) -> ProducerChannel | None:
-        """Return the active producer channel for this stream, if present."""
-        return self._producer_channel
+    def get_stream_session(self) -> StreamSession | None:
+        """Return the active stream session for this stream, if present."""
+        return self._session
 
     def get_recording_context(self) -> DataRecordingContext | None:
         """Return the active recording context for this stream, if present."""
         return self._context
 
     def _send_to_daemon(self, data: bytes) -> None:
-        """Send data to the daemon via the producer.
+        """Enqueue a single-payload recording chunk into the coordinator.
 
         Args:
             data: Serialized data bytes to send.
         """
-        if self._producer_channel is None or self._context is None:
+        if self._coordinator is None or self._session is None or not data:
             return
-        self._producer_channel.send_data(
-            data=data,
-            data_type=self._data_type,
-            robot_instance=self._context.robot_instance,
-            data_type_name=self._stream_name,
-            robot_id=self._context.robot_id,
-            robot_name=self._context.robot_name,
-            dataset_id=self._context.dataset_id,
-            dataset_name=self._context.dataset_name,
+        self._coordinator.enqueue_stream_payload(
+            StreamPayload(
+                session=self._session,
+                parts=(memoryview(data),),
+                total_bytes=len(data),
+            )
         )
 
     def _send_to_daemon_parts(
@@ -206,19 +164,15 @@ class DataStream(ABC):
         *,
         total_bytes: int,
     ) -> None:
-        """Send a logical payload assembled from multiple byte-like parts."""
-        if self._producer_channel is None or self._context is None:
+        """Enqueue a logical payload assembled from multiple byte-like parts."""
+        if self._coordinator is None or self._session is None:
             return
-        self._producer_channel.send_data_parts(
-            parts=parts,
-            total_bytes=total_bytes,
-            data_type=self._data_type,
-            robot_instance=self._context.robot_instance,
-            data_type_name=self._stream_name,
-            robot_id=self._context.robot_id,
-            robot_name=self._context.robot_name,
-            dataset_id=self._context.dataset_id,
-            dataset_name=self._context.dataset_name,
+        self._coordinator.enqueue_stream_payload(
+            StreamPayload(
+                session=self._session,
+                parts=parts,
+                total_bytes=total_bytes,
+            )
         )
 
 

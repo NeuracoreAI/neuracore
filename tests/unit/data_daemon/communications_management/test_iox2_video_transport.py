@@ -16,22 +16,27 @@ from neuracore.data_daemon.communications_management.shared_transport.iox2_daemo
 from neuracore.data_daemon.communications_management.shared_transport.iox2_video_transport import (  # noqa: E501
     FRAME_INDEX_KEY,
     FRAME_META_KEY,
+    FRAME_PRODUCER_KEY,
     FRAME_SEQUENCE_KEY,
     Iox2VideoTransport,
 )
 
 
-def _channel_id() -> str:
+def _service_id() -> str:
     return f"test-{uuid.uuid4().hex[:12]}"
+
+
+def _transport(service_id: str, producer_id: str = "prod-1", **kwargs):
+    return Iox2VideoTransport(service_id, producer_id, **kwargs)
 
 
 def test_send_frame_round_trip() -> None:
     """A published frame is received and parses back to the original payload."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    service_id = _service_id()
+    transport = _transport(service_id, producer_id="prod-rt")
     drain = Iox2DaemonDrain()
     try:
-        drain.register_channel(channel_id)
+        drain.register_channel(service_id)
         transport.update_connections()
 
         metadata = {"trace_id": "t1", "chunk_index": 0, "total_chunks": 1}
@@ -43,8 +48,8 @@ def test_send_frame_round_trip() -> None:
         drain.drain_all(lambda *args: received.append(args))
 
         assert len(received) == 1
-        got_channel, got_seq, got_meta, got_chunk = received[0]
-        assert got_channel == channel_id
+        got_producer, got_seq, got_meta, got_chunk = received[0]
+        assert got_producer == "prod-rt"
         assert got_seq == seq
         assert got_meta == metadata
         assert got_chunk == chunk
@@ -55,8 +60,7 @@ def test_send_frame_round_trip() -> None:
 
 def test_send_frame_too_large() -> None:
     """An oversized frame raises rather than being silently discarded."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id, max_frame_bytes=128)
+    transport = _transport(_service_id(), max_frame_bytes=128)
     try:
         with pytest.raises(PacketTooLarge):
             transport.send_frame({"trace_id": "t"}, b"x" * 256)
@@ -66,8 +70,7 @@ def test_send_frame_too_large() -> None:
 
 def test_send_frame_no_subscriber_is_not_an_error() -> None:
     """Publishing with no daemon subscriber succeeds (frame just goes nowhere)."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    transport = _transport(_service_id())
     try:
         seq = transport.send_frame({"trace_id": "t", "chunk_index": 0}, b"data")
         assert seq is not None
@@ -78,8 +81,7 @@ def test_send_frame_no_subscriber_is_not_an_error() -> None:
 
 def test_send_frame_respects_stop_cutoff() -> None:
     """Frames past the stop cutoff are rejected and return None."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    transport = _transport(_service_id())
     try:
         first = transport.send_frame({"trace_id": "t"}, b"a")
         assert first is not None
@@ -94,8 +96,7 @@ def test_send_frame_respects_stop_cutoff() -> None:
 
 def test_finish_recording_session_is_noop_for_service() -> None:
     """finish_recording_session keeps the publisher/service usable."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    transport = _transport(_service_id())
     try:
         transport.send_frame({"trace_id": "t"}, b"a")
         transport.finish_recording_session()
@@ -107,18 +108,18 @@ def test_finish_recording_session_is_noop_for_service() -> None:
 
 def test_envelope_carries_sequence_and_index() -> None:
     """Each frame embeds its sequence id and a monotonic frame index."""
-    channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    service_id = _service_id()
+    transport = _transport(service_id)
     drain = Iox2DaemonDrain()
     try:
-        drain.register_channel(channel_id)
+        drain.register_channel(service_id)
         transport.update_connections()
         transport.send_frame({"trace_id": "t", "chunk_index": 0}, b"a")
         transport.send_frame({"trace_id": "t", "chunk_index": 1}, b"b")
 
         indices: list[int] = []
 
-        def collect(channel: str, seq: int, meta: dict, chunk: bytes) -> None:
+        def collect(producer_id: str, seq: int, meta: dict, chunk: bytes) -> None:
             indices.append(seq)
 
         drain.drain_all(collect)
@@ -130,17 +131,18 @@ def test_envelope_carries_sequence_and_index() -> None:
 
 
 def test_raw_packet_envelope_structure() -> None:
-    """The on-wire packet wraps metadata with seq/idx/meta keys."""
-    from neuracore.data_daemon.communications_management.shared_transport.framing import (  # noqa: E501
-        build_video_transport_packet,
-    )
+    """The on-wire packet wraps metadata with pid/seq/idx/meta keys."""
     from neuracore.data_daemon.communications_management.shared_transport.iox2_video_transport import (  # noqa: E501
         build_frame_envelope,
     )
+    from neuracore.data_daemon.communications_management.shared_transport.framing import (  # noqa: E501
+        build_video_transport_packet,
+    )
 
-    envelope = build_frame_envelope(7, 3, {"trace_id": "t", "chunk_index": 0})
+    envelope = build_frame_envelope("prod-1", 7, 3, {"trace_id": "t", "chunk_index": 0})
     packet = build_video_transport_packet(envelope, b"payload")
     parsed, chunk = parse_video_transport_packet(packet)
+    assert parsed[FRAME_PRODUCER_KEY] == "prod-1"
     assert parsed[FRAME_SEQUENCE_KEY] == 7
     assert parsed[FRAME_INDEX_KEY] == 3
     assert parsed[FRAME_META_KEY] == {"trace_id": "t", "chunk_index": 0}

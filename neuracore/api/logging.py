@@ -164,7 +164,7 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
             dataset_id=dataset_id,
             dataset_name=None,
         )
-        data_stream.start_recording(context)
+        data_stream.start_recording(context, robot.get_producer_coordinator())
 
 
 def _log_single_joint_data(
@@ -245,10 +245,10 @@ def _log_joint_data_point(
 
     _publish_json_to_p2p(robot, joint_stream_binding.stream_id, data_type, data)
 
-    producer_channel = joint_stream.get_producer_channel()
+    session = joint_stream.get_stream_session()
     trace_id = (
-        producer_channel.trace_id
-        if producer_channel is not None
+        session.trace_id
+        if session is not None
         and joint_stream.get_recording_context() is not None
         else None
     )
@@ -324,11 +324,10 @@ def _log_group_of_joint_data(
         return
 
     batch_context = batch_transport_stream.get_recording_context()
-    batch_transport_channel = batch_transport_stream.get_producer_channel()
-    if batch_context is None or batch_transport_channel is None:
+    if batch_context is None:
         return
 
-    batch_transport_channel.send_batched_joint_data(
+    robot.get_producer_coordinator().enqueue_batched_joint(
         BatchedJointDataPayload(
             recording_id=batch_context.recording_id,
             timestamp=timestamp,

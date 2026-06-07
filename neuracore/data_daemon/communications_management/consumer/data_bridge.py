@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 
 from neuracore_types import DataType
@@ -35,23 +36,10 @@ from .models import (
     TraceMetadataRegistrationRequest,
     TraceMetadataSnapshot,
     TraceRecordingLookupRequest,
-    TransportMode,
     VideoFrameSequenceProgressRequest,
 )
 from .spool_worker import SpoolWorker
 from .trace_lifecycle_coordinator import TraceLifecycleCoordinator
-
-# Data types whose frames travel over the iceoryx2 zero-copy video transport
-# instead of the ZMQ control channel.
-_VIDEO_DATA_TYPES = frozenset(
-    {DataType.RGB_IMAGES, DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS}
-)
-
-
-def _data_type_uses_video_transport(data_type: DataType | None) -> bool:
-    """Return True when the channel's frames arrive over iceoryx2."""
-    return data_type in _VIDEO_DATA_TYPES
-
 
 RecordingDiskManager = rdm_module.RecordingDiskManager
 
@@ -59,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 
 DEFAULT_MAX_SPOOLED_CHUNKS = int(os.getenv("NCD_MAX_SPOOLED_CHUNKS", "128"))
+IOX2_DRAIN_POLL_INTERVAL_S = float(os.getenv("NCD_IOX2_DRAIN_POLL_INTERVAL_S", "0.001"))
 CommandHandler = Callable[[ChannelState, MessageEnvelope], None]
 
 
@@ -124,6 +113,8 @@ class DataBridge:
 
         self._emitter = emitter
         self._running = False
+        self._iox2_drain_stop = threading.Event()
+        self._iox2_drain_thread: threading.Thread | None = None
         self._emitter.on(Emitter.TRACE_WRITTEN, self.cleanup_channel_on_trace_written)
 
     def run(self) -> None:
@@ -147,6 +138,7 @@ class DataBridge:
         self.comm.start_consumer()
 
         logger.info("Daemon started and ready to receive messages...")
+        self._start_iox2_drain_thread()
         try:
             while self._running:
                 raw = self.comm.receive_raw()
@@ -154,11 +146,12 @@ class DataBridge:
                 if raw:
                     self.process_raw_message(raw)
 
-                self._iox2_drain.drain_all(self._on_iox2_frame)
                 self._cleanup_expired_channels()
         except KeyboardInterrupt:
             logger.info("Shutting down daemon...")
         finally:
+            self._stop_iox2_drain_thread()
+            self._iox2_drain.drain_all(self._on_iox2_frame)
             self._iox2_drain.close()
             self._spool_worker.close()
             self._completion_worker.close()
@@ -174,6 +167,38 @@ class DataBridge:
         to exit on the next iteration.
         """
         self._running = False
+
+    def _start_iox2_drain_thread(self) -> None:
+        """Continuously drain iceoryx video frames off the main ZMQ loop."""
+        if self._iox2_drain_thread is not None:
+            return
+        self._iox2_drain_stop.clear()
+        self._iox2_drain_thread = threading.Thread(
+            target=self._iox2_drain_loop,
+            name="daemon-iox2-drain",
+            daemon=True,
+        )
+        self._iox2_drain_thread.start()
+
+    def _stop_iox2_drain_thread(self) -> None:
+        """Stop the background iceoryx drain thread."""
+        self._iox2_drain_stop.set()
+        thread = self._iox2_drain_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+            self._iox2_drain_thread = None
+
+    def _iox2_drain_loop(self) -> None:
+        """Drain video subscribers frequently enough to avoid ring overflow."""
+        while not self._iox2_drain_stop.is_set():
+            try:
+                drained = self._iox2_drain.drain_all(self._on_iox2_frame)
+            except Exception:
+                logger.exception("Iox2 drain loop failed")
+                time.sleep(IOX2_DRAIN_POLL_INTERVAL_S)
+                continue
+            if drained == 0:
+                self._iox2_drain_stop.wait(IOX2_DRAIN_POLL_INTERVAL_S)
 
     def process_raw_message(self, raw: bytes) -> None:
         """Process a raw message from a producer.
@@ -239,18 +264,22 @@ class DataBridge:
             return
 
         if message.sequence_number is not None and cmd != CommandType.HEARTBEAT:
-            if message.sequence_number > channel.last_sequence_number:
-                channel.last_sequence_number = message.sequence_number
+            sequence_number = int(message.sequence_number)
+            if sequence_number > channel.last_sequence_number:
+                channel.last_sequence_number = sequence_number
                 self._trace_lifecycle.note_producer_sequence(
                     producer_id, channel.last_sequence_number
                 )
+            if sequence_number > channel.last_socket_sequence_number:
+                channel.last_socket_sequence_number = sequence_number
             else:
                 logger.warning(
-                    "Non-monotonic sequence_number=%s command=%s "
-                    "for producer_id=%s (last=%s)",
-                    message.sequence_number,
+                    "Non-monotonic socket sequence_number=%s command=%s "
+                    "for producer_id=%s (last_socket=%s, last_any=%s)",
+                    sequence_number,
                     cmd,
                     producer_id,
+                    channel.last_socket_sequence_number,
                     channel.last_sequence_number,
                 )
         try:
@@ -264,35 +293,36 @@ class DataBridge:
 
     def _on_iox2_frame(
         self,
-        channel_id: str,
+        producer_id: str,
         sequence_id: int,
         metadata: dict,
         chunk: bytes,
     ) -> None:
         """Handle one video frame drained from an iceoryx2 subscriber.
 
-        Advances the producer sequence (so end-of-recording cutoffs account for
+        The frame carries the owning robot coordinator ``producer_id``. This
+        advances the coordinator sequence (so end-of-recording cutoffs account for
         video frames), marks the sequence pending, and hands the decoded chunk to
         the spool worker. The spool worker marks the sequence completed once the
         chunk has been enqueued to the completion worker, which preserves the
         ordering guarantee that a trace is never finalized before its frames are
         spooled.
         """
-        channel = self.channels.get(channel_id)
+        channel = self.channels.get(producer_id)
         if channel is None:
             logger.debug(
-                "Iox2 frame for unknown channel channel_id=%s sequence_id=%s",
-                channel_id,
+                "Iox2 frame for unknown coordinator producer_id=%s sequence_id=%s",
+                producer_id,
                 sequence_id,
             )
             return
 
         if sequence_id > channel.last_sequence_number:
             channel.last_sequence_number = sequence_id
-        self._trace_lifecycle.set_max_producer_sequence(channel_id, sequence_id)
+        self._trace_lifecycle.set_max_producer_sequence(producer_id, sequence_id)
 
         request = VideoFrameSequenceProgressRequest(
-            producer_id=channel_id,
+            producer_id=producer_id,
             sequence_number=sequence_id,
         )
         self._mark_video_frame_sequence_pending(request)
@@ -357,24 +387,36 @@ class DataBridge:
     def _handle_heartbeat(
         self, channel: ChannelState, message: MessageEnvelope
     ) -> None:
-        """Update heartbeat state and register video subscribers on first contact.
-
-        The heartbeat payload must carry the producer's data type. For video
-        data types the daemon creates the matching iceoryx2 subscriber
-        (idempotent), so frames published by the producer are received.
-        Non-video channels fall back to the ZMQ socket transport.
-        """
+        """Update liveness and register video subscribers advertised in heartbeats."""
         channel.touch()
 
+        video_service_id = self._heartbeat_video_service_id(message)
+        if video_service_id is None:
+            return
+
         raw = message.payload.get("data_type") if message.payload else None
+        try:
+            data_type = DataType(raw)
+        except ValueError:
+            logger.warning(
+                "HEARTBEAT from producer_id=%s carried invalid data_type=%r "
+                "for video_service_id=%s",
+                channel.producer_id,
+                raw,
+                video_service_id,
+            )
+            return
 
-        channel.data_type = DataType(raw)
+        channel.data_type = data_type
+        channel.mark_video_transport_open()
+        channel.video_service_ids.add(video_service_id)
+        self._iox2_drain.register_channel(video_service_id)
 
-        if _data_type_uses_video_transport(raw):
-            channel.mark_video_transport_open()
-            self._iox2_drain.register_channel(channel.producer_id)
-        elif channel.transport_mode is TransportMode.NONE:
-            channel.mark_socket_transport_open()
+    @staticmethod
+    def _heartbeat_video_service_id(message: MessageEnvelope) -> str | None:
+        """Parse the optional iceoryx2 video service id from a heartbeat payload."""
+        raw = message.payload.get("video_service_id") if message.payload else None
+        return str(raw) if raw else None
 
     def _mark_video_frame_sequence_pending(
         self, request: VideoFrameSequenceProgressRequest
@@ -435,12 +477,6 @@ class DataBridge:
             return
 
         trace_id = data_chunk.trace_id
-        if channel.trace_id != trace_id and channel.trace_id is not None:
-            logger.warning(
-                "DATA_CHUNK trace_id=%s does not match channel trace_id=%s",
-                data_chunk.trace_id,
-                channel.trace_id,
-            )
         self.channels.set_trace_id(channel, trace_id)
 
         if self._should_drop_recording_data(
@@ -517,6 +553,7 @@ class DataBridge:
             return
 
         for item in batch_payload.items:
+            self.channels.set_trace_id(channel, item.trace_id)
             self._trace_lifecycle.register_trace(recording_id, item.trace_id)
             self._trace_lifecycle.register_trace_metadata(
                 TraceMetadataRegistrationRequest(
@@ -583,11 +620,12 @@ class DataBridge:
 
         channel = self.channels.get_by_trace_id(trace_id)
         if channel is not None:
-            # Keep the iceoryx2 subscriber registered: the channel may record
-            # further traces. It is unregistered only when the channel itself is
-            # removed on heartbeat expiry.
-            self.channels.set_trace_id(channel, None)
-            channel.clear_transport_state()
+            # Drop only this trace from the coordinator; its other traces and the
+            # iceoryx2 subscribers stay registered. Transport state is reset only
+            # once the coordinator has no remaining active traces.
+            self.channels.remove_trace_id(channel, trace_id)
+            if not channel.has_active_traces():
+                channel.clear_transport_state()
 
     def _cleanup_expired_channels(self) -> None:
         """Remove channels whose heartbeat has not been seen within the timeout."""
@@ -603,7 +641,7 @@ class DataBridge:
                 state.heartbeat_expired_at = None
                 continue
 
-            if state.trace_id is None:
+            if not state.has_active_traces():
                 to_remove.append(producer_id)
                 continue
 
@@ -636,28 +674,30 @@ class DataBridge:
             channel = self.channels.get(producer_id)
             if channel is None:
                 continue
-            if channel.trace_id is not None:
-                recording_id = self._trace_lifecycle.get_trace_recording(
-                    TraceRecordingLookupRequest(trace_id=channel.trace_id)
-                )
-                self._handle_end_trace(
-                    channel,
-                    MessageEnvelope(
-                        producer_id=producer_id,
-                        command=CommandType.TRACE_END,
-                        payload={
-                            "trace_end": {
-                                "trace_id": channel.trace_id,
-                                "recording_id": recording_id,
-                            }
-                        },
-                    ),
-                    reason="heartbeat_expiry",
-                )
+            if channel.has_active_traces():
+                for trace_id in list(channel.active_trace_ids):
+                    recording_id = self._trace_lifecycle.get_trace_recording(
+                        TraceRecordingLookupRequest(trace_id=trace_id)
+                    )
+                    self._handle_end_trace(
+                        channel,
+                        MessageEnvelope(
+                            producer_id=producer_id,
+                            command=CommandType.TRACE_END,
+                            payload={
+                                "trace_end": {
+                                    "trace_id": trace_id,
+                                    "recording_id": recording_id,
+                                }
+                            },
+                        ),
+                        reason="heartbeat_expiry",
+                    )
                 self._trace_lifecycle.set_max_producer_sequence(
                     channel.producer_id, channel.last_sequence_number
                 )
-            self._iox2_drain.unregister_channel(producer_id)
+            for service_id in list(channel.video_service_ids):
+                self._iox2_drain.unregister_channel(service_id)
             channel.clear_transport_state()
             self.channels.remove(producer_id)
             self._closed_producers.add(producer_id)

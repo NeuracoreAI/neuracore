@@ -12,8 +12,9 @@ from neuracore_types import DataType
 
 import neuracore.data_daemon.const as const_module
 from neuracore.data_daemon.communications_management.consumer.data_bridge import Daemon
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    ProducerChannel,
+from neuracore.data_daemon.communications_management.producer import (
+    RobotProducerCoordinator,
+    StreamPayload,
 )
 from neuracore.data_daemon.communications_management.shared_transport import (
     communications_manager as comms_module,
@@ -97,6 +98,52 @@ def _drain_messages(
     assert received == expected
     if until is not None:
         assert until()
+
+
+def _drain_until_rdm(
+    daemon: Daemon,
+    comm: CommunicationsManager,
+    until,
+    timeout: float = 2.0,
+) -> None:
+    """Drain daemon socket messages (heartbeats included) until ``until`` holds."""
+    poller = zmq.Poller()
+    poller.register(comm._consumer_socket, zmq.POLLIN)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if until():
+            return
+        events = dict(poller.poll(50))
+        if comm._consumer_socket in events:
+            raw = comm.receive_raw()
+            if raw is None:
+                continue
+            daemon.handle_message(MessageEnvelope.from_bytes(raw))
+    assert until()
+
+
+def _coordinator_session(
+    coordinator: RobotProducerCoordinator,
+    *,
+    stream_name: str,
+    data_type: DataType,
+    recording_id: str,
+    robot_instance: int = 1,
+    robot_id: str | None = "robot-1",
+    robot_name: str | None = "robot",
+    dataset_id: str | None = "dataset-1",
+    dataset_name: str | None = "dataset",
+):
+    return coordinator.register_stream_session(
+        stream_name=stream_name,
+        data_type=data_type,
+        recording_id=recording_id,
+        robot_instance=robot_instance,
+        robot_id=robot_id,
+        robot_name=robot_name,
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+    )
 
 
 def test_daemon_singleton_socket_enforced(zmq_context: zmq.Context) -> None:
@@ -189,38 +236,28 @@ def test_large_payload_chunked_round_trip_over_ipc(
         emitter=emitter,
     )
 
-    producer = ProducerChannel(
-        id="producer-large",
-        context=zmq_context,
-        chunk_size=16 * 1024,
-        recording_id="rec-large",
-        data_type=DataType.CUSTOM_1D,
+    coordinator = RobotProducerCoordinator(
+        producer_id="producer-large", context=zmq_context
     )
-
-    producer.start_new_trace()
+    session = _coordinator_session(
+        coordinator,
+        stream_name="custom",
+        data_type=DataType.CUSTOM_1D,
+        recording_id="rec-large",
+    )
 
     payload = b"x" * 50_000
-    producer.send_data(
-        payload,
-        data_type=DataType.CUSTOM_1D,
-        data_type_name="custom",
-        robot_instance=1,
-        robot_id="robot-1",
-        robot_name="robot",
-        dataset_id="dataset-1",
-        dataset_name="dataset",
+    coordinator.enqueue_stream_payload(
+        StreamPayload(
+            session=session, parts=(memoryview(payload),), total_bytes=len(payload)
+        )
     )
-    _drain_messages(
-        daemon,
-        daemon_comm,
-        expected=1,
-        until=lambda: len(rdm.enqueued) == 1,
-    )
+    _drain_until_rdm(daemon, daemon_comm, until=lambda: len(rdm.enqueued) == 1)
 
     assert len(rdm.enqueued) == 1
     assert rdm.enqueued[0].data == payload
 
-    producer.stop_producer_channel()
+    coordinator.close()
 
 
 def test_batched_joint_data_round_trip_over_ipc(
@@ -235,11 +272,8 @@ def test_batched_joint_data_round_trip_over_ipc(
         emitter=emitter,
     )
 
-    producer = ProducerChannel(
-        id="producer-joint-batch",
-        context=zmq_context,
-        recording_id="rec-joint-batch",
-        data_type=DataType.JOINT_POSITIONS,
+    coordinator = RobotProducerCoordinator(
+        producer_id="producer-joint-batch", context=zmq_context
     )
 
     payload = BatchedJointDataPayload(
@@ -265,13 +299,8 @@ def test_batched_joint_data_round_trip_over_ipc(
         ],
     )
 
-    producer.send_batched_joint_data(payload)
-    _drain_messages(
-        daemon,
-        daemon_comm,
-        expected=1,
-        until=lambda: len(rdm.enqueued) == 2,
-    )
+    coordinator.enqueue_batched_joint(payload)
+    _drain_until_rdm(daemon, daemon_comm, until=lambda: len(rdm.enqueued) == 2)
 
     assert len(rdm.enqueued) == 2
     assert [message.trace_id for message in rdm.enqueued] == [
@@ -287,8 +316,7 @@ def test_batched_joint_data_round_trip_over_ipc(
         b'{"timestamp": 123.456, "value": -0.2}',
     ]
 
-    producer.stop_producer_channel()
-    daemon_comm.cleanup_daemon()
+    coordinator.close()
     daemon_comm.cleanup_daemon()
 
 
@@ -302,56 +330,56 @@ def test_two_producers_route_to_own_channels(zmq_context: zmq.Context, emitter) 
         emitter=emitter,
     )
 
-    producer_a = ProducerChannel(
-        id="producer-a",
-        context=zmq_context,
-        chunk_size=8,
+    coordinator_a = RobotProducerCoordinator(
+        producer_id="producer-a", context=zmq_context
+    )
+    coordinator_b = RobotProducerCoordinator(
+        producer_id="producer-b", context=zmq_context
+    )
+    session_a = _coordinator_session(
+        coordinator_a,
+        stream_name="custom",
+        data_type=DataType.CUSTOM_1D,
         recording_id="rec-a",
-        data_type=DataType.CUSTOM_1D,
+        robot_instance=1,
+        robot_id="robot-a",
+        robot_name=None,
+        dataset_id="dataset-a",
+        dataset_name=None,
     )
-    producer_b = ProducerChannel(
-        id="producer-b",
-        context=zmq_context,
-        chunk_size=8,
+    session_b = _coordinator_session(
+        coordinator_b,
+        stream_name="custom",
+        data_type=DataType.CUSTOM_1D,
         recording_id="rec-b",
-        data_type=DataType.CUSTOM_1D,
+        robot_instance=2,
+        robot_id="robot-b",
+        robot_name=None,
+        dataset_id="dataset-b",
+        dataset_name=None,
     )
-
-    producer_a.start_new_trace()
-    producer_b.start_new_trace()
 
     payload_a = b"payload-a"
     payload_b = b"payload-b"
 
-    producer_a.send_data(
-        payload_a,
-        data_type=DataType.CUSTOM_1D,
-        data_type_name="custom",
-        robot_instance=1,
-        robot_id="robot-a",
-        dataset_id="dataset-a",
+    coordinator_a.enqueue_stream_payload(
+        StreamPayload(
+            session=session_a, parts=(memoryview(payload_a),), total_bytes=len(payload_a)
+        )
     )
-    producer_b.send_data(
-        payload_b,
-        data_type=DataType.CUSTOM_1D,
-        data_type_name="custom",
-        robot_instance=2,
-        robot_id="robot-b",
-        dataset_id="dataset-b",
+    coordinator_b.enqueue_stream_payload(
+        StreamPayload(
+            session=session_b, parts=(memoryview(payload_b),), total_bytes=len(payload_b)
+        )
     )
-    _drain_messages(
-        daemon,
-        daemon_comm,
-        expected=2,
-        until=lambda: len(rdm.enqueued) == 2,
-    )
+    _drain_until_rdm(daemon, daemon_comm, until=lambda: len(rdm.enqueued) == 2)
 
     by_producer = {msg.producer_id: msg.data for msg in rdm.enqueued}
     assert by_producer["producer-a"] == payload_a
     assert by_producer["producer-b"] == payload_b
 
-    producer_a.stop_producer_channel()
-    producer_b.stop_producer_channel()
+    coordinator_a.close()
+    coordinator_b.close()
     daemon_comm.cleanup_daemon()
 
 
@@ -441,38 +469,6 @@ def test_interleaved_chunks_reassemble_per_producer(
     assert by_producer["producer-b"] == payload_b
 
     daemon_comm.cleanup_daemon()
-
-
-def test_trace_id_required_on_send_data() -> None:
-    """send_data() requires start_new_trace() to be called first."""
-    producer = ProducerChannel(
-        recording_id="rec-1",
-        data_type=DataType.CUSTOM_1D,
-    )
-
-    with pytest.raises(ValueError, match="Trace ID required"):
-        producer.send_data(
-            b"data",
-            data_type=DataType.CUSTOM_1D,
-            data_type_name="custom",
-            robot_instance=1,
-            robot_id="robot",
-            dataset_id="dataset",
-        )
-
-    producer.stop_producer_channel()
-
-
-def test_recording_id_required_on_start_new_trace() -> None:
-    """start_new_trace() requires recording_id to be set on init."""
-    producer = ProducerChannel(
-        data_type=DataType.CUSTOM_1D,
-    )
-
-    with pytest.raises(ValueError, match="recording_id is required"):
-        producer.start_new_trace()
-
-    producer.stop_producer_channel()
 
 
 def test_unknown_command_logs_warning_and_continues(

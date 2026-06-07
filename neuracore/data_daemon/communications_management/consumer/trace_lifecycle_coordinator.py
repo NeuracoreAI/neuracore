@@ -119,23 +119,23 @@ class TraceLifecycleCoordinator:
         producer_id: str,
         channel: ChannelState,
     ) -> int | None:
-        """Return stop cutoff sequence for the channel's active trace, if known."""
-        trace_id = channel.trace_id
-        if trace_id is None:
-            return None
-        recording_id = self._trace_recordings.get_recording_id(trace_id)
-        if recording_id is None:
-            return None
-        closing_state = self._closing_recordings.get_closing(recording_id)
-        if closing_state is None:
-            return None
-        cutoffs = closing_state.producer_stop_sequence_numbers
-        if not cutoffs:
-            return None
-        cutoff = cutoffs.get(producer_id)
-        if cutoff is None:
-            return None
-        return int(cutoff)
+        """Return the coordinator stop cutoff sequence, if a recording is closing.
+
+        A coordinator carries several traces that all belong to the same closing
+        recording, so the cutoff is resolved from any active trace and keyed by
+        the coordinator ``producer_id``.
+        """
+        for trace_id in channel.active_trace_ids:
+            recording_id = self._trace_recordings.get_recording_id(trace_id)
+            if recording_id is None:
+                continue
+            closing_state = self._closing_recordings.get_closing(recording_id)
+            if closing_state is None:
+                continue
+            cutoff = closing_state.producer_stop_sequence_numbers.get(producer_id)
+            if cutoff is not None:
+                return int(cutoff)
+        return None
 
     def has_pending_video_frame_sequences_at_or_before(
         self,
@@ -203,11 +203,33 @@ class TraceLifecycleCoordinator:
         trace_id = request.trace_id
         sequence_number = request.sequence_number
         if self._closing_recordings.is_closed(recording_id):
-            logger.warning(
-                "Dropping data for closed recording_id=%s trace_id=%s",
-                recording_id,
-                trace_id,
+            closed_cutoff_sequence_number = (
+                self._closing_recordings.closed_stop_cutoff(
+                    recording_id, channel.producer_id
+                )
             )
+            if (
+                closed_cutoff_sequence_number is not None
+                and sequence_number is not None
+                and sequence_number <= closed_cutoff_sequence_number
+            ):
+                logger.debug(
+                    "Dropping stale data for closed recording_id=%s trace_id=%s "
+                    "(sequence_number=%s, cutoff_sequence_number=%s)",
+                    recording_id,
+                    trace_id,
+                    sequence_number,
+                    closed_cutoff_sequence_number,
+                )
+            else:
+                logger.warning(
+                    "Dropping data for closed recording_id=%s trace_id=%s "
+                    "(sequence_number=%s, cutoff_sequence_number=%s)",
+                    recording_id,
+                    trace_id,
+                    sequence_number,
+                    closed_cutoff_sequence_number,
+                )
             return True
 
         closing_state = self._closing_recordings.get_closing(recording_id)

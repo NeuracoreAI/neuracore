@@ -459,6 +459,10 @@ class StateManager:
         # Trace finished writing but buffer states not flushed
         # so possibly still unsure of expected_trace_count at this stage
         if not await self._store.is_expected_trace_count_reported(trace.recording_id):
+            logger.debug(
+                "Trace %s written before expected trace count was reported",
+                trace.trace_id,
+            )
             return
 
         # Start registering loop if not started yet

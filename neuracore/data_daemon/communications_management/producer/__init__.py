@@ -1,11 +1,21 @@
 """Producer-side communications management package."""
 
-from .producer_channel import ProducerChannel
-from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_heartbeat_service import ProducerHeartbeatService
+from .robot_producer_coordinator import (
+    RobotProducerCoordinator,
+    StreamPayload,
+    StreamSession,
+    TransportPriority,
+    data_type_uses_video_transport,
+    producer_transport_args_for_data_type,
+)
 
 __all__ = [
-    "ProducerChannel",
-    "ProducerChannelMessageSender",
     "ProducerHeartbeatService",
+    "RobotProducerCoordinator",
+    "StreamSession",
+    "StreamPayload",
+    "TransportPriority",
+    "data_type_uses_video_transport",
+    "producer_transport_args_for_data_type",
 ]
