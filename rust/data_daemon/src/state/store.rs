@@ -327,6 +327,59 @@ impl TraceUpdate {
     }
 }
 
+/// Row-creation fields for a trace, carried on the *first* coalesced write so
+/// the batcher can insert the row instead of the actor blocking on a
+/// synchronous `create_trace`. A trace is created the moment its actor spawns —
+/// which can happen at any point in a recording (a sensor that starts logging
+/// midway), not only at the boundary — so this rides every actor's first write.
+#[derive(Debug, Clone)]
+pub struct TraceCreate {
+    /// Parent recording's local index.
+    pub recording_index: i64,
+    /// Wire data-type label.
+    pub data_type: Option<String>,
+    /// Per-stream sensor label (persisted to `data_type_name`).
+    pub data_type_name: Option<String>,
+}
+
+/// One coalesced set of actor-owned column updates for a single trace — the
+/// unit the [`crate::state::trace_writer::TraceWriter`] batcher flushes.
+///
+/// Only the columns a per-trace actor owns appear here (`write_status`, the
+/// byte counters, the write-phase error). The registration / upload columns
+/// are owned by the cloud coordinators, so a batched flush can never clobber
+/// them. `None` fields are left untouched (`COALESCE`-preserved). `create` is
+/// set only on the trace's first write and triggers an idempotent row insert.
+#[derive(Debug, Clone, Default)]
+pub struct CoalescedTraceWrite {
+    /// Target trace row.
+    pub trace_id: String,
+    /// Row-creation fields, present only on the trace's first coalesced write.
+    pub create: Option<TraceCreate>,
+    /// New write-lifecycle state, if it changed.
+    pub write_status: Option<TraceWriteStatus>,
+    /// Latest absolute on-disk byte count.
+    pub bytes_written: Option<i64>,
+    /// Final byte total (set on finalise).
+    pub total_bytes: Option<i64>,
+    /// Write-phase error code.
+    pub error_code: Option<TraceErrorCode>,
+    /// Write-phase error message.
+    pub error_message: Option<String>,
+}
+
+impl CoalescedTraceWrite {
+    /// True when no actor-owned column changed — a create-only write whose
+    /// batched flush needs the row INSERT but no follow-up UPDATE.
+    fn has_column_update(&self) -> bool {
+        self.write_status.is_some()
+            || self.bytes_written.is_some()
+            || self.total_bytes.is_some()
+            || self.error_code.is_some()
+            || self.error_message.is_some()
+    }
+}
+
 /// SQLite-backed [`StateStore`].
 ///
 /// Writes are serialised through a `Mutex<()>` mirroring the
@@ -384,6 +437,93 @@ impl SqliteStateStore {
     /// Close the pool, draining outstanding connections.
     pub async fn close(self) {
         self.pool.close().await;
+    }
+
+    /// Apply a batch of coalesced per-trace writes in a single transaction.
+    ///
+    /// The [`crate::state::trace_writer::TraceWriter`] batcher coalesces many
+    /// actors' per-frame progress / status / finalise updates (last-writer-wins
+    /// per trace) and flushes them together here, so the per-transaction cost
+    /// and the `write_guard` acquisition are amortised across the whole batch
+    /// instead of paid per row. Each SET clause is a fixed `COALESCE(?, col)`
+    /// form (only supplied columns change; statement stays prepared-cache
+    /// friendly) and there is no read-back `SELECT`.
+    ///
+    /// The `WHERE` guard keys off the *target* lifecycle state so a flush is
+    /// monotonic w.r.t. terminal states — a late coalesced progress write can
+    /// never resurrect a row a concurrent [`StateStore::cancel_recording`]
+    /// already burned to `failed`, nor un-finish a `written` row. That
+    /// invariant is what lets the batcher run without tight coordination with
+    /// the cancel path.
+    pub async fn apply_trace_writes(
+        &self,
+        writes: &[CoalescedTraceWrite],
+    ) -> Result<(), StateStoreError> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        for write in writes {
+            // First write for a trace carries its create fields: insert the row
+            // (idempotent) before applying any column update. This folds the
+            // per-actor `create_trace` into the batch, so the boundary's spawn
+            // burst becomes one batched transaction instead of N.
+            if let Some(create) = &write.create {
+                sqlx::query(
+                    "INSERT INTO traces (trace_id, recording_index, write_status, \
+                                         data_type, data_type_name, created_at, last_updated) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+                     ON CONFLICT(trace_id) DO NOTHING",
+                )
+                .bind(&write.trace_id)
+                .bind(create.recording_index)
+                .bind(TraceWriteStatus::Initializing.as_str())
+                .bind(create.data_type.as_deref())
+                .bind(create.data_type_name.as_deref())
+                .bind(now)
+                .execute(&mut *tx)
+                .await?;
+            }
+
+            // A create-only write (actor just spawned, no data yet) needs no
+            // follow-up UPDATE.
+            if !write.has_column_update() {
+                continue;
+            }
+
+            let guard = match write.write_status {
+                // Finalise: apply unless cancel already burned the row.
+                Some(TraceWriteStatus::Written) => "write_status != 'failed'",
+                // Fail: apply unless the trace already finished writing.
+                Some(TraceWriteStatus::Failed) => "write_status != 'written'",
+                // Progress / Writing / byte-only: live (non-terminal) rows only.
+                _ => "write_status NOT IN ('written', 'failed')",
+            };
+            let sql = format!(
+                "UPDATE traces SET \
+                     write_status = COALESCE(?1, write_status), \
+                     bytes_written = COALESCE(?2, bytes_written), \
+                     total_bytes = COALESCE(?3, total_bytes), \
+                     error_code = COALESCE(?4, error_code), \
+                     error_message = COALESCE(?5, error_message), \
+                     last_updated = ?6 \
+                   WHERE trace_id = ?7 AND {guard}"
+            );
+            sqlx::query(&sql)
+                .bind(write.write_status.as_ref().map(|status| status.as_str()))
+                .bind(write.bytes_written)
+                .bind(write.total_bytes)
+                .bind(write.error_code.as_ref().map(|code| code.as_str()))
+                .bind(write.error_message.as_deref())
+                .bind(now)
+                .bind(&write.trace_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Fetch a recording row by its local index inside an open connection.

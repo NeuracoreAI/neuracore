@@ -122,6 +122,8 @@ extr
 extractall
 extrinsics
 Extrinsics
+DONTNEED
+fadvise
 faceadr
 facecolor
 facenum
@@ -272,6 +274,7 @@ offsamples
 oieb
 Oieb
 OIEB
+oneshot
 opencv
 openarm
 openarm_description
@@ -414,6 +417,7 @@ unet
 Unet
 Unet's
 uninit
+unflushed
 unistd
 UNITREE
 unitreeh1

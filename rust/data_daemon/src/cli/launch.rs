@@ -268,11 +268,19 @@ fn run_daemon(
         }
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
         let event_bus = EventBus::new();
+        // Write-behind for the per-trace actors' high-frequency progress /
+        // status / finalise writes: coalesced per trace and flushed in batches
+        // off the actors' hot path so they never contend on the store's single
+        // write mutex (see `state::trace_writer`). Drained + flushed at shutdown
+        // below, after the dispatcher (and so every actor) has stopped.
+        let (trace_write_handle, trace_writer) =
+            crate::state::trace_writer::spawn(Arc::new(state_store.clone()));
         let actor_context = Arc::new(
             TraceActorContext::new(
                 recordings_root.clone(),
                 storage_budget,
                 VideoEncoder::new(),
+                trace_write_handle,
             )
             .with_event_bus(event_bus.clone()),
         );
@@ -389,6 +397,10 @@ fn run_daemon(
             //   4. read the captured shutdown signal for the log line.
             drop(dispatcher_tx);
             dispatcher_handle.shutdown().await;
+            // Every per-trace actor has now exited, so no further trace writes
+            // can be produced. Drain + flush the write-behind's final batch
+            // before the store closes so finalise/failed states are durable.
+            trace_writer.shutdown().await;
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
             }
