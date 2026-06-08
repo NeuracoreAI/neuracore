@@ -1,95 +1,71 @@
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 from neuracore_types import DataType
 
 from neuracore.core.robot import Robot
-from neuracore.core.streaming.data_stream import MissingProducerChannelError
 
 
-class _FakeProducerChannel:
-    channel_id = "active-channel"
+class _FakeCoordinator:
+    """Stands in for the robot-scoped producer coordinator."""
 
-    def __init__(self) -> None:
-        self.stop_requested = False
+    def __init__(self, producer_id: str = "robot:robot-id-1:0", cutoff: int = 42):
+        self.producer_id = producer_id
+        self.cutoff = cutoff
+        self.stop_calls: list[bool] = []
+        self.closed = False
 
-    def mark_recording_stop_requested(self) -> int:
-        self.stop_requested = True
-        return 42
+    def stop_recording(self, *, wait_for_drain: bool = True) -> int:
+        self.stop_calls.append(wait_for_drain)
+        return self.cutoff
 
-
-class _StaleStream:
-    data_type = DataType.CUSTOM_1D
-
-    def prepare_recording_stopped(self) -> tuple[_FakeProducerChannel, int]:
-        raise MissingProducerChannelError("Stream stale has no ProducerChannel")
-
-
-class _ActiveStream:
-    data_type = DataType.JOINT_POSITIONS
-
-    def __init__(self) -> None:
-        self.channel = _FakeProducerChannel()
-        self.stop_calls: list[dict[str, object]] = []
-
-    def prepare_recording_stopped(self) -> tuple[_FakeProducerChannel, int]:
-        return self.channel, self.channel.mark_recording_stop_requested()
-
-    def stop_recording(
-        self,
-        *,
-        stop_cutoff_sequence_number: int,
-        wait_for_producer_drain: bool = True,
-    ) -> None:
-        self.stop_calls.append({
-            "stop_cutoff_sequence_number": stop_cutoff_sequence_number,
-            "wait_for_producer_drain": wait_for_producer_drain,
-        })
+    def close(self) -> None:
+        self.closed = True
 
 
-class _FailingStopStream(_ActiveStream):
-    def stop_recording(
-        self,
-        *,
-        stop_cutoff_sequence_number: int,
-        wait_for_producer_drain: bool = True,
-    ) -> None:
-        super().stop_recording(
-            stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-            wait_for_producer_drain=wait_for_producer_drain,
-        )
-        raise RuntimeError("producer drain failed")
+class _FakeStream:
+    def __init__(self, data_type: DataType = DataType.JOINT_POSITIONS) -> None:
+        self.data_type = data_type
+        self.stopped = False
+
+    def mark_recording_stopped(self) -> None:
+        self.stopped = True
 
 
-def test_stop_all_streams_removes_stale_stream_and_continues() -> None:
+def test_stop_all_streams_returns_coordinator_cutoff() -> None:
     robot = Robot("robot", instance=0, org_id="org-1")
-    stale = _StaleStream()
-    active = _ActiveStream()
-
-    robot.add_data_stream("CUSTOM_1D:stale", stale)  # type: ignore[arg-type]
-    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
+    coordinator = _FakeCoordinator()
+    robot._producer_coordinator = coordinator  # type: ignore[assignment]
+    stream = _FakeStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", stream)  # type: ignore[arg-type]
 
     sequence_numbers = robot._stop_all_streams(wait_for_producer_drain=False)
 
-    assert sequence_numbers == {"active-channel": 42}
-    assert active.stop_calls == [{
-        "stop_cutoff_sequence_number": 42,
-        "wait_for_producer_drain": False,
-    }]
-    assert "CUSTOM_1D:stale" not in robot.list_all_streams()
-    assert "JOINT_POSITIONS:joint" in robot.list_all_streams()
-    assert robot._data_stream_counts[DataType.CUSTOM_1D] == 0
-    assert robot._data_stream_counts[DataType.JOINT_POSITIONS] == 1
+    assert sequence_numbers == {coordinator.producer_id: 42}
+    assert coordinator.stop_calls == [False]
+    assert stream.stopped is True
+
+
+def test_stop_all_streams_without_coordinator_returns_empty() -> None:
+    robot = Robot("robot", instance=0, org_id="org-1")
+    stream = _FakeStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", stream)  # type: ignore[arg-type]
+
+    assert robot._stop_all_streams() == {}
 
 
 def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     """Callback registered at connect time must drain streams and notify the daemon."""
     robot = Robot("robot", instance=0, org_id="org-1")
     robot.id = "robot-id-1"
+    coordinator = _FakeCoordinator()
+    robot._producer_coordinator = coordinator  # type: ignore[assignment]
 
-    active = _ActiveStream()
-    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
+    stream = _FakeStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", stream)  # type: ignore[arg-type]
 
     fake_daemon = MagicMock()
     robot._daemon_recording_context = fake_daemon
@@ -115,30 +91,42 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     assert callable(callback)
     callback("rec-abc")
 
-    assert active.stop_calls == [{
-        "stop_cutoff_sequence_number": 42,
-        "wait_for_producer_drain": False,
-    }]
+    assert coordinator.stop_calls == [False]
+    assert stream.stopped is True
     fake_daemon.stop_recording.assert_called_once_with(
         recording_id="rec-abc",
-        producer_stop_sequence_numbers={"active-channel": 42},
+        producer_stop_sequence_numbers={coordinator.producer_id: 42},
     )
 
 
-def test_stop_all_streams_logs_stop_failure_and_continues() -> None:
+def test_get_producer_coordinator_is_thread_safe() -> None:
     robot = Robot("robot", instance=0, org_id="org-1")
-    failing = _FailingStopStream()
-    active = _ActiveStream()
+    robot.id = "robot-id-1"
+    created: list[_FakeCoordinator] = []
+    results: list[_FakeCoordinator] = []
+    thread_count = 8
+    barrier = threading.Barrier(thread_count)
 
-    robot.add_data_stream("JOINT_POSITIONS:failing", failing)  # type: ignore[arg-type]
-    robot.add_data_stream("JOINT_POSITIONS:active", active)  # type: ignore[arg-type]
+    def build_coordinator(producer_id: str) -> _FakeCoordinator:
+        time.sleep(0.01)
+        coordinator = _FakeCoordinator(producer_id=producer_id)
+        created.append(coordinator)
+        return coordinator
 
-    sequence_numbers = robot._stop_all_streams(wait_for_producer_drain=True)
+    def worker() -> None:
+        barrier.wait()
+        results.append(robot.get_producer_coordinator())  # type: ignore[arg-type]
 
-    assert sequence_numbers == {"active-channel": 42}
-    assert failing.stop_calls == [
-        {"stop_cutoff_sequence_number": 42, "wait_for_producer_drain": True}
-    ]
-    assert active.stop_calls == [
-        {"stop_cutoff_sequence_number": 42, "wait_for_producer_drain": True}
-    ]
+    with patch(
+        "neuracore.core.robot.RobotProducerCoordinator",
+        side_effect=build_coordinator,
+    ):
+        threads = [threading.Thread(target=worker) for _ in range(thread_count)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    assert len(created) == 1
+    assert len({id(result) for result in results}) == 1
+    assert results[0] is created[0]

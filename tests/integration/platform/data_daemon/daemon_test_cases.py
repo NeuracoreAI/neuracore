@@ -156,7 +156,6 @@ NETWORK_INTEGRITY_CASES = (
         joint_fps=1000,
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_REAL,
-        wait=True,
         skip=True,
     ),
     DataDaemonTestCase(
@@ -164,6 +163,7 @@ NETWORK_INTEGRITY_CASES = (
         recording_count=4,
         video_count=1,
         image_height=120,
+        joint_count=5,
         image_width=120,
         video_fps=120,
         joint_fps=500,

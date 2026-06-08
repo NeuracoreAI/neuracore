@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -208,6 +209,52 @@ def test_video_trace_writes_outputs_when_metadata_then_frames(
     assert isinstance(trace, list)
     assert trace[0]["width"] == w
     assert trace[0]["height"] == h
+
+
+def test_video_trace_small_timestamp_inversion_is_not_warning(
+    tmp_path: Path,
+    patched_video_trace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pytest.importorskip("numpy")
+
+    VideoTrace = patched_video_trace.VideoTrace
+    out_dir = tmp_path / "video"
+    vt = VideoTrace(output_dir=out_dir)
+
+    frame = bytes([10, 20, 30] * (4 * 3))
+    with caplog.at_level(logging.WARNING, logger=video_trace_module.logger.name):
+        vt.add_frame_record({"width": 4, "height": 3, "timestamp": 1.0}, frame)
+        vt.add_frame_record({"timestamp": 0.99}, frame)
+        vt.add_frame_record({"timestamp": 1.1}, frame)
+        vt.finish()
+
+    assert not any(
+        "non-monotonic frame timestamps" in record.message for record in caplog.records
+    )
+
+
+def test_video_trace_large_timestamp_compression_still_warns(
+    tmp_path: Path,
+    patched_video_trace,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    pytest.importorskip("numpy")
+
+    VideoTrace = patched_video_trace.VideoTrace
+    out_dir = tmp_path / "video"
+    vt = VideoTrace(output_dir=out_dir)
+
+    frame = bytes([10, 20, 30] * (4 * 3))
+    with caplog.at_level(logging.WARNING, logger=video_trace_module.logger.name):
+        vt.add_frame_record({"width": 4, "height": 3, "timestamp": 10.0}, frame)
+        vt.add_frame_record({"timestamp": 1.0}, frame)
+        vt.add_frame_record({"timestamp": 2.0}, frame)
+        vt.finish()
+
+    assert any(
+        "non-monotonic frame timestamps" in record.message for record in caplog.records
+    )
 
 
 def test_video_trace_timestamp_fallback_does_not_crash(

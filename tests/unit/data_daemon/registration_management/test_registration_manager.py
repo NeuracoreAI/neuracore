@@ -317,6 +317,40 @@ class TestBatchRegistration:
         state_api.mark_traces_registration_failed.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_registration_matches_hyphenated_backend_trace_ids(
+        self,
+        mock_auth,
+        state_api,
+    ) -> None:
+        local_trace_id = "02275568974844eb8854fae43ec277ed"
+        backend_trace_id = "02275568-9748-44eb-8854-fae43ec277ed"
+        uris = {"JOINT_POSITIONS/waist/trace.json": "https://storage/sess/1"}
+        session = _mock_http_session({
+            "registered_traces": [{
+                "trace_id": backend_trace_id,
+                "upload_session_uris": uris,
+            }],
+            "failed_traces": [],
+        })
+        state_api.mark_traces_registered = AsyncMock(return_value=[local_trace_id])
+
+        manager = RegistrationManager(
+            client_session=session,
+            state_api=state_api,
+            emitter=MagicMock(),
+            batch_size=10,
+        )
+        await manager._register_and_record_outcome(
+            [_make_candidate(trace_id=local_trace_id)]
+        )
+
+        state_api.mark_traces_registered.assert_awaited_once_with([local_trace_id])
+        state_api.emit_ready_for_upload.assert_awaited_once_with(
+            [local_trace_id], {local_trace_id: uris}
+        )
+        state_api.mark_traces_registration_failed.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_registration_partial_batch_success_and_failure(
         self,
         mock_auth,

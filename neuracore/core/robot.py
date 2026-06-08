@@ -11,6 +11,8 @@ import io
 import logging
 import os
 import tempfile
+import threading
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -22,9 +24,12 @@ import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.streaming.data_stream import DataStream, MissingProducerChannelError
+from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.data_daemon.communications_management.producer import (
+    RobotProducerCoordinator,
+)
 from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context,
 )
@@ -113,6 +118,8 @@ class Robot:
         self._data_streams: dict[str, DataStream] = dict()
         self._data_stream_counts: dict[DataType, int] = defaultdict(int)
         self._daemon_recording_context: DaemonRecordingContext | None = None
+        self._producer_coordinator: RobotProducerCoordinator | None = None
+        self._producer_coordinator_lock = threading.Lock()
 
         self.org_id = org_id or get_current_org()
 
@@ -280,6 +287,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
+            start_time = time.time()
             session = thread_local_session()
             response = session.post(
                 f"{API_URL}/org/{self.org_id}/recording/start",
@@ -291,7 +299,8 @@ class Robot:
                 },
             )
             response.raise_for_status()
-
+            now = time.time()
+            logger.info(f"Starting recording took {now - start_time:.2f}s")
             recording_details = response.json()
             recording_id = recording_details["id"]
             assert isinstance(recording_id, str)
@@ -344,6 +353,7 @@ class Robot:
         )
 
         try:
+            stop_time = time.time()
             session = thread_local_session()
             response = session.post(
                 f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
@@ -351,7 +361,8 @@ class Robot:
             )
 
             response.raise_for_status()
-
+            now = time.time()
+            logger.info(f"Stopping recording took {now - stop_time:.2f}s")
             if response.json() == "WrongUser":
                 raise RobotError("Cannot stop recording initiated by another user")
 
@@ -399,32 +410,48 @@ class Robot:
         self,
         wait_for_producer_drain: bool = True,
     ) -> dict[str, int]:
-        """Stop recording on all data streams for this robot instance."""
-        producer_stop_sequence_numbers: dict[str, int] = {}
+        """Stop recording across all streams via the robot coordinator.
+
+        Freezes coordinator intake, drains accepted work, and ends every active
+        stream trace, then marks the local streams stopped. Returns the single
+        ``{coordinator_id: stop_cutoff_sequence_number}`` mapping the daemon uses
+        to finalize the recording.
+        """
+        coordinator = self._producer_coordinator
+        if coordinator is None:
+            return {}
+
+        stop_cutoff_sequence_number: int | None = None
+        try:
+            stop_cutoff_sequence_number = coordinator.stop_recording(
+                wait_for_drain=wait_for_producer_drain
+            )
+        except Exception:
+            logger.exception("Failed to stop robot producer coordinator")
 
         for stream_id, stream in list(self._data_streams.items()):
             try:
-
-                (producer_channel, stop_cutoff_sequence_number) = (
-                    stream.prepare_recording_stopped()
-                )
-
-                producer_stop_sequence_numbers[producer_channel.channel_id] = (
-                    stop_cutoff_sequence_number
-                )
-
-                stream.stop_recording(
-                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-                    wait_for_producer_drain=wait_for_producer_drain,
-                )
-
-            except MissingProducerChannelError as exc:
-                logger.info("Removing stale data stream %s: %s", stream_id, exc)
-                self._remove_data_stream(stream_id, stream)
+                stream.mark_recording_stopped()
             except Exception:
-                logger.exception("Failed to stop data stream %s", stream_id)
+                logger.exception("Failed to mark data stream %s stopped", stream_id)
 
-        return producer_stop_sequence_numbers
+        if stop_cutoff_sequence_number is None:
+            return {}
+        return {coordinator.producer_id: stop_cutoff_sequence_number}
+
+    def get_producer_coordinator(self) -> RobotProducerCoordinator:
+        """Return the robot-scoped producer coordinator, creating it lazily."""
+        coordinator = self._producer_coordinator
+        if coordinator is not None:
+            return coordinator
+
+        with self._producer_coordinator_lock:
+            if self._producer_coordinator is None:
+                producer_id = f"robot:{self.id or self.name}:{self.instance}"
+                self._producer_coordinator = RobotProducerCoordinator(
+                    producer_id=producer_id
+                )
+            return self._producer_coordinator
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -755,8 +782,20 @@ class Robot:
         finally:
             self._daemon_recording_context = None
 
+    def _cleanup_producer_coordinator(self) -> None:
+        """Tear down the robot-scoped producer coordinator, if created."""
+        if self._producer_coordinator is None:
+            return
+        try:
+            self._producer_coordinator.close()
+        except Exception:
+            logger.exception("Failed to cleanup producer coordinator")
+        finally:
+            self._producer_coordinator = None
+
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
+        self._cleanup_producer_coordinator()
         self._cleanup_daemon_recording_context()
         if self.id is not None:
             get_recording_state_manager().deregister_remote_stop_handler(

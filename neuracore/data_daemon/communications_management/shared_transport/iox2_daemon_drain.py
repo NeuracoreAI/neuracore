@@ -29,6 +29,7 @@ from neuracore.data_daemon.communications_management.shared_transport.framing im
 from neuracore.data_daemon.communications_management.shared_transport.iox2_video_transport import (  # noqa: E501
     FRAME_INDEX_KEY,
     FRAME_META_KEY,
+    FRAME_PRODUCER_KEY,
     FRAME_SEQUENCE_KEY,
 )
 from neuracore.data_daemon.const import (
@@ -39,7 +40,10 @@ from neuracore.data_daemon.const import (
 
 logger = logging.getLogger(__name__)
 
-# Callback signature: (channel_id, sequence_id, metadata_dict, chunk_bytes).
+# Callback signature: (producer_id, sequence_id, metadata_dict, chunk_bytes).
+# ``producer_id`` is the robot coordinator that owns the frame (read from the
+# frame envelope); the per-stream service id stays internal to the drain pool for
+# subscriber management and drop accounting.
 FrameCallback = Callable[[str, int, dict[str, object], bytes], None]
 
 # Log a per-channel drop summary at most this often (number of drained frames).
@@ -102,6 +106,7 @@ class Iox2DaemonDrain:
         self._lock = threading.Lock()
         self._node = iceoryx2.NodeBuilder.new().create(iceoryx2.ServiceType.Ipc)
         self._subscribers: dict[str, _ChannelSubscriber] = {}
+        self._drain_lock = threading.Lock()
         # Reclaim resources left behind by producer/daemon processes that exited
         # uncleanly in a previous run (best effort).
         try:
@@ -146,7 +151,8 @@ class Iox2DaemonDrain:
                 _delete_subscriber(typed_subscriber)
                 return
             self._subscribers[channel_id] = _ChannelSubscriber(typed_subscriber)
-        logger.info("Iox2DaemonDrain: registered subscriber service=%s", service_name)
+        logger.debug("Iox2DaemonDrain: registered subscriber service=%s", service_name)
+        logger.debug("Iox2DaemonDrain: registered subscriber service=%s", service_name)
 
     def is_registered(self, channel_id: str) -> bool:
         """Return whether a subscriber exists for the channel."""
@@ -161,13 +167,14 @@ class Iox2DaemonDrain:
         on the caller's thread; it should stay fast and offload heavy work.
         Returns the total number of frames drained.
         """
-        with self._lock:
-            items = list(self._subscribers.items())
+        with self._drain_lock:
+            with self._lock:
+                items = list(self._subscribers.items())
 
-        drained = 0
-        for channel_id, channel_sub in items:
-            drained += self._drain_channel(channel_id, channel_sub, on_frame)
-        return drained
+            drained = 0
+            for channel_id, channel_sub in items:
+                drained += self._drain_channel(channel_id, channel_sub, on_frame)
+            return drained
 
     def _drain_channel(
         self,
@@ -215,6 +222,7 @@ class Iox2DaemonDrain:
         on_frame: FrameCallback,
     ) -> None:
         envelope, chunk = parse_video_transport_packet(raw)
+        producer_id = _parse_producer_id(envelope, FRAME_PRODUCER_KEY)
         sequence_id = _parse_int_field(envelope, FRAME_SEQUENCE_KEY)
         frame_index = _parse_int_field(envelope, FRAME_INDEX_KEY)
         metadata = _parse_metadata_field(envelope, FRAME_META_KEY)
@@ -222,13 +230,14 @@ class Iox2DaemonDrain:
         dropped = channel_sub.note_frame_index(frame_index)
         if dropped and channel_sub.should_log_drops():
             logger.warning(
-                "Iox2DaemonDrain: dropped video frames channel_id=%s "
+                "Iox2DaemonDrain: dropped video frames service_id=%s producer_id=%s "
                 "recent=%d total=%d (daemon overload / DiscardData)",
                 channel_id,
+                producer_id,
                 dropped,
                 channel_sub.dropped_frames,
             )
-        on_frame(channel_id, sequence_id, metadata, chunk)
+        on_frame(producer_id, sequence_id, metadata, chunk)
 
     def dropped_frame_count(self, channel_id: str) -> int:
         """Return the total frames dropped for one channel (for observability)."""
@@ -249,7 +258,7 @@ class Iox2DaemonDrain:
                 channel_sub.dropped_frames,
             )
         _delete_subscriber(channel_sub.subscriber)
-        logger.info("Iox2DaemonDrain: unregistered channel channel_id=%s", channel_id)
+        logger.debug("Iox2DaemonDrain: unregistered channel channel_id=%s", channel_id)
 
     def close(self) -> None:
         """Close all subscribers and the node."""
@@ -279,6 +288,14 @@ def _parse_metadata_field(envelope: dict[str, object], key: str) -> dict[str, ob
     if not isinstance(value, dict):
         raise TypeError(f"Frame envelope field {key!r} must be a dict")
     return cast(dict[str, object], value)
+
+
+def _parse_producer_id(envelope: dict[str, object], key: str) -> str:
+    """Extract the producer id from a decoded frame envelope."""
+    value = envelope[key]
+    if not isinstance(value, str):
+        raise TypeError(f"Frame envelope field {key!r} must be a str")
+    return value
 
 
 def _delete_subscriber(subscriber: _Subscriber) -> None:

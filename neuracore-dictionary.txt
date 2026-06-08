@@ -25,9 +25,11 @@ axvline
 backpressure
 bfloat
 bgra
+efgh
 bibtex
 bigendian
 bigym
+Startable
 blit
 blowaway
 Brawner

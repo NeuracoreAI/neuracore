@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from neuracore_types import DataType
 
@@ -9,6 +10,7 @@ from neuracore.data_daemon.communications_management.consumer.models import (
     ChannelState,
     CompletedChannelMessage,
     FinalTraceWork,
+    RecordingDataDropRequest,
     TraceMetadataRegistrationRequest,
     TraceMetadataSnapshot,
     TraceRecordingLookupRequest,
@@ -50,7 +52,7 @@ def test_handle_trace_end_drops_registered_trace_missing_data_type_metadata() ->
     coordinator.register_trace("recording-1", "trace-1")
 
     coordinator.handle_trace_end(
-        ChannelState(producer_id="producer-1", trace_id="trace-1"),
+        ChannelState(producer_id="producer-1", active_trace_ids={"trace-1"}),
         MessageEnvelope(
             producer_id="producer-1",
             command=CommandType.TRACE_END,
@@ -67,6 +69,75 @@ def test_handle_trace_end_drops_registered_trace_missing_data_type_metadata() ->
         coordinator.get_trace_recording(TraceRecordingLookupRequest(trace_id="trace-1"))
         is None
     )
+
+
+def test_closed_recording_drops_pre_stop_history_without_warning(caplog) -> None:
+    coordinator = _build_coordinator()
+    channel = ChannelState(producer_id="producer-1", active_trace_ids={"trace-1"})
+
+    coordinator.register_trace("recording-1", "trace-1")
+    coordinator.register_trace_metadata(
+        TraceMetadataRegistrationRequest(
+            trace_id="trace-1",
+            metadata=TraceMetadataSnapshot(
+                data_type=DataType.RGB_IMAGES.value,
+                data_type_name="camera",
+            ),
+        )
+    )
+    coordinator.note_producer_sequence("producer-1", 5)
+    coordinator.handle_trace_end(
+        channel,
+        MessageEnvelope(
+            producer_id="producer-1",
+            command=CommandType.TRACE_END,
+            payload={
+                "trace_end": {
+                    "trace_id": "trace-1",
+                    "recording_id": "recording-1",
+                }
+            },
+            sequence_number=6,
+        ),
+    )
+    coordinator.handle_recording_stopped(
+        MessageEnvelope(
+            producer_id=None,
+            command=CommandType.RECORDING_STOPPED,
+            payload={
+                "recording_stopped": {
+                    "recording_id": "recording-1",
+                    "producer_stop_sequence_numbers": {"producer-1": 5},
+                }
+            },
+        )
+    )
+    coordinator.cleanup_trace_written("trace-1")
+
+    with caplog.at_level(logging.WARNING):
+        assert coordinator.should_drop_recording_data(
+            RecordingDataDropRequest(
+                channel=channel,
+                recording_id="recording-1",
+                trace_id="trace-1",
+                sequence_number=4,
+            )
+        )
+
+    assert "Dropping data for closed recording_id" not in caplog.text
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        assert coordinator.should_drop_recording_data(
+            RecordingDataDropRequest(
+                channel=channel,
+                recording_id="recording-1",
+                trace_id="trace-1",
+                sequence_number=6,
+            )
+        )
+
+    assert "Dropping data for closed recording_id=recording-1" in caplog.text
 
 
 def test_ensure_result_trace_registered_uses_completed_result_data_type_fallback() -> (
@@ -103,7 +174,7 @@ def test_closing_recordings_advance_from_lifecycle_events() -> None:
         enqueue_final_trace=lambda work: enqueued_trace_ids.append(work.trace_id),
         set_channel_trace_id=lambda *_: None,
     )
-    channel = ChannelState(producer_id="producer-1", trace_id="trace-1")
+    channel = ChannelState(producer_id="producer-1", active_trace_ids={"trace-1"})
 
     coordinator.register_trace("recording-1", "trace-1")
     coordinator.register_trace_metadata(
@@ -165,7 +236,7 @@ def test_finalize_closing_recordings_enqueues_final_trace_once() -> None:
         enqueue_final_trace=lambda work: enqueued_work.append(work),
         set_channel_trace_id=lambda *_: None,
     )
-    channel = ChannelState(producer_id="producer-1", trace_id="trace-1")
+    channel = ChannelState(producer_id="producer-1", active_trace_ids={"trace-1"})
 
     coordinator.register_trace("recording-1", "trace-1")
     coordinator.register_trace_metadata(
@@ -276,7 +347,7 @@ def test_note_producer_sequence_ignores_non_cutoff_updates() -> None:
         enqueue_final_trace=lambda work: enqueued_trace_ids.append(work.trace_id),
         set_channel_trace_id=lambda *_: None,
     )
-    channel = ChannelState(producer_id="producer-1", trace_id="trace-1")
+    channel = ChannelState(producer_id="producer-1", active_trace_ids={"trace-1"})
 
     coordinator.register_trace("recording-1", "trace-1")
     coordinator.register_trace_metadata(

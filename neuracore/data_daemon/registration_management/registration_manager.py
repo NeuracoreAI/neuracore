@@ -44,6 +44,11 @@ REGISTERED_TRACES_KEY = "registered_traces"
 FAILED_TRACES_KEY = "failed_traces"
 
 
+def _normalise_trace_id_for_match(value: object) -> str:
+    """Return a UUID-ish trace id key stable across hyphen formatting."""
+    return str(value).replace("-", "").lower()
+
+
 def get_cloud_file_list(
     data_type: DataType, data_type_name: str
 ) -> list[dict[str, str]]:
@@ -268,7 +273,11 @@ class RegistrationManager:
                 loop.run_in_executor(None, auth.get_headers),
             )
 
-            requested_trace_ids = {trace.trace_id for trace in traces}
+            requested_trace_ids = {str(trace.trace_id) for trace in traces}
+            requested_trace_ids_by_normalised = {
+                _normalise_trace_id_for_match(trace_id): trace_id
+                for trace_id in requested_trace_ids
+            }
             logger.debug(
                 "Submitting registration batch (size=%d, sample_ids=%s)",
                 len(requested_trace_ids),
@@ -300,7 +309,7 @@ class RegistrationManager:
                     ) as response:
                         assert isinstance(response, aiohttp.ClientResponse)
                         if response.status == 401 and not refreshed_auth:
-                            logger.debug("Access token expired, refreshing token")
+                            logger.warning("Access token expired, refreshing token")
                             await loop.run_in_executor(None, auth.login)
                             headers = await loop.run_in_executor(None, auth.get_headers)
                             refreshed_auth = True
@@ -338,6 +347,9 @@ class RegistrationManager:
                             )
 
                         response_payload = await response.json()
+                        logger.debug(
+                            "Registration response payload=%r", response_payload
+                        )
                         if not isinstance(response_payload, dict):
                             return RegistrationBatchOutcome(
                                 registered_trace_ids=[],
@@ -354,27 +366,30 @@ class RegistrationManager:
                         )
                         failed_traces = response_payload.get(FAILED_TRACES_KEY, [])
 
-                        registered_trace_ids = [
-                            str(entry["trace_id"])
-                            for entry in registered_traces
-                            if str(entry.get("trace_id")) in requested_trace_ids
-                        ]
-                        upload_session_uris: dict[str, dict[str, str]] = {
-                            str(entry["trace_id"]): entry["upload_session_uris"]
-                            for entry in registered_traces
-                            if str(entry.get("trace_id")) in requested_trace_ids
-                            and entry.get("upload_session_uris")
-                        }
-                        failed_trace_ids = [
-                            str(entry["trace_id"])
-                            for entry in failed_traces
-                            if str(entry.get("trace_id")) in requested_trace_ids
-                        ]
-                        failed_errors = [
-                            entry.get("error", "Unknown error")
-                            for entry in failed_traces
-                            if str(entry.get("trace_id")) in requested_trace_ids
-                        ]
+                        registered_trace_ids: list[str] = []
+                        upload_session_uris: dict[str, dict[str, str]] = {}
+                        for entry in registered_traces:
+                            local_trace_id = requested_trace_ids_by_normalised.get(
+                                _normalise_trace_id_for_match(entry.get("trace_id"))
+                            )
+                            if local_trace_id is None:
+                                continue
+                            registered_trace_ids.append(local_trace_id)
+                            if entry.get("upload_session_uris"):
+                                upload_session_uris[local_trace_id] = entry[
+                                    "upload_session_uris"
+                                ]
+
+                        failed_trace_ids: list[str] = []
+                        failed_errors: list[str] = []
+                        for entry in failed_traces:
+                            local_trace_id = requested_trace_ids_by_normalised.get(
+                                _normalise_trace_id_for_match(entry.get("trace_id"))
+                            )
+                            if local_trace_id is None:
+                                continue
+                            failed_trace_ids.append(local_trace_id)
+                            failed_errors.append(entry.get("error", "Unknown error"))
 
                         unresolved = (
                             requested_trace_ids

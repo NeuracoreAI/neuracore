@@ -130,6 +130,11 @@ def _build_daemon_launch_env(
     return cast(dict[str, str], environment)
 
 
+def _env_flag_enabled(value: str | None) -> bool:
+    """Return True for common truthy environment flag values."""
+    return value is not None and value.lower() in {"1", "true", "yes", "on"}
+
+
 def _start_daemon_subprocess(
     pid_path: Path,
     db_path: Path,
@@ -148,6 +153,9 @@ def _start_daemon_subprocess(
 
     try:
         if background:
+            inherit_stdio = _env_flag_enabled(
+                environment.get("NEURACORE_DAEMON_INHERIT_STDIO")
+            )
             return subprocess.Popen(
                 _build_daemon_runner_command(),
                 close_fds=True,
@@ -155,8 +163,8 @@ def _start_daemon_subprocess(
                 env=environment,
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stdout=None if inherit_stdio else subprocess.DEVNULL,
+                stderr=None if inherit_stdio else subprocess.PIPE,
             )
 
         return subprocess.Popen(

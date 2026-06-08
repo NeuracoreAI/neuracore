@@ -41,19 +41,23 @@ from neuracore.data_daemon.const import (
 logger = logging.getLogger(__name__)
 
 # Metadata-envelope keys carried alongside the per-chunk metadata so the daemon
-# can recover lifecycle ordering (``seq``) and detect dropped frames (``idx``).
+# can recover lifecycle ordering (``seq``), detect dropped frames (``idx``), and
+# attribute frames to the owning robot coordinator (``pid``).
 FRAME_SEQUENCE_KEY = "seq"
 FRAME_INDEX_KEY = "idx"
 FRAME_META_KEY = "meta"
+FRAME_PRODUCER_KEY = "pid"
 
 
 def build_frame_envelope(
+    producer_id: str,
     sequence_id: int,
     frame_index: int,
     metadata: Mapping[str, object],
 ) -> dict[str, object]:
-    """Wrap per-chunk metadata with the lifecycle sequence and frame index."""
+    """Wrap per-chunk metadata with the producer, lifecycle seq, and frame index."""
     return {
+        FRAME_PRODUCER_KEY: producer_id,
         FRAME_SEQUENCE_KEY: sequence_id,
         FRAME_INDEX_KEY: frame_index,
         FRAME_META_KEY: metadata,
@@ -61,17 +65,27 @@ def build_frame_envelope(
 
 
 class Iox2VideoTransport:
-    """Producer-side iceoryx2 publisher for one video channel."""
+    """Producer-side iceoryx2 publisher for one video stream of a coordinator.
+
+    One robot coordinator owns several of these (one per video stream). Every
+    transport shares the coordinator's sequence allocator so the single
+    end-of-recording stop cutoff spans both the socket and all video streams. The
+    coordinator ``producer_id`` travels inside each frame so the daemon attributes
+    frames to the right coordinator channel, while the per-stream ``service_id``
+    keys the iceoryx2 service (and the daemon's drop accounting).
+    """
 
     def __init__(
         self,
-        channel_id: str,
+        service_id: str,
+        producer_id: str,
         sequence_allocator: ChannelSequenceAllocator | None = None,
         max_frame_bytes: int = IOX2_MAX_FRAME_BYTES,
     ) -> None:
-        """Create the iceoryx2 node, service, and publisher for one channel."""
-        self._channel_id = channel_id
-        self._service_name = f"{IOX2_SERVICE_PREFIX}{channel_id}"
+        """Create the iceoryx2 node, service, and publisher for one video stream."""
+        self._service_id = service_id
+        self._producer_id = producer_id
+        self._service_name = f"{IOX2_SERVICE_PREFIX}{service_id}"
         self._max_frame_bytes = int(max_frame_bytes)
         self._sequence_allocator = sequence_allocator or ChannelSequenceAllocator()
         self._state_lock = threading.Lock()
@@ -97,12 +111,17 @@ class Iox2VideoTransport:
             .max_loaned_samples(1)
             .create()
         )
-        logger.info("Iox2VideoTransport created service=%s", self._service_name)
+        logger.debug("Iox2VideoTransport created service=%s", self._service_name)
 
     @property
     def service_name(self) -> str:
-        """Return the iceoryx2 service name for this channel."""
+        """Return the iceoryx2 service name for this stream."""
         return self._service_name
+
+    @property
+    def service_id(self) -> str:
+        """Return the per-stream service identifier."""
+        return self._service_id
 
     def send_frame(
         self,
@@ -135,7 +154,9 @@ class Iox2VideoTransport:
             frame_index = self._frame_index
             self._frame_index += 1
 
-        envelope = build_frame_envelope(sequence_number, frame_index, metadata)
+        envelope = build_frame_envelope(
+            self._producer_id, sequence_number, frame_index, metadata
+        )
         packet = build_video_transport_packet(envelope, chunk)
         packet_length = len(packet)
         if packet_length > self._max_frame_bytes:
