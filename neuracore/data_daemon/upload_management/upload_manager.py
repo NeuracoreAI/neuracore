@@ -353,10 +353,6 @@ class UploadManager:
                         return False
 
                     cumulative_bytes += file.stat().st_size
-                logger.info(
-                    f"Marking trace complete on backend: trace-id: {trace_id}, "
-                    f"recording_id: {recording_id}"
-                )
                 updated_trace = await self._trace_status_updater.update_trace_completed(
                     recording_id=recording_id,
                     trace_id=trace_id,
@@ -377,10 +373,6 @@ class UploadManager:
                     return False
 
                 self._emitter.emit(Emitter.UPLOAD_COMPLETE, trace_id)
-                logger.info(
-                    f"Trace marked complete on backend: trace-id: {trace_id}, "
-                    f"recording_id: {recording_id}"
-                )
                 return True
 
             except FileNotFoundError as e:

@@ -1,8 +1,6 @@
 import logging
-import threading
 import time
 from datetime import datetime, timedelta, timezone
-from uuid import uuid4
 
 import pytest
 from neuracore_types import DataType
@@ -21,15 +19,6 @@ from neuracore.data_daemon.communications_management.consumer.models import (
     TraceMetadataSnapshot,
     TransportMode,
     VideoFrameSequenceProgressRequest,
-)
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    ProducerChannel,
-)
-from neuracore.data_daemon.communications_management.shared_transport.framing import (
-    PacketTooLarge,
-)
-from neuracore.data_daemon.communications_management.shared_transport.iox2_daemon_drain import (  # noqa: E501
-    Iox2DaemonDrain,
 )
 from neuracore.data_daemon.const import HEARTBEAT_TIMEOUT_SECS
 from neuracore.data_daemon.models import (
@@ -166,289 +155,6 @@ class DummyComm:
         self.cleaned = True
 
 
-def _wait_for_envelopes(
-    messages: list[MessageEnvelope], expected: int, timeout: float = 1.0
-) -> None:
-    """Wait for the producer sender thread to flush messages to the stub."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if len(messages) >= expected:
-            return
-        time.sleep(0.02)
-    return
-
-
-def _stub_producer_transport(monkeypatch) -> list[MessageEnvelope]:
-    """Patch the producer ZMQ control channel to capture sent envelopes."""
-    messages: list[MessageEnvelope] = []
-    base = (
-        "neuracore.data_daemon.communications_management.shared_transport."
-        "communications_manager.CommunicationsManager"
-    )
-
-    monkeypatch.setattr(f"{base}.create_producer_socket", lambda self: None)
-    monkeypatch.setattr(
-        f"{base}.send_message", lambda self, message: messages.append(message)
-    )
-    monkeypatch.setattr(f"{base}.cleanup_producer", lambda self: None)
-    return messages
-
-
-def test_send_batched_joint_data_enqueues_expected_command(monkeypatch) -> None:
-    messages = _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(
-        id="producer-joint-batch",
-        recording_id="rec-1",
-        data_type=DataType.JOINT_POSITIONS,
-    )
-
-    payload = BatchedJointDataPayload(
-        recording_id="rec-1",
-        timestamp=123.456,
-        dataset_id="dataset-1",
-        dataset_name="dataset",
-        robot_name="robot",
-        robot_id="robot-1",
-        robot_instance=0,
-        data_type=DataType.JOINT_POSITIONS,
-        items=[
-            BatchedJointDataItemPayload(
-                trace_id="trace-1",
-                data_type_name="joint1",
-                value=0.25,
-            )
-        ],
-    )
-
-    try:
-        producer.send_batched_joint_data(payload)
-        _wait_for_envelopes(messages, expected=1)
-    finally:
-        producer.stop_producer_channel()
-
-    assert len(messages) == 1
-    envelope = messages[0]
-    assert envelope.command == CommandType.BATCHED_JOINT_DATA
-    assert envelope.payload[CommandType.BATCHED_JOINT_DATA.value] == payload.to_dict()
-
-
-def _drain_until(
-    drain: Iox2DaemonDrain,
-    received: list[tuple[dict, bytes]],
-    expected: int,
-    timeout: float = 1.0,
-) -> None:
-    deadline = time.monotonic() + timeout
-    while len(received) < expected and time.monotonic() < deadline:
-        drain.drain_all(
-            lambda channel, seq, meta, chunk: received.append((meta, chunk))
-        )
-        time.sleep(0.02)
-
-
-@pytest.mark.parametrize(
-    "data_type",
-    [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES, DataType.POINT_CLOUDS],
-)
-def test_producer_routes_video_frames_over_iox2(monkeypatch, data_type) -> None:
-    messages = _stub_producer_transport(monkeypatch)
-    channel_id = f"vid-{uuid4().hex[:8]}"
-    producer = ProducerChannel(
-        id=channel_id,
-        chunk_size=2,
-        recording_id="rec-1",
-        data_type=data_type,
-    )
-    drain = Iox2DaemonDrain()
-    received: list[tuple[dict, bytes]] = []
-
-    try:
-        drain.register_channel(channel_id)
-        producer.start_new_trace()
-        producer.send_data(
-            b"abcd",
-            data_type=data_type,
-            data_type_name="custom",
-            robot_instance=2,
-            robot_id="robot-1",
-            robot_name="robot",
-            dataset_id="dataset-1",
-            dataset_name="dataset",
-        )
-        _drain_until(drain, received, expected=2)
-    finally:
-        drain.close()
-        producer.stop_producer_channel()
-
-    assert [chunk for _, chunk in received] == [b"ab", b"cd"]
-    # First frame carries trace metadata, subsequent frames do not.
-    assert received[0][0]["data_type"] == data_type.value
-    assert "data_type" not in received[1][0]
-    # Video frames must not travel over the ZMQ control channel.
-    assert all(message.command != CommandType.DATA_CHUNK for message in messages)
-
-
-def test_producer_video_chunks_across_multiple_frames(monkeypatch) -> None:
-    _stub_producer_transport(monkeypatch)
-    channel_id = f"vid-{uuid4().hex[:8]}"
-    producer = ProducerChannel(
-        id=channel_id,
-        chunk_size=3,
-        recording_id="rec-1",
-        data_type=DataType.RGB_IMAGES,
-    )
-    drain = Iox2DaemonDrain()
-    received: list[tuple[dict, bytes]] = []
-
-    try:
-        drain.register_channel(channel_id)
-        producer.start_new_trace()
-        # cspell:ignore cdef
-        producer.send_data_parts(
-            (b"ab", memoryview(b"cdef"), b"gh"),
-            total_bytes=8,
-            data_type=DataType.RGB_IMAGES,
-            data_type_name="custom",
-            robot_instance=2,
-            robot_id="robot-1",
-            robot_name="robot",
-            dataset_id="dataset-1",
-            dataset_name="dataset",
-        )
-        _drain_until(drain, received, expected=3)
-    finally:
-        drain.close()
-        producer.stop_producer_channel()
-
-    assert [chunk for _, chunk in received] == [b"abc", b"def", b"gh"]
-    assert received[0][0]["recording_id"] == "rec-1"
-    assert "recording_id" not in received[1][0]
-    assert "recording_id" not in received[2][0]
-
-
-def test_producer_send_data_parts_uses_socket_for_non_video(monkeypatch) -> None:
-    messages = _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(
-        recording_id="rec-1",
-        data_type=DataType.CUSTOM_1D,
-    )
-
-    try:
-        producer.start_new_trace()
-        producer.send_data(
-            b"abcd",
-            data_type=DataType.CUSTOM_1D,
-            data_type_name="custom",
-            robot_instance=2,
-            robot_id="robot-1",
-            robot_name="robot",
-            dataset_id="dataset-1",
-            dataset_name="dataset",
-        )
-        _wait_for_envelopes(messages, 1)
-    finally:
-        producer.stop_producer_channel()
-
-    assert len(messages) == 1
-    envelope = messages[0]
-    assert envelope.command == CommandType.DATA_CHUNK
-    payload = DataChunkPayload.from_dict(envelope.payload["data_chunk"])
-    assert payload.channel_id == producer.channel_id
-    assert payload.recording_id == "rec-1"
-    assert payload.trace_id == producer.trace_id
-    assert payload.chunk_index == 0
-    assert payload.total_chunks == 1
-    assert payload.data_type == DataType.CUSTOM_1D
-    assert payload.data == b"abcd"
-
-
-def test_producer_video_rejects_oversized_frame(monkeypatch) -> None:
-    _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(
-        chunk_size=16,
-        recording_id="rec-1",
-        max_frame_bytes=8,
-        data_type=DataType.RGB_IMAGES,
-    )
-
-    try:
-        producer.start_new_trace()
-        with pytest.raises(PacketTooLarge):
-            producer.send_data(
-                b"abcdefgh",
-                data_type=DataType.RGB_IMAGES,
-                data_type_name="custom",
-                robot_instance=2,
-                robot_id="robot-1",
-                dataset_id="dataset-1",
-            )
-    finally:
-        producer.stop_producer_channel()
-
-
-def test_producer_sequences_follow_enqueue_order_under_concurrent_senders(
-    monkeypatch,
-) -> None:
-    messages = _stub_producer_transport(monkeypatch)
-    producer = ProducerChannel(
-        recording_id="rec-1",
-        data_type=DataType.CUSTOM_1D,
-    )
-
-    first_put_entered = threading.Event()
-    allow_first_put = threading.Event()
-    second_send_finished = threading.Event()
-    thread_errors: list[BaseException] = []
-
-    real_put = producer._send_queue.put
-
-    def blocked_put(item):
-        if item is not None and not first_put_entered.is_set():
-            first_put_entered.set()
-            allow_first_put.wait(timeout=5.0)
-        return real_put(item)
-
-    monkeypatch.setattr(producer._send_queue, "put", blocked_put)
-
-    def send_heartbeat(mark_done: threading.Event | None = None) -> None:
-        try:
-            producer.heartbeat()
-        except BaseException as exc:  # pragma: no cover - surfaced below
-            thread_errors.append(exc)
-        finally:
-            if mark_done is not None:
-                mark_done.set()
-
-    first_sender = threading.Thread(target=send_heartbeat, daemon=True)
-    second_sender = threading.Thread(
-        target=send_heartbeat,
-        kwargs={"mark_done": second_send_finished},
-        daemon=True,
-    )
-
-    try:
-        first_sender.start()
-        assert first_put_entered.wait(timeout=5.0) is True
-
-        second_sender.start()
-        time.sleep(0.1)
-
-        assert producer.get_last_enqueued_sequence_number() == 1
-        assert second_send_finished.is_set() is False
-
-        allow_first_put.set()
-
-        first_sender.join(timeout=5.0)
-        second_sender.join(timeout=5.0)
-        _wait_for_envelopes(messages, 2)
-    finally:
-        allow_first_put.set()
-        producer.stop_producer_channel()
-
-    assert thread_errors == []
-    assert [message.sequence_number for message in messages] == [1, 2]
-
-
 class DummyRecordingDiskManager:
     """Minimal recording disk manager for tests."""
 
@@ -552,6 +258,84 @@ def test_bridge_chunk_spool_reuses_current_segment_handle_until_rotation(
     assert first_handle.closed is True
 
 
+def test_socket_sequence_below_video_max_does_not_warn(
+    emitter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    producer_id = "producer-mixed-transport"
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
+    )
+    channel = ChannelState(
+        producer_id=producer_id,
+        last_sequence_number=953,
+        last_socket_sequence_number=950,
+    )
+    daemon.channels.add(channel)
+    daemon._trace_lifecycle.set_max_producer_sequence(producer_id, 953)
+
+    batch_payload = BatchedJointDataPayload(
+        recording_id="rec-1",
+        timestamp=1.0,
+        dataset_id="dataset-1",
+        dataset_name=None,
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=0,
+        data_type=DataType.JOINT_POSITIONS,
+        items=[
+            BatchedJointDataItemPayload(
+                trace_id="trace-joint",
+                data_type_name="joint",
+                value=0.1,
+            )
+        ],
+    )
+    data_chunk = DataChunkPayload(
+        channel_id=producer_id,
+        recording_id="rec-1",
+        trace_id="trace-custom",
+        chunk_index=0,
+        total_chunks=1,
+        data_type_name="custom",
+        dataset_id="dataset-1",
+        dataset_name=None,
+        robot_name="robot",
+        robot_id="robot-1",
+        robot_instance=0,
+        data=b"{}",
+        data_type=DataType.CUSTOM_1D,
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="neuracore.data_daemon.communications_management.consumer.data_bridge",
+    ):
+        daemon.handle_message(
+            MessageEnvelope(
+                producer_id=producer_id,
+                command=CommandType.BATCHED_JOINT_DATA,
+                payload={CommandType.BATCHED_JOINT_DATA.value: batch_payload.to_dict()},
+                sequence_number=951,
+            )
+        )
+        daemon.handle_message(
+            MessageEnvelope(
+                producer_id=producer_id,
+                command=CommandType.DATA_CHUNK,
+                payload={"data_chunk": data_chunk.to_dict()},
+                sequence_number=952,
+            )
+        )
+
+    assert channel.last_sequence_number == 953
+    assert channel.last_socket_sequence_number == 952
+    assert channel.active_trace_ids == {"trace-joint", "trace-custom"}
+    assert not any("Non-monotonic" in record.message for record in caplog.records)
+
+
 def test_cleanup_removes_channel_without_heartbeat(emitter) -> None:
     daemon = Daemon(
         comm_manager=DummyComm(),
@@ -587,7 +371,28 @@ def test_cleanup_keeps_recent_channel(emitter) -> None:
     assert daemon.channels.get("active") is channel
 
 
-def test_heartbeat_missing_data_type_does_not_open_transport(
+def test_plain_heartbeat_does_not_open_transport(emitter) -> None:
+    daemon = Daemon(
+        comm_manager=DummyComm(),
+        recording_disk_manager=DummyRecordingDiskManager(),
+        emitter=emitter,
+    )
+
+    daemon.handle_message(
+        MessageEnvelope(
+            producer_id="plain-heartbeat",
+            command=CommandType.HEARTBEAT,
+            payload={},
+        )
+    )
+
+    channel = daemon.channels.get("plain-heartbeat")
+    assert channel is not None
+    assert channel.transport_mode is TransportMode.NONE
+    assert channel.data_type is None
+
+
+def test_video_heartbeat_missing_data_type_does_not_open_transport(
     caplog: pytest.LogCaptureFixture,
     emitter,
 ) -> None:
@@ -600,20 +405,20 @@ def test_heartbeat_missing_data_type_does_not_open_transport(
     with caplog.at_level(logging.WARNING):
         daemon.handle_message(
             MessageEnvelope(
-                producer_id="missing-data-type",
+                producer_id="missing-video-data-type",
                 command=CommandType.HEARTBEAT,
-                payload={},
+                payload={"video_service_id": "svc-1"},
             )
         )
 
-    channel = daemon.channels.get("missing-data-type")
+    channel = daemon.channels.get("missing-video-data-type")
     assert channel is not None
     assert channel.transport_mode is TransportMode.NONE
     assert channel.data_type is None
-    assert "missing required data_type" in caplog.text
+    assert "carried invalid data_type=None" in caplog.text
 
 
-def test_heartbeat_unknown_data_type_does_not_open_transport(
+def test_video_heartbeat_unknown_data_type_does_not_open_transport(
     caplog: pytest.LogCaptureFixture,
     emitter,
 ) -> None:
@@ -626,17 +431,17 @@ def test_heartbeat_unknown_data_type_does_not_open_transport(
     with caplog.at_level(logging.WARNING):
         daemon.handle_message(
             MessageEnvelope(
-                producer_id="unknown-data-type",
+                producer_id="unknown-video-data-type",
                 command=CommandType.HEARTBEAT,
-                payload={"data_type": "not-a-real-type"},
+                payload={"data_type": "not-a-real-type", "video_service_id": "svc-1"},
             )
         )
 
-    channel = daemon.channels.get("unknown-data-type")
+    channel = daemon.channels.get("unknown-video-data-type")
     assert channel is not None
     assert channel.transport_mode is TransportMode.NONE
     assert channel.data_type is None
-    assert "carried unknown data_type" in caplog.text
+    assert "carried invalid data_type='not-a-real-type'" in caplog.text
 
 
 def test_cleanup_keeps_stale_video_channel_with_pending_sequence(emitter) -> None:
@@ -654,7 +459,7 @@ def test_cleanup_keeps_stale_video_channel_with_pending_sequence(emitter) -> Non
         producer_id=producer_id,
         last_heartbeat=datetime.now(timezone.utc)
         - timedelta(seconds=HEARTBEAT_TIMEOUT_SECS + 1),
-        trace_id=trace_id,
+        active_trace_ids={trace_id},
         last_sequence_number=cutoff_sequence_number,
     )
     channel.data_type = DataType.RGB_IMAGES

@@ -301,26 +301,37 @@ class ChannelRegistry:
     def add(self, channel: ChannelState) -> None:
         """Register or replace one active producer channel."""
         existing = self._channels.get(channel.producer_id)
-        if existing is not None and existing.trace_id is not None:
-            self._producer_by_trace_id.pop(existing.trace_id, None)
+        if existing is not None:
+            for trace_id in existing.active_trace_ids:
+                self._producer_by_trace_id.pop(trace_id, None)
         self._channels[channel.producer_id] = channel
-        if channel.trace_id is not None:
-            self._producer_by_trace_id[channel.trace_id] = channel.producer_id
+        for trace_id in channel.active_trace_ids:
+            self._producer_by_trace_id[trace_id] = channel.producer_id
 
     def remove(self, producer_id: str) -> ChannelState | None:
         """Remove and return one producer channel, if present."""
         channel = self._channels.pop(producer_id, None)
-        if channel is not None and channel.trace_id is not None:
-            self._producer_by_trace_id.pop(channel.trace_id, None)
+        if channel is not None:
+            for trace_id in channel.active_trace_ids:
+                self._producer_by_trace_id.pop(trace_id, None)
         return channel
 
     def set_trace_id(self, channel: ChannelState, trace_id: str | None) -> None:
-        """Update one channel's trace identifier and keep indexes synchronized."""
-        if channel.trace_id is not None:
-            self._producer_by_trace_id.pop(channel.trace_id, None)
-        channel.trace_id = trace_id
-        if trace_id is not None:
-            self._producer_by_trace_id[trace_id] = channel.producer_id
+        """Mark one trace as active on a channel and index it to the producer.
+
+        A coordinator carries several concurrent traces, so this adds the trace
+        rather than replacing a single active one. ``None`` is a no-op kept for
+        callback compatibility; use :meth:`remove_trace_id` to drop a trace.
+        """
+        if trace_id is None:
+            return
+        channel.add_trace_id(trace_id)
+        self._producer_by_trace_id[trace_id] = channel.producer_id
+
+    def remove_trace_id(self, channel: ChannelState, trace_id: str) -> None:
+        """Drop one finished trace from a channel and the producer index."""
+        self._producer_by_trace_id.pop(trace_id, None)
+        channel.remove_trace(trace_id)
 
     def items(self) -> Iterator[tuple[str, ChannelState]]:
         """Iterate over `(producer_id, channel)` pairs."""
@@ -411,18 +422,30 @@ class PendingVideoFrameSequenceRegistry:
 
 @dataclass
 class ChannelState:
-    """Mutable transport and heartbeat state for one producer channel."""
+    """Mutable transport and heartbeat state for one robot coordinator channel.
+
+    One ``producer_id`` identifies a robot coordinator, which may carry several
+    concurrent traces (one per active data stream). ``active_trace_ids`` tracks
+    those traces and ``video_service_ids`` tracks the iceoryx2 services the
+    coordinator has asked the daemon to subscribe to (one per video stream).
+    """
 
     producer_id: str
     last_heartbeat: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    trace_id: str | None = None
+    active_trace_ids: set[str] = field(default_factory=set)
+    video_service_ids: set[str] = field(default_factory=set)
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     last_sequence_number: int = 0
+    last_socket_sequence_number: int = 0
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
     transport_mode: TransportMode = TransportMode.NONE
     data_type: DataType | None = None
     socket_pending_messages: dict[str, PartialMessage] = field(default_factory=dict)
+
+    def has_active_traces(self) -> bool:
+        """Return whether the coordinator currently has any active trace."""
+        return bool(self.active_trace_ids)
 
     def touch(self) -> None:
         """Refresh heartbeat tracking for this channel."""
@@ -450,10 +473,15 @@ class ChannelState:
         return self.transport_mode is TransportMode.VIDEO
 
     def clear_transport_state(self) -> None:
-        """Reset transport-specific state after a trace finishes or closes."""
+        """Reset transport-specific state after the channel closes."""
         self.opened_at = None
         self.transport_mode = TransportMode.NONE
         self.socket_pending_messages.clear()
+
+    def remove_trace(self, trace_id: str) -> None:
+        """Drop per-trace transport state for one finished trace."""
+        self.active_trace_ids.discard(trace_id)
+        self.socket_pending_messages.pop(trace_id, None)
 
     def add_socket_data_chunk(
         self,
@@ -565,10 +593,9 @@ class ChannelState:
         now = utc_now()
         return self.has_missed_heartbeat(now) or self.is_stale_unopened(now)
 
-    def set_trace_id(self, trace_id: str) -> None:
-        """Update the channel's active trace identifier."""
-        if trace_id != self.trace_id:
-            self.trace_id = trace_id
+    def add_trace_id(self, trace_id: str) -> None:
+        """Mark one trace as active on this coordinator channel."""
+        self.active_trace_ids.add(trace_id)
 
 
 @dataclass
@@ -804,10 +831,23 @@ class RecordingCloseRegistry:
         default_factory=dict
     )
     _closed_recording_ids: set[str] = field(default_factory=set)
+    _closed_stop_cutoffs_by_recording: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )
 
     def is_closed(self, recording_id: str) -> bool:
         """Return whether the recording has already been marked closed."""
         return recording_id in self._closed_recording_ids
+
+    def closed_stop_cutoff(
+        self,
+        recording_id: str,
+        producer_id: str,
+    ) -> int | None:
+        """Return the stored stop cutoff for a closed recording producer."""
+        return self._closed_stop_cutoffs_by_recording.get(recording_id, {}).get(
+            producer_id
+        )
 
     def mark_closing(
         self,
@@ -827,5 +867,9 @@ class RecordingCloseRegistry:
 
     def close(self, recording_id: str) -> None:
         """Mark a recording as closed and clear any closing state."""
-        self._closing_by_recording.pop(recording_id, None)
+        closing_state = self._closing_by_recording.pop(recording_id, None)
         self._closed_recording_ids.add(recording_id)
+        if closing_state is not None:
+            self._closed_stop_cutoffs_by_recording[recording_id] = dict(
+                closing_state.producer_stop_sequence_numbers
+            )

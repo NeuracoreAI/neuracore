@@ -9,6 +9,7 @@ Work is sharded by producer so ordering is preserved per channel.
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import threading
 import zlib
@@ -31,6 +32,10 @@ from .models import (
 )
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_SPOOL_SHARD_QUEUE_MAXSIZE = int(
+    os.getenv("NCD_SPOOL_SHARD_QUEUE_MAXSIZE", "1024")
+)
 
 
 class _SpoolShard:
@@ -61,7 +66,9 @@ class _SpoolShard:
         self._register_trace_metadata = register_trace_metadata
         self._get_trace_recording = get_trace_recording
         self._set_channel_trace_id = set_channel_trace_id
-        self._queue: queue.Queue[DecodedFrameWork | None] = queue.Queue(maxsize=32)
+        self._queue: queue.Queue[DecodedFrameWork | None] = queue.Queue(
+            maxsize=DEFAULT_SPOOL_SHARD_QUEUE_MAXSIZE
+        )
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
         self._thread = threading.Thread(

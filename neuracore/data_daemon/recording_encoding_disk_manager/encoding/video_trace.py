@@ -29,6 +29,8 @@ CHUNK_SIZE = 64 * MB_CHUNK
 LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
 TRACE_FILE = "trace.json"
+TIMESTAMP_COMPRESSION_WARNING_MIN_SECONDS = 0.25
+TIMESTAMP_COMPRESSION_WARNING_RATIO = 0.05
 
 logger = logging.getLogger(__name__)
 
@@ -410,12 +412,25 @@ class VideoTrace:
                 self.output_dir,
             )
         if self._non_monotonic_timestamp_count > 0:
-            logger.warning(
-                "VideoTrace observed %d non-monotonic frame timestamps (dir=%s); "
-                "playback duration can be much shorter than capture duration when "
-                "batches are processed out of order",
+            compression_s = metadata_timestamp_span_s - encoded_timestamp_span_s
+            compression_threshold_s = max(
+                TIMESTAMP_COMPRESSION_WARNING_MIN_SECONDS,
+                metadata_timestamp_span_s * TIMESTAMP_COMPRESSION_WARNING_RATIO,
+            )
+            log_method = (
+                logger.warning
+                if compression_s > compression_threshold_s
+                else logger.debug
+            )
+            log_method(
+                "VideoTrace observed %d non-monotonic frame timestamps (dir=%s, "
+                "encoded_timestamp_span_s=%.3f, metadata_timestamp_span_s=%.3f); "
+                "small inversions can happen with jittered timestamps, but large "
+                "span compression suggests batches were processed out of order",
                 self._non_monotonic_timestamp_count,
                 self.output_dir,
+                encoded_timestamp_span_s,
+                metadata_timestamp_span_s,
             )
 
         self._frame_metadata = []

@@ -22,6 +22,42 @@ def db_path(tmp_path: Path) -> Path:
     return tmp_path / "state.db"
 
 
+def test_configure_logging_uses_env_log_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_basic_config(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setenv("NEURACORE_DAEMON_LOG_LEVEL", "DEBUG")
+    monkeypatch.setattr(runner_entry.logging, "basicConfig", fake_basic_config)
+
+    runner_entry.configure_logging()
+
+    assert captured["level"] == logging.DEBUG
+    assert captured["format"] == (
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+
+def test_configure_logging_defaults_to_debug_when_ndd_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_basic_config(**kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.delenv("NEURACORE_DAEMON_LOG_LEVEL", raising=False)
+    monkeypatch.setenv("NDD_DEBUG", "true")
+    monkeypatch.setattr(runner_entry.logging, "basicConfig", fake_basic_config)
+
+    runner_entry.configure_logging()
+
+    assert captured["level"] == logging.DEBUG
+
+
 def test_main_logs_error_when_runtime_initialize_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,

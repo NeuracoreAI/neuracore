@@ -7,102 +7,36 @@ import numpy as np
 from neuracore_types import DataType
 
 from neuracore.core.streaming.data_stream import DataRecordingContext, RGBDataStream
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    producer_transport_args_for_data_type,
-)
-from neuracore.data_daemon.const import (
-    DEFAULT_VIDEO_CHUNK_SIZE,
-    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
-    DEFAULT_VIDEO_SLOT_SIZE,
+from neuracore.data_daemon.communications_management.producer import (
+    StreamPayload,
+    StreamSession,
 )
 
 
-class _FakeProducerChannel:
-    instances: list[_FakeProducerChannel] = []
+class _FakeCoordinator:
+    """Records session registrations and enqueued payloads."""
 
-    def __init__(
-        self,
-        *,
-        data_type: DataType,
-        id: str | None = None,
-        recording_id: str | None = None,
-        chunk_size: int | None = None,
-        send_queue_maxsize: int | None = None,
-        max_frame_bytes: int | None = None,
-        **_: object,
-    ) -> None:
-        default_chunk_size, default_max_frame_bytes, default_send_queue_maxsize = (
-            producer_transport_args_for_data_type(data_type)
-        )
-        self.id = id
-        self.recording_id = recording_id
-        self.data_type = data_type
-        self.chunk_size = default_chunk_size if chunk_size is None else chunk_size
-        self.send_queue_maxsize = (
-            default_send_queue_maxsize
-            if send_queue_maxsize is None
-            else send_queue_maxsize
-        )
-        self.init_max_frame_bytes: int | None = None
-        self.default_max_frame_bytes = (
-            default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
-        )
-        self.opened_max_frame_bytes: list[int] = []
-        self.send_data_parts_calls: list[dict[str, object]] = []
-        self.cleanup_wait_for_transport_drain_calls: list[bool] = []
-        self.stop_wait_for_transport_drain_calls: list[bool] = []
-        self.trace_id = None
-        _FakeProducerChannel.instances.append(self)
+    def __init__(self) -> None:
+        self.register_calls: list[dict[str, object]] = []
+        self.payloads: list[StreamPayload] = []
 
-    def start_recording_session(
-        self,
-        *,
-        recording_id: str | None = None,
-        max_frame_bytes: int | None = None,
-    ) -> None:
-        if recording_id is not None:
-            self.recording_id = recording_id
-        self.trace_id = "trace-1"
-        self.opened_max_frame_bytes.append(
-            self.default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
+    def register_stream_session(self, **kwargs: object) -> StreamSession:
+        self.register_calls.append(kwargs)
+        return StreamSession(
+            session_id=f"{kwargs['data_type'].value}:{kwargs['stream_name']}",
+            data_type=kwargs["data_type"],  # type: ignore[arg-type]
+            data_type_name=str(kwargs["stream_name"]),
+            recording_id=str(kwargs["recording_id"]),
+            robot_instance=int(kwargs["robot_instance"]),  # type: ignore[arg-type]
+            robot_id=kwargs["robot_id"],  # type: ignore[arg-type]
+            robot_name=kwargs["robot_name"],  # type: ignore[arg-type]
+            dataset_id=kwargs["dataset_id"],  # type: ignore[arg-type]
+            dataset_name=kwargs["dataset_name"],  # type: ignore[arg-type]
+            trace_id="trace-1",
         )
 
-    def initialize_new_producer_channel(
-        self, max_frame_bytes: int | None = None
-    ) -> None:
-        self.init_max_frame_bytes = (
-            self.default_max_frame_bytes if max_frame_bytes is None else max_frame_bytes
-        )
-
-    def set_recording_id(self, recording_id: str | None) -> None:
-        self.recording_id = recording_id
-
-    def start_producer_channel(self) -> None:
-        return
-
-    def stop_producer_channel(
-        self,
-        *,
-        wait_for_transport_drain: bool = True,
-    ) -> None:
-        self.stop_wait_for_transport_drain_calls.append(wait_for_transport_drain)
-        return
-
-    def start_new_trace(self) -> None:
-        self.trace_id = "trace-1"
-
-    def cleanup_producer_channel(
-        self,
-        *,
-        stop_cutoff_sequence_number: int | None = None,
-        wait_for_transport_drain: bool = True,
-    ) -> None:
-        del stop_cutoff_sequence_number
-        self.cleanup_wait_for_transport_drain_calls.append(wait_for_transport_drain)
-        return
-
-    def send_data_parts(self, **kwargs: object) -> None:
-        self.send_data_parts_calls.append(kwargs)
+    def enqueue_stream_payload(self, payload: StreamPayload) -> None:
+        self.payloads.append(payload)
 
 
 class _DummyCameraData:
@@ -132,45 +66,51 @@ def _context(recording_id: str = "rec-1") -> DataRecordingContext:
     )
 
 
-def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-
+def test_rgb_stream_registers_video_session() -> None:
+    coordinator = _FakeCoordinator()
     stream = RGBDataStream("front_camera", width=3840, height=2160)
-    stream.start_recording(_context())
 
-    producer = _FakeProducerChannel.instances[0]
-    assert producer.data_type == DataType.RGB_IMAGES
-    assert producer.chunk_size == DEFAULT_VIDEO_CHUNK_SIZE
-    assert producer.send_queue_maxsize == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
-    assert producer.opened_max_frame_bytes == [DEFAULT_VIDEO_SLOT_SIZE]
+    stream.start_recording(_context(), coordinator)
+
+    assert len(coordinator.register_calls) == 1
+    call = coordinator.register_calls[0]
+    assert call["data_type"] == DataType.RGB_IMAGES
+    assert call["stream_name"] == "front_camera"
+    session = stream.get_stream_session()
+    assert session is not None
+    assert session.uses_video_transport()
 
 
-def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
+def test_start_recording_replaces_stale_recording_session() -> None:
+    coordinator = _FakeCoordinator()
+    stream = RGBDataStream("front_camera", width=640, height=480)
 
+    stream.start_recording(_context("rec-old"), coordinator)
+    old_session = stream.get_stream_session()
+    stream.start_recording(_context("rec-new"), coordinator)
+
+    assert len(coordinator.register_calls) == 2
+    assert coordinator.register_calls[0]["recording_id"] == "rec-old"
+    assert coordinator.register_calls[1]["recording_id"] == "rec-new"
+    current_context = stream.get_recording_context()
+    assert current_context is not None
+    assert current_context.recording_id == "rec-new"
+    assert stream.get_stream_session() is not old_session
+
+
+def test_rgb_stream_enqueues_frame_as_multipart_payload() -> None:
+    coordinator = _FakeCoordinator()
     width, height = 4, 3
     stream = RGBDataStream("front_camera", width=width, height=height)
-    stream.start_recording(_context())
+    stream.start_recording(_context(), coordinator)
 
     metadata = _DummyCameraData(timestamp=123.0)
     frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
     stream.log(metadata, frame)
 
-    producer = _FakeProducerChannel.instances[0]
-    assert len(producer.send_data_parts_calls) == 1
-
-    send_call = producer.send_data_parts_calls[0]
-    parts = send_call["parts"]
-    total_bytes = send_call["total_bytes"]
-
+    assert len(coordinator.payloads) == 1
+    payload = coordinator.payloads[0]
+    parts = payload.parts
     assert isinstance(parts, tuple)
     assert len(parts) == 3
     header, metadata_json, frame_view = parts
@@ -187,27 +127,16 @@ def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
     assert metadata_json == expected_metadata_json
     assert isinstance(frame_view, memoryview)
     assert len(frame_view) == frame.nbytes
-    assert total_bytes == len(header) + len(metadata_json) + frame.nbytes
+    assert payload.total_bytes == len(header) + len(metadata_json) + frame.nbytes
 
 
-def test_stream_stop_recording_wait_false_skips_transport_drain(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-
+def test_stream_mark_recording_stopped_clears_local_state() -> None:
+    coordinator = _FakeCoordinator()
     stream = RGBDataStream("front_camera", width=640, height=480)
-    stream.start_recording(_context())
+    stream.start_recording(_context(), coordinator)
 
-    producer = _FakeProducerChannel.instances[0]
-    stream.stop_recording(
-        stop_cutoff_sequence_number=0,
-        wait_for_producer_drain=False,
-    )
+    stream.mark_recording_stopped()
 
-    assert producer.cleanup_wait_for_transport_drain_calls == [False]
-    assert producer.stop_wait_for_transport_drain_calls == [False]
     assert stream.get_recording_context() is None
-    assert stream.get_producer_channel() is None
+    assert stream.get_stream_session() is None
     assert stream.is_recording() is False

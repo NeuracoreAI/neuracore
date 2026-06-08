@@ -19,7 +19,7 @@ def _channel_id() -> str:
 def test_register_and_drain() -> None:
     """A registered channel drains frames sent by its publisher."""
     channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    transport = Iox2VideoTransport(channel_id, channel_id)
     drain = Iox2DaemonDrain()
     try:
         drain.register_channel(channel_id)
@@ -40,8 +40,8 @@ def test_drain_multiple_channels() -> None:
     """Two channels are drained independently."""
     channel_a = _channel_id()
     channel_b = _channel_id()
-    transport_a = Iox2VideoTransport(channel_a)
-    transport_b = Iox2VideoTransport(channel_b)
+    transport_a = Iox2VideoTransport(channel_a, channel_a)
+    transport_b = Iox2VideoTransport(channel_b, channel_b)
     drain = Iox2DaemonDrain()
     try:
         drain.register_channel(channel_a)
@@ -63,7 +63,7 @@ def test_drain_multiple_channels() -> None:
 def test_unregister_channel_stops_draining() -> None:
     """After unregister, frames on that channel are not drained."""
     channel_id = _channel_id()
-    transport = Iox2VideoTransport(channel_id)
+    transport = Iox2VideoTransport(channel_id, channel_id)
     drain = Iox2DaemonDrain()
     try:
         drain.register_channel(channel_id)

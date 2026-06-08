@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import os
 
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import (
@@ -16,6 +17,31 @@ from neuracore.data_daemon.lifecycle.runtime_recovery import shutdown
 from neuracore.data_daemon.runtime import DaemonContext, DaemonRuntime
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_daemon_log_level() -> tuple[int, str | None]:
+    """Return the daemon log level and any invalid raw env value."""
+    raw_level = os.environ.get("NEURACORE_DAEMON_LOG_LEVEL")
+    if raw_level is None:
+        return (logging.DEBUG if is_debug_mode() else logging.INFO), None
+
+    resolved_level = logging.getLevelName(raw_level.upper())
+    if isinstance(resolved_level, int):
+        return resolved_level, None
+    return logging.INFO, raw_level
+
+
+def configure_logging() -> None:
+    """Configure daemon process logging from environment."""
+    log_level, invalid_level = _resolve_daemon_log_level()
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    )
+    if invalid_level is not None:
+        logger.warning(
+            "Invalid NEURACORE_DAEMON_LOG_LEVEL=%r; using INFO", invalid_level
+        )
 
 
 def main() -> None:
@@ -103,8 +129,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    )
+    configure_logging()
     main()

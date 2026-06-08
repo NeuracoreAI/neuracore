@@ -105,6 +105,39 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
     assert pid_path.read_text(encoding="utf-8").strip() == "54321"
 
 
+def test_launch_daemon_subprocess_can_inherit_stdio_in_background(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    fake_socket_path = tmp_path / "management.sock"
+    fake_socket_path.touch()
+    captured: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
+        captured["command"] = command
+        captured.update(kwargs)
+        return _FakePopen(pid=56789, poll_value=None)
+
+    monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(daemon_os_control, "SOCKET_PATH", fake_socket_path)
+
+    proc = launch_daemon_subprocess(
+        pid_path=pid_path,
+        db_path=db_path,
+        background=True,
+        env_overrides={"NEURACORE_DAEMON_INHERIT_STDIO": "1"},
+    )
+
+    assert proc.pid == 56789
+    assert captured["start_new_session"] is True
+    assert captured["stdin"] is daemon_os_control.subprocess.DEVNULL
+    assert captured["stdout"] is None
+    assert captured["stderr"] is None
+    assert pid_path.read_text(encoding="utf-8").strip() == "56789"
+
+
 def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
