@@ -272,18 +272,6 @@ def mock_data_requests(
     create_test_video_fn,
 ) -> Generator[requests_mock.Mocker, None, None]:
     """Set up mocks for Dataset API endpoints."""
-    # Mock datasets endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_model.model_dump(mode="json")],
-        status_code=200,
-    )
-
-    # Mock shared datasets endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared", json=[], status_code=200
-    )
-
     mock_auth_requests.get(
         re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
         json=dataset_model.model_dump(mode="json"),

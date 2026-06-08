@@ -24,6 +24,15 @@ from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.utils.http_session import thread_local_session
+from tests.integration.ml.shared.constants import (
+    GRIPPER_NAMES,
+    INPUT_DATA_TYPES,
+    JOINT_NAMES,
+    LANGUAGE_LABEL,
+    NC_CAM_NAME,
+    OUTPUT_DATA_TYPES,
+    POSE_SENSOR_NAME,
+)
 from tests.integration.ml.shared.data_collection import (
     collect_demo_data,
     wait_for_dataset_recording_count,
@@ -42,14 +51,7 @@ from tests.integration.ml.shared.utils import (
 from tests.integration.ml.test_training_flow import (
     FLOW_COLLECTED_DATASET_PREFIX,
     FLOW_MERGED_DATASET_PREFIX,
-    GRIPPER_NAMES,
     INFERENCE_MODEL_TRAIN_RUN_PREFIX,
-    INPUT_DATA_TYPES,
-    JOINT_NAMES,
-    LANGUAGE_LABEL,
-    NC_CAM_NAME,
-    OUTPUT_DATA_TYPES,
-    POSE_SENSOR_NAME,
 )
 
 logging.basicConfig(

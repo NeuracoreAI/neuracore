@@ -398,28 +398,6 @@ class Dataset:
         )
         response.raise_for_status()
 
-    def _format_failed_recording_ids(self, failed_recording_ids: list[str]) -> str:
-        return "".join(f"\n{recording_id}" for recording_id in failed_recording_ids)
-
-    def _raise_sync_failure(
-        self,
-        failed_recording_ids: list[str],
-        processed: int | None = None,
-        total: int | None = None,
-    ) -> None:
-        recording_ids = self._format_failed_recording_ids(failed_recording_ids)
-        progress_line = (
-            f"\n({processed}/{total} recordings synchronized)."
-            if processed is not None and total is not None
-            else ""
-        )
-        raise DatasetError(
-            f"Synchronization failed for dataset '{self.name}'.\n\n"
-            f"Problematic recordings:\n{recording_ids}\n\n"
-            "These recordings might have missing or extra sensor data or "
-            f"invalid synchronization parameters were provided.{progress_line}"
-        )
-
     def _synchronize(
         self,
         frequency: int = 0,
@@ -478,18 +456,10 @@ class Dataset:
             f"{API_URL}/org/{self.org_id}/synchronize/synchronization-progress/{synchronized_dataset_id}",
             headers=get_auth().get_headers(),
         )
-        if response.status_code == 409:
-            detail = extract_error_detail(response) or "Synchronization failed."
-            prefix = "Synchronization failed for recording(s): "
-            if prefix in detail:
-                failed_ids = [
-                    rid.strip()
-                    for rid in detail.split(prefix, 1)[1].split(",")
-                    if rid.strip()
-                ]
-                self._raise_sync_failure(failed_ids)
-            raise DatasetError(detail)
-        response.raise_for_status()
+        if not response.ok:
+            raise DatasetError(
+                extract_error_detail(response) or "Synchronization failed."
+            )
         return SynchronizationProgress.model_validate(response.json())
 
     def synchronize(
@@ -533,10 +503,6 @@ class Dataset:
         total = synced_dataset.num_demonstrations
         synchronization_progress = self._get_synchronization_progress(synced_dataset.id)
         processed = synchronization_progress.num_synchronized_demonstrations
-        if synchronization_progress.has_failures:
-            self._raise_sync_failure(
-                synchronization_progress.failed_recording_ids, processed, total
-            )
         if total != processed:
             pbar = tqdm(total=total, desc="Synchronizing dataset", unit="recording")
             pbar.n = processed
@@ -546,12 +512,6 @@ class Dataset:
                 synchronization_progress = self._get_synchronization_progress(
                     synced_dataset.id
                 )
-                if synchronization_progress.has_failures:
-                    pbar.close()
-                    self._raise_sync_failure(
-                        synchronization_progress.failed_recording_ids, processed, total
-                    )
-
                 new_processed = synchronization_progress.num_synchronized_demonstrations
                 if new_processed > processed:
                     pbar.update(new_processed - processed)

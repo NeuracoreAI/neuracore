@@ -6,6 +6,13 @@ from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from tests.integration.ml.shared.constants import (
+    GRIPPER_NAMES,
+    JOINT_NAMES,
+    LANGUAGE_LABEL,
+    NC_CAM_NAME,
+    POSE_SENSOR_NAME,
+)
 from tests.integration.ml.shared.data_collection import (
     collect_demo_data,
     wait_for_dataset_recording_count,
@@ -15,13 +22,6 @@ from tests.integration.ml.shared.training import (
     wait_for_all_training,
 )
 from tests.integration.ml.shared.utils import unique_name
-from tests.integration.ml.test_training_flow import (
-    GRIPPER_NAMES,
-    JOINT_NAMES,
-    LANGUAGE_LABEL,
-    NC_CAM_NAME,
-    POSE_SENSOR_NAME,
-)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"

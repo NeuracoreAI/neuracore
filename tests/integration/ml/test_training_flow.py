@@ -12,15 +12,24 @@ superseded runs).
 """
 
 import logging
-import os
 import pprint
-import sys
 import time
-
-from neuracore_types import DataType, EmbodimentDescription
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
+from tests.integration.ml.shared.constants import (
+    FREQUENCY,
+    GPU_TYPE,
+    GRIPPER_NAMES,
+    INPUT_DATA_TYPES,
+    JOINT_NAMES,
+    LANGUAGE_LABEL,
+    NC_CAM_NAME,
+    NUM_GPUS,
+    OUTPUT_DATA_TYPES,
+    POSE_SENSOR_NAME,
+    ROBOT_NAME,
+)
 from tests.integration.ml.shared.data_collection import (
     collect_demo_data,
     wait_for_dataset_recording_count,
@@ -33,47 +42,10 @@ from tests.integration.ml.shared.training import (
 )
 from tests.integration.ml.shared.utils import unique_name
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")
-if _EXAMPLES_DIR not in sys.path:
-    sys.path.append(_EXAMPLES_DIR)
-
-# ruff: noqa: E402
-from common.base_env import BimanualViperXTask
-
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-NC_CAM_NAME = "rgb_angle"
-MJ_CAM_NAME = "angle"
-JOINT_NAMES = (
-    BimanualViperXTask.LEFT_ARM_JOINT_NAMES + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
-)
-GRIPPER_NAMES = ["left_gripper", "right_gripper"]
-POSE_SENSOR_NAME = "tcp"
-LANGUAGE_LABEL = "instruction"
-
-
-def _indexed_names(names: list[str] | tuple[str, ...]) -> dict[int, str]:
-    return {index: name for index, name in enumerate(names)}
-
-
-# Training/Inference robot (VX300s) embodiment descriptions
-INPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
-    DataType.RGB_IMAGES: {0: NC_CAM_NAME},
-    DataType.JOINT_POSITIONS: _indexed_names(names=JOINT_NAMES),
-    DataType.LANGUAGE: {0: LANGUAGE_LABEL},
-    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: _indexed_names(names=GRIPPER_NAMES),
-}
-OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
-    DataType.JOINT_TARGET_POSITIONS: _indexed_names(names=JOINT_NAMES),
-    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS: _indexed_names(names=GRIPPER_NAMES),
-}
-
-INPUT_DATA_TYPES = list(INPUT_EMBODIMENT_DESCRIPTION.keys())
-OUTPUT_DATA_TYPES = list(OUTPUT_EMBODIMENT_DESCRIPTION.keys())
 
 # Predefined name prefix for the training run produced by this test. The
 # inference and resume tests scan for the latest COMPLETED run under this prefix
@@ -87,10 +59,6 @@ FLOW_MERGED_DATASET_PREFIX = "merged"
 JOB_STATE_POLL_SECONDS = 30
 RUNNING_STATE_TIMEOUT_MINUTES = 10
 LOGS_AVAILABILITY_TIMEOUT_MINUTES = 10
-ROBOT_NAME = "integration_test_robot"
-GPU_TYPE = "NVIDIA_TESLA_V100"
-NUM_GPUS = 1
-FREQUENCY = 20
 SHARED_DATASET_NAME = "NYU ROT"
 COLLECTED_DEMO_EPISODES = 3
 CNNMLP_CONFIG = {
