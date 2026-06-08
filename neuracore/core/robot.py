@@ -981,3 +981,69 @@ def get_robot_id_from_name(robot_name: str, org_id: str | None = None) -> str:
         f"Robot with name '{robot_name}' not found in organization '{org_id}' "
         "or shared robots."
     )
+
+
+def get_robot_name_by_id(robot_id: str, org_id: str | None = None) -> str:
+    """Resolve a robot ID to its display name.
+
+    Args:
+        robot_id: Robot ID to look up.
+        org_id: Organization ID. Uses the current org when omitted.
+
+    Returns:
+        The robot's display name.
+
+    Raises:
+        RobotError: If not authenticated, no org is selected, or the robot is unknown.
+    """
+    names = get_robot_names_by_ids([robot_id], org_id=org_id)
+    name = names.get(robot_id)
+    if name is None:
+        raise RobotError(f"Robot with ID '{robot_id}' was not found.")
+    return name
+
+
+def get_robot_names_by_ids(
+    robot_ids: list[str], org_id: str | None = None
+) -> dict[str, str]:
+    """Resolve robot IDs to display names via the Neuracore API.
+
+    Args:
+        robot_ids: Robot IDs to resolve. Duplicates are ignored.
+        org_id: Organization ID. Uses the current org when omitted.
+
+    Returns:
+        Mapping of robot ID to display name for IDs that were found.
+        Unknown IDs are omitted from the result.
+
+    Raises:
+        RobotError: If not authenticated, no org is selected, or the API call fails.
+    """
+    if not robot_ids:
+        return {}
+    if not get_auth().is_authenticated:
+        raise RobotError("Not authenticated. Please call nc.login() first.")
+    if org_id is None:
+        org_id = get_current_org()
+    if not org_id:
+        raise RobotError("No organization selected. Please call nc.select_org() first.")
+
+    unique_robot_ids = list(dict.fromkeys(robot_ids))
+    try:
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{org_id}/robots/names",
+            headers=get_auth().get_headers(),
+            json={"robot_ids": unique_robot_ids},
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return {robot["id"]: robot["name"] for robot in payload.get("robots", [])}
+    except requests.exceptions.ConnectionError:
+        raise RobotError(
+            "Failed to connect to neuracore server, "
+            "please check your internet connection and try again."
+        )
+    except requests.exceptions.RequestException as e:
+        raise RobotError(f"Failed to resolve robot names: {str(e)}")
