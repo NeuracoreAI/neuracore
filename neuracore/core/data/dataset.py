@@ -113,6 +113,7 @@ class Dataset:
             start_time=recording_model.start_time,
             end_time=recording_model.end_time,
             metadata=recording_model.metadata,
+            data_types=recording_model.data_types,
         )
 
     def _initialize_num_recordings(self) -> None:

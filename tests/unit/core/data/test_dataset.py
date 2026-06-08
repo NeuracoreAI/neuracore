@@ -755,6 +755,13 @@ class TestDatasetIteration:
         assert all(isinstance(r, Recording) for r in recordings)
         assert recordings[0].id == "rec1"
         assert recordings[1].id == "rec2"
+        # data_types populated when present in API response
+        assert recordings[0].data_types == {
+            DataType.JOINT_POSITIONS,
+            DataType.RGB_IMAGES,
+        }
+        # data_types defaults to empty set when absent from API response
+        assert recordings[1].data_types == set()
 
     def test_iteration_multiple_times(self, dataset_dict, recordings_list):
         """Test that dataset can be iterated multiple times."""

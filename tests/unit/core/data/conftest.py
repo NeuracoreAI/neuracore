@@ -161,6 +161,7 @@ def recordings_list():
             end_time=10.0,
             total_bytes=512,
             metadata=RecordingMetadata(name="recording1"),
+            data_types={DataType.JOINT_POSITIONS, DataType.RGB_IMAGES},
         ).model_dump(mode="json"),
         Recording(
             id="rec2",

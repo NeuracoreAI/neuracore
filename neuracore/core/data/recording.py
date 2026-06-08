@@ -35,6 +35,7 @@ class Recording:
         start_time: float,
         end_time: float,
         metadata: RecordingMetadata,
+        data_types: set[DataType] | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -47,6 +48,7 @@ class Recording:
             start_time: Unix timestamp when recording started.
             end_time: Unix timestamp when recording ended.
             metadata: Metadata associated with the recording.
+            data_types: Set of DataTypes present in this recording.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -58,6 +60,7 @@ class Recording:
         # Store human-friendly recording name when available.
         self.name = getattr(metadata, "name", None) or recording_id
         self.metadata = metadata
+        self.data_types: set[DataType] = data_types or set()
         self._raw = {
             "id": recording_id,
             "total_bytes": total_bytes,
