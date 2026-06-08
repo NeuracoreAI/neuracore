@@ -1,22 +1,12 @@
-name: Integration ML Training Flow - Staging
+name: Integration ML Failure Reporting - Staging
 
 on:
   schedule:
-    - cron: "0 1 * * *"  # 1. test_training_flow.py
+    - cron: "0 4 * * *"  # 4. test_failure_reporting.py
   workflow_dispatch:
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
-
   test:
-    needs: pre-commit
     runs-on: ubuntu-24.04
     # TODO: NDD has socket issue when running in parallel
     #   in CommunicationsManager when calling create_producer_socket()
@@ -57,7 +47,7 @@ jobs:
           echo "Test harness environment: staging"
           echo "Test harness ref: ${{ github.ref_name }}"
           echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/ml/test_training_flow.py"
+          echo "Test harness path: tests/integration/ml/test_failure_reporting.py"
           python - << 'EOF'
           import neuracore
 
@@ -81,4 +71,4 @@ jobs:
             --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
             --log-cli-date-format="%H:%M:%S" \
             -v \
-            tests/integration/ml/test_training_flow.py
+            tests/integration/ml/test_failure_reporting.py
