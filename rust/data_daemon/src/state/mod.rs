@@ -14,6 +14,8 @@ pub mod events;
 pub mod schema;
 #[allow(dead_code)]
 pub mod store;
+#[allow(dead_code)]
+pub mod trace_writer;
 
 #[allow(unused_imports)]
 pub use events::{ConnectionState, DaemonEvent, EventBus};
@@ -23,4 +25,8 @@ pub use schema::{
     TraceUploadStatus, TraceWriteStatus,
 };
 #[allow(unused_imports)]
-pub use store::{NewRecording, SqliteStateStore, StateStore, StateStoreError, TraceUpdate};
+pub use store::{
+    CoalescedTraceWrite, NewRecording, SqliteStateStore, StateStore, StateStoreError, TraceUpdate,
+};
+#[allow(unused_imports)]
+pub use trace_writer::{TraceWriteHandle, TraceWriter};

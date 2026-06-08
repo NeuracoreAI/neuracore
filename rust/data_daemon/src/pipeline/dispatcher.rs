@@ -432,6 +432,11 @@ impl Dispatcher {
         started_at_ns: i64,
         recv_at: Instant,
     ) {
+        // Insert the recording row synchronously: cloud notifiers react to the
+        // `RecordingStarted` event by reading this row, and `cancel_recording`
+        // burns it by index, so the row must exist before either runs. After the
+        // create_trace burst was folded into the write-behind (the actors no
+        // longer create rows here), this is a single uncontended write.
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
@@ -492,6 +497,9 @@ impl Dispatcher {
         let recording_index = window.recording_index;
         entry.closing.push(window);
 
+        // Persist `stopped_at` before publishing the event: the cloud
+        // stop-notifier reads this row on `RecordingStopped`, so the timestamp
+        // must be on disk first.
         if let Err(error) = self
             .store
             .mark_recording_stopped(recording_index, stopped_at_ns)
@@ -525,6 +533,13 @@ impl Dispatcher {
             for (_, handle) in window.traces {
                 let _ = handle.sender.send(TraceActorMessage::Cancel).await;
             }
+            // Purge any not-yet-flushed trace creates for this recording before
+            // burning its rows, so a late batch can't insert an orphan row for
+            // a recording that's already cancelled.
+            self.actor_context
+                .trace_writer
+                .drop_recording(recording_index)
+                .await;
             match self.store.cancel_recording(recording_index).await {
                 Ok((_, touched)) => {
                     tracing::info!(
@@ -752,7 +767,6 @@ impl Dispatcher {
         };
         let sender = Self::ensure_actor(
             window,
-            &self.store,
             &self.actor_context,
             data_type,
             sensor_name,
@@ -818,7 +832,6 @@ impl Dispatcher {
         let recording_index = window.recording_index;
         let handle = Self::ensure_actor(
             window,
-            &self.store,
             &self.actor_context,
             data_type.clone(),
             sensor_name.clone(),
@@ -869,7 +882,6 @@ impl Dispatcher {
     /// sensor_name)`, returning its routing handle.
     fn ensure_actor<'a>(
         window: &'a mut ActiveWindow,
-        store: &Arc<SqliteStateStore>,
         actor_context: &Arc<TraceActorContext>,
         data_type: String,
         sensor_name: Option<String>,
@@ -887,10 +899,9 @@ impl Dispatcher {
                 key,
             };
             let (tx, actor_rx) = mpsc::channel(TRACE_QUEUE_CAPACITY);
-            let actor_store = Arc::clone(store);
             let actor_context = Arc::clone(actor_context);
             let join = tokio::spawn(async move {
-                trace_actor::run(actor_store, actor_context, identity, actor_rx).await;
+                trace_actor::run(actor_context, identity, actor_rx).await;
             });
             actor_handles.push(join);
             TraceHandle {
@@ -937,6 +948,11 @@ impl Dispatcher {
                 tracing::warn!(?error, "trace actor join failed during shutdown");
             }
         }
+        // Every actor has exited, so all their finalise/failed writes are now
+        // queued in the write-behind. Flush it here so that by the time
+        // `DispatcherHandle::shutdown` returns the trace rows are durable —
+        // callers (and tests) can read final state without a separate barrier.
+        self.actor_context.trace_writer.flush().await;
         tracing::info!("dispatcher stopped");
     }
 }
@@ -986,17 +1002,22 @@ mod tests {
         (store, dir)
     }
 
-    fn test_context(recordings_root: PathBuf) -> Arc<TraceActorContext> {
+    fn test_context(recordings_root: PathBuf, store: SqliteStateStore) -> Arc<TraceActorContext> {
         let policy = StoragePolicy {
             storage_limit_bytes: None,
             min_free_disk_bytes: 0,
             refresh_interval: Duration::from_secs(60),
         };
         let budget = Arc::new(StorageBudget::new(&recordings_root, policy));
+        // The writer owner is dropped: the spawned task lives while the handle
+        // inside the context does. The dispatcher flushes it on shutdown, so
+        // tests see durable trace state after `handle.shutdown().await`.
+        let (trace_writer, _writer_owner) = crate::state::trace_writer::spawn(Arc::new(store));
         Arc::new(TraceActorContext::new(
             recordings_root,
             budget,
             VideoEncoder::new(),
+            trace_writer,
         ))
     }
 
@@ -1048,7 +1069,7 @@ mod tests {
     async fn routes_data_into_its_window_by_timestamp() {
         fast_holdback();
         let (store, dir) = open_store().await;
-        let context = test_context(dir.path().join("recordings"));
+        let context = test_context(dir.path().join("recordings"), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let bus = crate::state::EventBus::new();
         let dispatcher_context = DispatcherContext {
@@ -1098,7 +1119,7 @@ mod tests {
     async fn back_to_back_recordings_route_by_publish_timestamp() {
         fast_holdback();
         let (store, dir) = open_store().await;
-        let context = test_context(dir.path().join("recordings"));
+        let context = test_context(dir.path().join("recordings"), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
@@ -1182,7 +1203,7 @@ mod tests {
         fast_holdback();
         let (store, dir) = open_store().await;
         let recordings_root = dir.path().join("recordings");
-        let context = test_context(recordings_root.clone());
+        let context = test_context(recordings_root.clone(), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
@@ -1236,7 +1257,7 @@ mod tests {
         fast_holdback();
         let (store, dir) = open_store().await;
         let recordings_root = dir.path().join("recordings");
-        let context = test_context(recordings_root.clone());
+        let context = test_context(recordings_root.clone(), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
@@ -1276,7 +1297,7 @@ mod tests {
         // correctly while its own 0-based timestamp is preserved as content.
         fast_holdback();
         let (store, dir) = open_store().await;
-        let context = test_context(dir.path().join("recordings"));
+        let context = test_context(dir.path().join("recordings"), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
@@ -1313,7 +1334,7 @@ mod tests {
     async fn data_outside_any_window_is_dropped() {
         fast_holdback();
         let (store, dir) = open_store().await;
-        let context = test_context(dir.path().join("recordings"));
+        let context = test_context(dir.path().join("recordings"), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
 
@@ -1333,7 +1354,7 @@ mod tests {
     async fn cancel_purges_held_data_and_marks_cancelled() {
         fast_holdback();
         let (store, dir) = open_store().await;
-        let context = test_context(dir.path().join("recordings"));
+        let context = test_context(dir.path().join("recordings"), store.clone());
         let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
         let bus = crate::state::EventBus::new();
         let mut sub = bus.subscribe();

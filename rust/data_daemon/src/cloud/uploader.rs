@@ -54,7 +54,7 @@ pub const MAX_RETRIES: u32 = 5;
 /// Hard deadline for a single chunk PUT. Belt-and-braces over the reqwest
 /// client-level timeout, which can silently fail to fire for direct GCS
 /// resumable session URI uploads.
-const CHUNK_UPLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+const CHUNK_UPLOAD_TIMEOUT: Duration = Duration::from_secs(200);
 /// Maximum number of traces uploading concurrently. With 8 parallel contexts
 /// each queuing ~128 traces simultaneously (1024 total), 32 slots serialise
 /// into ~32 rounds × 300 ms ≈ 9.6 s. 128 slots cuts that to ~8 rounds ×

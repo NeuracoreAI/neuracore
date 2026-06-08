@@ -18,10 +18,17 @@
 //! *before* `WindowClosing`, so by the time the actor sees it every frame has
 //! been applied — completeness without counting sequence numbers.
 //!
-//! Database writes are debounced — a per-frame `bytes_written` UPDATE is
-//! wasteful at 200+ Hz scalar ingestion, so a counter is flushed every
-//! [`BYTES_WRITTEN_DEBOUNCE_FRAMES`] frames during ingestion and always on
-//! finalise.
+//! Database writes never touch the store's single write mutex on the actor's
+//! hot path: the row creation *and* every subsequent progress / status /
+//! finalise / failed update are fired into the coalescing write-behind
+//! ([`crate::state::trace_writer`]) and never awaited — the actor's first write
+//! carries the create fields, so the row is born from the same batch that
+//! applies its updates (the batched insert is `ON CONFLICT DO NOTHING`). Because
+//! creation is fire-and-forget too, the actor starts draining its inbox the
+//! instant it spawns, even during a boundary's spawn burst. Per-frame
+//! `bytes_written` updates are still debounced ([`BYTES_WRITTEN_DEBOUNCE_FRAMES`])
+//! before being enqueued, and the batcher further coalesces them per trace and
+//! flushes them in batched transactions.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -34,8 +41,7 @@ use tokio::task::{self, JoinSet};
 use crate::encoding::json_trace::{JsonTraceError, JsonTraceWriter};
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{ChunkEncodeRequest, VideoEncodeError, VideoEncoder};
-use crate::state::store::TraceUpdate;
-use crate::state::{SqliteStateStore, StateStore, TraceWriteStatus};
+use crate::state::TraceWriteHandle;
 use crate::storage::budget::StorageBudget;
 use crate::storage::paths::{self, TracePath};
 
@@ -113,6 +119,11 @@ pub struct TraceActorContext {
     /// registration coordinator can wake immediately. Optional so unit tests
     /// can exercise the actor without standing up a bus.
     pub event_bus: Option<crate::state::EventBus>,
+    /// Write-behind handle for this actor's create / progress / status /
+    /// finalise updates. Routing these through the coalescing batcher keeps the
+    /// actor's hot path — including row creation — off the store's single write
+    /// mutex entirely (see [`crate::state::trace_writer`]).
+    pub trace_writer: TraceWriteHandle,
 }
 
 impl TraceActorContext {
@@ -123,12 +134,14 @@ impl TraceActorContext {
         recordings_root: impl Into<std::path::PathBuf>,
         storage_budget: Arc<StorageBudget>,
         video_encoder: VideoEncoder,
+        trace_writer: TraceWriteHandle,
     ) -> Self {
         Self::with_ffmpeg_permits(
             recordings_root,
             storage_budget,
             video_encoder,
             Arc::new(Semaphore::new(default_ffmpeg_concurrency())),
+            trace_writer,
         )
     }
 
@@ -138,6 +151,7 @@ impl TraceActorContext {
         storage_budget: Arc<StorageBudget>,
         video_encoder: VideoEncoder,
         ffmpeg_permits: Arc<Semaphore>,
+        trace_writer: TraceWriteHandle,
     ) -> Self {
         Self {
             recordings_root: Arc::new(recordings_root.into()),
@@ -145,6 +159,7 @@ impl TraceActorContext {
             video_encoder,
             ffmpeg_permits,
             event_bus: None,
+            trace_writer,
         }
     }
 
@@ -244,13 +259,16 @@ struct ChunkEncodeJobResult {
 /// Run the per-trace actor until the dispatcher closes the inbox or sends a
 /// terminal message (`WindowClosing` / `Cancel`).
 pub async fn run(
-    store: Arc<SqliteStateStore>,
     context: Arc<TraceActorContext>,
     identity: TraceIdentity,
     mut inbox: mpsc::Receiver<TraceActorMessage>,
 ) {
     let mut state = ActorState::new(identity);
-    state.ensure_trace_row(&store).await;
+    // Fire-and-forget the row creation as the actor's first write. The batcher
+    // inserts it on its next flush — so the boundary's spawn burst is one
+    // batched insert, and the actor starts draining its inbox immediately
+    // instead of blocking on a synchronous `create_trace`.
+    state.send_create(&context);
 
     while let Some(message) = inbox.recv().await {
         match message {
@@ -260,7 +278,7 @@ pub async fn run(
                 payload,
             } => {
                 state
-                    .handle_data(&store, &context, timestamp_ns, timestamp_s, payload)
+                    .handle_data(&context, timestamp_ns, timestamp_s, payload)
                     .await;
             }
             TraceActorMessage::Video {
@@ -273,7 +291,6 @@ pub async fn run(
             } => {
                 state
                     .handle_video(
-                        &store,
                         &context,
                         chunk_index,
                         width,
@@ -285,7 +302,7 @@ pub async fn run(
                     .await;
             }
             TraceActorMessage::WindowClosing => {
-                state.finalise_trace(&store, &context).await;
+                state.finalise_trace(&context).await;
                 return;
             }
             TraceActorMessage::Cancel => {
@@ -302,7 +319,7 @@ pub async fn run(
     // Inbox closed without a WindowClosing nor a Cancel — typically a daemon
     // shutdown. Mark the trace failed so its lifecycle is observable from the
     // DB and the registration coordinator doesn't pick it up.
-    state.handle_shutdown_without_end(&store).await;
+    state.handle_shutdown_without_end(&context).await;
 }
 
 /// Per-actor mutable bookkeeping. Pulled out of `run` so the message handlers
@@ -334,30 +351,20 @@ impl ActorState {
         }
     }
 
-    /// Insert the trace row in `initializing` state. Idempotent on `trace_id`.
-    async fn ensure_trace_row(&self, store: &Arc<SqliteStateStore>) {
+    /// Enqueue the trace's row creation through the write-behind. Idempotent on
+    /// `trace_id` (the batched insert is `ON CONFLICT DO NOTHING`).
+    fn send_create(&self, context: &Arc<TraceActorContext>) {
         let key = &self.identity.key;
-        if let Err(error) = store
-            .create_trace(
-                key.recording_index,
-                &self.identity.trace_id,
-                Some(&key.data_type),
-                key.sensor_name.as_deref(),
-            )
-            .await
-        {
-            tracing::warn!(
-                %error,
-                trace_id = self.identity.trace_id,
-                recording_index = key.recording_index,
-                "failed to create trace row"
-            );
-        }
+        context.trace_writer.create(
+            &self.identity.trace_id,
+            key.recording_index,
+            Some(&key.data_type),
+            key.sensor_name.as_deref(),
+        );
     }
 
     async fn handle_data(
         &mut self,
-        store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
         timestamp_ns: i64,
         _timestamp_s: Option<f64>,
@@ -381,7 +388,7 @@ impl ActorState {
                 trace_id = self.identity.trace_id,
                 "failed to append frame; marking trace failed"
             );
-            self.mark_failed(store).await;
+            self.mark_failed(context);
             return;
         }
 
@@ -391,19 +398,18 @@ impl ActorState {
         let debounce_due = self
             .frame_count
             .is_multiple_of(BYTES_WRITTEN_DEBOUNCE_FRAMES);
+        // Fire-and-forget into the coalescing write-behind: the first frame
+        // bumps `writing`, and the debounced byte count rides along. Both calls
+        // for the same trace merge into one batched row write downstream, so
+        // the actor's hot path never touches the store's write mutex.
         if bumped_status || (debounce_due && bytes_changed) {
-            let update = TraceUpdate {
-                write_status: bumped_status.then_some(TraceWriteStatus::Writing),
-                bytes_written: bytes_changed.then_some(self.bytes_on_disk as i64),
-                ..TraceUpdate::default()
-            };
-            if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
-                tracing::warn!(
-                    %error,
-                    trace_id = self.identity.trace_id,
-                    "failed to update trace progress"
-                );
-            } else if bytes_changed {
+            if bumped_status {
+                context.trace_writer.mark_writing(&self.identity.trace_id);
+            }
+            if bytes_changed {
+                context
+                    .trace_writer
+                    .progress(&self.identity.trace_id, self.bytes_on_disk as i64);
                 self.last_db_bytes = self.bytes_on_disk as i64;
             }
         }
@@ -509,7 +515,6 @@ impl ActorState {
     #[allow(clippy::too_many_arguments)]
     async fn handle_video(
         &mut self,
-        store: &Arc<SqliteStateStore>,
         context: &Arc<TraceActorContext>,
         chunk_index: u32,
         width: u32,
@@ -538,7 +543,7 @@ impl ActorState {
         }
 
         // Drain any background encodes that finished while we were idle.
-        if self.drain_completed_encodes(store).await {
+        if self.drain_completed_encodes(context) {
             // A previous chunk's encode failed; mark_failed already ran, no
             // point spawning more work.
             return;
@@ -648,24 +653,14 @@ impl ActorState {
         // sees the trace's lifecycle moving forward without waiting for the
         // first encode to complete.
         if bumped_status {
-            let update = TraceUpdate {
-                write_status: Some(TraceWriteStatus::Writing),
-                ..TraceUpdate::default()
-            };
-            if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
-                tracing::warn!(
-                    %error,
-                    trace_id = self.identity.trace_id,
-                    "failed to mark trace writing"
-                );
-            }
+            context.trace_writer.mark_writing(&self.identity.trace_id);
         }
     }
 
     /// Drain every background encode that has already finished. On encode
     /// failure marks the trace failed and returns `true`; otherwise returns
     /// `false`. Caller-side use: gate further work on the return value.
-    async fn drain_completed_encodes(&mut self, store: &Arc<SqliteStateStore>) -> bool {
+    fn drain_completed_encodes(&mut self, context: &Arc<TraceActorContext>) -> bool {
         let TraceWriter::Video {
             completed_chunks,
             pending_encodes,
@@ -710,50 +705,27 @@ impl ActorState {
             self.frame_count = self.frame_count.saturating_add(new_frames);
             let bytes_changed = self.bytes_on_disk as i64 != self.last_db_bytes;
             if bytes_changed {
-                let update = TraceUpdate {
-                    bytes_written: Some(self.bytes_on_disk as i64),
-                    ..TraceUpdate::default()
-                };
-                if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
-                    tracing::warn!(
-                        %error,
-                        trace_id = self.identity.trace_id,
-                        "failed to update trace progress"
-                    );
-                } else {
-                    self.last_db_bytes = self.bytes_on_disk as i64;
-                }
+                context
+                    .trace_writer
+                    .progress(&self.identity.trace_id, self.bytes_on_disk as i64);
+                self.last_db_bytes = self.bytes_on_disk as i64;
             }
         }
         if any_failure {
-            self.mark_failed(store).await;
+            self.mark_failed(context);
         }
         any_failure
     }
 
-    async fn finalise_trace(
-        &mut self,
-        store: &Arc<SqliteStateStore>,
-        context: &Arc<TraceActorContext>,
-    ) {
+    async fn finalise_trace(&mut self, context: &Arc<TraceActorContext>) {
         let writer = std::mem::replace(&mut self.writer, TraceWriter::Pending);
         let finalise = self.finalise_writer(writer, context).await;
         match finalise {
             Ok(total_bytes) => {
                 self.bytes_on_disk = total_bytes;
-                let update = TraceUpdate {
-                    write_status: Some(TraceWriteStatus::Written),
-                    total_bytes: Some(total_bytes as i64),
-                    bytes_written: Some(total_bytes as i64),
-                    ..TraceUpdate::default()
-                };
-                if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
-                    tracing::warn!(
-                        %error,
-                        trace_id = self.identity.trace_id,
-                        "failed to mark trace as written"
-                    );
-                }
+                context
+                    .trace_writer
+                    .finalise(&self.identity.trace_id, total_bytes as i64);
                 tracing::info!(
                     trace_id = self.identity.trace_id,
                     recording_index = self.identity.key.recording_index,
@@ -775,7 +747,7 @@ impl ActorState {
                     trace_id = self.identity.trace_id,
                     "failed to finalise trace artefacts"
                 );
-                self.mark_failed(store).await;
+                self.mark_failed(context);
             }
         }
     }
@@ -914,23 +886,18 @@ impl ActorState {
         }
     }
 
-    async fn handle_shutdown_without_end(&mut self, store: &Arc<SqliteStateStore>) {
-        self.mark_failed(store).await;
+    async fn handle_shutdown_without_end(&mut self, context: &Arc<TraceActorContext>) {
+        self.mark_failed(context);
     }
 
-    async fn mark_failed(&mut self, store: &Arc<SqliteStateStore>) {
-        let update = TraceUpdate {
-            write_status: Some(TraceWriteStatus::Failed),
-            bytes_written: Some(self.bytes_on_disk as i64),
-            ..TraceUpdate::default()
-        };
-        if let Err(error) = store.update_trace(&self.identity.trace_id, update).await {
-            tracing::warn!(
-                %error,
-                trace_id = self.identity.trace_id,
-                "failed to mark trace as failed"
-            );
-        }
+    /// Enqueue a `failed` write for this trace, preserving the latest byte
+    /// count. Fire-and-forget through the coalescing batcher; the terminal
+    /// guard in `apply_trace_writes` keeps it from clobbering an
+    /// already-`written` row.
+    fn mark_failed(&mut self, context: &Arc<TraceActorContext>) {
+        context
+            .trace_writer
+            .fail(&self.identity.trace_id, self.bytes_on_disk as i64);
     }
 
     /// Tear down the writer and delete the on-disk trace directory.
@@ -1021,22 +988,33 @@ async fn flush_metadata_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{SqliteStateStore, StateStore, TraceWriteStatus};
     use crate::storage::budget::StoragePolicy;
     use serde_json::json;
     use std::time::Duration;
     use tempfile::TempDir;
 
-    fn test_context(root: &std::path::Path) -> Arc<TraceActorContext> {
+    /// Build an actor context whose write-behind flushes into `store`. The
+    /// [`TraceWriter`] owner is dropped — the spawned task stays alive while the
+    /// handle in the returned context lives (dropping its `JoinHandle` detaches,
+    /// not cancels). Tests call `context.trace_writer.flush().await` before
+    /// asserting on the DB, since actor writes are now fire-and-forget.
+    fn test_context(
+        root: &std::path::Path,
+        store: Arc<SqliteStateStore>,
+    ) -> Arc<TraceActorContext> {
         let policy = StoragePolicy {
             storage_limit_bytes: None,
             min_free_disk_bytes: 0,
             refresh_interval: Duration::from_secs(60),
         };
         let budget = Arc::new(StorageBudget::new(root, policy));
+        let (trace_writer, _writer_owner) = crate::state::trace_writer::spawn(store);
         Arc::new(TraceActorContext::new(
             root.to_path_buf(),
             budget,
             VideoEncoder::new(),
+            trace_writer,
         ))
     }
 
@@ -1073,18 +1051,19 @@ mod tests {
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
             .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
+        let context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
 
         let mut state = ActorState::new(identity(7, "trace-1", "joints"));
-        state.ensure_trace_row(&store_arc).await;
+        state.send_create(&context);
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             state
-                .handle_data(&store_arc, &context, index * 1_000_000, None, payload)
+                .handle_data(&context, index * 1_000_000, None, payload)
                 .await;
         }
-        state.finalise_trace(&store_arc, &context).await;
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
 
         let trace_dir =
             TracePath::new("7", "joints", "trace-1").directory(context.recordings_root.as_path());
@@ -1108,12 +1087,13 @@ mod tests {
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
             .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
+        let context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
 
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
-        state.ensure_trace_row(&store_arc).await;
-        state.finalise_trace(&store_arc, &context).await;
+        state.send_create(&context);
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
 
         let trace_dir =
             TracePath::new("1", "joints", "trace-1").directory(context.recordings_root.as_path());
@@ -1139,11 +1119,11 @@ mod tests {
         let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
             .await
             .expect("open store");
-        let context = test_context(&tempdir.path().join("recordings"));
         let store_arc = Arc::new(store.clone());
+        let context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
 
         let mut state = ActorState::new(identity(1, "trace-vid", "RGB"));
-        state.ensure_trace_row(&store_arc).await;
+        state.send_create(&context);
 
         // Build two NUT chunks via ffmpeg testsrc and place them where the
         // dispatcher would have relinked them.
@@ -1175,7 +1155,6 @@ mod tests {
                 (0..4u32).map(|i| (chunk_index * 4 + i) as f64).collect();
             state
                 .handle_video(
-                    &store_arc,
                     &context,
                     chunk_index,
                     16,
@@ -1187,7 +1166,8 @@ mod tests {
                 .await;
         }
 
-        state.finalise_trace(&store_arc, &context).await;
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
 
         assert!(trace_dir.join(paths::LOSSY_VIDEO_FILENAME).exists());
         assert!(trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME).exists());

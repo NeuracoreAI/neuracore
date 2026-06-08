@@ -17,6 +17,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -147,6 +148,9 @@ pub struct NutWriter {
     /// populate `back_ptr_div16` on the next syncpoint so demuxers can walk
     /// the chain when seeking.
     last_syncpoint_offset: u64,
+    /// File offset up to which an async writeback hint has been issued. The
+    /// next hint covers `[last_writeback_hint, bytes_written)`.
+    last_writeback_hint: u64,
 }
 
 /// Emit a new syncpoint when the bytes-since-last-syncpoint would exceed
@@ -166,6 +170,25 @@ const SYNCPOINT_INTERVAL_BYTES: u64 = 32_768;
 /// pressure). Although the 0.5-3 MiB frame zone the buffer causes
 /// occasional ~7 ms flush spikes
 const BUF_WRITER_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Issue an async writeback hint at least this often, measured by bytes
+/// appended since the last hint.
+///
+/// A chunk is 256 MiB ([`CHUNK_FLUSH_BYTES`](crate)) and the kernel's
+/// `balance_dirty_pages` throttle fires on the *system-wide* dirty-page count —
+/// so at 1080p@60 across multiple cameras hundreds of MiB of dirty pages can
+/// pile up before a chunk closes, then a single `write()` hard-stalls for
+/// hundreds of ms. Hinting writeback every 16 MiB starts the kernel draining
+/// those pages continuously, keeping the dirty footprint bounded (≈ interval ×
+/// active streams) so the throttle never reaches a hard stall. It's only a
+/// handful of cheap syscalls per chunk — far coarser than per-frame, far finer
+/// than per-chunk (which would arrive after the stall already happened).
+///
+/// We only hint writeback (`SYNC_FILE_RANGE_WRITE`); we do **not** drop the
+/// pages (`fadvise(DONTNEED)`), because the daemon re-reads each NUT to
+/// transcode it — cleaning the pages keeps them cache-warm for that read while
+/// still relieving write pressure.
+const WRITEBACK_HINT_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
 
 impl NutWriter {
     /// Create a NUT file at `path` and emit the four mandatory header
@@ -213,6 +236,7 @@ impl NutWriter {
             bytes_written: 0,
             expected_frame_bytes,
             last_syncpoint_offset: 0,
+            last_writeback_hint: 0,
         };
         writer.write_headers()?;
         Ok(writer)
@@ -293,7 +317,61 @@ impl NutWriter {
 
         self.write_all(&header)?;
         self.write_all(rgb_bytes)?;
+
+        // Once enough has accumulated, kick off async writeback for it so dirty
+        // pages drain continuously instead of piling up to the throttle's hard
+        // stall. Best-effort: never fails a frame.
+        if self.bytes_written.saturating_sub(self.last_writeback_hint)
+            >= WRITEBACK_HINT_INTERVAL_BYTES
+        {
+            self.hint_writeback();
+        }
         Ok(())
+    }
+
+    /// Ask the kernel to start writing back the bytes appended since the last
+    /// hint, *without waiting* (`SYNC_FILE_RANGE_WRITE`). This bounds the
+    /// producer's dirty-page footprint so a later `write()` doesn't hard-stall
+    /// under `balance_dirty_pages` throttling. The pages are cleaned but not
+    /// evicted, so the daemon's subsequent transcode read still hits cache.
+    ///
+    /// Best-effort: the buffered tail is flushed into the page cache first so
+    /// the whole range is eligible, then the marker advances regardless of the
+    /// syscall result — a writeback hint is a pure optimisation and must never
+    /// drop a frame or surface an error.
+    fn hint_writeback(&mut self) {
+        // Push the BufWriter's contents into the page cache so the full range
+        // is writeback-eligible. A real write error here is surfaced by the
+        // next `write_all`; here we just skip the hint.
+        if self.flush().is_err() {
+            return;
+        }
+        let offset = self.last_writeback_hint;
+        let nbytes = self.bytes_written.saturating_sub(offset);
+        self.last_writeback_hint = self.bytes_written;
+        if nbytes == 0 {
+            return;
+        }
+        let fd = self.writer.get_ref().as_raw_fd();
+        // SAFETY: `fd` is the open NUT file's descriptor (valid for the
+        // lifetime of `self.writer`), offset/nbytes are non-negative, and
+        // `SYNC_FILE_RANGE_WRITE` only *queues* writeback — it does not block,
+        // mutate user memory, or take ownership of the fd.
+        let result = unsafe {
+            libc::sync_file_range(
+                fd,
+                offset as libc::off64_t,
+                nbytes as libc::off64_t,
+                libc::SYNC_FILE_RANGE_WRITE,
+            )
+        };
+        if result != 0 {
+            tracing::debug!(
+                errno = %io::Error::last_os_error(),
+                path = %self.path.display(),
+                "sync_file_range writeback hint failed (ignored)",
+            );
+        }
     }
 
     /// Flush any remaining buffered bytes and return the total bytes
