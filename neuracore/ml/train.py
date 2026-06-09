@@ -16,7 +16,6 @@ import hydra
 import torch
 import torch.multiprocessing as mp
 from neuracore_types import (
-    BatchedNCData,
     CrossEmbodimentDescription,
     CrossEmbodimentUnion,
     ModelInitDescription,
@@ -30,7 +29,7 @@ from neuracore.core.utils.embodiment_description_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
 )
-from neuracore.ml import BatchedTrainingSamples, NeuracoreModel
+from neuracore.ml import NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -76,28 +75,6 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
     if configured_dir is None:
         return DEFAULT_RECORDING_CACHE_DIR
     return Path(str(configured_dir)).expanduser()
-
-
-def _estimate_sample_tensor_bytes(sample: BatchedTrainingSamples) -> int:
-    """Roughly estimate total tensor memory footprint (bytes) for a sample."""
-
-    def _collect(obj: Any) -> int:
-        if torch.is_tensor(obj):
-            return obj.numel() * obj.element_size()
-        if isinstance(obj, BatchedNCData):
-            return _collect(obj.model_dump())
-        if isinstance(obj, dict):
-            return sum(_collect(v) for v in obj.values())
-        if isinstance(obj, (list, tuple)):
-            return sum(_collect(v) for v in obj)
-        return 0
-
-    return _collect({
-        "inputs": sample.inputs,
-        "inputs_mask": sample.inputs_mask,
-        "outputs": sample.outputs,
-        "outputs_mask": sample.outputs_mask,
-    })
 
 
 def _serialize_robot_data_spec(
