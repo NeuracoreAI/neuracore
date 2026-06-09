@@ -28,7 +28,7 @@ class TestRecording:
 
     @pytest.fixture
     def recording_model(self, mocked_org_id) -> RecordingModel:
-        """Create a mock recording metadata."""
+        """Create a mock recording model."""
         return RecordingModel(
             id="rec1",
             org_id=mocked_org_id,
@@ -37,11 +37,7 @@ class TestRecording:
             instance=1,
             start_time=0,
             end_time=10,
-            metadata=RecordingMetadata(
-                name="recording1",
-                org_id="test-org-id",
-                created_at="2023-01-01T00:00:00Z",
-            ),
+            metadata=RecordingMetadata(),
         )
 
     @pytest.fixture
@@ -53,6 +49,7 @@ class TestRecording:
         """Test Recording initialization."""
         assert recording.dataset == dataset_mock
         assert recording.id == "rec1"
+        assert recording.name == "rec1"
         assert recording.total_bytes == 512
         assert recording.robot_id == "robot1"
         assert recording.instance == 1

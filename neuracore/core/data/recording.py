@@ -57,8 +57,7 @@ class Recording:
         self.instance = instance
         self.start_time = start_time
         self.end_time = end_time
-        # Store human-friendly recording name when available.
-        self.name = getattr(metadata, "name", None) or recording_id
+        self.name = recording_id
         self.metadata = metadata
         self.data_types: set[DataType] = data_types or set()
         self._raw = {
