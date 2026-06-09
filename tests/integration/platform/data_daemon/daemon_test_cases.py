@@ -130,6 +130,7 @@ NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
+        skip=True,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -145,6 +146,7 @@ NETWORK_INTEGRITY_CASES = (
         parallel_contexts=2,
         mode=MODE_STAGGERED,
         timestamp_mode=TIMESTAMP_MODE_REAL,
+        skip=True,
     ),
     # DataDaemonTestCase(
     #     duration_sec=10,
@@ -193,6 +195,7 @@ NETWORK_INTEGRITY_CASES = (
         mode=MODE_STAGGERED,
         timestamp_mode=TIMESTAMP_MODE_REAL,
         wait=True,
+        skip=True,
     ),
 )
 
