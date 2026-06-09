@@ -11,6 +11,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -280,6 +281,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         try:
+            start_time = time.time()
             session = thread_local_session()
             response = session.post(
                 f"{API_URL}/org/{self.org_id}/recording/start",
@@ -288,6 +290,7 @@ class Robot:
                     "robot_id": self.id,
                     "instance": self.instance,
                     "dataset_id": dataset_id,
+                    "start_time": start_time,
                 },
             )
             response.raise_for_status()
@@ -296,7 +299,14 @@ class Robot:
             recording_id = recording_details["id"]
             assert isinstance(recording_id, str)
 
-            if "start_time" in recording_details:
+            # The backend returns the existing pending recording (with its
+            # original start_time) when one is already active for this robot
+            # instance, instead of creating a new one.
+            returned_start_time = recording_details.get("start_time")
+            if (
+                returned_start_time is not None
+                and abs(returned_start_time - start_time) > 1e-3
+            ):
                 warn("This recording had already been started!")
 
             get_recording_state_manager().recording_started(
@@ -346,8 +356,12 @@ class Robot:
         try:
             session = thread_local_session()
             response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/stop?recording_id={recording_id}",
+                f"{API_URL}/org/{self.org_id}/recording/stop",
                 headers=self._auth.get_headers(),
+                json={
+                    "recording_id": recording_id,
+                    "end_time": time.time(),
+                },
             )
 
             response.raise_for_status()
