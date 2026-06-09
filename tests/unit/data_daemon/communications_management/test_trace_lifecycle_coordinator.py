@@ -267,6 +267,81 @@ def test_finalize_closing_recordings_closes_recording_after_cutoffs() -> None:
     assert stopped_recordings == ["recording-1"]
 
 
+def test_duplicate_recording_stopped_does_not_close_recording_twice() -> None:
+    """A duplicate RECORDING_STOPPED must not re-close the recording.
+
+    The first close clears the unique-trace registry, so a second close would
+    emit SET_EXPECTED_TRACE_COUNT with 0 and overwrite the correct count on
+    the backend, stranding the recording as pending forever.
+    """
+    loop = asyncio.new_event_loop()
+    emitter = Emitter(loop=loop)
+    expected_trace_counts: list[tuple[str, int]] = []
+    stopped_recordings: list[str] = []
+    emitter.on(
+        Emitter.SET_EXPECTED_TRACE_COUNT,
+        lambda recording_id, count: expected_trace_counts.append((recording_id, count)),
+    )
+    emitter.on(
+        Emitter.STOP_RECORDING,
+        lambda recording_id: stopped_recordings.append(recording_id),
+    )
+    coordinator = TraceLifecycleCoordinator(
+        emitter=emitter,
+        enqueue_final_trace=lambda _: None,
+        set_channel_trace_id=lambda *_: None,
+    )
+    channel = ChannelState(producer_id="producer-1", trace_id="trace-1")
+    stop_message = MessageEnvelope(
+        producer_id=None,
+        command=CommandType.RECORDING_STOPPED,
+        payload={
+            "recording_stopped": {
+                "recording_id": "recording-1",
+                "producer_stop_sequence_numbers": {"producer-1": 5},
+            }
+        },
+    )
+
+    coordinator.register_trace("recording-1", "trace-1")
+    coordinator.register_trace_metadata(
+        TraceMetadataRegistrationRequest(
+            trace_id="trace-1",
+            metadata=TraceMetadataSnapshot(
+                data_type=DataType.RGB_IMAGES.value,
+                data_type_name="camera",
+            ),
+        )
+    )
+    coordinator.handle_trace_end(
+        channel,
+        MessageEnvelope(
+            producer_id="producer-1",
+            command=CommandType.TRACE_END,
+            payload={
+                "trace_end": {
+                    "trace_id": "trace-1",
+                    "recording_id": "recording-1",
+                }
+            },
+            sequence_number=5,
+        ),
+    )
+    coordinator.handle_recording_stopped(stop_message)
+    coordinator.note_producer_sequence("producer-1", 5)
+    coordinator.cleanup_trace_written("trace-1")
+
+    assert expected_trace_counts == [("recording-1", 1)]
+    assert stopped_recordings == ["recording-1"]
+
+    coordinator.handle_recording_stopped(stop_message)
+    coordinator.set_max_producer_sequence("producer-1", 5)
+    coordinator.finalize_closing_recordings()
+
+    assert expected_trace_counts == [("recording-1", 1)]
+    assert stopped_recordings == ["recording-1"]
+
+
 def test_note_producer_sequence_ignores_non_cutoff_updates() -> None:
     loop = asyncio.new_event_loop()
     emitter = Emitter(loop=loop)

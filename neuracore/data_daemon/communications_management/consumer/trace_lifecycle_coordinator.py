@@ -319,6 +319,17 @@ class TraceLifecycleCoordinator:
             )
             return
 
+        if self._closing_recordings.is_closed(recording_id):
+            # A duplicate stop message would re-enter the closing set and
+            # trigger a second close that reports expected_trace_count=0
+            # (unique traces were cleared on the first close), permanently
+            # stranding the recording as pending on the backend.
+            logger.warning(
+                "Ignoring RECORDING_STOPPED for already-closed recording_id=%s",
+                recording_id,
+            )
+            return
+
         producer_stop_sequence_numbers_raw = payload.get(
             "producer_stop_sequence_numbers", {}
         )
