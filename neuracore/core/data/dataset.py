@@ -398,26 +398,8 @@ class Dataset:
         )
         response.raise_for_status()
 
-    def _format_failure_summary(self, failed_recording_ids: list[str]) -> str:
-        id_to_name = {r.id: r.name for r in self._recordings_cache}
-        auth_headers = get_auth().get_headers()
-        for recording_id in failed_recording_ids:
-            if recording_id not in id_to_name:
-                try:
-                    session = thread_local_session()
-                    response = session.get(
-                        f"{API_URL}/org/{self.org_id}/recording/{recording_id}",
-                        headers=auth_headers,
-                    )
-                    response.raise_for_status()
-                    recording_model = RecordingModel.model_validate(response.json())
-                    id_to_name[recording_id] = recording_model.metadata.name
-                except Exception:
-                    logger.debug("Failed to fetch name for recording %s", recording_id)
-                    id_to_name[recording_id] = recording_id
-        return "".join(
-            f"\n{id_to_name[recording_id]}" for recording_id in failed_recording_ids
-        )
+    def _format_failed_recording_ids(self, failed_recording_ids: list[str]) -> str:
+        return "".join(f"\n{recording_id}" for recording_id in failed_recording_ids)
 
     def _raise_sync_failure(
         self,
@@ -425,7 +407,7 @@ class Dataset:
         processed: int | None = None,
         total: int | None = None,
     ) -> None:
-        recording_names = self._format_failure_summary(failed_recording_ids)
+        recording_ids = self._format_failed_recording_ids(failed_recording_ids)
         progress_line = (
             f"\n({processed}/{total} recordings synchronized)."
             if processed is not None and total is not None
@@ -433,7 +415,7 @@ class Dataset:
         )
         raise DatasetError(
             f"Synchronization failed for dataset '{self.name}'.\n\n"
-            f"Problematic recordings:\n{recording_names}\n\n"
+            f"Problematic recordings:\n{recording_ids}\n\n"
             "These recordings might have missing or extra sensor data or "
             f"invalid synchronization parameters were provided.{progress_line}"
         )

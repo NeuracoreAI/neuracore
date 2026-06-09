@@ -929,10 +929,10 @@ class TestDatasetSynchronization:
             dataset.synchronize(frequency=30)
 
     @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_error_shows_recording_name_from_cache(
+    def test_synchronize_error_shows_recording_id_from_cache(
         self, mock_data_requests, dataset_dict, recordings_list, monkeypatch
     ):
-        """Error message shows recording name when recording is in cache."""
+        """Error message shows recording ID when recording is in cache."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         def failed_progress(_: str) -> SynchronizationProgress:
@@ -949,25 +949,17 @@ class TestDatasetSynchronization:
         with pytest.raises(DatasetError) as exc_info:
             dataset.synchronize(frequency=30)
 
-        assert "recording1" in str(exc_info.value)
+        assert "rec1" in str(exc_info.value)
 
     @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_error_fetches_recording_name_on_cache_miss(
+    def test_synchronize_error_shows_recording_id_on_cache_miss(
         self,
         mock_data_requests,
         dataset_dict,
-        recordings_list,
-        mocked_org_id,
         monkeypatch,
     ):
-        """Error message fetches recording name via API when not in cache."""
+        """Error message shows recording ID when recording is not in cache."""
         dataset = Dataset(**dataset_dict)
-
-        mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/recording/rec1",
-            json=recordings_list[0],
-            status_code=200,
-        )
 
         def failed_progress(_: str) -> SynchronizationProgress:
             return SynchronizationProgress(
@@ -983,7 +975,7 @@ class TestDatasetSynchronization:
         with pytest.raises(DatasetError) as exc_info:
             dataset.synchronize(frequency=30)
 
-        assert "recording1" in str(exc_info.value)
+        assert "rec1" in str(exc_info.value)
 
     @pytest.mark.usefixtures("mock_login")
     def test_synchronize_error_falls_back_to_id_when_name_fetch_fails(
@@ -1033,11 +1025,12 @@ class TestDatasetSynchronization:
             dataset._get_synchronization_progress("synced_dataset_123")
 
     @pytest.mark.usefixtures("mock_login")
-    def test_get_synchronization_progress_409_shows_recording_name(
-        self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
+    def test_get_synchronization_progress_409_shows_recording_id(
+        self, mock_data_requests, dataset_dict, mocked_org_id
     ):
-        """409 error message resolves recording name from cache."""
-        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        """409 error message shows failed recording ID."""
+        dataset = Dataset(**dataset_dict)
+
         mock_data_requests.get(
             f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
             json={
@@ -1052,7 +1045,7 @@ class TestDatasetSynchronization:
         with pytest.raises(DatasetError) as exc_info:
             dataset._get_synchronization_progress("synced_dataset_123")
 
-        assert "recording1" in str(exc_info.value)
+        assert "rec1" in str(exc_info.value)
 
 
 class TestDatasetMixedOperations:
