@@ -8,6 +8,7 @@ used by every test suite.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 from contextlib import contextmanager
 
@@ -28,6 +29,34 @@ from tests.integration.platform.data_daemon.shared.profiles import (
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
 )
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    OFFLINE_DB_PATH,
+    OFFLINE_RECORDINGS_ROOT,
+)
+
+
+@contextmanager
+def scoped_daemon_storage_env() -> Generator[None, None, None]:
+    """Point the daemon at the shared ``.data_daemon_test_state`` directory for the
+    duration of the block.
+
+    Yields:
+        ``None`` — the storage env vars are configured while the body runs.
+    """
+    OFFLINE_RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
+    previous_recordings_root = os.environ.get("NEURACORE_DAEMON_RECORDINGS_ROOT")
+    previous_db_path = os.environ.get("NEURACORE_DAEMON_DB_PATH")
+    if previous_recordings_root is None:
+        os.environ["NEURACORE_DAEMON_RECORDINGS_ROOT"] = str(OFFLINE_RECORDINGS_ROOT)
+    if previous_db_path is None:
+        os.environ["NEURACORE_DAEMON_DB_PATH"] = str(OFFLINE_DB_PATH)
+    try:
+        yield
+    finally:
+        if previous_recordings_root is None:
+            os.environ.pop("NEURACORE_DAEMON_RECORDINGS_ROOT", None)
+        if previous_db_path is None:
+            os.environ.pop("NEURACORE_DAEMON_DB_PATH", None)
 
 
 @contextmanager
@@ -46,7 +75,7 @@ def offline_daemon_running() -> Generator[None, None, None]:
         ``None`` — the daemon is running in offline mode while the body
         executes.
     """
-    with scoped_offline_profile():
+    with scoped_daemon_storage_env(), scoped_offline_profile():
         try:
             stop_daemon()
             assert_daemon_cleanup()
@@ -73,7 +102,7 @@ def online_daemon_running() -> Generator[None, None, None]:
         ``None`` — the daemon is running in online mode while the body
         executes.
     """
-    with scoped_online_mode():
+    with scoped_daemon_storage_env(), scoped_online_mode():
         try:
             stop_daemon()
             assert_daemon_cleanup()
