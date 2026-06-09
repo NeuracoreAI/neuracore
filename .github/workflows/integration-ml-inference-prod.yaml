@@ -1,22 +1,12 @@
-name: Integration ML Training Flow - Production
+name: Integration ML Inference - Production
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 1. test_training_flow.py
+    - cron: "0 4 * * *"  # 3. test_inference.py
   workflow_dispatch:
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
-
   test:
-    needs: pre-commit
     runs-on: ubuntu-24.04
     # TODO: NDD has socket issue when running in parallel
     #   in CommunicationsManager when calling create_producer_socket()
@@ -83,7 +73,7 @@ jobs:
           echo "Test harness environment: production"
           echo "Test harness ref: ${{ steps.release-tag.outputs.latest_release_tag }}"
           echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/ml/test_training_flow.py"
+          echo "Test harness path: tests/integration/ml/test_inference.py"
           python - << 'EOF'
           import neuracore
 
@@ -107,4 +97,4 @@ jobs:
             --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
             --log-cli-date-format="%H:%M:%S" \
             -v \
-            tests/integration/ml/test_training_flow.py
+            tests/integration/ml/test_inference.py
