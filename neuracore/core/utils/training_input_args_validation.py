@@ -6,11 +6,45 @@ algorithm existence, robot existence, and data spec compatibility.
 
 from __future__ import annotations
 
+from collections import defaultdict
+
 from neuracore_types import CrossEmbodimentDescription, DataType
 from omegaconf import DictConfig
 
 from neuracore.core.data.dataset import Dataset, EmbodimentDescription
 from neuracore.core.utils.embodiment_description_utils import is_robot_id
+
+
+def _validate_per_recording_data_types(
+    dataset: Dataset,
+    requested_input_types: set[DataType],
+) -> None:
+    """Validate every recording has all requested input datatypes.
+
+    Args:
+        dataset: Dataset whose recordings will be inspected.
+        requested_input_types: DataTypes that every recording must contain.
+
+    Raises:
+        ValueError: If any recording is missing a requested type, with a
+            grouped message listing affected recording names per type.
+    """
+    missing_per_type: dict[DataType, list[str]] = defaultdict(list)
+    for recording in dataset:
+        for data_type in requested_input_types - recording.data_types:
+            missing_per_type[data_type].append(recording.name)
+
+    if not missing_per_type:
+        return
+
+    lines = [
+        "Failed to start training run: some recordings are missing requested datatypes."
+    ]
+    for data_type in sorted(missing_per_type, key=lambda dt: dt.value):
+        lines.append(f"\nMissing {data_type.value}:")
+        for recording_name in missing_per_type[data_type]:
+            lines.append(f"- {recording_name}")
+    raise ValueError("\n".join(lines))
 
 
 def _validate_algorithm_exists(algorithm_id: str | None, algorithm_name: str) -> None:
@@ -241,6 +275,15 @@ def validate_training_params(
     Raises:
         ValueError: If any validation check fails.
     """
+    requested_input_types: set[DataType] = {
+        dt
+        for robot_data in input_cross_embodiment_description.values()
+        for dt in robot_data.keys()
+    }
+    if not requested_input_types:
+        raise ValueError("Failed to start training run: no input datatypes specified.")
+    _validate_per_recording_data_types(dataset, requested_input_types)
+
     _validate_data_specs(
         dataset=dataset,
         dataset_name=dataset_name,
