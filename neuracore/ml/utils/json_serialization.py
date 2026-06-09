@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from enum import Enum
 from typing import Protocol, TypeAlias, runtime_checkable
 
+from neuracore_types import CrossEmbodimentDescription, CrossEmbodimentUnion
 from omegaconf import DictConfig, ListConfig, OmegaConf
 
 JsonKey: TypeAlias = str | int | float | bool | None
@@ -17,6 +18,34 @@ class SupportsModelDump(Protocol):
 
     def model_dump(self, *, mode: str) -> object:
         """Return a serializable representation of the object."""
+
+
+def _serialize_cross_embodiment_description(
+    cross_embodiment_description: CrossEmbodimentDescription,
+) -> dict[str, dict[str, list[str]]]:
+    """Convert indexed robot data specs to JSON-serializable ordered name lists."""
+    serializable: dict[str, dict[str, list[str]]] = {}
+    for robot_id, data_types in cross_embodiment_description.items():
+        serializable[robot_id] = {}
+        for data_type, indexed_names in data_types.items():
+            key = data_type.name if hasattr(data_type, "name") else str(data_type)
+            serializable[robot_id][key] = [
+                indexed_names[index] for index in sorted(indexed_names)
+            ]
+    return serializable
+
+
+def _serialize_cross_embodiment_union(
+    cross_embodiment_union: CrossEmbodimentUnion,
+) -> dict[str, dict[str, list[str]]]:
+    """Convert merged robot data specs to JSON-serializable form."""
+    serializable: dict[str, dict[str, list[str]]] = {}
+    for robot_id, data_types in cross_embodiment_union.items():
+        serializable[robot_id] = {}
+        for data_type, names in data_types.items():
+            key = data_type.name if hasattr(data_type, "name") else str(data_type)
+            serializable[robot_id][key] = list(names)
+    return serializable
 
 
 def _to_json_key(key: object) -> JsonKey:

@@ -35,7 +35,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.train import (
-    _resolve_recording_cache_dir,
     assert_valid_batch_size,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
@@ -50,6 +49,7 @@ from neuracore.ml.utils.training_config import (
     _resolve_algorithm_name_and_supported_data_types,
     _resolve_algorithm_name_config,
     _resolve_cross_embodiment_description,
+    _resolve_recording_cache_dir,
     _resolve_training_run_name,
     resolve_to_complete_config,
     resolve_user_input_config,

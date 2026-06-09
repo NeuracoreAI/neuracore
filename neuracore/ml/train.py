@@ -24,7 +24,6 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader, DistributedSampler, random_split
 
 import neuracore as nc
-from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.utils.embodiment_description_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
@@ -49,11 +48,16 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
+from neuracore.ml.utils.json_serialization import (
+    _serialize_cross_embodiment_description,
+    _serialize_cross_embodiment_union,
+)
 from neuracore.ml.utils.preprocessing_utils import (
     PreprocessingConfiguration,
     resolve_preprocessing_config,
 )
 from neuracore.ml.utils.training_config import (
+    _resolve_recording_cache_dir,
     resolve_to_complete_config,
     resolve_user_input_config,
     validate_complete_config,
@@ -67,42 +71,6 @@ os.environ["PJRT_DEVICE"] = "GPU"
 logger = logging.getLogger(__name__)
 
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
-
-
-def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
-    """Resolve recording cache directory for synchronized dataset downloads."""
-    configured_dir = cfg.get("recording_cache_dir")
-    if configured_dir is None:
-        return DEFAULT_RECORDING_CACHE_DIR
-    return Path(str(configured_dir)).expanduser()
-
-
-def _serialize_robot_data_spec(
-    cross_embodiment_description: CrossEmbodimentDescription,
-) -> dict[str, dict[str, list[str]]]:
-    """Convert indexed robot data specs to JSON-serializable ordered name lists."""
-    serializable: dict[str, dict[str, list[str]]] = {}
-    for robot_id, data_types in cross_embodiment_description.items():
-        serializable[robot_id] = {}
-        for data_type, indexed_names in data_types.items():
-            key = data_type.name if hasattr(data_type, "name") else str(data_type)
-            serializable[robot_id][key] = [
-                indexed_names[index] for index in sorted(indexed_names)
-            ]
-    return serializable
-
-
-def _serialize_cross_embodiment_union(
-    cross_embodiment_union: CrossEmbodimentUnion,
-) -> dict[str, dict[str, list[str]]]:
-    """Convert merged robot data specs to JSON-serializable form."""
-    serializable: dict[str, dict[str, list[str]]] = {}
-    for robot_id, data_types in cross_embodiment_union.items():
-        serializable[robot_id] = {}
-        for data_type, names in data_types.items():
-            key = data_type.name if hasattr(data_type, "name") else str(data_type)
-            serializable[robot_id][key] = list(names)
-    return serializable
 
 
 def _save_local_training_metadata(
@@ -133,10 +101,10 @@ def _save_local_training_metadata(
         "launch_time": time.time(),
         "local_output_dir": str(output_dir),
         "org_id": getattr(cfg, "org_id", None),
-        "input_cross_embodiment_description": _serialize_robot_data_spec(
+        "input_cross_embodiment_description": _serialize_cross_embodiment_description(
             input_cross_embodiment_description
         ),
-        "output_cross_embodiment_description": _serialize_robot_data_spec(
+        "output_cross_embodiment_description": _serialize_cross_embodiment_description(
             output_cross_embodiment_description
         ),
         "frequency": getattr(cfg, "frequency", None),

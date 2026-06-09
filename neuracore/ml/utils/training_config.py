@@ -12,7 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 
 import neuracore as nc
 from neuracore.api.training import _get_algorithms, get_algorithm
-from neuracore.core.const import DEFAULT_CACHE_DIR
+from neuracore.core.const import DEFAULT_CACHE_DIR, DEFAULT_RECORDING_CACHE_DIR
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.utils.embodiment_description_utils import (
     convert_cross_embodiment_description_names_to_ids,
@@ -39,6 +39,14 @@ ALGORITHM_CONFIG_DIR = Path(__file__).resolve().parents[1] / "config" / "algorit
 # ``run_2`` after Hydra creates ``run_1``. The key includes the cache root,
 # requested name, and auto-increment flag so unrelated runs do not share names.
 _RESOLVED_TRAINING_RUN_NAMES: dict[tuple[str, str, bool], str] = {}
+
+
+def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
+    """Resolve recording cache directory for synchronized dataset downloads."""
+    configured_dir = cfg.get("recording_cache_dir")
+    if configured_dir is None:
+        return DEFAULT_RECORDING_CACHE_DIR
+    return Path(str(configured_dir)).expanduser()
 
 
 def _resolve_training_run_name(
