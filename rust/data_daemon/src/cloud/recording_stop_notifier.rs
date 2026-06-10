@@ -1,7 +1,8 @@
 //! Backend recording-stop notifier.
 //!
 //! Subscribes to [`DaemonEvent::RecordingStopped`] and POSTs
-//! `/org/{org}/recording/stop?recording_id=…` to the backend. The Python SDK
+//! `/org/{org}/recording/stop` (JSON body `{recording_id, end_time}`) to the
+//! backend. The Python SDK
 //! used to make this call inline from `nc.stop_recording`, but the staging
 //! POST has a fat upper tail (occasional 1-2 s spikes on otherwise
 //! sub-second calls). Doing it here means the SDK call returns as soon as
@@ -178,7 +179,23 @@ async fn notify_backend(
         );
         return;
     };
-    match client.recording_stop(&org_id, &recording_id).await {
+    let Some(stop_timestamp_ns) = row.stop_timestamp_ns else {
+        tracing::warn!(
+            recording_index,
+            recording_id,
+            "recording has no stop_timestamp_ns at stop time; skipping backend notify",
+        );
+        return;
+    };
+    // The producer captured this as the recording window's real upper bound;
+    // the backend requires it (seconds) and derives the reported duration from
+    // it, so a late notify (e.g. after reconnecting) still reports correctly.
+    let end_time = stop_timestamp_ns as f64 / 1_000_000_000.0;
+
+    match client
+        .recording_stop(&org_id, &recording_id, end_time)
+        .await
+    {
         Ok(()) => {
             if let Err(error) = store.mark_recording_stop_notified(recording_index).await {
                 tracing::warn!(
@@ -219,7 +236,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::api::auth::StaticAuthProvider;
@@ -279,7 +296,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/stop"))
-            .and(query_param("recording_id", "rec-stop-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-stop-1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
             .mount(&server)
             .await;
@@ -334,7 +353,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/stop"))
-            .and(query_param("recording_id", "rec-offline-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-offline-1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
             .mount(&server)
             .await;
@@ -487,7 +508,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/stop"))
-            .and(query_param("recording_id", "rec-recovered-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-recovered-1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
             .mount(&server)
             .await;

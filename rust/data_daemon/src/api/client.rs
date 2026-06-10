@@ -234,23 +234,34 @@ impl ApiClient {
         Ok(())
     }
 
-    /// `POST /org/{org}/recording/stop?recording_id={recording_id}`.
+    /// `POST /org/{org}/recording/stop` with a JSON body carrying
+    /// `recording_id` and the client-captured `end_time` (Unix seconds).
     ///
     /// Mirrors the call the Python SDK previously made inline from
     /// `nc.stop_recording`. Moving it into the daemon keeps the SDK call
     /// bounded by producer work (~ms) and absorbs staging POST tail
     /// latency in the daemon's background tokio runtime instead of in the
-    /// test's SLA-timed block. The body is empty; `recording_id` is a
-    /// query parameter.
+    /// test's SLA-timed block. `end_time` is the recording window's real
+    /// upper bound captured by the producer, so the backend reports the true
+    /// duration even for recordings notified late (e.g. after reconnecting).
     pub async fn recording_stop(
         &self,
         org_id: &str,
         recording_id: &str,
+        end_time: f64,
     ) -> Result<(), ApiClientError> {
         let path = format!("/org/{org_id}/recording/stop");
-        let query = [("recording_id", recording_id)];
+        #[derive(Serialize)]
+        struct Body<'a> {
+            recording_id: &'a str,
+            end_time: f64,
+        }
+        let body = Body {
+            recording_id,
+            end_time,
+        };
         let _ = self
-            .send_with_retry(Method::POST, &path, |builder| builder.query(&query))
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
             .await?;
         Ok(())
     }
@@ -280,13 +291,16 @@ impl ApiClient {
     /// SDK no longer makes this call inline — the daemon's recording-start
     /// notifier POSTs it in the background once the local recording row
     /// exists, absorbing staging POST tail latency off the SDK's hot path.
-    /// The body carries the source identity; the response is `{"id": "..."}`.
+    /// The body carries the source identity plus the client-captured
+    /// `start_time` (Unix seconds) the backend requires; the response is
+    /// `{"id": "..."}`.
     pub async fn recording_start(
         &self,
         org_id: &str,
         robot_id: &str,
         instance: i64,
         dataset_id: &str,
+        start_time: f64,
     ) -> Result<String, ApiClientError> {
         let path = format!("/org/{org_id}/recording/start");
         #[derive(Serialize)]
@@ -294,11 +308,13 @@ impl ApiClient {
             robot_id: &'a str,
             instance: i64,
             dataset_id: &'a str,
+            start_time: f64,
         }
         let body = Body {
             robot_id,
             instance,
             dataset_id,
+            start_time,
         };
         let response = self
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))

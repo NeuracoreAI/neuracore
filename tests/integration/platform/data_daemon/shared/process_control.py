@@ -31,7 +31,6 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
     wait_for_exit,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    STOP_METHOD_CLI,
     STOP_METHOD_SIGKILL,
     STOP_METHOD_SIGTERM,
 )
@@ -54,11 +53,6 @@ LEAST_TIME_TO_STOP_S = 10
 HIGH_TIME_TO_DATASET_READY_S = 500
 """Upper bound on waiting for an online dataset to become ready, in seconds."""
 
-GRACEFUL_TIMEOUT_STOP_S = 15
-"""Seconds to wait for graceful exit before escalating to SIGKILL in stop_daemon()."""
-
-SIGKILL_TIMEOUT_STOP_S = 60
-"""Seconds to wait for exit after sending SIGKILL in stop_daemon()."""
 
 # ---------------------------------------------------------------------------
 # Timer
@@ -254,22 +248,15 @@ def _send_initial_stop(method: str, candidate_pids: set[int]) -> None:
         raise ValueError(f"Unknown stop method: {method!r}")
 
 
-def _wait_and_escalate(
-    candidate_pids: set[int],
-    *,
-    graceful_timeout_s: float = GRACEFUL_TIMEOUT_STOP_S,
-    sigkill_timeout_s: float = SIGKILL_TIMEOUT_STOP_S,
-) -> None:
+def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -> None:
     """Wait for each PID to exit, escalating to SIGKILL on timeout."""
     for pid in sorted(candidate_pids):
         if not pid_is_running(pid):
             continue
         if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
-            with Timer(
-                sigkill_timeout_s, label="stop_daemon_escalated", assert_deadline=False
-            ):
+            with Timer(5.0, label="stop_daemon_escalated", assert_deadline=False):
                 force_kill(pid)
-                wait_for_exit(pid, timeout_s=sigkill_timeout_s)
+                wait_for_exit(pid, timeout_s=5.0)
 
 
 def _remove_ipc_artefacts() -> None:
@@ -288,9 +275,8 @@ def _remove_ipc_artefacts() -> None:
 
 def stop_daemon(
     *,
-    method: str = STOP_METHOD_CLI,
-    graceful_timeout_s: float = GRACEFUL_TIMEOUT_STOP_S,
-    sigkill_timeout_s: float = SIGKILL_TIMEOUT_STOP_S,
+    method: str = "cli",
+    graceful_timeout_s: float = 10.0,
 ) -> None:
     """Stop all daemon processes and clean up IPC artefacts.
 
@@ -299,20 +285,14 @@ def stop_daemon(
         graceful_timeout_s: Seconds to wait for graceful exit before escalating
             to SIGKILL.  Ignored when ``method="sigkill"``.
     """
-    with Timer(
-        graceful_timeout_s, label=f"stop_daemon[{method}]", assert_deadline=False
-    ):
+    with Timer(15.0, label=f"stop_daemon[{method}]", assert_deadline=False):
         candidate_pids = _collect_candidate_pids()
         _send_initial_stop(method, candidate_pids)
         if method == STOP_METHOD_SIGKILL:
             for pid in sorted(candidate_pids):
-                wait_for_exit(pid, timeout_s=sigkill_timeout_s)
+                wait_for_exit(pid, timeout_s=5.0)
         else:
-            _wait_and_escalate(
-                candidate_pids,
-                graceful_timeout_s=graceful_timeout_s,
-                sigkill_timeout_s=sigkill_timeout_s,
-            )
+            _wait_and_escalate(candidate_pids, graceful_timeout_s=graceful_timeout_s)
         _remove_ipc_artefacts()
 
 

@@ -151,11 +151,6 @@ class DataDaemonTestCase:
             timestamps computed from ``timestamp_start_s + frame_index / fps``.
             ``"real"`` omits the ``timestamp`` argument so the logging API uses
             the wall-clock time at the moment each frame is logged.
-        skip: When ``True``, the case is skipped at collection time instead of
-            being executed.  Lets unstable or not-yet-validated workloads stay
-            in the suite (documented and discoverable) without running.  A
-            batch with ``skip=True`` forces every case to skip regardless of
-            this per-case value.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -183,7 +178,6 @@ class DataDaemonTestCase:
     joint_fps: int = 60
     video_fps: int = 60
     timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
-    skip: bool = False
 
     @property
     def has_video(self) -> bool:
@@ -232,9 +226,6 @@ class DataDaemonTestBatch:
             ``DataDaemonTestCase.stop_method``.
             timestamp_mode: Optional batch-level override for timestamp mode. When
                 unset, each case keeps its own ``timestamp_mode``.
-        skip: When ``True``, every case in the batch is skipped at collection
-            time.  When ``False`` (default), each case keeps its own per-case
-            ``skip`` value, so individual cases can still opt out.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -243,7 +234,6 @@ class DataDaemonTestBatch:
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     timestamp_mode: TimestampMode | None = None
-    skip: bool = False
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -255,8 +245,6 @@ class DataDaemonTestBatch:
         }
         if self.timestamp_mode is not None:
             batch_overrides["timestamp_mode"] = self.timestamp_mode
-        if self.skip:
-            batch_overrides["skip"] = True
         return [
             DataDaemonTestCase(**{
                 **{

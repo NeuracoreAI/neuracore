@@ -135,8 +135,9 @@ pub enum Envelope {
     /// Producer announces that a recording has started for a source.
     ///
     /// The daemon opens an active window for `(robot_id, robot_instance)` at
-    /// `started_at_ns`, allocates the local `recording_index`, and inserts the
-    /// recording row. Processed immediately on arrival (bypasses the holdback).
+    /// `publish_timestamp_ns`, allocates the local `recording_index`, and
+    /// inserts the recording row. Processed immediately on arrival (bypasses
+    /// the holdback).
     StartRecording {
         /// Robot identifier — the first half of the source key.
         robot_id: String,
@@ -148,10 +149,17 @@ pub enum Envelope {
         dataset_id: Option<String>,
         /// Optional dataset human-readable name.
         dataset_name: Option<String>,
-        /// Producer capture-clock timestamp (Unix nanoseconds) at which the
-        /// recording window opens. Forms the inclusive lower bound of the
-        /// window's `[started_at_ns, stopped_at_ns)` membership range.
-        started_at_ns: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) at which the
+        /// recording window opens — the inclusive lower bound of the window's
+        /// membership range, on the same publish clock as every `Data`
+        /// envelope. The **only** key used for window membership, so routing
+        /// never depends on the caller's capture clock.
+        publish_timestamp_ns: i64,
+        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
+        /// start — the recording's *own* clock, or the publish time when the
+        /// caller supplied none. Stored as the row's `start_timestamp_ns` and
+        /// POSTed to the backend as `start_time`; never used for routing.
+        timestamp_ns: i64,
     },
     /// Producer announces that the source's active recording has stopped.
     ///
@@ -162,10 +170,15 @@ pub enum Envelope {
         robot_id: String,
         /// Robot instance — the second half of the source key.
         robot_instance: i64,
-        /// Producer capture-clock timestamp (Unix nanoseconds) at which the
-        /// recording window closes. Exclusive upper bound of the membership
-        /// range.
-        stopped_at_ns: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) at which the
+        /// recording window closes — the exclusive upper bound of the
+        /// membership range, on the same publish clock as the data envelopes.
+        publish_timestamp_ns: i64,
+        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
+        /// stop — or the publish time when the caller supplied none. Stored as
+        /// the row's `stop_timestamp_ns` and POSTed to the backend as
+        /// `end_time`; never used for routing.
+        timestamp_ns: i64,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -385,7 +398,8 @@ mod tests {
             robot_name: Some("arm".into()),
             dataset_id: Some("ds-1".into()),
             dataset_name: Some("warehouse".into()),
-            started_at_ns: 1_700_000_000_000_000_000,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_ns: 1_700_000_000_000_000_000,
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -533,7 +547,8 @@ mod tests {
         let stop = Envelope::StopRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
-            stopped_at_ns: 1_700_000_000_000_000_000,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp_ns: 1_700_000_000_000_000_000,
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));

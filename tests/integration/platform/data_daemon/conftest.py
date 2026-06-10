@@ -41,21 +41,6 @@ def cleanup_profiles():
 
 
 @pytest.fixture(autouse=True)
-def skip_marked_cases(request: pytest.FixtureRequest) -> None:
-    """Skip any parametrized case flagged with ``skip=True``.
-
-    Lets unstable or not-yet-validated workloads remain documented in the
-    suite's test-case tables (rather than being commented out) while still
-    being excluded from execution.
-    """
-    if "case" not in request.fixturenames:
-        return
-    case = request.getfixturevalue("case")
-    if getattr(case, "skip", False):
-        pytest.skip("case marked skip=True")
-
-
-@pytest.fixture(autouse=True)
 def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
     """Apply local storage cleanup once before the first case in each batch.
 
