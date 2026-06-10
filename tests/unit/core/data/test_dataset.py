@@ -470,6 +470,80 @@ class TestDatasetCreation:
         assert dataset.is_shared is True
 
     @pytest.mark.usefixtures("mock_login")
+    @pytest.mark.parametrize(
+        "shared,existing_is_shared,found,expect_create",
+        [
+            pytest.param(False, False, True, False, id="private_reuses_private"),
+            pytest.param(
+                False, True, True, True, id="private_creates_when_shared_exists"
+            ),
+            pytest.param(False, False, False, True, id="private_creates_when_none"),
+            pytest.param(
+                True, False, True, True, id="shared_creates_when_private_exists"
+            ),
+            pytest.param(True, True, True, False, id="shared_reuses_shared"),
+            pytest.param(True, False, False, True, id="shared_creates_when_none"),
+        ],
+    )
+    def test_create_dataset_namespace(
+        self,
+        shared,
+        existing_is_shared,
+        found,
+        expect_create,
+        dataset_model,
+        mocked_org_id,
+    ):
+        """Test create reuses same-namespace datasets and creates across namespaces."""
+        existing = copy.deepcopy(dataset_model)
+        existing.is_shared = existing_is_shared
+
+        created = copy.deepcopy(dataset_model)
+        created.is_shared = shared
+        if expect_create and found:
+            created.id = "dataset456"
+
+        with requests_mock.Mocker() as m:
+            m.get(
+                f"{API_URL}/org-management/my-orgs",
+                json=[{"org": {"id": mocked_org_id, "name": "test organization"}}],
+            )
+            if found:
+                m.get(
+                    f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+                    json=existing.model_dump(mode="json"),
+                    status_code=200,
+                )
+            else:
+                m.get(
+                    f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+                    json={},
+                    status_code=404,
+                )
+            m.post(
+                f"{API_URL}/org/{mocked_org_id}/datasets",
+                json=created.model_dump(mode="json"),
+                status_code=200,
+            )
+
+            dataset = Dataset.create("test_dataset", shared=shared)
+
+            post_calls = [
+                call
+                for call in m.request_history
+                if call.method == "POST"
+                and call.url == f"{API_URL}/org/{mocked_org_id}/datasets"
+            ]
+            if expect_create:
+                assert len(post_calls) == 1
+                assert dataset.id == created.id
+                assert dataset.is_shared == shared
+            else:
+                assert len(post_calls) == 0
+                assert dataset.id == existing.id
+                assert dataset.is_shared == existing_is_shared
+
+    @pytest.mark.usefixtures("mock_login")
     def test_create_dataset_unauthorized_error_detail(self, dataset_model):
         """Test dataset creation errors include backend details."""
         mocked_org_id = "test-org-id"
