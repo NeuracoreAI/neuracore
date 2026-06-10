@@ -794,6 +794,21 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             recording_timestamp_start_s = (
                 spec.timestamp_start_s + recording_ordinal * case.duration_sec
             )
+            # Capture timestamps for the recording's start/stop (→ backend
+            # start_time / end_time). In manual/stochastic modes frames carry the
+            # synthetic clock and are logged faster than real time, so the
+            # recording's reported window must use that same clock to report a
+            # meaningful duration. Window membership is keyed on the producer's
+            # publish clock regardless, so this never affects data routing. Real
+            # mode lets the producer stamp wall-clock now (``timestamp=None``).
+            recording_capture_start_s = (
+                None if use_real_timestamps else recording_timestamp_start_s
+            )
+            recording_capture_stop_s = (
+                None
+                if use_real_timestamps
+                else recording_timestamp_start_s + case.duration_sec
+            )
 
             with Timer(
                 MAX_TIME_TO_START_S,
@@ -801,7 +816,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 always_log=True,
                 assert_deadline=spec.assert_deadline,
             ):
-                nc.start_recording(robot_name=spec.robot_name)
+                nc.start_recording(
+                    robot_name=spec.robot_name, timestamp=recording_capture_start_s
+                )
             # Wall-clock marker captured immediately after start lands inside this
             # recording's window; the Rust path uses it to resolve the cloud id.
             marker_ns = time.time_ns()
@@ -902,7 +919,11 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 always_log=True,
                 assert_deadline=spec.assert_deadline,
             ):
-                nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
+                nc.stop_recording(
+                    robot_name=spec.robot_name,
+                    wait=case.wait,
+                    timestamp=recording_capture_stop_s,
+                )
             wall_stopped_at = time.time()
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}

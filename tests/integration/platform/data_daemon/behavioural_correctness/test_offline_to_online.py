@@ -106,13 +106,11 @@ def test_offline_pending_data_recovers_when_online(
                 # verification can match the dataset's recording.id. Under the
                 # legacy daemon recording_ids are already authoritative (no-op).
                 results = resolve_cloud_recording_ids(results)
-                # TODO: drop verify_duration=False once the backend derives a
-                # recovered recording's start/end time from its real capture
-                # window. Today both /recording/start and /recording/stop are
-                # POSTed back-to-back when the daemon comes online, so the
-                # backend-reported duration collapses to ~0s for offline
-                # recordings even though the data spans the full window.
-                verify_cloud_results(results=results, case=case, verify_duration=False)
+                # The daemon now POSTs the producer's real captured start/stop
+                # timestamps, so an offline recording recovered after going
+                # online reports its true duration (no longer collapsed to ~0s
+                # by the back-to-back /recording/start and /recording/stop POSTs).
+                verify_cloud_results(results=results, case=case)
 
     finally:
         set_case_analysis_report(

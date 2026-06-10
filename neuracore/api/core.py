@@ -248,7 +248,11 @@ def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     return robot.is_recording()
 
 
-def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
+def start_recording(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
     """Start recording data for a specific robot.
 
     Begins a new recording session for the specified robot, capturing all
@@ -259,6 +263,9 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
+        timestamp: Optional capture time (Unix seconds) for the recording's
+            start, matching the ``log_*`` methods. When omitted, the current
+            time is captured.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided,
@@ -295,11 +302,14 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
                 "shared robot, ensure connect_robot(shared=True) succeeded. "
                 f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
             )
-    robot.start_recording(active_dataset_id)
+    robot.start_recording(active_dataset_id, timestamp=timestamp)
 
 
 def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
+    robot_name: str | None = None,
+    instance: int = 0,
+    wait: bool = False,
+    timestamp: float | None = None,
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -312,6 +322,9 @@ def stop_recording(
         instance: Instance number of the robot for multi-instance scenarios.
         wait: Whether to block until all data streams have finished uploading
             to the backend storage.
+        timestamp: Optional capture time (Unix seconds) for the recording's
+            stop, matching the ``log_*`` methods. When omitted, the current
+            time is captured.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
@@ -332,12 +345,16 @@ def stop_recording(
         # (waiting for it to be minted) before stopping, then drive the same
         # backend completion poll below.
         cloud_recording_id = robot.get_cloud_recording_id() if wait else None
-        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        robot.stop_recording(
+            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
+        )
         if not wait or not cloud_recording_id:
             return
         recording_id = cloud_recording_id
     else:
-        robot.stop_recording(recording_id, wait_for_producer_drain=wait)
+        robot.stop_recording(
+            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
+        )
         if not wait:
             return
 

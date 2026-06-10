@@ -33,6 +33,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use data_daemon_ipc::{BatchedDataItem, Envelope};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -311,14 +312,16 @@ impl Dispatcher {
                 robot_name,
                 dataset_id,
                 dataset_name,
-                started_at_ns,
+                publish_timestamp_ns,
+                timestamp_ns,
             } => {
                 self.handle_start(
                     (robot_id, robot_instance),
                     robot_name,
                     dataset_id,
                     dataset_name,
-                    started_at_ns,
+                    publish_timestamp_ns,
+                    timestamp_ns,
                     recv_at,
                 )
                 .await;
@@ -326,10 +329,16 @@ impl Dispatcher {
             Envelope::StopRecording {
                 robot_id,
                 robot_instance,
-                stopped_at_ns,
+                publish_timestamp_ns,
+                timestamp_ns,
             } => {
-                self.handle_stop((robot_id, robot_instance), stopped_at_ns, recv_at)
-                    .await;
+                self.handle_stop(
+                    (robot_id, robot_instance),
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                    recv_at,
+                )
+                .await;
             }
             Envelope::CancelRecording {
                 robot_id,
@@ -423,13 +432,15 @@ impl Dispatcher {
         self.windows.entry(source.clone()).or_default().last_seen = Some(recv_at);
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn handle_start(
         &mut self,
         source: Source,
         robot_name: Option<String>,
         dataset_id: Option<String>,
         dataset_name: Option<String>,
-        started_at_ns: i64,
+        publish_timestamp_ns: i64,
+        timestamp_ns: i64,
         recv_at: Instant,
     ) {
         // Insert the recording row synchronously: cloud notifiers react to the
@@ -437,13 +448,16 @@ impl Dispatcher {
         // burns it by index, so the row must exist before either runs. After the
         // create_trace burst was folded into the write-behind (the actors no
         // longer create rows here), this is a single uncontended write.
+        //
+        // The row's `start_timestamp_ns` is the caller's *capture* time (→
+        // backend `start_time`); the window opens on the *publish* clock below.
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             robot_name: robot_name.as_deref(),
             dataset_id: dataset_id.as_deref(),
             dataset_name: dataset_name.as_deref(),
-            start_timestamp_ns: started_at_ns,
+            start_timestamp_ns: timestamp_ns,
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -457,18 +471,18 @@ impl Dispatcher {
         let entry = self.windows.entry(source).or_default();
         entry.last_seen = Some(recv_at);
         // A well-behaved producer stops before starting; if a live window is
-        // somehow still open, retire it to `closing` bounded at the new start
-        // so it stops catching data published after this point.
+        // somehow still open, retire it to `closing` bounded at the new start's
+        // publish time so it stops catching data published after this point.
         if let Some(mut previous) = entry.live.take() {
             if previous.stopped_at_ns.is_none() {
-                previous.stopped_at_ns = Some(started_at_ns);
+                previous.stopped_at_ns = Some(publish_timestamp_ns);
                 previous.stop_recv_at = Some(recv_at);
             }
             entry.closing.push(previous);
         }
         entry.live = Some(ActiveWindow {
             recording_index,
-            started_at_ns,
+            started_at_ns: publish_timestamp_ns,
             stopped_at_ns: None,
             stop_recv_at: None,
             traces: HashMap::new(),
@@ -479,7 +493,13 @@ impl Dispatcher {
         }
     }
 
-    async fn handle_stop(&mut self, source: Source, stopped_at_ns: i64, recv_at: Instant) {
+    async fn handle_stop(
+        &mut self,
+        source: Source,
+        publish_timestamp_ns: i64,
+        timestamp_ns: i64,
+        recv_at: Instant,
+    ) {
         let Some(entry) = self.windows.get_mut(&source) else {
             tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
             return;
@@ -492,7 +512,9 @@ impl Dispatcher {
             );
             return;
         };
-        window.stopped_at_ns = Some(stopped_at_ns);
+        // The window closes on the publish clock; the row's `stop_timestamp_ns`
+        // (→ backend `end_time`) is the caller's capture time.
+        window.stopped_at_ns = Some(publish_timestamp_ns);
         window.stop_recv_at = Some(recv_at);
         let recording_index = window.recording_index;
         entry.closing.push(window);
@@ -502,7 +524,7 @@ impl Dispatcher {
         // must be on disk first.
         if let Err(error) = self
             .store
-            .mark_recording_stopped(recording_index, stopped_at_ns)
+            .mark_recording_stopped(recording_index, timestamp_ns)
             .await
         {
             tracing::warn!(%error, recording_index, "failed to mark recording stopped");
@@ -642,15 +664,19 @@ impl Dispatcher {
                 continue;
             };
             // The producer crashed without a Stop, so there is no next
-            // recording to partition against — keep the window open above to
-            // catch any straggler data before eviction.
+            // recording to partition against — keep the window's publish upper
+            // bound open (`i64::MAX`) to catch any straggler data before
+            // eviction. The row's capture stop time (→ backend `end_time`) is
+            // the reap moment, so the backend reports a finite end rather than
+            // the year-2262 the `i64::MAX` window sentinel would imply.
             window.stopped_at_ns = Some(i64::MAX);
             window.stop_recv_at = Some(now);
             let recording_index = window.recording_index;
             entry.closing.push(window);
+            let stop_capture_ns = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, i64::MAX)
+                .mark_recording_stopped(recording_index, stop_capture_ns)
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark idle recording stopped");
@@ -1021,22 +1047,26 @@ mod tests {
         ))
     }
 
-    fn start(robot: &str, started_at_ns: i64) -> Envelope {
+    // Tests exercise window membership, which is keyed on the publish clock, so
+    // the helper sets the capture `timestamp_ns` to the same value.
+    fn start(robot: &str, publish_timestamp_ns: i64) -> Envelope {
         Envelope::StartRecording {
             robot_id: robot.into(),
             robot_instance: 0,
             robot_name: None,
             dataset_id: None,
             dataset_name: None,
-            started_at_ns,
+            publish_timestamp_ns,
+            timestamp_ns: publish_timestamp_ns,
         }
     }
 
-    fn stop(robot: &str, stopped_at_ns: i64) -> Envelope {
+    fn stop(robot: &str, publish_timestamp_ns: i64) -> Envelope {
         Envelope::StopRecording {
             robot_id: robot.into(),
             robot_instance: 0,
-            stopped_at_ns,
+            publish_timestamp_ns,
+            timestamp_ns: publish_timestamp_ns,
         }
     }
 

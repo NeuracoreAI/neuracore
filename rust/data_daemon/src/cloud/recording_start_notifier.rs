@@ -179,9 +179,20 @@ async fn notify(
         return;
     };
     let instance = row.robot_instance.unwrap_or(0);
+    let Some(start_timestamp_ns) = row.start_timestamp_ns else {
+        tracing::warn!(
+            recording_index,
+            "recording has no start_timestamp_ns at start time; skipping backend notify",
+        );
+        return;
+    };
+    // The producer captured this as the recording window's real lower bound;
+    // the backend requires it (seconds) and derives the reported duration from
+    // it, so a late notify (e.g. after reconnecting) still reports correctly.
+    let start_time = start_timestamp_ns as f64 / 1_000_000_000.0;
 
     match client
-        .recording_start(&org_id, &robot_id, instance, &dataset_id)
+        .recording_start(&org_id, &robot_id, instance, &dataset_id, start_time)
         .await
     {
         Ok(recording_id) => {

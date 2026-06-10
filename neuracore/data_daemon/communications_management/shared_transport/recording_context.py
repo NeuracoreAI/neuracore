@@ -90,12 +90,17 @@ class RecordingContext:
         robot_name: str | None = None,
         dataset_id: str | None = None,
         dataset_name: str | None = None,
+        timestamp: float | None = None,
     ) -> None:
         """Announce a recording to the Rust daemon for a source.
 
         Publishes exactly one ``StartRecording`` envelope tagged with the
         source ``(robot_id, robot_instance)``. No recording id is on the wire —
         the daemon allocates and owns recording identity.
+
+        ``timestamp`` optionally pins the recording window's lower bound (Unix
+        seconds), matching the ``log_*`` methods; when ``None`` the producer
+        stamps the publish clock now.
         """
         if not self._rust_mode:
             return
@@ -103,17 +108,21 @@ class RecordingContext:
             raise ValueError("robot_id is required to start a recording.")
         self._robot_id = robot_id
         self._robot_instance = robot_instance
-        # The producer owns the publish clock: it stamps the window's
-        # ``started_at_ns`` and returns it. That value is the daemon's
-        # ``start_timestamp_ns`` for this recording, so we keep it verbatim as
-        # the marker used to resolve the daemon-assigned cloud recording id
-        # later (``get_recording_id`` matches it exactly).
+        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
+        # The recording window opens on the producer's publish clock (always
+        # wall-clock now), independent of this capture ``timestamp``. The
+        # producer returns the capture timestamp (the caller-supplied value, or
+        # the publish time when omitted), which the daemon stores as the row's
+        # ``start_timestamp_ns``; we keep it verbatim as the marker used to
+        # resolve the daemon-assigned cloud recording id later
+        # (``get_recording_id`` matches it exactly).
         self._recording_marker_ns = _load_native().start_recording(
             robot_id,
             robot_instance,
             robot_name,
             dataset_id,
             dataset_name,
+            timestamp_ns,
         )
 
     def log_joints(
@@ -216,18 +225,26 @@ class RecordingContext:
         self,
         recording_id: str | None = None,
         producer_stop_sequence_numbers: dict[str, int] | None = None,
+        timestamp: float | None = None,
     ) -> None:
         """Send a recording-stopped control message.
 
         Under the Rust daemon this publishes one ``StopRecording`` tagged with
-        the source and the publish-clock stop boundary (wall-clock now), which
-        the daemon uses to close the recording window. ``recording_id`` /
+        the source and the publish-clock stop boundary, which the daemon uses to
+        close the recording window. ``timestamp`` optionally pins that boundary
+        (Unix seconds), matching the ``log_*`` methods; when ``None`` the
+        producer stamps wall-clock now. ``recording_id`` /
         ``producer_stop_sequence_numbers`` are only used by the legacy path.
         """
         if self._rust_mode:
             if not self._robot_id:
                 return
-            _load_native().stop_recording(self._robot_id, self._robot_instance)
+            timestamp_ns = (
+                int(timestamp * 1_000_000_000) if timestamp is not None else None
+            )
+            _load_native().stop_recording(
+                self._robot_id, self._robot_instance, timestamp_ns
+            )
             return
 
         effective_recording_id = recording_id or self.recording_id
@@ -279,7 +296,7 @@ class RecordingContext:
         db_uri = f"file:{get_daemon_db_path()}?mode=ro"
         deadline = time.monotonic() + timeout_s
         # Match the recording whose start *equals* the marker rather than
-        # ``<=``. The marker is the producer's ``started_at_ns`` for a specific
+        # ``<=``. The marker is the producer's capture timestamp for a specific
         # ``start_recording`` call, stored verbatim as the row's
         # ``start_timestamp_ns``, so an exact match resolves precisely that
         # recording. ``<=`` could otherwise fall back to an earlier recording

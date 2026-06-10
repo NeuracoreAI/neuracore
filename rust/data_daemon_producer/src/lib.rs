@@ -388,9 +388,9 @@ extern "C" fn on_fork_in_child() {
 /// Producer wall-clock time in nanoseconds since the Unix epoch, stamped onto
 /// every published data envelope as its `publish_timestamp_ns`. This is the
 /// daemon's sole window-membership key, decoupled from whatever clock the
-/// caller timestamps data with. The same wall clock the SDK uses for the
-/// lifecycle `started_at_ns` / `stopped_at_ns`, so they are directly
-/// comparable.
+/// caller timestamps data with. The lifecycle `StartRecording` / `StopRecording`
+/// envelopes carry the same publish clock as their `publish_timestamp_ns`, so
+/// window boundaries and data are directly comparable.
 fn now_ns() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -436,12 +436,19 @@ struct ScalarFrameEntry {
 }
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
-/// daemon opens a window and owns all recording identity. The producer stamps
-/// the window's lower bound (`started_at_ns`) on the publish clock and returns
-/// it so the caller can use it as the marker that resolves the daemon-assigned
-/// cloud recording id (`get_recording_id`) for this exact recording.
+/// daemon opens a window and owns all recording identity.
+///
+/// The producer stamps the window's lower bound on the publish clock
+/// (`publish_timestamp_ns`, always wall-clock now) — that, never the caller's
+/// timestamp, is what the daemon uses for window membership, so a synthetic
+/// capture time can't shift the window or clip data. Separately, the recording's
+/// *capture* timestamp (`timestamp_ns` when supplied, else the publish time) is
+/// what the daemon stores as `start_timestamp_ns` and POSTs as the backend
+/// `start_time`. The capture timestamp is returned so the caller can use it as
+/// the marker that resolves the daemon-assigned cloud recording id
+/// (`get_recording_id`) for this exact recording.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None))]
+#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, timestamp_ns = None))]
 fn start_recording(
     py: Python<'_>,
     robot_id: &str,
@@ -449,22 +456,27 @@ fn start_recording(
     robot_name: Option<String>,
     dataset_id: Option<String>,
     dataset_name: Option<String>,
+    timestamp_ns: Option<i64>,
 ) -> PyResult<i64> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
     py.allow_threads(|| -> PyResult<i64> {
-        let started_at_ns = now_ns();
+        let publish_timestamp_ns = now_ns();
+        // Caller-supplied capture time, mirroring the `log_*` timestamp default
+        // (publish clock when omitted). Decoupled from the window boundary.
+        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StartRecording {
             robot_id,
             robot_instance,
             robot_name,
             dataset_id,
             dataset_name,
-            started_at_ns,
+            publish_timestamp_ns,
+            timestamp_ns: capture_timestamp_ns,
         })?;
-        Ok(started_at_ns)
+        Ok(capture_timestamp_ns)
     })
 }
 
@@ -806,24 +818,37 @@ fn log_json(
 /// `StopRecording`. The flush happens before the stop publish so the in-order
 /// delivery contract on this thread's publisher delivers the chunk first.
 ///
-/// The producer stamps the window's upper bound (`stopped_at_ns`) on the
-/// publish clock here, so the whole publish clock is owned by the producer
-/// (consistent with the data envelopes). Every video chunk routes by its
-/// *open* time, which is strictly inside the recording, so the exact value of
-/// this boundary no longer has to be reconciled with a tail chunk.
+/// The producer stamps the window's upper bound on the publish clock here
+/// (`publish_timestamp_ns`, always wall-clock now), so the whole publish clock
+/// is owned by the producer (consistent with the data envelopes). Every video
+/// chunk routes by its *open* time, which is strictly inside the recording, so
+/// the exact value of this boundary no longer has to be reconciled with a tail
+/// chunk. The recording's *capture* stop time (`timestamp_ns` when supplied,
+/// else the publish time) is separate — it is stored as `stop_timestamp_ns` and
+/// POSTed as the backend `end_time`, never used for window membership.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance))]
-fn stop_recording(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
+fn stop_recording(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp_ns: Option<i64>,
+) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
     py.allow_threads(|| -> PyResult<()> {
         flush_source_chunks(&robot_id, robot_instance)?;
+        let publish_timestamp_ns = now_ns();
+        // Caller-supplied capture time, mirroring the `log_*` timestamp default
+        // (publish clock when omitted). Decoupled from the window boundary.
+        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StopRecording {
             robot_id,
             robot_instance,
-            stopped_at_ns: now_ns(),
+            publish_timestamp_ns,
+            timestamp_ns: capture_timestamp_ns,
         })?;
         Ok(())
     })
