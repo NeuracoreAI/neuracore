@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
+from lerobot.datasets.backward_compatibility import BackwardCompatibilityError
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.v30.convert_dataset_v21_to_v30 import (
+    convert_data,
+    convert_episodes_metadata,
+    convert_info,
+    convert_tasks,
+    convert_videos,
+)
 from neuracore_types import (
     DataType,
     EndEffectorPoseInputTypeConfig,
@@ -190,9 +199,42 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
+    def _convert_v21_to_v30(self) -> None:
+        """Convert a v2.1 dataset in-place to v3.0 format required by lerobot>=0.4.x."""
+        root = self.dataset_root
+        new_root = root.parent / f"{root.name}_v30"
+        old_root = root.parent / f"{root.name}_old"
+        self.logger.info(
+            "Converting dataset '%s' from v2.1 to v3.0 format at %s",
+            self.dataset_name,
+            root,
+        )
+        if new_root.is_dir():
+            shutil.rmtree(new_root)
+        convert_info(
+            root, new_root, data_file_size_in_mb=100, video_file_size_in_mb=200
+        )
+        convert_tasks(root, new_root)
+        episodes_metadata = convert_data(root, new_root, data_file_size_in_mb=100)
+        episodes_videos_metadata = convert_videos(
+            root, new_root, video_file_size_in_mb=200
+        )
+        convert_episodes_metadata(
+            root, new_root, episodes_metadata, episodes_videos_metadata
+        )
+        shutil.move(str(root), str(old_root))
+        shutil.move(str(new_root), str(root))
+        self.logger.info(
+            "Conversion complete. Original dataset preserved at %s", old_root
+        )
+
     def _load_metadata(self) -> LeRobotDatasetMetadata:
         """Fetch metadata without pulling down the entire dataset."""
-        ds_meta = LeRobotDatasetMetadata(self.dataset_name, root=self.dataset_root)
+        try:
+            ds_meta = LeRobotDatasetMetadata(self.dataset_name, root=self.dataset_root)
+        except BackwardCompatibilityError:
+            self._convert_v21_to_v30()
+            ds_meta = LeRobotDatasetMetadata(self.dataset_name, root=self.dataset_root)
         self.logger.info(
             "Dataset metadata loaded: name=%s root=%s episodes=%s "
             "camera_keys=%s fps=%s",
