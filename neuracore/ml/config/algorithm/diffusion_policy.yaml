@@ -14,6 +14,11 @@ algorithm:
   spatial_softmax_num_keypoints: 32       # Number of keypoints for spatial softmax pooling
   use_pretrained_weights: true            # Load pretrained ResNet weights
 
+  # Vision augmentation (training only; 0.0 disables each)
+  color_jitter_brightness: 0.1            # Brightness jitter magnitude
+  color_jitter_contrast: 0.1             # Contrast jitter magnitude
+  color_jitter_saturation: 0.1           # Saturation jitter magnitude
+
   # Generative process
   process_type: "diffusion"               # "diffusion" or "flow_matching"
 

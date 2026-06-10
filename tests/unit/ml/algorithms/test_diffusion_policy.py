@@ -187,6 +187,104 @@ def test_process_type_forward_backward(
             assert torch.isfinite(param.grad).all()
 
 
+def test_color_jitter_training_forward_backward(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_inference_batch: BatchedInferenceInputs,
+    sample_training_batch: BatchedTrainingSamples,
+):
+    """Color jitter enabled: model constructs, infers, and finitely."""
+    description = ModelInitDescription(
+        input_data_types=OrderedSet([DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]),
+        output_data_types=OrderedSet([DataType.JOINT_TARGET_POSITIONS]),
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    config = {
+        **model_config,
+        "color_jitter_brightness": 0.5,
+        "color_jitter_contrast": 0.5,
+        "color_jitter_saturation": 0.5,
+    }
+    model = DiffusionPolicy(model_init_description=description, **config).to(DEVICE)
+    assert model.color_jitter is not None
+
+    inference_batch = sample_inference_batch.to(DEVICE)
+    output = model(inference_batch)
+    assert isinstance(output, dict)
+
+    training_batch = sample_training_batch.to(DEVICE)
+    train_output = model.training_step(training_batch)
+    loss = train_output.losses["mse_loss"]
+    assert torch.isfinite(loss)
+
+    loss.backward()
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"Gradient for {name} is None"
+            assert torch.isfinite(param.grad).all()
+
+
+def test_color_jitter_skipped_on_inference_path(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_training_batch: BatchedTrainingSamples,
+):
+    """The inference path (apply_color_jitter=False) is deterministic and
+    leaves frames un-augmented, while the training path (True) augments them."""
+    description = ModelInitDescription(
+        input_data_types=OrderedSet([DataType.JOINT_POSITIONS, DataType.RGB_IMAGES]),
+        output_data_types=OrderedSet([DataType.JOINT_TARGET_POSITIONS]),
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    config = {
+        **model_config,
+        "color_jitter_brightness": 0.5,
+        "color_jitter_contrast": 0.5,
+        "color_jitter_saturation": 0.5,
+    }
+    model = DiffusionPolicy(model_init_description=description, **config).to(DEVICE)
+    # eval() so encoder BatchNorm uses fixed running stats; any output change
+    # then comes solely from the color jitter, not the network.
+    model.eval()
+
+    batch = sample_training_batch.to(DEVICE)
+    inference = BatchedInferenceInputs(
+        inputs=batch.inputs,
+        inputs_mask=batch.inputs_mask,
+        batch_size=batch.batch_size,
+    )
+    joint_states = model._combine_proprio(inference)
+    rgb = batch.inputs[DataType.RGB_IMAGES]
+    mask = batch.inputs_mask[DataType.RGB_IMAGES]
+
+    with torch.no_grad():
+        # Inference path: no augmentation, so it is fully deterministic.
+        ref = model._prepare_global_conditioning(
+            joint_states, rgb, mask, apply_color_jitter=False
+        )
+        again = model._prepare_global_conditioning(
+            joint_states, rgb, mask, apply_color_jitter=False
+        )
+        assert torch.equal(ref, again)
+
+        # Training path: jitter randomizes the frames, so the conditioning
+        # differs from the un-augmented reference at least once.
+        jittered_differs = False
+        for seed in range(5):
+            torch.manual_seed(seed)
+            out = model._prepare_global_conditioning(
+                joint_states, rgb, mask, apply_color_jitter=True
+            )
+            if not torch.equal(out, ref):
+                jittered_differs = True
+                break
+    assert jittered_differs
+
+
 def test_run_validation(tmp_path: Path, mock_login):
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "60"
     algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent

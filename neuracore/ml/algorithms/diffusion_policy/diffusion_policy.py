@@ -63,6 +63,9 @@ class DiffusionPolicy(NeuracoreModel):
         unet_use_film_scale_modulation: bool = True,
         use_pretrained_weights: bool = True,
         use_resnet_stats: bool = True,
+        color_jitter_brightness: float = 0.1,
+        color_jitter_contrast: float = 0.1,
+        color_jitter_saturation: float = 0.1,
         process_type: str = "diffusion",
         noise_scheduler_type: str = "DDPM",  # diffusion only
         num_train_timesteps: int = 100,  # diffusion only
@@ -95,6 +98,12 @@ class DiffusionPolicy(NeuracoreModel):
             unet_use_film_scale_modulation: Whether to use FiLM scale modulation.
             use_pretrained_weights: Whether to load pretrained ResNet weights.
             use_resnet_stats: Whether to use ResNet normalization statistics.
+            color_jitter_brightness: Brightness jitter magnitude for RGB
+                augmentation, applied during training only. 0.0 disables.
+            color_jitter_contrast: Contrast jitter magnitude for RGB
+                augmentation, applied during training only. 0.0 disables.
+            color_jitter_saturation: Saturation jitter magnitude for RGB
+                augmentation, applied during training only. 0.0 disables.
             process_type: Generative process to use, "diffusion" (default) or
                 "flow_matching". See the note below for which parameters apply.
             noise_scheduler_type: Type of noise scheduler ("DDPM" or "DDIM").
@@ -145,6 +154,27 @@ class DiffusionPolicy(NeuracoreModel):
         self.lr_scheduler_num_warmup_steps = lr_scheduler_num_warmup_steps
         self.prediction_type = prediction_type
         self.num_inference_steps = num_inference_steps
+
+        # RGB color-jitter augmentation, applied during training only. Built only
+        # when at least one magnitude is non-zero so the default path is
+        # unchanged. ColorJitter holds no learnable parameters, so it is kept as
+        # a plain attribute rather than a registered submodule.
+        if any(
+            v > 0.0
+            for v in (
+                color_jitter_brightness,
+                color_jitter_contrast,
+                color_jitter_saturation,
+            )
+        ):
+            self.color_jitter: T.ColorJitter | None = T.ColorJitter(
+                brightness=color_jitter_brightness,
+                contrast=color_jitter_contrast,
+                saturation=color_jitter_saturation,
+                hue=0,
+            )
+        else:
+            self.color_jitter = None
 
         if process_type not in ("diffusion", "flow_matching"):
             raise ValueError(
@@ -480,6 +510,7 @@ class DiffusionPolicy(NeuracoreModel):
         joint_states: torch.FloatTensor | None,
         batched_nc_data: list[BatchedNCData],
         camera_images_mask: torch.FloatTensor,
+        apply_color_jitter: bool = False,
     ) -> torch.FloatTensor:
         """Encode image features and concatenate with the state vector.
 
@@ -487,6 +518,10 @@ class DiffusionPolicy(NeuracoreModel):
             joint_states: Joint state tensor, or None if no proprioception.
             batched_nc_data: List of BatchedRGBData.
             camera_images_mask: Camera image mask tensor.
+            apply_color_jitter: Whether to apply RGB color-jitter augmentation
+                to each camera frame before normalization. Set True only on the
+                training path; inference always leaves this False so augmentation
+                never runs at inference time.
 
         Returns:
             Global conditioning tensor.
@@ -506,6 +541,10 @@ class DiffusionPolicy(NeuracoreModel):
             zip(self.image_normalizers, self.image_encoders, batched_rgb_data)
         ):
             last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
+            # Jitter raw [0, 1] intensities before ResNet normalization, and
+            # only on the training path.
+            if apply_color_jitter and self.color_jitter is not None:
+                last_frame = self.color_jitter(last_frame)
             transformed = normalizer(last_frame)
             features = encoder(transformed)
             features = features * camera_images_mask[:, cam_id].view(batch_size, 1)
@@ -731,6 +770,7 @@ class DiffusionPolicy(NeuracoreModel):
                 joint_states,
                 batch.inputs[DataType.RGB_IMAGES],
                 batch.inputs_mask[DataType.RGB_IMAGES],
+                apply_color_jitter=True,
             )
         elif DataType.RGB_IMAGES in self.input_data_types:
             # RGB configured but absent in this batch: zero-pad to full cond dim
