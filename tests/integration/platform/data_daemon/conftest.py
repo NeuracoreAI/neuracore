@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 from collections.abc import Callable
 
@@ -9,10 +8,7 @@ import pytest
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
-from tests.integration.platform.data_daemon.shared.process_control import (
-    Timer,
-    stop_daemon,
-)
+from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
@@ -26,8 +22,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    OFFLINE_DB_PATH,
-    OFFLINE_RECORDINGS_ROOT,
     apply_storage_state_action,
     build_isolation_run_analysis,
 )
@@ -37,33 +31,6 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
-
-
-@pytest.fixture(autouse=True, scope="session")
-def daemon_test_state_env():
-    """Point all daemon tests at the shared .data_daemon_test_state directory.
-
-    Applied session-wide so every test — offline, online, behavioural, and
-    performance — records and uploads to a single known root rather than
-    scattering artefacts across ~/.neuracore or CWD.
-    """
-    OFFLINE_RECORDINGS_ROOT.mkdir(parents=True, exist_ok=True)
-    previous_recordings_root = os.environ.get("NEURACORE_DAEMON_RECORDINGS_ROOT")
-    previous_db_path = os.environ.get("NEURACORE_DAEMON_DB_PATH")
-    os.environ["NEURACORE_DAEMON_RECORDINGS_ROOT"] = str(OFFLINE_RECORDINGS_ROOT)
-    os.environ["NEURACORE_DAEMON_DB_PATH"] = str(OFFLINE_DB_PATH)
-    stop_daemon(method="sigkill")
-    try:
-        yield
-    finally:
-        if previous_recordings_root is None:
-            os.environ.pop("NEURACORE_DAEMON_RECORDINGS_ROOT", None)
-        else:
-            os.environ["NEURACORE_DAEMON_RECORDINGS_ROOT"] = previous_recordings_root
-        if previous_db_path is None:
-            os.environ.pop("NEURACORE_DAEMON_DB_PATH", None)
-        else:
-            os.environ["NEURACORE_DAEMON_DB_PATH"] = previous_db_path
 
 
 @pytest.fixture(autouse=True)
