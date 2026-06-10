@@ -6,7 +6,7 @@ import re
 import pytest
 import requests_mock
 from neuracore_types import Dataset as DatasetModel
-from neuracore_types import DataType, SynchronizationProgress
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
@@ -57,13 +57,6 @@ def test_nc_create_dataset_basic(
         status_code=200,
     )
 
-    # Mock recordings endpoint (Dataset will often hit this to init num_recordings)
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"data": [], "total": 0, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-
     # Mock search-by-name (if nc.create_dataset internally checks for existence)
     mock_data_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
@@ -107,13 +100,6 @@ def test_nc_create_dataset_with_params(
         status_code=200,
     )
 
-    # Mock recordings endpoint
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"data": [], "total": 0, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-
     dataset = nc.create_dataset(
         name="test_dataset",
         description="Test dataset description",
@@ -138,31 +124,10 @@ def test_nc_get_dataset_existing(
     """Test getting an existing dataset via nc.get_dataset."""
     nc.login("test_api_key")
 
-    # Mock datasets list endpoint (if nc.get_dataset uses it)
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-
-    # Mock shared datasets endpoint (if used)
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-
-    # Mock search-by-name endpoint (most likely used)
+    # Mock search-by-name endpoint
     mock_data_requests.get(
         f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
         json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-
-    # Mock recordings endpoint
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
 
@@ -226,13 +191,6 @@ def test_nc_create_shared_dataset_sets_is_shared(
         status_code=200,
     )
 
-    # Recordings endpoint
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"data": [], "total": 0, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-
     dataset = nc.create_dataset(name="shared_dataset", shared=True)
 
     assert dataset is not None
@@ -252,12 +210,6 @@ def test_nc_create_dataset_sets_global_state(
     mock_data_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets",
         json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-
-    mock_data_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"data": [], "total": 0, "limit": 1, "start_after": None},
         status_code=200,
     )
 
@@ -468,13 +420,6 @@ class TestDatasetCreation:
             status_code=200,
         )
 
-        # Mock recordings endpoint for num_recordings initialization
-        mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
-            json={"data": [], "total": 0, "limit": 1, "start_after": None},
-            status_code=200,
-        )
-
         dataset = Dataset.create(
             "test_dataset", description="Test description", tags=["test"], shared=False
         )
@@ -491,18 +436,6 @@ class TestDatasetCreation:
         mock_data_requests.get(
             re.compile(f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name"),
             json=dataset_model.model_dump(mode="json"),
-            status_code=200,
-        )
-
-        # Mock recordings endpoint for num_recordings initialization
-        mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
-            json={
-                "data": recordings_list[:1],
-                "total": 2,
-                "limit": 1,
-                "start_after": None,
-            },
             status_code=200,
         )
 
@@ -529,13 +462,6 @@ class TestDatasetCreation:
         mock_data_requests.post(
             f"{API_URL}/org/{mocked_org_id}/datasets",
             json=dataset_model.model_dump(mode="json"),
-            status_code=200,
-        )
-
-        # Mock recordings endpoint for num_recordings initialization
-        mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_model.id}/recordings",
-            json={"data": [], "total": 0, "limit": 1, "start_after": None},
             status_code=200,
         )
 
@@ -904,148 +830,94 @@ class TestDatasetSynchronization:
             TEST_ROBOT_ID: cross_embodiment_union[TEST_ROBOT_ID]
         }
 
-    def test_synchronize_raises_when_backend_reports_failed_recordings(
-        self, mock_data_requests, dataset_dict, recordings_list, monkeypatch
-    ):
-        """Test synchronization fails immediately when backend reports failures."""
-        dataset = Dataset(**dataset_dict, recordings=recordings_list)
-
-        def failed_progress(_: str) -> SynchronizationProgress:
-            return SynchronizationProgress(
-                synchronized_dataset_id="synced_dataset_123",
-                num_synchronized_demonstrations=0,
-                has_failures=True,
-                num_failed_recordings=1,
-                failed_recording_ids=["rec1"],
-            )
-
-        monkeypatch.setattr(
-            dataset,
-            "_get_synchronization_progress",
-            failed_progress,
-        )
-
-        with pytest.raises(DatasetError, match="Problematic recordings"):
-            dataset.synchronize(frequency=30)
-
     @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_error_shows_recording_id_from_cache(
-        self, mock_data_requests, dataset_dict, recordings_list, monkeypatch
-    ):
-        """Error message shows recording ID when recording is in cache."""
-        dataset = Dataset(**dataset_dict, recordings=recordings_list)
-
-        def failed_progress(_: str) -> SynchronizationProgress:
-            return SynchronizationProgress(
-                synchronized_dataset_id="synced_dataset_123",
-                num_synchronized_demonstrations=0,
-                has_failures=True,
-                num_failed_recordings=1,
-                failed_recording_ids=["rec1"],
-            )
-
-        monkeypatch.setattr(dataset, "_get_synchronization_progress", failed_progress)
-
-        with pytest.raises(DatasetError) as exc_info:
-            dataset.synchronize(frequency=30)
-
-        assert "rec1" in str(exc_info.value)
-
-    @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_error_shows_recording_id_on_cache_miss(
+    def test_synchronize_polls_until_complete(
         self,
         mock_data_requests,
         dataset_dict,
+        recordings_list,
+        mocked_org_id,
         monkeypatch,
     ):
-        """Error message shows recording ID when recording is not in cache."""
-        dataset = Dataset(**dataset_dict)
+        """synchronize() polls progress until processed reaches total.
 
-        def failed_progress(_: str) -> SynchronizationProgress:
-            return SynchronizationProgress(
-                synchronized_dataset_id="synced_dataset_123",
-                num_synchronized_demonstrations=0,
-                has_failures=True,
-                num_failed_recordings=1,
-                failed_recording_ids=["rec1"],
-            )
+        The conftest mock returns a fully-synced progress immediately (the
+        already-synchronized path). Override it with a partial-then-complete
+        sequence so the tqdm polling loop runs.
+        """
+        monkeypatch.setattr(
+            "neuracore.core.data.dataset.SYNC_PROGRESS_POLL_INTERVAL_S", 0
+        )
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        total = len(recordings_list)
 
-        monkeypatch.setattr(dataset, "_get_synchronization_progress", failed_progress)
+        def progress_json(num_synchronized: int) -> dict:
+            return {
+                "synchronized_dataset_id": "synced_dataset_123",
+                "num_synchronized_demonstrations": num_synchronized,
+                "has_failures": False,
+                "num_failed_recordings": 0,
+                "failed_recording_ids": [],
+            }
 
-        with pytest.raises(DatasetError) as exc_info:
-            dataset.synchronize(frequency=30)
-
-        assert "rec1" in str(exc_info.value)
-
-    @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_error_falls_back_to_id_when_name_fetch_fails(
-        self, mock_data_requests, dataset_dict, mocked_org_id, monkeypatch
-    ):
-        """Error message falls back to recording ID when name API call fails."""
-        dataset = Dataset(**dataset_dict)
-
-        mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/recording/unknown-rec",
-            status_code=404,
+        progress_endpoint = (
+            f"{API_URL}/org/{mocked_org_id}/synchronize/"
+            f"synchronization-progress/synced_dataset_123"
+        )
+        # First poll: nothing done yet (enters the loop); then one more, then
+        # complete. The last response repeats if polled again.
+        progress_matcher = mock_data_requests.get(
+            progress_endpoint,
+            [
+                {"json": progress_json(0), "status_code": 200},
+                {"json": progress_json(1), "status_code": 200},
+                {"json": progress_json(total), "status_code": 200},
+            ],
         )
 
-        def failed_progress(_: str) -> SynchronizationProgress:
-            return SynchronizationProgress(
-                synchronized_dataset_id="synced_dataset_123",
-                num_synchronized_demonstrations=0,
-                has_failures=True,
-                num_failed_recordings=1,
-                failed_recording_ids=["unknown-rec"],
-            )
+        synced = dataset.synchronize(frequency=30)
 
-        monkeypatch.setattr(dataset, "_get_synchronization_progress", failed_progress)
-
-        with pytest.raises(DatasetError) as exc_info:
-            dataset.synchronize(frequency=30)
-
-        assert "unknown-rec" in str(exc_info.value)
+        assert isinstance(synced, SynchronizedDataset)
+        # Initial read + at least two polls to advance 0 -> 1 -> total.
+        assert progress_matcher.call_count >= 3
 
     @pytest.mark.usefixtures("mock_login")
-    def test_get_synchronization_progress_raises_dataset_error_on_409(
+    def test_synchronize_propagates_dataset_error_on_failure(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
+        """synchronize() propagates the DatasetError from progress polling."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        error = (
+            "Synchronization failed for recording: rec1. "
+            "Reason: No sensors found for data type DEPTH_IMAGES"
+        )
         mock_data_requests.get(
             f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
-            json={
-                "detail": {
-                    "error": "Synchronization failed for recording(s): rec1",
-                    "status": 409,
-                }
-            },
-            status_code=409,
+            json={"detail": {"error": error, "status": 422}},
+            status_code=422,
         )
 
-        with pytest.raises(DatasetError, match="Problematic recordings"):
-            dataset._get_synchronization_progress("synced_dataset_123")
+        with pytest.raises(DatasetError, match="No sensors found for data type"):
+            dataset.synchronize(frequency=30)
 
     @pytest.mark.usefixtures("mock_login")
-    def test_get_synchronization_progress_409_shows_recording_id(
-        self, mock_data_requests, dataset_dict, mocked_org_id
+    def test_get_synchronization_progress_surfaces_detail_on_422(
+        self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
-        """409 error message shows failed recording ID."""
-        dataset = Dataset(**dataset_dict)
-
+        """A failure response surfaces the backend detail verbatim."""
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        error = (
+            "Synchronization failed for recording: rec1. "
+            "Reason: No sensors found for data type DEPTH_IMAGES"
+        )
         mock_data_requests.get(
             f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
-            json={
-                "detail": {
-                    "error": "Synchronization failed for recording(s): rec1",
-                    "status": 409,
-                }
-            },
-            status_code=409,
+            json={"detail": {"error": error, "status": 422}},
+            status_code=422,
         )
 
-        with pytest.raises(DatasetError) as exc_info:
+        with pytest.raises(DatasetError, match=error):
             dataset._get_synchronization_progress("synced_dataset_123")
-
-        assert "rec1" in str(exc_info.value)
 
 
 class TestDatasetMixedOperations:

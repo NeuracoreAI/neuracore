@@ -327,6 +327,7 @@ solref
 squaredcos
 staticmethod
 subdirs
+synchronizable
 targetbody
 TDVB
 teleop
