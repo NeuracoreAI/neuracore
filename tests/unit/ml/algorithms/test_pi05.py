@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 import torch
+from huggingface_hub import get_token
 from neuracore_types import (
     BatchedNCData,
     CrossEmbodimentDescription,
@@ -21,6 +22,12 @@ from neuracore.ml.algorithms.pi05.pi05 import Pi05 as Pi05Model
 from neuracore.ml.core.ml_types import BatchedTrainingOutputs
 from neuracore.ml.datasets.pytorch_dummy_dataset import PytorchDummyDataset
 from neuracore.ml.utils.validate import run_validation
+
+# Pi05 needs the gated paligemma tokenizer; skip in CI when HF auth is absent.
+requires_hf_auth = pytest.mark.skipif(
+    os.environ.get("CI", "false").lower() == "true" and get_token() is None,
+    reason="CI without Hugging Face auth cannot access gated paligemma tokenizer",
+)
 
 
 @pytest.fixture(scope="module")
@@ -117,6 +124,7 @@ def sample_training_batch(
     return sample
 
 
+@requires_hf_auth
 @pytest.mark.parametrize("output_data_types", OUTPUT_PARAMS)
 @pytest.mark.parametrize("input_data_types", INPUT_PARAMS)
 def test_model_construction_forward_backward(
@@ -184,6 +192,7 @@ def test_model_construction_forward_backward(
                 ).all(), f"Parameter {name} has non-finite gradients"
 
 
+@requires_hf_auth
 @pytest.mark.slow
 def test_run_validation(tmp_path: Path, mock_login, monkeypatch, Pi05):  # noqa: N803
     from neuracore.ml.utils import validate as validate_module
