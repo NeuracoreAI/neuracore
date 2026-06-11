@@ -266,20 +266,33 @@ impl ApiClient {
         Ok(())
     }
 
-    /// `POST /org/{org}/recording/cancel?recording_id=…`.
+    /// `POST /org/{org}/recording/cancel` with a JSON body carrying
+    /// `recording_id` and `end_time` (the cancel time, Unix seconds) — the same
+    /// body shape the backend now requires for `/recording/stop`.
     ///
-    /// Cancels the recording server-side. The daemon's cancel notifier makes
+    /// Cancels the recording server-side, which also clears it as the robot
+    /// instance's *pending* recording so the next `/recording/start` mints a
+    /// fresh id instead of reusing this one. The daemon's cancel notifier makes
     /// this call best-effort once it knows the cloud `recording_id`; the SDK
     /// no longer calls it inline.
     pub async fn recording_cancel(
         &self,
         org_id: &str,
         recording_id: &str,
+        end_time: f64,
     ) -> Result<(), ApiClientError> {
         let path = format!("/org/{org_id}/recording/cancel");
-        let query = [("recording_id", recording_id)];
+        #[derive(Serialize)]
+        struct Body<'a> {
+            recording_id: &'a str,
+            end_time: f64,
+        }
+        let body = Body {
+            recording_id,
+            end_time,
+        };
         let _ = self
-            .send_with_retry(Method::POST, &path, |builder| builder.query(&query))
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
             .await?;
         Ok(())
     }

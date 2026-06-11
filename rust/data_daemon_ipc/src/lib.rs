@@ -189,6 +189,13 @@ pub enum Envelope {
         robot_id: String,
         /// Robot instance — the second half of the source key.
         robot_instance: i64,
+        /// Caller-supplied capture time (Unix nanoseconds) for the cancel — or
+        /// the publish time when the caller supplied none. A cancel is a
+        /// recording stop that discards data, so the daemon stores this as the
+        /// row's `stop_timestamp_ns` and POSTs it as the backend `end_time`,
+        /// exactly like `StopRecording`. No window-boundary `publish_timestamp_ns`
+        /// is carried because cancelling drops the window outright.
+        timestamp_ns: i64,
     },
     /// Producer delivers one sensor sample.
     ///
@@ -557,6 +564,7 @@ mod tests {
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
+            timestamp_ns: 1_700_000_000_000_000_000,
         };
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));

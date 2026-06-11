@@ -343,8 +343,10 @@ impl Dispatcher {
             Envelope::CancelRecording {
                 robot_id,
                 robot_instance,
+                timestamp_ns,
             } => {
-                self.handle_cancel((robot_id, robot_instance)).await;
+                self.handle_cancel((robot_id, robot_instance), timestamp_ns)
+                    .await;
             }
             Envelope::Data {
                 robot_id,
@@ -536,7 +538,7 @@ impl Dispatcher {
         }
     }
 
-    async fn handle_cancel(&mut self, source: Source) {
+    async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
         let Some(mut entry) = self.windows.remove(&source) else {
             return;
         };
@@ -562,7 +564,13 @@ impl Dispatcher {
                 .trace_writer
                 .drop_recording(recording_index)
                 .await;
-            match self.store.cancel_recording(recording_index).await {
+            // The cancel's capture timestamp becomes the row's
+            // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
+            match self
+                .store
+                .cancel_recording(recording_index, timestamp_ns)
+                .await
+            {
                 Ok((_, touched)) => {
                     tracing::info!(
                         recording_index,
@@ -1403,6 +1411,7 @@ mod tests {
         tx.send(Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 0,
+            timestamp_ns: 120,
         })
         .await
         .unwrap();

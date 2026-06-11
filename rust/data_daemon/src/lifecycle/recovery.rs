@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use chrono::Utc;
 use iceoryx2::config::Config;
 use iceoryx2::node::Node;
 use iceoryx2::prelude::ipc;
@@ -132,7 +133,13 @@ pub async fn sweep_partial_recordings(
             }
         }
 
-        if let Err(error) = store.cancel_recording(recording.recording_index).await {
+        // Recovery has no producer cancel timestamp; use the recovery wall
+        // clock as the discarded recording's stop time (→ backend end_time).
+        let cancel_stop_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        if let Err(error) = store
+            .cancel_recording(recording.recording_index, cancel_stop_ns)
+            .await
+        {
             tracing::warn!(
                 %error,
                 recording_index = recording.recording_index,

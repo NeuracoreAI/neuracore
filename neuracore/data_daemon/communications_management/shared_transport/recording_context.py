@@ -201,13 +201,26 @@ class RecordingContext:
             timestamp,
         )
 
-    def cancel_recording(self, recording_id: str | None = None) -> None:
-        """Cancel the source's active recording — the daemon discards it."""
+    def cancel_recording(
+        self,
+        recording_id: str | None = None,
+        timestamp: float | None = None,
+    ) -> None:
+        """Cancel the source's active recording — the daemon discards it.
+
+        A cancel is a recording stop that discards data, so ``timestamp``
+        behaves exactly like ``stop_recording``'s: it optionally pins the
+        recording's capture stop time (Unix seconds); when ``None`` the producer
+        stamps wall-clock now.
+        """
         if not self._rust_mode:
             return
         if not self._robot_id:
             return
-        _load_native().cancel_recording(self._robot_id, self._robot_instance)
+        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
+        _load_native().cancel_recording(
+            self._robot_id, self._robot_instance, timestamp_ns
+        )
 
     def _require_source(self, operation: str) -> str:
         """Return the active source's robot id or raise if logging before start."""
