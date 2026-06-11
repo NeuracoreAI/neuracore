@@ -901,9 +901,19 @@ fn split_stream_key(key: &str) -> (String, String) {
 /// Cancel a recording — drop the source's in-progress chunk state without
 /// flushing (the daemon's cancel handler removes the relinked artefacts and
 /// the recovery sweep reclaims any spooled NUTs).
+///
+/// A cancel is a recording stop that discards data, so it carries the same
+/// capture `timestamp_ns` as `stop_recording` (the caller's value, else the
+/// publish clock); the daemon stores it as `stop_timestamp_ns` and POSTs it as
+/// the backend `end_time`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance))]
-fn cancel_recording(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
+fn cancel_recording(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp_ns: Option<i64>,
+) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
@@ -913,9 +923,11 @@ fn cancel_recording(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyRe
         with_video_chunks(|streams| {
             streams.retain(|key, _| !key.starts_with(&prefix));
         });
+        let capture_timestamp_ns = timestamp_ns.unwrap_or_else(now_ns);
         publish(&Envelope::CancelRecording {
             robot_id,
             robot_instance,
+            timestamp_ns: capture_timestamp_ns,
         })?;
         Ok(())
     })

@@ -1,7 +1,8 @@
 //! Backend recording-cancel notifier.
 //!
 //! Subscribes to [`DaemonEvent::RecordingCancelled`] and POSTs
-//! `/org/{org}/recording/cancel?recording_id=…` to the backend. The Python
+//! `/org/{org}/recording/cancel` (JSON body `{recording_id, end_time}`) to the
+//! backend. The Python
 //! SDK used to make this call inline from `nc.cancel_recording`, but that
 //! required the SDK to know the cloud `recording_id` — which the thin-shipper
 //! model removes. The notifier picks up the responsibility: once the local
@@ -156,7 +157,22 @@ async fn notify_backend(
         return;
     };
 
-    match client.recording_cancel(&org_id, &recording_id).await {
+    // A cancel is a recording stop that discards data: send the captured cancel
+    // time as `end_time`, exactly as the stop notifier does.
+    let Some(stop_timestamp_ns) = row.stop_timestamp_ns else {
+        tracing::warn!(
+            recording_index,
+            recording_id,
+            "cancelled recording has no stop_timestamp_ns; skipping backend cancel notify",
+        );
+        return;
+    };
+    let end_time = stop_timestamp_ns as f64 / 1_000_000_000.0;
+
+    match client
+        .recording_cancel(&org_id, &recording_id, end_time)
+        .await
+    {
         Ok(()) => {
             if let Err(error) = store.mark_recording_cancel_notified(recording_index).await {
                 tracing::warn!(
@@ -194,7 +210,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::api::auth::StaticAuthProvider;
@@ -236,7 +252,10 @@ mod tests {
             .mark_recording_start_notified(index, cloud_id)
             .await
             .expect("mark start notified");
-        store.cancel_recording(index).await.expect("cancel");
+        store
+            .cancel_recording(index, 5_000_000_000)
+            .await
+            .expect("cancel");
         index
     }
 
@@ -253,7 +272,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/cancel"))
-            .and(query_param("recording_id", "rec-cancel-1"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-cancel-1" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
             .mount(&server)
             .await;
@@ -296,7 +317,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/org/org-1/recording/cancel"))
-            .and(query_param("recording_id", "rec-offline-cancel"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-offline-cancel" }),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
             .mount(&server)
             .await;
@@ -363,7 +386,10 @@ mod tests {
             })
             .await
             .unwrap();
-        store.cancel_recording(row.recording_index).await.unwrap();
+        store
+            .cancel_recording(row.recording_index, 5_000_000_000)
+            .await
+            .unwrap();
 
         let auth = Arc::new(StaticAuthProvider::new("token-1"));
         let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));

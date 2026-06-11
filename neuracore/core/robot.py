@@ -816,13 +816,20 @@ class Robot:
 
         return joint_info
 
-    def cancel_recording(self, recording_id: str | None = None) -> None:
+    def cancel_recording(
+        self, recording_id: str | None = None, timestamp: float | None = None
+    ) -> None:
         """Cancel an active recording without saving any data.
 
         Args:
             recording_id: Unused under the Rust daemon (the daemon cancels the
                 active recording for this source); the legacy daemon uses it to
                 address the backend cancel POST.
+            timestamp: Optional capture time (Unix seconds) for the cancel,
+                mirroring ``stop_recording``. Under the Rust daemon it is the
+                recording's captured stop time (producer stamps now when
+                omitted); under the legacy daemon it is the ``end_time`` sent to
+                the backend (defaults to ``time.time()``).
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
@@ -836,7 +843,7 @@ class Robot:
             # source and the daemon discards the recording locally. The daemon
             # owns any backend cancel (best-effort if a cloud id was minted) —
             # the SDK has no recording id to POST with.
-            daemon_context.cancel_recording()
+            daemon_context.cancel_recording(timestamp=timestamp)
             active_handle = get_recording_state_manager().get_current_recording_id(
                 self.id, self.instance
             )
@@ -854,7 +861,7 @@ class Robot:
                 headers=self._auth.get_headers(),
                 json={
                     "recording_id": recording_id,
-                    "end_time": end_time,
+                    "end_time": timestamp if timestamp is not None else end_time,
                 },
             )
             response.raise_for_status()

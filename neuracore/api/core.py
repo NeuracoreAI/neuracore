@@ -419,12 +419,19 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 
-def cancel_recording(robot_name: str | None = None, instance: int = 0) -> None:
+def cancel_recording(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
     """Cancel the current recording for a specific robot without saving any data.
 
     Args:
         robot_name: Robot identifier.
         instance: Instance number of the robot for multi-instance scenarios.
+        timestamp: Optional capture time (Unix seconds) for the cancel,
+            mirroring ``stop_recording``. When omitted, the current time is
+            captured.
 
     """
     robot = _get_robot(robot_name, instance)
@@ -433,4 +440,4 @@ def cancel_recording(robot_name: str | None = None, instance: int = 0) -> None:
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         return
-    robot.cancel_recording(recording_id)
+    robot.cancel_recording(recording_id, timestamp=timestamp)

@@ -191,6 +191,17 @@ async fn notify(
     // it, so a late notify (e.g. after reconnecting) still reports correctly.
     let start_time = start_timestamp_ns as f64 / 1_000_000_000.0;
 
+    // Before opening this recording server-side, close any earlier recording for
+    // the same source that finished locally (cancel/stop) but whose backend
+    // notification has not landed yet. The backend dedupes pending recordings
+    // per robot instance — it returns the existing pending recording instead of
+    // minting a new one — so a still-pending prior recording would otherwise
+    // hand its cloud id to this one, collapsing both into one backend recording
+    // (e.g. cancel-then-start with no gap). The start notifier processes
+    // `RecordingStarted` events in order, so the prior recording's cloud id is
+    // already on its row by the time we reach here.
+    resolve_prior_pending(store, client, &org_id, &robot_id, instance, recording_index).await;
+
     match client
         .recording_start(&org_id, &robot_id, instance, &dataset_id, start_time)
         .await
@@ -232,6 +243,94 @@ async fn notify(
     }
 }
 
+/// Close, on the backend, any earlier recording for `(robot_id, instance)` that
+/// finished locally (cancelled or stopped) but is still pending server-side, so
+/// the backend does not hand its cloud id to the next `/recording/start` for
+/// this instance. See
+/// [`StateStore::recordings_pending_backend_resolution_for_source`].
+async fn resolve_prior_pending(
+    store: &Arc<SqliteStateStore>,
+    client: &Arc<ApiClient>,
+    org_id: &str,
+    robot_id: &str,
+    instance: i64,
+    before_index: i64,
+) {
+    let prior = match store
+        .recordings_pending_backend_resolution_for_source(robot_id, instance, before_index)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                before_index,
+                "failed to query prior pending recordings for source; next start may reuse a cloud id",
+            );
+            return;
+        }
+    };
+    for row in prior {
+        let index = row.recording_index;
+        let is_cancelled = row.cancelled_at.is_some();
+        // Cancel and stop both report the recording's captured stop time as
+        // `end_time` (a cancel is a stop that discards data). Compute it before
+        // `recording_id` is moved out of `row`.
+        let end_time = row.stop_timestamp_ns.map(|ns| ns as f64 / 1_000_000_000.0);
+        let Some(recording_id) = row.recording_id else {
+            continue;
+        };
+        let Some(end_time) = end_time else {
+            continue;
+        };
+        if is_cancelled {
+            match client
+                .recording_cancel(org_id, &recording_id, end_time)
+                .await
+            {
+                Ok(()) => {
+                    let _ = store.mark_recording_cancel_notified(index).await;
+                    tracing::info!(
+                        recording_index = index,
+                        recording_id,
+                        next_recording_index = before_index,
+                        "cancelled prior pending recording on the backend before opening the next",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        recording_index = index,
+                        recording_id,
+                        "failed to cancel prior pending recording before next start; \
+                         the next start may reuse its cloud id",
+                    );
+                }
+            }
+        } else {
+            match client.recording_stop(org_id, &recording_id, end_time).await {
+                Ok(()) => {
+                    let _ = store.mark_recording_stop_notified(index).await;
+                    tracing::info!(
+                        recording_index = index,
+                        recording_id,
+                        next_recording_index = before_index,
+                        "stopped prior pending recording on the backend before opening the next",
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        recording_index = index,
+                        recording_id,
+                        "failed to stop prior pending recording before next start",
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,7 +340,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
     use tokio::time::{sleep, timeout};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use crate::api::auth::StaticAuthProvider;
@@ -341,6 +440,83 @@ mod tests {
         })
         .await
         .expect("cloud recording_id must be persisted within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn cancels_prior_pending_recording_before_opening_the_next() {
+        // Cancel-then-start (no gap) for one source: the prior recording was
+        // cancelled before its cloud id was notified, so it is still pending on
+        // the backend. Opening the next recording must cancel it FIRST, so the
+        // backend mints a fresh id instead of handing back the cancelled one
+        // (which would collapse both recordings into one cloud recording).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/cancel"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "cloud-cancelled-A" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+        start_ok_mock("cloud-fresh-B").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        // Prior recording A (same source): start-notified, then cancelled, with
+        // its backend cancel still pending.
+        let prior = seed_recording(&store).await;
+        store
+            .mark_recording_start_notified(prior, "cloud-cancelled-A")
+            .await
+            .expect("mark start notified");
+        store
+            .cancel_recording(prior, 5_000_000_000)
+            .await
+            .expect("cancel");
+        // The next recording B for the same source.
+        let next = seed_recording(&store).await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        bus.publish(DaemonEvent::RecordingStarted {
+            recording_index: next,
+        });
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let prior_row = store
+                    .get_recording(prior)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                let next_row = store
+                    .get_recording(next)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                if prior_row.backend_cancel_notified_at.is_some() && next_row.recording_id.is_some()
+                {
+                    // Prior cancelled server-side; next opened with a FRESH id.
+                    assert_eq!(next_row.recording_id.as_deref(), Some("cloud-fresh-B"));
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("prior recording must be cancelled and next opened fresh within 3s");
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;

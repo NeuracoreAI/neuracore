@@ -196,6 +196,22 @@ pub trait StateStore: Send + Sync {
     /// server-side; the start notifier fills it first, then this sweep fires).
     async fn recordings_pending_stop_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
+    /// List earlier recordings for `(robot_id, robot_instance)` that are still
+    /// *pending* on the backend: they have a cloud `recording_id` (so they were
+    /// opened server-side), are resolved locally (`cancelled_at` or `stopped_at`
+    /// is set), but have not yet had their backend cancel/stop notification
+    /// delivered. The backend dedupes pending recordings per robot instance —
+    /// it returns the existing pending recording for an instance instead of
+    /// minting a new one — so these must be closed server-side before the next
+    /// recording's `/recording/start`, or that start reuses their cloud id.
+    /// Restricted to `recording_index < before_index`, ordered oldest first.
+    async fn recordings_pending_backend_resolution_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+        before_index: i64,
+    ) -> Result<Vec<RecordingRow>, StateStoreError>;
+
     /// List every recording row currently in the DB.
     ///
     /// Used by the progress reporter to discover stopped recordings whose
@@ -268,12 +284,17 @@ pub trait StateStore: Send + Sync {
     /// (`write_status = failed`, `upload_status = failed`,
     /// `registration_status = failed` if not already `registered`).
     ///
-    /// Idempotent: re-cancelling a recording that already has a
-    /// `cancelled_at` leaves the timestamp untouched. Returns the recording
-    /// row after the update and the number of trace rows touched.
+    /// A cancel is a recording stop that discards data, so it also stamps
+    /// `stop_timestamp_ns` (the cancel's capture time, → backend `end_time`)
+    /// just like [`mark_recording_stopped`](Self::mark_recording_stopped).
+    ///
+    /// Idempotent: re-cancelling a recording that already has a `cancelled_at`
+    /// leaves both timestamps untouched. Returns the recording row after the
+    /// update and the number of trace rows touched.
     async fn cancel_recording(
         &self,
         recording_index: i64,
+        stop_timestamp_ns: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
 }
 
@@ -1014,6 +1035,34 @@ impl StateStore for SqliteStateStore {
             .map_err(Into::into)
     }
 
+    async fn recordings_pending_backend_resolution_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+        before_index: i64,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE robot_id = ? \
+                AND robot_instance = ? \
+                AND recording_index < ? \
+                AND recording_id IS NOT NULL \
+                AND backend_stop_notified_at IS NULL \
+                AND backend_cancel_notified_at IS NULL \
+                AND (cancelled_at IS NOT NULL OR stopped_at IS NOT NULL) \
+           ORDER BY recording_index ASC",
+        )
+        .bind(robot_id)
+        .bind(robot_instance)
+        .bind(before_index)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn set_progress_report_status(
         &self,
         recording_index: i64,
@@ -1156,6 +1205,7 @@ impl StateStore for SqliteStateStore {
     async fn cancel_recording(
         &self,
         recording_index: i64,
+        stop_timestamp_ns: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
@@ -1164,6 +1214,7 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET cancelled_at = COALESCE(cancelled_at, ?2), \
+                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?4), \
                     progress_reported = ?3, \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
@@ -1171,6 +1222,7 @@ impl StateStore for SqliteStateStore {
         .bind(recording_index)
         .bind(now)
         .bind(ProgressReportStatus::Reported.as_str())
+        .bind(stop_timestamp_ns)
         .execute(&mut *tx)
         .await?;
 
@@ -1660,8 +1712,16 @@ mod tests {
             .await
             .unwrap();
 
-        let (row, touched) = store.cancel_recording(recording_index).await.unwrap();
+        let (row, touched) = store
+            .cancel_recording(recording_index, 5_000_000_000)
+            .await
+            .unwrap();
         assert!(row.cancelled_at.is_some(), "cancelled_at must be stamped");
+        assert_eq!(
+            row.stop_timestamp_ns,
+            Some(5_000_000_000),
+            "a cancel stamps stop_timestamp_ns like a stop"
+        );
         assert_eq!(row.progress_reported, ProgressReportStatus::Reported);
         assert_eq!(touched, 1, "only the non-Written trace's write was touched");
 
@@ -1698,11 +1758,22 @@ mod tests {
             .await
             .unwrap();
 
-        let (first, _) = store.cancel_recording(recording_index).await.unwrap();
+        let (first, _) = store
+            .cancel_recording(recording_index, 5_000_000_000)
+            .await
+            .unwrap();
         let first_at = first.cancelled_at.expect("cancelled_at set");
         // Sleep across a clock tick to make a date change observable.
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let (second, _) = store.cancel_recording(recording_index).await.unwrap();
+        let (second, _) = store
+            .cancel_recording(recording_index, 9_000_000_000)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.stop_timestamp_ns,
+            Some(5_000_000_000),
+            "subsequent cancels must not slide stop_timestamp_ns forward"
+        );
         assert_eq!(
             second.cancelled_at,
             Some(first_at),
