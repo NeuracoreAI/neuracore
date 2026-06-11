@@ -149,6 +149,30 @@ pub mod service_name {
     /// The scalable fix (one node shared per process, not per thread) is tracked
     /// separately and would reduce the live count to single digits.
     pub const MAX_NODES_PER_SERVICE: usize = 512;
+
+    /// Request-response service the SDK uses to resolve a recording's
+    /// daemon-owned cloud `recording_id`.
+    ///
+    /// The cloud id is minted asynchronously by the start notifier, so the SDK
+    /// (`nc.start_recording(wait=True)`, tests) asks the daemon for it over this
+    /// service instead of reading the daemon's private SQLite DB directly — the
+    /// daemon answers authoritatively from its own state. A request carries the
+    /// source + the recording's capture marker; the reply carries the id once
+    /// minted (or "not yet"). See [`RecordingIdQuery`] / [`RecordingIdReply`].
+    pub const QUERIES: &str = "neuracore/data_daemon/queries";
+
+    /// Maximum size of a single `queries`-service sample. Both the request and
+    /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
+    pub const QUERIES_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+
+    /// Maximum number of concurrent query clients. Mirrors
+    /// [`MAX_PUBLISHERS_PER_SERVICE`]: the native producer parks one client port
+    /// per OS thread (iceoryx2 ports are `!Sync`), so the cap must cover the
+    /// integration matrix's full thread fan-out.
+    pub const MAX_QUERY_CLIENTS_PER_SERVICE: usize = 128;
+
+    /// Maximum number of concurrent query servers. The daemon opens exactly one.
+    pub const MAX_QUERY_SERVERS_PER_SERVICE: usize = 1;
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -418,6 +442,59 @@ pub enum EnvelopeCodecError {
     /// Failed to deserialize the envelope.
     #[error("failed to decode envelope: {0}")]
     Decode(#[source] postcard::Error),
+}
+
+/// Request sent by the SDK on the [`service_name::QUERIES`] service to resolve a
+/// recording's daemon-owned cloud `recording_id`.
+///
+/// The recording is identified exactly the way the daemon stored it: the
+/// `(robot_id, robot_instance)` source plus `timestamp_ns` — the producer's
+/// capture marker returned by `start_recording`, persisted verbatim as the
+/// recording row's `start_timestamp_ns`. Matching on the marker (not `<=`)
+/// resolves precisely that recording, never an earlier one for the same source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingIdQuery {
+    /// Robot identifier — the first half of the source key.
+    pub robot_id: String,
+    /// Robot instance — the second half of the source key.
+    pub robot_instance: i64,
+    /// The recording's capture marker (Unix nanoseconds).
+    pub timestamp_ns: i64,
+}
+
+/// Reply to a [`RecordingIdQuery`].
+///
+/// `recording_id` is `None` while the start notifier has not yet minted the
+/// cloud id (or no matching, non-cancelled recording exists); the SDK re-asks
+/// until it is `Some` or its own timeout elapses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingIdReply {
+    /// The daemon-owned cloud recording id, once available.
+    pub recording_id: Option<String>,
+}
+
+impl RecordingIdQuery {
+    /// Encode as a postcard byte vector for a `queries`-service request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        postcard::to_allocvec(self).map_err(EnvelopeCodecError::Encode)
+    }
+
+    /// Decode from the byte slice carried in a `queries`-service request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        postcard::from_bytes(bytes).map_err(EnvelopeCodecError::Decode)
+    }
+}
+
+impl RecordingIdReply {
+    /// Encode as a postcard byte vector for a `queries`-service response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        postcard::to_allocvec(self).map_err(EnvelopeCodecError::Encode)
+    }
+
+    /// Decode from the byte slice carried in a `queries`-service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        postcard::from_bytes(bytes).map_err(EnvelopeCodecError::Decode)
+    }
 }
 
 #[cfg(test)]

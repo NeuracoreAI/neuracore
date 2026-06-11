@@ -410,7 +410,13 @@ fn run_daemon(
             drop(shutdown_rx);
 
             tracing::info!(?org_id, "daemon ready; awaiting shutdown signal");
-            listener::run(transport, dispatcher_tx.clone(), shutdown_tx.subscribe()).await;
+            listener::run(
+                transport,
+                dispatcher_tx.clone(),
+                Arc::new(state_store.clone()),
+                shutdown_tx.subscribe(),
+            )
+            .await;
 
             // Ordered shutdown — by the time `listener::run` has returned
             // the iceoryx2 node has already been dropped (it lived inside

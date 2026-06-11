@@ -52,17 +52,21 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, Once};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_daemon_ipc::service_name::{
-    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
-    MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, MAX_VIDEO_CHUNK_FRAMES,
+    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
+    MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_QUERY_CLIENTS_PER_SERVICE,
+    MAX_QUERY_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, MAX_VIDEO_CHUNK_FRAMES, QUERIES,
+    QUERIES_MAX_PAYLOAD_BYTES,
 };
-use data_daemon_ipc::{BatchedDataItem, Envelope};
+use data_daemon_ipc::{BatchedDataItem, Envelope, RecordingIdQuery, RecordingIdReply};
 use iceoryx2::node::{Node, NodeBuilder};
+use iceoryx2::port::client::Client;
 use iceoryx2::port::publisher::Publisher;
 use iceoryx2::prelude::{ipc, UnableToDeliverStrategy};
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
+use iceoryx2::service::port_factory::request_response::PortFactory as QueryPortFactory;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use thiserror::Error;
@@ -133,6 +137,12 @@ struct ProducerState {
     _node: Node<ipc::Service>,
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
     commands_publisher: Publisher<ipc::Service, [u8], ()>,
+    /// Service handle held alongside the query client so port discovery doesn't
+    /// race the handle going out of scope.
+    _queries_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used by [`get_recording_id`] to ask the daemon
+    /// for a recording's cloud id.
+    queries_client: Client<ipc::Service, [u8], (), [u8], ()>,
 }
 
 /// In-progress video chunk state for one `(source, sensor)` stream.
@@ -313,11 +323,49 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         COMMANDS_MAX_PAYLOAD_BYTES,
     )?;
 
+    let (queries_service, queries_client) = open_query_client(&node, QUERIES)?;
+
     Ok(ProducerState {
         _node: node,
         _commands_service: commands_service,
         commands_publisher,
+        _queries_service: queries_service,
+        queries_client,
     })
+}
+
+/// Open (or attach to) the `[u8]` request-response `queries` service off `node`
+/// and build a client on it. Config mirrors the daemon's `open_query_server`
+/// so `open_or_create` reconciles to the same service attributes regardless of
+/// which side comes up first.
+#[allow(clippy::type_complexity)]
+fn open_query_client(
+    node: &Node<ipc::Service>,
+    service_name: &str,
+) -> Result<
+    (
+        QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+        Client<ipc::Service, [u8], (), [u8], ()>,
+    ),
+    ProducerError,
+> {
+    let parsed_name = service_name
+        .try_into()
+        .map_err(|error| ProducerError::ServiceOpen(format!("invalid service name: {error}")))?;
+    let service = node
+        .service_builder(&parsed_name)
+        .request_response::<[u8], [u8]>()
+        .max_clients(MAX_QUERY_CLIENTS_PER_SERVICE)
+        .max_servers(MAX_QUERY_SERVERS_PER_SERVICE)
+        .max_nodes(MAX_NODES_PER_SERVICE)
+        .open_or_create()
+        .map_err(|error| ProducerError::ServiceOpen(error.to_string()))?;
+    let client = service
+        .client_builder()
+        .initial_max_slice_len(QUERIES_MAX_PAYLOAD_BYTES)
+        .create()
+        .map_err(|error| ProducerError::PublisherCreate(error.to_string()))?;
+    Ok((service, client))
 }
 
 /// Open (or attach to) one `[u8]` pub/sub service off `node` and build a
@@ -955,6 +1003,91 @@ fn cancel_recording(
 }
 
 /// Python module entrypoint registered as `neuracore.data_daemon._native_producer`.
+/// Interval between successive recording-id requests to the daemon.
+const RECORDING_ID_POLL_INTERVAL: Duration = Duration::from_millis(50);
+/// How long a single request waits for the daemon's reply before re-asking.
+const RECORDING_ID_RESPONSE_WAIT: Duration = Duration::from_millis(40);
+/// Poll cadence while waiting for a single request's reply.
+const RECORDING_ID_RECEIVE_POLL: Duration = Duration::from_millis(2);
+
+/// Resolve the daemon-owned cloud `recording_id` for a recording, blocking with
+/// the GIL released until the id is available or `timeout_s` elapses.
+///
+/// The thin producer never mints recording identity — the daemon allocates the
+/// cloud id asynchronously after `/recording/start`. This asks the daemon over
+/// the `queries` request-response service (identifying the recording by its
+/// source + capture `timestamp_ns` marker) and returns the id once minted, or
+/// `None` on timeout / when no daemon is answering. Safe for
+/// non-performance-critical paths only (tests, `stop_recording(wait=True)`).
+#[pyfunction]
+#[pyo3(signature = (robot_id, robot_instance, timestamp_ns, timeout_s))]
+fn get_recording_id(
+    py: Python<'_>,
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp_ns: i64,
+    timeout_s: f64,
+) -> PyResult<Option<String>> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let query = RecordingIdQuery {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+        timestamp_ns,
+    };
+    let request_bytes = query.encode().map_err(ProducerError::from)?;
+    py.allow_threads(|| -> PyResult<Option<String>> {
+        let deadline = Instant::now() + Duration::from_secs_f64(timeout_s.max(0.0));
+        loop {
+            let resolved =
+                with_producer(|state| resolve_recording_id_once(state, &request_bytes))?;
+            if resolved.is_some() {
+                return Ok(resolved);
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(RECORDING_ID_POLL_INTERVAL);
+        }
+    })
+}
+
+/// Send one recording-id request and wait briefly for the daemon's reply.
+///
+/// Returns `Ok(Some(id))` once the daemon has minted the cloud id, or `Ok(None)`
+/// when it replied "not yet" or did not reply within the per-request window
+/// (e.g. no daemon is up). The caller re-asks until its overall timeout.
+fn resolve_recording_id_once(
+    state: &ProducerState,
+    request_bytes: &[u8],
+) -> Result<Option<String>, ProducerError> {
+    let request = state
+        .queries_client
+        .loan_slice_uninit(request_bytes.len())
+        .map_err(|error| ProducerError::Loan(error.to_string()))?;
+    let request = request.write_from_slice(request_bytes);
+    let pending = request
+        .send()
+        .map_err(|error| ProducerError::Send(error.to_string()))?;
+
+    let response_deadline = Instant::now() + RECORDING_ID_RESPONSE_WAIT;
+    loop {
+        match pending.receive() {
+            Ok(Some(response)) => {
+                let reply = RecordingIdReply::decode(response.payload())?;
+                return Ok(reply.recording_id);
+            }
+            Ok(None) => {}
+            Err(error) => return Err(ProducerError::Send(error.to_string())),
+        }
+        if Instant::now() >= response_deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(RECORDING_ID_RECEIVE_POLL);
+    }
+}
+
 #[pymodule]
 fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
@@ -963,6 +1096,7 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     Ok(())
 }
 
