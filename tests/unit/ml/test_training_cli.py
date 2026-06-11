@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 import neuracore as nc
 from neuracore.core.cli.app import app
+from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.const import API_URL
 
 runner = CliRunner()
@@ -128,6 +129,61 @@ def test_training_cloud_list(
     assert "No" in result.output
     assert "cnnmlp" in result.output
     assert "dataset_123" in result.output
+
+
+def test_training_cloud_list_uses_env_org_override(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+    monkeypatch,
+):
+    """Cloud list prefers the environment organization over select-org."""
+    nc.login("test_api_key")
+    other_org_id = "other-org-id"
+    monkeypatch.setenv("NEURACORE_ORG_ID", mocked_org_id)
+
+    mock_auth_requests.get(
+        f"{API_URL}/org-management/my-orgs",
+        json=[
+            {"org": {"id": mocked_org_id, "name": "test organization"}},
+            {"org": {"id": other_org_id, "name": "Other Org"}},
+        ],
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+        status_code=200,
+    )
+
+    select_result = runner.invoke(
+        app,
+        ["select-org", "--org-name", "Other Org"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+    assert select_result.exit_code == 0
+    get_config_manager()._config = None
+
+    result = runner.invoke(
+        app,
+        ["training", "list", "--cloud"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "training_run_1" in result.output
+    assert any(
+        req.method == "GET"
+        and req.url == f"{API_URL}/org/{mocked_org_id}/training/jobs"
+        for req in mock_auth_requests.request_history
+    )
+    assert not any(
+        req.method == "GET" and req.url == f"{API_URL}/org/{other_org_id}/training/jobs"
+        for req in mock_auth_requests.request_history
+    )
 
 
 def test_training_local_inspect(tmp_path):
@@ -289,5 +345,65 @@ def test_training_cloud_delete(
     assert "Deleted cloud training run 'training_run_1' (job_123)." in result.output
     assert any(
         req.method == "DELETE" and req.url.endswith("/job_123")
+        for req in mock_auth_requests.request_history
+    )
+
+
+def test_training_cloud_delete_uses_env_org_override(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    sample_training_jobs_response,
+    monkeypatch,
+):
+    """Delete prefers the environment organization over select-org."""
+    nc.login("test_api_key")
+    other_org_id = "other-org-id"
+    monkeypatch.setenv("NEURACORE_ORG_ID", mocked_org_id)
+
+    mock_auth_requests.get(
+        f"{API_URL}/org-management/my-orgs",
+        json=[
+            {"org": {"id": mocked_org_id, "name": "test organization"}},
+            {"org": {"id": other_org_id, "name": "Other Org"}},
+        ],
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json=sample_training_jobs_response,
+        status_code=200,
+    )
+    mock_auth_requests.delete(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123", status_code=204
+    )
+
+    select_result = runner.invoke(
+        app,
+        ["select-org", "--org-name", "Other Org"],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+    assert select_result.exit_code == 0
+    get_config_manager()._config = None
+
+    result = runner.invoke(
+        app,
+        [
+            "training",
+            "delete",
+            "--training-name",
+            "training_run_1",
+            "--yes",
+        ],
+        color=False,
+        env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
+    )
+
+    assert result.exit_code == 0
+    assert "Deleted cloud training run 'training_run_1' (job_123)." in result.output
+    assert any(
+        req.method == "DELETE"
+        and req.url == f"{API_URL}/org/{mocked_org_id}/training/jobs/job_123"
         for req in mock_auth_requests.request_history
     )
