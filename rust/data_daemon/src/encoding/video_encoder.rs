@@ -105,6 +105,44 @@ pub enum VideoEncodeError {
     EmptySegments,
 }
 
+/// Failure modes of [`VideoEncoder::preflight`], surfaced at daemon startup so
+/// an unusable ffmpeg is reported once, clearly, instead of failing every
+/// video encode at recording time.
+#[derive(Debug, thiserror::Error)]
+pub enum FfmpegPreflightError {
+    /// The ffmpeg binary could not be executed at all — typically not
+    /// installed or not on `PATH`.
+    #[error(
+        "ffmpeg not found: could not run `{}` ({source}). \
+         Install ffmpeg (>= 4.0, built with libx264) and ensure it is on PATH.",
+        binary.to_string_lossy()
+    )]
+    NotFound {
+        /// Binary that could not be executed.
+        binary: OsString,
+        /// Underlying spawn error (e.g. `ENOENT`).
+        #[source]
+        source: std::io::Error,
+    },
+    /// ffmpeg ran but rejected a capability the encoder depends on: the
+    /// `-vsync passthrough` frame-timing mode or the libx264 encoder.
+    #[error(
+        "ffmpeg at `{}` (version {version}) is incompatible: a required capability was \
+         rejected. The daemon needs `-vsync passthrough` (drop-free, frame-accurate \
+         encoding — note `-fps_mode passthrough` is ffmpeg >= 5.1 only) and the libx264 \
+         encoder. Install a compatible ffmpeg (>= 4.0 with libx264). ffmpeg reported:\n{stderr_tail}",
+        binary.to_string_lossy()
+    )]
+    Incompatible {
+        /// Binary that was probed.
+        binary: OsString,
+        /// Detected ffmpeg version, or `"unknown"`.
+        version: String,
+        /// Tail of ffmpeg's stderr from the failed probe.
+        stderr_tail: String,
+    },
+}
+
 /// Builder for ffmpeg invocations. Keeps the ffmpeg binary path configurable
 /// so unit tests can shim in a wrapper script if needed.
 #[derive(Debug, Clone)]
@@ -132,6 +170,108 @@ impl VideoEncoder {
         self
     }
 
+    /// Verify the configured ffmpeg is present and supports the capabilities
+    /// [`encode_chunk`](Self::encode_chunk) depends on, returning the detected
+    /// version string on success.
+    ///
+    /// Run once at daemon startup so an incompatible install fails fast with a
+    /// clear message instead of silently marking every video trace `failed` at
+    /// recording time. Two steps: `ffmpeg -version` confirms the binary runs
+    /// (and yields a version for diagnostics), then a one-frame synthetic
+    /// encode to the null muxer exercises the exact `-vsync passthrough` knob —
+    /// the option ffmpeg < 5.1 rejects when spelled `-fps_mode` — together with
+    /// the libx264 encoder.
+    pub fn preflight(&self) -> Result<String, FfmpegPreflightError> {
+        let version = self.detect_ffmpeg_version()?;
+        self.probe_passthrough_encode(&version)?;
+        Ok(version)
+    }
+
+    /// Run `ffmpeg -version`, mapping a spawn failure to
+    /// [`FfmpegPreflightError::NotFound`] and parsing the reported version.
+    fn detect_ffmpeg_version(&self) -> Result<String, FfmpegPreflightError> {
+        let output = std::process::Command::new(&self.binary)
+            .arg("-hide_banner")
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .map_err(|source| FfmpegPreflightError::NotFound {
+                binary: self.binary.clone(),
+                source,
+            })?;
+        Ok(parse_ffmpeg_version(&output.stdout))
+    }
+
+    /// Encode one synthetic frame with `-vsync passthrough` + libx264 to the
+    /// null muxer; a non-zero exit means the local ffmpeg lacks a capability
+    /// the encoder needs.
+    fn probe_passthrough_encode(&self, version: &str) -> Result<(), FfmpegPreflightError> {
+        // One 16x16 yuv420p frame (a 16x16 plane plus two 8x8 planes = 384
+        // bytes) fed via the rawvideo demuxer on stdin — no lavfi/input-file
+        // dependency, so the probe works even on a minimal build. ffmpeg parses
+        // (and would reject) the options before reading stdin, so an unsupported
+        // `-vsync passthrough` fails immediately rather than on a healthy input.
+        const PROBE_FRAME_LEN: usize = 16 * 16 * 3 / 2;
+        let frame = vec![128u8; PROBE_FRAME_LEN];
+
+        let mut child = std::process::Command::new(&self.binary)
+            .arg("-hide_banner")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-video_size")
+            .arg("16x16")
+            .arg("-i")
+            .arg("-")
+            .arg("-vsync")
+            .arg("passthrough")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-f")
+            .arg("null")
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|source| FfmpegPreflightError::NotFound {
+                binary: self.binary.clone(),
+                source,
+            })?;
+
+        // The frame is far smaller than a pipe buffer, so writing then dropping
+        // stdin cannot deadlock against ffmpeg's reads.
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(&frame);
+        }
+
+        let output = child
+            .wait_with_output()
+            .map_err(|source| FfmpegPreflightError::NotFound {
+                binary: self.binary.clone(),
+                source,
+            })?;
+
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(FfmpegPreflightError::Incompatible {
+                binary: self.binary.clone(),
+                version: version.to_string(),
+                stderr_tail: tail_stderr(&output.stderr),
+            })
+        }
+    }
+
     /// Transcode one NUT chunk into the configured per-chunk mp4 outputs.
     ///
     /// The source `raw.nut` is left in place — the caller is responsible for
@@ -148,17 +288,31 @@ impl VideoEncoder {
         // `-y` overwrites existing outputs (resume safety: a previous failed
         // run may have left a partial mp4). `-fflags +genpts` rebuilds the
         // presentation timestamps from the NUT timing when the spool was
-        // truncated mid-frame. `-vsync vfr` (applied per output) is the
-        // critical knob here: the NUT chunk uses `time_base = 1/1_000_000`
+        // truncated mid-frame. `-vsync passthrough` (applied per output) is
+        // the critical knob here: the NUT chunk uses `time_base = 1/1_000_000`
         // so ffmpeg's demuxer reports `r_frame_rate = 1_000_000/1` (one
-        // million fps). With the default `vsync auto` cfr policy the encoder
-        // would then synthesise an output frame at every microsecond slot
-        // between consecutive input PTS values — for a 10 s clip that is
-        // ~10 million duplicate output frames, and the encode effectively
-        // never completes. `vfr` writes each input frame exactly once at its
-        // original PTS, which is what real-time camera capture actually is.
-        // Two `-map 0:v -c:v ...` blocks emit both outputs from a single
-        // demux pass.
+        // million fps). With the default `cfr` policy the encoder would then
+        // synthesise an output frame at every microsecond slot between
+        // consecutive input PTS values — for a 10 s clip that is ~10 million
+        // duplicate output frames, and the encode effectively never completes.
+        //
+        // We must NOT use `vfr` here: vfr drops any frame whose PTS rounds to
+        // the same tick as its predecessor at the output stream timescale.
+        // Real-time capture has jitter, so closely-spaced frames (a few hundred
+        // µs apart under threaded logging) collide and are silently dropped —
+        // the encoded video then has fewer frames than the per-frame timestamp
+        // sidecar (`trace.json`), and the downstream synced-recording reader
+        // dereferences a frame index the video never contained. `passthrough`
+        // emits every input frame exactly once at its original PTS and never
+        // drops, which is what real-time camera capture actually is.
+        //
+        // We spell this `-vsync passthrough` rather than the newer
+        // `-fps_mode passthrough`: the two select the identical passthrough
+        // mode, but `-fps_mode` is unrecognised by ffmpeg < 5.1 (e.g. the 4.4
+        // build shipped on Ubuntu 22.04 / the integration host), where it aborts
+        // the encode with "Unrecognized option 'fps_mode'". `-vsync` is accepted
+        // on both (only deprecated, not removed, on 5.1+). Two `-map 0:v -c:v ...`
+        // blocks emit both outputs from a single demux pass.
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -173,7 +327,7 @@ impl VideoEncoder {
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
-            .arg("vfr")
+            .arg("passthrough")
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
@@ -186,7 +340,7 @@ impl VideoEncoder {
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
-            .arg("vfr")
+            .arg("passthrough")
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
@@ -401,6 +555,20 @@ fn tail_stderr(stderr: &[u8]) -> String {
     String::from_utf8_lossy(&stderr[start..]).into_owned()
 }
 
+/// Extract the version token from `ffmpeg -version` stdout. The first line is
+/// `ffmpeg version <token> ...` (e.g. `ffmpeg version 4.4.2-0ubuntu0.22.04.1
+/// Copyright ...`); returns `"unknown"` when that prefix is absent (custom
+/// builds occasionally reword it).
+fn parse_ffmpeg_version(stdout: &[u8]) -> String {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("ffmpeg version "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(|token| token.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,6 +644,41 @@ mod tests {
         let bytes = vec![b'x'; 16 * 1024];
         let tail = tail_stderr(&bytes);
         assert_eq!(tail.len(), 4 * 1024);
+    }
+
+    #[test]
+    fn parse_version_extracts_token_and_falls_back() {
+        assert_eq!(
+            parse_ffmpeg_version(b"ffmpeg version 4.4.2-0ubuntu0.22.04.1 Copyright (c) 2000\n"),
+            "4.4.2-0ubuntu0.22.04.1"
+        );
+        assert_eq!(parse_ffmpeg_version(b"ffmpeg version n6.1\n"), "n6.1");
+        assert_eq!(parse_ffmpeg_version(b"some custom banner\n"), "unknown");
+        assert_eq!(parse_ffmpeg_version(b""), "unknown");
+    }
+
+    #[test]
+    fn preflight_reports_not_found_for_missing_binary() {
+        let result = VideoEncoder::new()
+            .with_binary("nc-definitely-not-a-real-ffmpeg-binary")
+            .preflight();
+        assert!(
+            matches!(result, Err(FfmpegPreflightError::NotFound { .. })),
+            "expected NotFound, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_accepts_a_real_ffmpeg() {
+        // Skip where the toolchain is unavailable, matching the encode tests.
+        let Some(ffmpeg) = locate_binary("ffmpeg") else {
+            return;
+        };
+        let version = VideoEncoder::new()
+            .with_binary(ffmpeg)
+            .preflight()
+            .expect("system ffmpeg should pass preflight");
+        assert!(!version.is_empty(), "version string should be populated");
     }
 
     #[test]
