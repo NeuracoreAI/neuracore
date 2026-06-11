@@ -157,12 +157,8 @@ pub struct RecordingRow {
     pub robot_id: Option<String>,
     /// Robot instance — second half of the source key.
     pub robot_instance: Option<i64>,
-    /// Robot human-readable name, when supplied.
-    pub robot_name: Option<String>,
     /// Dataset identifier, when supplied.
     pub dataset_id: Option<String>,
-    /// Dataset human-readable name, when supplied.
-    pub dataset_name: Option<String>,
     /// Producer capture-clock window lower bound (Unix nanoseconds).
     pub start_timestamp_ns: Option<i64>,
     /// Producer capture-clock window upper bound (Unix nanoseconds).
@@ -171,12 +167,8 @@ pub struct RecordingRow {
     pub expected_trace_count: Option<i64>,
     /// `1` once the expected trace count has been reported to the backend.
     pub expected_trace_count_reported: i64,
-    /// Traces that have reached the `uploaded` terminal state.
-    pub uploaded_trace_count: i64,
     /// Progress-report lifecycle for this recording.
     pub progress_reported: ProgressReportStatus,
-    /// Daemon wall-clock time the recording was opened.
-    pub started_at: Option<NaiveDateTime>,
     /// Set when the producer issues a stop command.
     pub stopped_at: Option<NaiveDateTime>,
     /// Set when the producer issues a cancel command. Cancelled recordings
@@ -210,16 +202,12 @@ impl RecordingRow {
             recording_id: row.try_get("recording_id")?,
             robot_id: row.try_get("robot_id")?,
             robot_instance: row.try_get("robot_instance")?,
-            robot_name: row.try_get("robot_name")?,
             dataset_id: row.try_get("dataset_id")?,
-            dataset_name: row.try_get("dataset_name")?,
             start_timestamp_ns: row.try_get("start_timestamp_ns")?,
             stop_timestamp_ns: row.try_get("stop_timestamp_ns")?,
             expected_trace_count: row.try_get("expected_trace_count")?,
             expected_trace_count_reported: row.try_get("expected_trace_count_reported")?,
-            uploaded_trace_count: row.try_get("uploaded_trace_count")?,
             progress_reported,
-            started_at: row.try_get("started_at")?,
             stopped_at: row.try_get("stopped_at")?,
             cancelled_at: row.try_get("cancelled_at")?,
             backend_start_notified_at: row.try_get("backend_start_notified_at")?,
@@ -248,16 +236,6 @@ pub struct TraceRecord {
     pub data_type: Option<String>,
     /// Producer-supplied data-type name.
     pub data_type_name: Option<String>,
-    /// Dataset ID, when supplied.
-    pub dataset_id: Option<String>,
-    /// Dataset name, when supplied.
-    pub dataset_name: Option<String>,
-    /// Robot name, when supplied.
-    pub robot_name: Option<String>,
-    /// Robot ID, when supplied.
-    pub robot_id: Option<String>,
-    /// Robot instance number, when supplied.
-    pub robot_instance: Option<i64>,
     /// Filesystem path to the on-disk artefact.
     pub path: Option<String>,
     /// Bytes written so far.
@@ -270,10 +248,6 @@ pub struct TraceRecord {
     pub error_code: Option<TraceErrorCode>,
     /// Latest error message, if any.
     pub error_message: Option<String>,
-    /// Number of upload attempts made so far.
-    pub num_upload_attempts: i64,
-    /// Next scheduled retry time, when in backoff.
-    pub next_retry_at: Option<NaiveDateTime>,
     /// JSON-encoded `{filepath: session_uri}` map populated by the
     /// registration coordinator. The uploader reads this back on
     /// `ReadyForUpload` and dispatches one resumable upload per entry.
@@ -305,19 +279,12 @@ impl TraceRecord {
             upload_status,
             data_type: row.try_get("data_type")?,
             data_type_name: row.try_get("data_type_name")?,
-            dataset_id: row.try_get("dataset_id")?,
-            dataset_name: row.try_get("dataset_name")?,
-            robot_name: row.try_get("robot_name")?,
-            robot_id: row.try_get("robot_id")?,
-            robot_instance: row.try_get("robot_instance")?,
             path: row.try_get("path")?,
             bytes_written: row.try_get("bytes_written")?,
             total_bytes: row.try_get("total_bytes")?,
             bytes_uploaded: row.try_get("bytes_uploaded")?,
             error_code,
             error_message: row.try_get("error_message")?,
-            num_upload_attempts: row.try_get("num_upload_attempts")?,
-            next_retry_at: row.try_get("next_retry_at")?,
             upload_session_uris: row.try_get("upload_session_uris")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,

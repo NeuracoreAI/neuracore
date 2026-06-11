@@ -115,6 +115,16 @@ pub fn chunk_lossless_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}_lossless.mp4")
 }
 
+/// Resolve a recording's top-level directory: `{recordings_root}/{recording}`.
+///
+/// `recording` is the daemon-local `recording_index` stringified — the same
+/// value the per-trace [`TracePath`] uses as its first path segment, so this
+/// directory contains every trace directory for the recording. Used by the
+/// recording reaper to remove a fully-uploaded recording's artefacts in one go.
+pub fn recording_dir(recordings_root: &Path, recording_index: i64) -> PathBuf {
+    recordings_root.join(recording_index.to_string())
+}
+
 /// Key for an on-disk trace directory.
 ///
 /// The three components map directly to the on-disk path segments:

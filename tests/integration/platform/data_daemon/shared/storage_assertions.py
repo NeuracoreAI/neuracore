@@ -6,6 +6,7 @@ neuracore helpers, stdlib, and test constants.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
@@ -13,15 +14,45 @@ from neuracore.data_daemon.helpers import (
     get_daemon_db_path,
     get_daemon_recordings_root_path,
 )
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
 )
 
+# Shared test-state location the Rust daemon is pointed at by
+# ``scoped_daemon_storage_env`` (mirrors ``OFFLINE_DB_PATH`` /
+# ``OFFLINE_RECORDINGS_ROOT`` in ``test_infrastructure``).
+_RUST_TEST_STATE_ROOT = Path(".data_daemon_test_state")
+
+
+def harness_db_path() -> Path:
+    """Return the DB path the harness should clean and assert against.
+
+    The Rust daemon only sees ``NEURACORE_DAEMON_DB_PATH`` while it runs (set by
+    ``scoped_daemon_storage_env``); the clean/check helpers run *outside* that
+    scope, where the production getter falls back to ``~/.neuracore`` and would
+    target the wrong folder. When the Rust daemon is active and the env var is
+    unset, resolve the real shared test-state path the daemon actually used.
+    """
+    if rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_DB_PATH"):
+        return _RUST_TEST_STATE_ROOT / "state.db"
+    return get_daemon_db_path()
+
+
+def harness_recordings_root() -> Path:
+    """Return the recordings root the harness should clean and assert against.
+
+    See :func:`harness_db_path` for why the Rust daemon needs special handling.
+    """
+    if rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_RECORDINGS_ROOT"):
+        return _RUST_TEST_STATE_ROOT / "recordings"
+    return get_daemon_recordings_root_path()
+
 
 def assert_db_absent() -> None:
     """Fail if the active daemon DB file or its WAL/SHM sidecars still exist."""
-    db_path = get_daemon_db_path()
+    db_path = harness_db_path()
     for candidate in (
         db_path,
         Path(str(db_path) + "-wal"),
@@ -34,7 +65,7 @@ def assert_db_absent() -> None:
 
 def assert_recordings_folder_absent() -> None:
     """Fail if the active daemon recordings root directory still exists."""
-    recordings_root = get_daemon_recordings_root_path()
+    recordings_root = harness_recordings_root()
     assert (
         not recordings_root.exists()
     ), f"Recordings folder still present: {recordings_root}"
@@ -59,7 +90,7 @@ def assert_db_empty() -> None:
     non-zero row count there is expected after the daemon has started even
     once.
     """
-    db_path = get_daemon_db_path()
+    db_path = harness_db_path()
     if not db_path.exists():
         return
     with sqlite3.connect(str(db_path)) as conn:
@@ -86,7 +117,7 @@ def assert_db_empty() -> None:
 
 def assert_recordings_folder_empty() -> None:
     """Fail if the recordings root contains any files."""
-    recordings_root = get_daemon_recordings_root_path()
+    recordings_root = harness_recordings_root()
     if not recordings_root.exists():
         return
     leftover = [p for p in recordings_root.rglob("*") if p.is_file()]

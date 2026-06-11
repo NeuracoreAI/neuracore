@@ -452,7 +452,6 @@ async fn upload_single(
                 let update = TraceUpdate {
                     upload_status: Some(TraceUploadStatus::Retrying),
                     error_message: Some(Some(error)),
-                    increment_upload_attempts: true,
                     ..TraceUpdate::default()
                 };
                 if let Err(error) = store.update_trace(trace_id, update).await {
@@ -1129,9 +1128,6 @@ mod tests {
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
-        // The recovery sweep relies on `num_upload_attempts` so the
-        // operator can spot a trace that's flapping between attempts.
-        assert_eq!(trace.num_upload_attempts, 1);
         // Status updates are sent regardless.
         let _ = status_rx.try_recv();
     }

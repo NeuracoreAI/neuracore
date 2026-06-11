@@ -55,12 +55,8 @@ pub struct NewRecording<'a> {
     pub robot_id: Option<&'a str>,
     /// Robot instance — second half of the source key.
     pub robot_instance: Option<i64>,
-    /// Robot human-readable name.
-    pub robot_name: Option<&'a str>,
     /// Dataset identifier.
     pub dataset_id: Option<&'a str>,
-    /// Dataset human-readable name.
-    pub dataset_name: Option<&'a str>,
     /// Producer capture-clock window lower bound (Unix nanoseconds).
     pub start_timestamp_ns: i64,
 }
@@ -296,6 +292,16 @@ pub trait StateStore: Send + Sync {
         recording_index: i64,
         stop_timestamp_ns: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
+
+    /// Delete a recording and all of its trace rows in a single transaction.
+    ///
+    /// Called by the recording reaper once a recording is fully settled (every
+    /// trace uploaded and the backend notified), after its on-disk artefacts
+    /// have been removed. Returns the number of trace rows deleted.
+    async fn delete_recording_cascade(
+        &self,
+        recording_index: i64,
+    ) -> Result<u64, StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -321,8 +327,6 @@ pub struct TraceUpdate {
     /// JSON-encoded `{filepath: session_uri}` map persisted by the
     /// registration coordinator.
     pub upload_session_uris: Option<String>,
-    /// Bump the upload-attempt counter when set.
-    pub increment_upload_attempts: bool,
     /// Set the latest error code (use `Some(None)` to clear, `None` to leave
     /// untouched).
     pub error_code: Option<Option<TraceErrorCode>>,
@@ -342,7 +346,6 @@ impl TraceUpdate {
             && self.total_bytes.is_none()
             && self.bytes_uploaded.is_none()
             && self.upload_session_uris.is_none()
-            && !self.increment_upload_attempts
             && self.error_code.is_none()
             && self.error_message.is_none()
     }
@@ -574,15 +577,13 @@ impl StateStore for SqliteStateStore {
         let now = Utc::now().naive_utc();
         let result = sqlx::query(
             "INSERT INTO recordings ( \
-                 robot_id, robot_instance, robot_name, dataset_id, dataset_name, \
-                 start_timestamp_ns, started_at, created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7, ?7)",
+                 robot_id, robot_instance, dataset_id, \
+                 start_timestamp_ns, created_at, last_updated \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
-        .bind(new.robot_name)
         .bind(new.dataset_id)
-        .bind(new.dataset_name)
         .bind(new.start_timestamp_ns)
         .bind(now)
         .execute(&mut *tx)
@@ -747,11 +748,6 @@ impl StateStore for SqliteStateStore {
         }
         if update.upload_session_uris.is_some() {
             assignments.push("upload_session_uris = ?");
-        }
-        if update.increment_upload_attempts {
-            // SQLite-native expression so callers don't need to read-modify-
-            // write the existing counter on retry.
-            assignments.push("num_upload_attempts = num_upload_attempts + 1");
         }
         if update.error_code.is_some() {
             assignments.push("error_code = ?");
@@ -1280,6 +1276,25 @@ impl StateStore for SqliteStateStore {
         tx.commit().await?;
         Ok((record, write_result.rows_affected()))
     }
+
+    async fn delete_recording_cascade(
+        &self,
+        recording_index: i64,
+    ) -> Result<u64, StateStoreError> {
+        let _guard = self.write_guard.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let traces_deleted = sqlx::query("DELETE FROM traces WHERE recording_index = ?1")
+            .bind(recording_index)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+        sqlx::query("DELETE FROM recordings WHERE recording_index = ?1")
+            .bind(recording_index)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(traces_deleted)
+    }
 }
 
 #[cfg(test)]
@@ -1300,9 +1315,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(instance),
-                robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
-                dataset_name: Some("warehouse"),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
@@ -1812,5 +1825,34 @@ mod tests {
             claimed[0].registration_status,
             TraceRegistrationStatus::Registering
         );
+    }
+
+    #[tokio::test]
+    async fn delete_recording_cascade_removes_recording_and_its_traces_only() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        for trace_id in ["t-1", "t-2"] {
+            store
+                .create_trace(index, trace_id, Some("JOINT_POSITIONS"), None)
+                .await
+                .unwrap();
+        }
+        // A sibling recording + trace must survive the cascade.
+        let other = seed_recording(&store, 9).await;
+        store
+            .create_trace(other, "keep", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+
+        let deleted = store.delete_recording_cascade(index).await.unwrap();
+        assert_eq!(deleted, 2, "both traces of the recording are deleted");
+
+        assert!(store.get_recording(index).await.unwrap().is_none());
+        assert!(store.get_trace("t-1").await.unwrap().is_none());
+        assert!(store.get_trace("t-2").await.unwrap().is_none());
+
+        // Sibling untouched.
+        assert!(store.get_recording(other).await.unwrap().is_some());
+        assert!(store.get_trace("keep").await.unwrap().is_some());
     }
 }
