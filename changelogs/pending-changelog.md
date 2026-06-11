@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+Upgraded to neuracore_types 9.x, which removes NVIDIA Tesla P100 and P4 from GPUType.
