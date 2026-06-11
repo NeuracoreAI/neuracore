@@ -59,6 +59,33 @@ pub mod service_name {
     /// headroom for the worst case.
     pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
+    /// Worst-case postcard size of one frame's contribution to a
+    /// [`Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
+    /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
+    /// value) and a `frame_timestamps_s` element is a fixed 8-byte `f64`.
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8;
+
+    /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
+    /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
+    /// dimensions, counts and the two vector length prefixes — so the frame cap
+    /// below is computed against only the room left for the per-frame vectors.
+    pub const VIDEO_CHUNK_HEADER_RESERVE: usize = 4 * 1024;
+
+    /// Maximum number of frames a single video chunk may carry.
+    ///
+    /// The producer seals a chunk at the **lower** of its byte threshold and
+    /// this frame cap. The cap exists so a [`Envelope::VideoChunkReady`]
+    /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
+    /// per-frame `frame_timestamps_{ns,s}` vectors are the only unbounded part
+    /// of the envelope, so a long recording of small frames — which never
+    /// reaches the byte threshold mid-recording — would otherwise accumulate
+    /// enough frames in a single chunk to overflow the slice. The announcement
+    /// then fails to publish and the whole recording's video is lost. Guarded
+    /// by `video_chunk_ready_at_frame_cap_fits_commands_slice`.
+    pub const MAX_VIDEO_CHUNK_FRAMES: u32 = ((COMMANDS_MAX_PAYLOAD_BYTES
+        - VIDEO_CHUNK_HEADER_RESERVE)
+        / VIDEO_CHUNK_BYTES_PER_FRAME) as u32;
+
     /// Subscriber buffer depth for the lifecycle service.
     ///
     /// Lossless, in-order delivery is *not* a function of this depth: the
@@ -628,6 +655,40 @@ mod tests {
         assert!(
             bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
             "10k-frame chunk envelope ({} bytes) must fit the commands slice ({} bytes)",
+            bytes.len(),
+            service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+        );
+    }
+
+    #[test]
+    fn video_chunk_ready_at_frame_cap_fits_commands_slice() {
+        // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
+        // announcement always fits one commands sample. Prove the cap holds at
+        // the absolute worst case: every per-frame ns timestamp a full-range
+        // i64 (10-byte postcard zigzag varint) and every fixed field maxed out.
+        // Without the cap a long recording of tiny frames overflows the slice
+        // and the whole recording's video announcement fails to publish.
+        let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
+        let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
+        let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let envelope = Envelope::VideoChunkReady {
+            robot_id: "11111111-2222-3333-4444-555555555555".into(),
+            robot_instance: i64::MAX,
+            data_type: "RGB_IMAGES".into(),
+            sensor_name: Some("camera_with_a_deliberately_long_sensor_label".into()),
+            publish_timestamp_ns: i64::MAX,
+            thread_id: i64::MAX,
+            width: u32::MAX,
+            height: u32::MAX,
+            byte_count: u64::MAX,
+            frame_count: count as u32,
+            frame_timestamps_ns,
+            frame_timestamps_s,
+        };
+        let bytes = envelope.encode().expect("encode");
+        assert!(
+            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+            "chunk at frame cap ({count} frames, {} bytes) must fit the commands slice ({} bytes)",
             bytes.len(),
             service_name::COMMANDS_MAX_PAYLOAD_BYTES,
         );

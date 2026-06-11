@@ -57,6 +57,7 @@
         "syncpoint",
         "testsrc",
         "writeback",
+        "varint",
         "vdecode",
         "vencode"
     ]
