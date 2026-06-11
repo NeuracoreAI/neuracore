@@ -900,27 +900,18 @@ impl ActorState {
             .fail(&self.identity.trace_id, self.bytes_on_disk as i64);
     }
 
-    /// Tear down the writer and delete the on-disk trace directory.
+    /// Tear down the writer and release the trace's disk budget.
     ///
-    /// Called when the parent recording is cancelled. The DB row's
-    /// `write_status` is left untouched here — the dispatcher issues a single
-    /// `cancel_recording` transaction once every actor has exited.
+    /// Called when the parent recording is cancelled. The on-disk artefacts are
+    /// *not* removed here: the recording reaper deletes the whole recording
+    /// directory (and the DB rows) together once the cancel has been durably
+    /// notified to the backend, so it is the single owner of cancelled-recording
+    /// file removal. The DB row's `write_status` is left untouched here — the
+    /// dispatcher issues a single `cancel_recording` transaction once every
+    /// actor has exited.
     async fn handle_cancel(&mut self, context: &Arc<TraceActorContext>) {
-        // Drop the writer first so any BufWriter inside releases its file
-        // handle before we unlink the directory.
+        // Drop the writer so any BufWriter inside releases its file handle.
         self.writer = TraceWriter::Pending;
-
-        let trace_dir = self.trace_directory(context);
-        if let Err(error) = std::fs::remove_dir_all(&trace_dir) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    %error,
-                    trace_id = self.identity.trace_id,
-                    path = %trace_dir.display(),
-                    "failed to remove cancelled trace directory"
-                );
-            }
-        }
         if self.bytes_on_disk > 0 {
             context.storage_budget.release(self.bytes_on_disk);
             self.bytes_on_disk = 0;

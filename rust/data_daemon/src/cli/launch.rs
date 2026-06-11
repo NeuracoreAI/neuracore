@@ -16,8 +16,8 @@ use anyhow::{Context, Result};
 use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
-    read_org_id_from_config, spawn_org_watcher, spawn_progress_reporter,
-    spawn_recording_cancel_notifier, spawn_recording_start_notifier, spawn_recording_stop_notifier,
+    read_org_id_from_config, spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
+    spawn_recording_reaper, spawn_recording_start_notifier, spawn_recording_stop_notifier,
     spawn_registration, spawn_status_updater, spawn_uploader, OrgWatcherHandle, StatusUpdate,
 };
 use crate::config::env::RuntimeEnv;
@@ -381,6 +381,16 @@ fn run_daemon(
                 shutdown_tx.subscribe(),
             );
 
+            // Reclaim fully-uploaded recordings' files + rows. Spawned
+            // regardless of `offline` so a daemon restarted offline still
+            // reaps recordings that completed in a prior online session; it
+            // only ever acts on recordings the backend already holds in full.
+            let reaper_handle = spawn_recording_reaper(
+                state_store.clone(),
+                Arc::new(recordings_root.clone()),
+                shutdown_tx.subscribe(),
+            );
+
             // Capture the actual shutdown signal in a spawned task so we
             // can log which signal triggered the exit *after* the listener
             // returns. The listener itself cannot be `tokio::spawn`'d —
@@ -418,6 +428,7 @@ fn run_daemon(
             // can be produced. Drain + flush the write-behind's final batch
             // before the store closes so finalise/failed states are durable.
             trace_writer.shutdown().await;
+            reaper_handle.join().await;
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
             }

@@ -20,12 +20,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
-from neuracore.data_daemon.helpers import (
-    get_daemon_db_path,
-    get_daemon_recordings_root_path,
-)
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
+    harness_db_path,
+    harness_recordings_root,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     case_id,
@@ -163,8 +161,8 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     """
     import shutil
 
-    db_path = get_daemon_db_path()
-    recordings_root = get_daemon_recordings_root_path()
+    db_path = harness_db_path()
+    recordings_root = harness_recordings_root()
 
     if storage_state_action == STORAGE_STATE_EMPTY:
         if db_path.exists():

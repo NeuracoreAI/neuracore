@@ -309,17 +309,14 @@ impl Dispatcher {
             Envelope::StartRecording {
                 robot_id,
                 robot_instance,
-                robot_name,
                 dataset_id,
-                dataset_name,
                 publish_timestamp_ns,
                 timestamp_ns,
+                ..
             } => {
                 self.handle_start(
                     (robot_id, robot_instance),
-                    robot_name,
                     dataset_id,
-                    dataset_name,
                     publish_timestamp_ns,
                     timestamp_ns,
                     recv_at,
@@ -438,9 +435,7 @@ impl Dispatcher {
     async fn handle_start(
         &mut self,
         source: Source,
-        robot_name: Option<String>,
         dataset_id: Option<String>,
-        dataset_name: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
         recv_at: Instant,
@@ -456,9 +451,7 @@ impl Dispatcher {
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
-            robot_name: robot_name.as_deref(),
             dataset_id: dataset_id.as_deref(),
-            dataset_name: dataset_name.as_deref(),
             start_timestamp_ns: timestamp_ns,
         };
         let recording_index = match self.store.create_recording(new).await {

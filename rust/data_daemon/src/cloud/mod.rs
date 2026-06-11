@@ -21,6 +21,7 @@ pub mod cloud_files;
 pub mod org_watcher;
 pub mod progress;
 pub mod recording_cancel_notifier;
+pub mod recording_reaper;
 pub mod recording_start_notifier;
 pub mod recording_stop_notifier;
 pub mod registration;
@@ -34,6 +35,7 @@ pub use progress::{spawn_progress_reporter, ProgressReporterHandle};
 pub use recording_cancel_notifier::{
     spawn_recording_cancel_notifier, RecordingCancelNotifierHandle,
 };
+pub use recording_reaper::spawn_recording_reaper;
 pub use recording_start_notifier::{spawn_recording_start_notifier, RecordingStartNotifierHandle};
 pub use recording_stop_notifier::{spawn_recording_stop_notifier, RecordingStopNotifierHandle};
 pub use registration::{spawn_registration, RegistrationCoordinatorHandle};

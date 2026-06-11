@@ -268,9 +268,7 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                robot_name: Some("arm"),
                 dataset_id: Some("ds-1"),
-                dataset_name: Some("warehouse"),
                 start_timestamp_ns: 1_700_000_000_000_000_000,
             })
             .await
