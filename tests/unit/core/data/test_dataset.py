@@ -2,16 +2,21 @@
 
 import copy
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests_mock
 from neuracore_types import Dataset as DatasetModel
 from neuracore_types import DataType
+from neuracore_types import Recording as RecordingModel
+from neuracore_types import RecordingMetadata
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.const import API_URL, DEFAULT_RECORDING_CACHE_DIR
-from neuracore.core.data.dataset import Dataset
+from neuracore.core.data.dataset import PAGE_SIZE, Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.exceptions import DatasetError
@@ -1168,3 +1173,66 @@ class TestDatasetMixedOperations:
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
 
         assert dataset.cache_dir == DEFAULT_RECORDING_CACHE_DIR
+
+
+class TestDatasetConcurrentPagination:
+    """Regression tests for thread-safety of lazy page fetching.
+
+    SynchronizedDataset prefetches recordings from a thread pool, so
+    concurrent Dataset[idx] calls race on the shared pagination cursor and
+    recordings cache. Without locking, the same page could be fetched and
+    appended multiple times, duplicating recordings and dropping the tail.
+    """
+
+    def test_concurrent_getitem_no_duplicate_pages(self, dataset_dict):
+        """Concurrent indexing must fetch each page exactly once."""
+        import neuracore.core.data.dataset as ds_mod
+
+        total = 496
+        all_recordings = [
+            RecordingModel(
+                id=f"rec-{i:04d}",
+                robot_id=TEST_ROBOT_ID,
+                instance=1,
+                org_id="test-org-id",
+                start_time=float(i),
+                end_time=float(i) + 1.0,
+                total_bytes=512,
+                metadata=RecordingMetadata(),
+            ).model_dump(mode="json")
+            for i in range(total)
+        ]
+        request_count = 0
+        count_lock = threading.Lock()
+
+        def fake_post(url, headers=None, params=None, json=None, timeout=None):
+            nonlocal request_count
+            with count_lock:
+                request_count += 1
+            start = 0 if json is None else int(json["id"].split("-")[1]) + 1
+            batch = all_recordings[start : start + params.get("limit", PAGE_SIZE)]
+            response = MagicMock()
+            response.status_code = 200
+            response.json.return_value = {"data": batch, "total": total}
+            response.raise_for_status = MagicMock()
+            return response
+
+        session = MagicMock()
+        session.post.side_effect = fake_post
+
+        with (
+            patch.object(ds_mod, "thread_local_session", return_value=session),
+            patch.object(ds_mod, "get_auth", return_value=MagicMock(get_headers=dict)),
+        ):
+            for _ in range(10):
+                dataset = Dataset(**dataset_dict)
+                dataset._num_recordings = total
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    recordings = list(executor.map(lambda i: dataset[i], range(total)))
+
+                ids = [r.id for r in recordings]
+                assert len(set(ids)) == total, "duplicate recordings from page race"
+                assert ids == sorted(ids), "recording order corrupted by page race"
+
+        num_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        assert request_count == 10 * num_pages, "pages fetched more than once"

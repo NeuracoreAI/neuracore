@@ -35,6 +35,7 @@ class SynchronizedDataset:
         cross_embodiment_union: CrossEmbodimentUnion | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
+        synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
     ):
         """Initialize a dataset from server response data.
 
@@ -45,14 +46,20 @@ class SynchronizedDataset:
             cross_embodiment_union: Cross-embodiment union for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_prefetch_workers: Number of threads to use for prefetching videos.
+            synced_recording_cache: Already-fetched synced recordings keyed by
+                index, used when slicing to avoid re-fetching data the parent
+                dataset already loaded.
         """
         self.id = id
         self.dataset = dataset
         self.frequency = frequency
         self.cross_embodiment_union = cross_embodiment_union
         self._prefetch_videos = prefetch_videos
+        self._max_prefetch_workers = max_prefetch_workers
         self._recording_idx = 0
-        self._synced_recording_cache: dict[int, SynchronizedRecording] = {}
+        self._synced_recording_cache: dict[int, SynchronizedRecording] = (
+            dict(synced_recording_cache) if synced_recording_cache else {}
+        )
 
         self._prefetch_videos_needed = False
         if prefetch_videos:
@@ -68,7 +75,16 @@ class SynchronizedDataset:
                     #  other download is in progress fails, we can retry
                     self._prefetch_videos_needed = True
                     break
-        self._perform_synced_data_prefetch(max_prefetch_workers=max_prefetch_workers)
+        if not self._is_synced_recording_cache_complete():
+            self._perform_synced_data_prefetch(
+                max_prefetch_workers=max_prefetch_workers
+            )
+
+    def _is_synced_recording_cache_complete(self) -> bool:
+        """Check whether every recording is already in the synced cache."""
+        return all(
+            idx in self._synced_recording_cache for idx in range(len(self.dataset))
+        )
 
     def _perform_synced_data_prefetch(self, max_prefetch_workers: int) -> None:
         """Prefetch synced data for all recordings using multiple threads.
@@ -129,12 +145,22 @@ class SynchronizedDataset:
         if isinstance(idx, slice):
             # Handle slice
             dataset = self.dataset[idx.start : idx.stop : idx.step]
+            # Hand already-fetched recordings to the slice (re-indexed) so it
+            # does not prefetch data this instance already loaded.
+            start, stop, step = idx.indices(len(self.dataset))
+            sliced_cache = {
+                new_idx: self._synced_recording_cache[old_idx]
+                for new_idx, old_idx in enumerate(range(start, stop, step))
+                if old_idx in self._synced_recording_cache
+            }
             return SynchronizedDataset(
                 id=self.id,
                 dataset=cast("Dataset", dataset),
                 frequency=self.frequency,
                 cross_embodiment_union=self.cross_embodiment_union,
                 prefetch_videos=False,  # Avoid prefetching again
+                max_prefetch_workers=self._max_prefetch_workers,
+                synced_recording_cache=sliced_cache,
             )
         else:
             # Handle single index
