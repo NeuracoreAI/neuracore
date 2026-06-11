@@ -152,6 +152,58 @@ def test_model_construction_forward_backward(
             assert torch.isfinite(param.grad).all()
 
 
+@pytest.mark.parametrize("output_data_types", OUTPUT_PARAMS)
+@pytest.mark.parametrize("input_data_types", INPUT_PARAMS)
+def test_flow_matching_forward_backward(
+    input_data_types: OrderedSet[DataType],
+    output_data_types: OrderedSet[DataType],
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+    sample_inference_batch: BatchedInferenceInputs,
+    sample_training_batch: BatchedTrainingSamples,
+):
+    """Flow matching constructs, infers, and backward passes.
+
+    The diffusion process is already covered by
+    test_model_construction_forward_backward (the default process_type).
+    """
+    description = ModelInitDescription(
+        input_data_types=input_data_types,
+        output_data_types=output_data_types,
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    config = {**model_config, "process_type": "flow_matching"}
+    model = DiffusionPolicy(model_init_description=description, **config)
+    model = model.to(DEVICE)
+    assert isinstance(model, nn.Module)
+
+    sample_inference_batch = sample_inference_batch.to(DEVICE)
+    output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
+    assert isinstance(output, dict)
+    for data_type, tensors in output.items():
+        assert isinstance(data_type, DataType)
+        assert isinstance(tensors, list)
+        for tensor in tensors:
+            assert isinstance(tensor, BatchedNCData)
+
+    sample_training_batch = sample_training_batch.to(DEVICE)
+    output: BatchedTrainingOutputs = model.training_step(sample_training_batch)
+
+    # Compute loss
+    loss = output.losses["mse_loss"]
+
+    # Perform backward pass
+    loss.backward()
+
+    # Check that gradients are computed
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            assert param.grad is not None, f"Gradient for {name} is None"
+            assert torch.isfinite(param.grad).all()
+
+
 def test_run_validation(tmp_path: Path, mock_login):
     os.environ["NEURACORE_ENDPOINT_TIMEOUT"] = "60"
     algorithm_dir = Path(inspect.getfile(DiffusionPolicy)).parent
