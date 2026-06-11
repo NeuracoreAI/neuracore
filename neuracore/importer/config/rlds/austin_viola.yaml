@@ -107,7 +107,16 @@ data_import_config:
             orientation:
                 type: AXIS_ANGLE # Rotation delta is a rotation vector.
                 angle_units: RADIANS
-                align_frame_roll: 3.14159265
+                # Action delta re-expressed in the base frame
+                # (conjugation X*T*X^-1): WORLD(X) then TOOL(X^-1); the inverse
+                # negates the rotation.
+                frame_transforms:
+                    - frame: WORLD
+                      rotation: {roll: 3.14159265, pitch: 0.0, yaw: 0.0}
+                      translation: {x: 0.0, y: 0.0, z: 0.0}
+                    - frame: TOOL
+                      rotation: {roll: -3.14159265, pitch: 0.0, yaw: 0.0}
+                      translation: {x: 0.0, y: 0.0, z: 0.0}
         mapping:
             - name: panda_hand_tcp # Same TCP frame as END_EFFECTOR_POSES.
               pose_position_source_name: world_vector # TCP translation delta.

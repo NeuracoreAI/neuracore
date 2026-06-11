@@ -1,29 +1,31 @@
+# cspell:ignore kewang
 input_dataset_name: bridge_v2_dataset_converted_externally_to_tfds
 
 output_dataset:
   name: bridge_v2
   tags: [widowx, bridge_v2, manipulation]
-  description: "BridgeData V2 is a large and diverse dataset of robotic manipulation 
-  behaviors designed to facilitate research in scalable robot learning. The dataset is 
-  compatible with open-vocabulary, multi-task learning methods conditioned on goal 
-  images or natural language instructions. Skills learned from the data generalize to 
-  novel objects and environments, as well as across institutions.
+  description: >-
+    BridgeData V2 is a large and diverse dataset of robotic manipulation behaviors
+    designed to facilitate research in scalable robot learning. The dataset is
+    compatible with open-vocabulary, multi-task learning methods conditioned on goal
+    images or natural language instructions. Skills learned from the data generalize
+    to novel objects and environments, as well as across institutions.
+  source_url: "https://rail-berkeley.github.io/bridgedata/"
 
-. Dataset source: https://rail-berkeley.github.io/bridgedata/"
-
-robot: 
+robot:
   name: widowx
-  urdf_path: "neuracore/neuracore/importer/config/widowx.urdf"
-  override_existing: true
+  urdf_path: "wx250s.urdf"
+  overwrite_existing: true
 
 frequency: 5.0
 
 data_import_config:
   RGB_IMAGES:
     source: observation
-    image_convention: CHANNELS_LAST
-    order_of_channels: RGB
-    mapping: 
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
       - name: image_0
         source_name: image_0
       - name: image_1
@@ -33,41 +35,65 @@ data_import_config:
       - name: image_3
         source_name: image_3
 
-  JOINT_POSITIONS: 
+  END_EFFECTOR_POSES:
     source: observation.state
-    units: RADIANS
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: EULER
+        euler_order: XYZ
+        angle_units: RADIANS
+        # Bridge stores RPY via ROS tf (static-axes xyz) -- extrinsic XYZ.
+        extrinsic_euler: true
+        # Bridge identity orientation = gripper pointing down (-Z), while
+        # the wx250s ee_gripper_link identity points forward (+X). A +pi/2
+        # pitch offset on the body's own axes reconciles the tool frames so
+        # IK targets the correct world-frame orientation.
+        frame_transforms:
+          - frame: TOOL
+            rotation: {roll: 0.0, pitch: 1.5707963267948966, yaw: 0.0}
+            translation: {x: 0.0, y: 0.0, z: 0.0}
     mapping:
-      - name: joint_1
-        index: 0
-      - name: joint_2
-        index: 1
-      - name: joint_3
-        index: 2
-      - name: joint_4
-        index: 3
-      - name: joint_5
-        index: 4
-      - name: gripper_revolute_joint
-        index: 5
+      - name: gripper_aux_link
+        index_range:
+          start: 0
+          end: 6
 
+  JOINT_POSITIONS:
+    source: observation.state
+    format:
+      joint_position_input_type: END_EFFECTOR
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: EULER
+        euler_order: XYZ
+        angle_units: RADIANS
+        extrinsic_euler: true
+        frame_transforms:
+          - frame: TOOL
+            rotation: {roll: 0.0, pitch: 1.5707963267948966, yaw: 0.0}
+            translation: {x: 0.0, y: 0.0, z: 0.0}
+    mapping:
+      - name: ee_gripper_link
+        source_name: gripper_aux_link
+        index_range:
+          start: 0
+          end: 6
 
   PARALLEL_GRIPPER_OPEN_AMOUNTS:
     source: observation.state
-    inverted: false
     mapping:
       - name: gripper_open_amount
         index: 6
 
   VISUAL_JOINT_POSITIONS:
-    source: observation.state # path to the data in the input dataset
+    source: observation.state
     format:
       visual_joint_input_type: GRIPPER
     mapping:
-      - name: gripper_prismatic_joint_1
+      - name: left_finger
         index: 6
-        inverted: false
-        offset: 0.0
-      - name: gripper_prismatic_joint_2
+      - name: right_finger
         index: 6
 
   LANGUAGE:

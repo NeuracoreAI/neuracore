@@ -125,7 +125,7 @@ def test_log_data_ik_requested_converts_end_effector_to_joints():
     importer.robot_utils.end_effector_to_joint_positions.assert_called_once()
     assert importer._validate_joint_data.call_count == 2
     assert importer._log_transformed_data.call_count == 2
-    assert importer.prev_ik_solution == [0.7, -0.4]
+    assert importer.prev_ik_solution == {"joint1": 0.7, "joint2": -0.4}
 
 
 def test_log_data_fk_requested_converts_joints_to_end_effector():
