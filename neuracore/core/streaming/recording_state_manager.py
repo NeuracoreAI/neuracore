@@ -162,8 +162,11 @@ class RecordingStateManager(BaseSSEConsumer):
     ) -> None:
         """Handle recording start for a robot instance.
 
-        Updates internal state. If the robot was already recording with a different
-        ID, stops the previous recording first.
+        Updates internal state. If the robot was already recording under a
+        different id (e.g. the local handle being replaced by the backend cloud
+        id), the handle is replaced in place and the previous recording's timers
+        are retired — the instance is never transiently cleared, so a concurrent
+        ``log_*`` cannot observe a ``None`` recording id and drop a frame.
 
         Args:
             robot_id: Robot ID
@@ -177,8 +180,6 @@ class RecordingStateManager(BaseSSEConsumer):
 
         if previous_recording_id == recording_id:
             return
-        if previous_recording_id is not None:
-            self.recording_stopped(robot_id, instance, previous_recording_id)
 
         try:
             ensure_daemon_running()
@@ -187,6 +188,8 @@ class RecordingStateManager(BaseSSEConsumer):
             return
 
         self.recording_robot_instances[instance_key] = recording_id
+        if previous_recording_id is not None:
+            self._cancel_recording_timers(previous_recording_id)
         self._schedule_recording_timers(
             robot_id=robot_id,
             instance=instance,
@@ -336,6 +339,16 @@ class RecordingStateManager(BaseSSEConsumer):
             instance_key = RobotInstanceIdentifier(
                 robot_id=robot_id, robot_instance=instance
             )
+            # A STOP only applies to the recording currently active for this
+            # instance. A stale STOP for an already-superseded recording — e.g.
+            # the prior recording in a back-to-back sequence whose SSE lands
+            # after the next recording has already started on the same source —
+            # must not drain it: the drain callback issues a timestamp-less
+            # producer stop, so the daemon would close the now-live window at
+            # wall-clock now and collapse its reported duration. This mirrors the
+            # identity guard in recording_stopped, which fires below.
+            if previous_recording_id != recording_id:
+                return
             callback = self._drain_callbacks.get(instance_key)
             if callback and was_recording:
                 threading.Thread(

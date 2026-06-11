@@ -56,7 +56,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use data_daemon_ipc::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
-    MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
+    MAX_PUBLISHERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, MAX_VIDEO_CHUNK_FRAMES,
 };
 use data_daemon_ipc::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -79,6 +79,12 @@ use crate::nut_writer::{NutVideoConfig, NutWriter};
 /// checked *after* each frame, so the on-disk file can exceed it by at most
 /// one frame. A chunk is also rolled at every lifecycle event so a single NUT
 /// only ever holds frames from one recording window.
+///
+/// This byte threshold has a companion frame-count cap
+/// ([`MAX_VIDEO_CHUNK_FRAMES`]): a chunk is sealed at whichever bound is hit
+/// first (see [`should_flush_chunk`]). Small frames never reach 256 MiB
+/// mid-recording, so the frame cap is what bounds the chunk's announcement
+/// envelope to one commands slice.
 const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Spool directory name — must match `storage::paths::SPOOL_DIRNAME` on the
@@ -604,10 +610,25 @@ fn log_frame(
     )
 }
 
+/// Whether the in-progress chunk should be sealed now, checked after each
+/// appended frame. A chunk is rolled at the **lower** of two bounds:
+///
+/// * [`CHUNK_FLUSH_BYTES`] — keeps the daemon's per-chunk encode cost amortised.
+/// * [`MAX_VIDEO_CHUNK_FRAMES`] — keeps the chunk's `VideoChunkReady`
+///   announcement within one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample. Small frames
+///   never reach the byte threshold mid-recording, so without the frame cap a
+///   long recording accumulates one ever-growing chunk whose per-frame
+///   timestamp vectors eventually overflow the commands slice — the
+///   announcement then fails to publish and the recording's video is lost.
+fn should_flush_chunk(chunk_bytes: u64, frame_count: u32) -> bool {
+    chunk_bytes >= CHUNK_FLUSH_BYTES || frame_count >= MAX_VIDEO_CHUNK_FRAMES
+}
+
 /// Append one frame to the `(source, sensor)` in-progress NUT chunk, opening
 /// the chunk lazily, enforcing PTS monotonicity, and flushing once the chunk
-/// crosses [`CHUNK_FLUSH_BYTES`]. Best-effort: NUT-write errors are logged and
-/// the frame dropped, never propagated to Python.
+/// crosses [`CHUNK_FLUSH_BYTES`] or [`MAX_VIDEO_CHUNK_FRAMES`]. Best-effort:
+/// NUT-write errors are logged and the frame dropped, never propagated to
+/// Python.
 #[allow(clippy::too_many_arguments)]
 fn record_video_frame(
     robot_id: &str,
@@ -706,7 +727,7 @@ fn record_video_frame(
         state.frame_timestamps_ns.push(timestamp_ns);
         state.frame_timestamps_s.push(timestamp_s);
 
-        if bytes_after_write >= CHUNK_FLUSH_BYTES {
+        if should_flush_chunk(bytes_after_write, state.frame_count) {
             flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, &mut state)
         } else {
             None
@@ -943,4 +964,44 @@ fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flushes_when_byte_threshold_reached() {
+        // The byte threshold seals the chunk regardless of frame count (large
+        // frames hit 256 MiB long before the frame cap).
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES + 1, 1));
+    }
+
+    #[test]
+    fn flushes_when_frame_cap_reached() {
+        // Small frames never reach the byte threshold, so the frame cap is what
+        // bounds the chunk — it seals at MAX_VIDEO_CHUNK_FRAMES even with a
+        // near-empty NUT file.
+        assert!(should_flush_chunk(0, MAX_VIDEO_CHUNK_FRAMES));
+        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES + 1));
+    }
+
+    #[test]
+    fn does_not_flush_below_both_bounds() {
+        assert!(!should_flush_chunk(0, 0));
+        assert!(!should_flush_chunk(
+            CHUNK_FLUSH_BYTES - 1,
+            MAX_VIDEO_CHUNK_FRAMES - 1
+        ));
+    }
+
+    #[test]
+    fn flush_is_the_lower_of_the_two_bounds() {
+        // A chunk of tiny frames is sealed by the frame cap with bytes still far
+        // under the byte threshold — i.e. whichever bound is hit first wins.
+        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES));
+        // ...and a byte-heavy chunk is sealed before the frame cap.
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
+    }
 }
