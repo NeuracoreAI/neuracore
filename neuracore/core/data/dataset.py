@@ -311,11 +311,12 @@ class Dataset:
         tags: list[str] | None = None,
         shared: bool = False,
     ) -> "Dataset":
-        """Create a new dataset or return existing one with the same name.
+        """Create a new dataset or return an existing one in the same namespace.
 
         Creates a new dataset with the specified parameters. If a dataset
-        with the same name already exists, returns the existing dataset
-        instead of creating a duplicate.
+        with the same name already exists in the same namespace (private or
+        shared), returns the existing dataset instead of creating a duplicate.
+        If a dataset exists in the other namespace, a new dataset is created.
 
         Args:
             name: Unique name for the dataset.
@@ -326,11 +327,19 @@ class Dataset:
                 members allocated by the Neuracore team.
 
         Returns:
-            The newly created Dataset instance, or existing dataset if
-            name already exists.
+            The newly created Dataset instance, or the existing dataset if one
+            already exists in the same namespace.
         """
         ds = Dataset.get_by_name(name, non_exist_ok=True)
         if ds is None:
+            ds = Dataset._create_dataset(name, description, tags, shared=shared)
+        elif shared != ds.is_shared:
+            existing_namespace = "shared" if ds.is_shared else "private"
+            requested_namespace = "shared" if shared else "private"
+            logger.info(
+                f"Dataset '{name}' already exists as a {existing_namespace} "
+                f"dataset; creating a new {requested_namespace} dataset."
+            )
             ds = Dataset._create_dataset(name, description, tags, shared=shared)
         else:
             logger.info(f"Dataset '{name}' already exist.")
