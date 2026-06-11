@@ -297,6 +297,19 @@ async fn resolve_prior_pending(
                         "cancelled prior pending recording on the backend before opening the next",
                     );
                 }
+                Err(error) if error.is_not_found() => {
+                    // Already closed — the cancel-notifier sweep won the race.
+                    // The prior recording is not pending on the backend, so the
+                    // next start cannot reuse its id; mark it notified so the
+                    // sweep stops re-posting too.
+                    let _ = store.mark_recording_cancel_notified(index).await;
+                    tracing::debug!(
+                        recording_index = index,
+                        recording_id,
+                        next_recording_index = before_index,
+                        "prior pending recording already cancelled on backend (404)",
+                    );
+                }
                 Err(error) => {
                     tracing::warn!(
                         %error,
@@ -316,6 +329,17 @@ async fn resolve_prior_pending(
                         recording_id,
                         next_recording_index = before_index,
                         "stopped prior pending recording on the backend before opening the next",
+                    );
+                }
+                Err(error) if error.is_not_found() => {
+                    // Already closed — the stop-notifier sweep won the race. Mark
+                    // it notified so the sweep stops re-posting too.
+                    let _ = store.mark_recording_stop_notified(index).await;
+                    tracing::debug!(
+                        recording_index = index,
+                        recording_id,
+                        next_recording_index = before_index,
+                        "prior pending recording already stopped on backend (404)",
                     );
                 }
                 Err(error) => {

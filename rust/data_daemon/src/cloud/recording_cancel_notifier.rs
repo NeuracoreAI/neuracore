@@ -190,6 +190,27 @@ async fn notify_backend(
                 );
             }
         }
+        Err(error) if error.is_not_found() => {
+            // 404 means the backend no longer has this recording open — the
+            // start-notifier's `resolve_prior_pending` already closed it when
+            // the next recording for this source opened. That is exactly the
+            // post-condition we wanted, so record it as notified rather than
+            // re-sweeping forever.
+            if let Err(error) = store.mark_recording_cancel_notified(recording_index).await {
+                tracing::warn!(
+                    %error,
+                    recording_index,
+                    recording_id,
+                    "persisting backend_cancel_notified_at after a 404 failed; will re-sweep",
+                );
+            } else {
+                tracing::debug!(
+                    recording_index,
+                    recording_id,
+                    "recording already closed on backend (404); treated as cancel-notified",
+                );
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 %error,
@@ -366,6 +387,57 @@ mod tests {
         })
         .await
         .expect("backend_cancel_notified_at must be stamped within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn treats_backend_404_as_already_cancelled() {
+        // The start-notifier's `resolve_prior_pending` may have closed this
+        // recording on the backend first (cancel-then-start with no gap), so a
+        // 404 here is the desired post-condition, not a failure: the row must
+        // still be marked notified so the sweep stops re-posting.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/cancel"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "detail": "Recording not found." })),
+            )
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_cancelled_recording_with_cloud_id(&store, "rec-already-gone").await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_cancel_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let row = store
+                    .get_recording(index)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                if row.backend_cancel_notified_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a 404 must still stamp backend_cancel_notified_at within 3s");
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;

@@ -79,6 +79,19 @@ pub enum ApiClientError {
     MissingHeader(&'static str),
 }
 
+impl ApiClientError {
+    /// True when the backend responded `404 Not Found`.
+    ///
+    /// The recording notifiers use this to treat "the recording is already not
+    /// open on the backend" as the desired post-condition rather than a
+    /// failure: a cancel/stop POST that 404s means another path already closed
+    /// the recording (a benign race between the cancel-notifier sweep and the
+    /// start-notifier's `resolve_prior_pending`), so there is nothing left to do.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
+}
+
 /// Generic HTTP client wrapping a [`reqwest::Client`] with auth + retry.
 pub struct ApiClient {
     inner: Client,

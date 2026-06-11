@@ -213,6 +213,27 @@ async fn notify_backend(
                 );
             }
         }
+        Err(error) if error.is_not_found() => {
+            // 404 means the backend no longer has this recording open — the
+            // start-notifier's `resolve_prior_pending` already closed it when
+            // the next recording for this source opened. That is the
+            // post-condition we wanted, so record it as notified rather than
+            // re-sweeping forever.
+            if let Err(error) = store.mark_recording_stop_notified(recording_index).await {
+                tracing::warn!(
+                    %error,
+                    recording_index,
+                    recording_id,
+                    "persisting backend_stop_notified_at after a 404 failed; will re-sweep",
+                );
+            } else {
+                tracing::debug!(
+                    recording_index,
+                    recording_id,
+                    "recording already closed on backend (404); treated as stop-notified",
+                );
+            }
+        }
         Err(error) => {
             // The producer-side iceoryx2 publish has already succeeded by
             // the time we get here; logging is the only available recourse
