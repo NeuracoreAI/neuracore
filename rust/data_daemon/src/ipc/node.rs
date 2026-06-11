@@ -12,12 +12,15 @@
 
 use data_daemon_ipc::service_name::{
     COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE,
+    MAX_QUERY_CLIENTS_PER_SERVICE, MAX_QUERY_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
+    QUERIES, QUERIES_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
+use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::{ipc, NodeName};
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
+use iceoryx2::service::port_factory::request_response::PortFactory as QueryPortFactory;
 use thiserror::Error;
 
 /// Errors raised while bringing up the daemon's iceoryx2 transport.
@@ -62,6 +65,14 @@ pub enum IpcSetupError {
         /// Underlying iceoryx2 error message.
         detail: String,
     },
+    /// Building a request-response server port failed.
+    #[error("failed to create server on '{name}': {detail}")]
+    ServerCreate {
+        /// Owning service.
+        name: String,
+        /// Underlying iceoryx2 error message.
+        detail: String,
+    },
 }
 
 /// Daemon-side iceoryx2 transport.
@@ -79,6 +90,11 @@ pub struct IpcTransport {
     /// Service handle held alongside the subscriber so port discovery doesn't
     /// race the service handle going out of scope.
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
+    /// Request-response server on `neuracore/data_daemon/queries` that answers
+    /// SDK recording-id lookups.
+    queries_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the server, as for the commands service.
+    _queries_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
 }
 
 impl IpcTransport {
@@ -102,16 +118,25 @@ impl IpcTransport {
         let (commands_service, commands_subscriber) =
             open_subscriber(&node, COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)?;
 
+        let (queries_service, queries_server) = open_query_server(&node, QUERIES)?;
+
         Ok(IpcTransport {
             _node: node,
             commands_subscriber,
             _commands_service: commands_service,
+            queries_server,
+            _queries_service: queries_service,
         })
     }
 
     /// Borrow the `commands` subscriber port.
     pub fn commands_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
         &self.commands_subscriber
+    }
+
+    /// Borrow the `queries` request-response server port.
+    pub fn queries_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.queries_server
     }
 }
 
@@ -165,4 +190,46 @@ fn open_subscriber(
                 detail: error.to_string(),
             })?;
     Ok((service, subscriber))
+}
+
+/// Convenience aliases for the `[u8]` request-response factory + server pair.
+type ByteSliceQueryFactory = QueryPortFactory<ipc::Service, [u8], (), [u8], ()>;
+type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
+
+/// Open or attach to the `[u8]` request-response `queries` service and build the
+/// daemon's single server on it.
+///
+/// The SDK opens client ports on the same service (one per OS thread, like the
+/// `commands` publisher), so the caps mirror the publisher topology. Requests
+/// and responses are both small postcard blobs ([`QUERIES_MAX_PAYLOAD_BYTES`]).
+fn open_query_server(
+    node: &Node<ipc::Service>,
+    name: &str,
+) -> Result<(ByteSliceQueryFactory, ByteSliceServer), IpcSetupError> {
+    let service_name = name
+        .try_into()
+        .map_err(|error| IpcSetupError::InvalidServiceName {
+            name: name.to_string(),
+            detail: format!("{error}"),
+        })?;
+    let service = node
+        .service_builder(&service_name)
+        .request_response::<[u8], [u8]>()
+        .max_clients(MAX_QUERY_CLIENTS_PER_SERVICE)
+        .max_servers(MAX_QUERY_SERVERS_PER_SERVICE)
+        .max_nodes(MAX_NODES_PER_SERVICE)
+        .open_or_create()
+        .map_err(|error| IpcSetupError::ServiceOpen {
+            name: name.to_string(),
+            detail: error.to_string(),
+        })?;
+    let server = service
+        .server_builder()
+        .initial_max_slice_len(QUERIES_MAX_PAYLOAD_BYTES)
+        .create()
+        .map_err(|error| IpcSetupError::ServerCreate {
+            name: name.to_string(),
+            detail: error.to_string(),
+        })?;
+    Ok((service, server))
 }

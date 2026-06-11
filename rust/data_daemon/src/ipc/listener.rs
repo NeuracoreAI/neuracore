@@ -13,9 +13,11 @@
 //! the subscriber synchronously into a local `Vec<Envelope>` before awaiting
 //! the dispatcher.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use data_daemon_ipc::Envelope;
+use data_daemon_ipc::{Envelope, RecordingIdQuery, RecordingIdReply};
+use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
 use tokio::select;
@@ -24,6 +26,7 @@ use tokio::time::sleep;
 
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::signals::ShutdownSignal;
+use crate::state::{SqliteStateStore, StateStore};
 
 /// How often the listener polls the iceoryx2 subscriber.
 ///
@@ -48,10 +51,12 @@ const POLL_INTERVAL: Duration = Duration::from_millis(1);
 pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
+    store: Arc<SqliteStateStore>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
         commands = data_daemon_ipc::service_name::COMMANDS,
+        queries = data_daemon_ipc::service_name::QUERIES,
         "ipc listener started"
     );
 
@@ -78,6 +83,13 @@ pub async fn run(
             tracing::debug!(envelope = kind, "ipc envelope forwarded");
         }
 
+        // -- Answer recording-id queries ----------------------------------------
+        // Each request is resolved against the daemon's own store (a single
+        // `.await`) while holding the iceoryx2 `ActiveRequest` to reply on. That
+        // borrow makes this future `!Send`, which is fine: `run` is awaited
+        // inline under `block_on`, never `tokio::spawn`'d.
+        serve_queries(transport.queries_server(), &store).await;
+
         // -- Yield / shutdown ---------------------------------------------------
         select! {
             biased;
@@ -86,6 +98,64 @@ pub async fn run(
                 return;
             }
             _ = sleep(POLL_INTERVAL) => {}
+        }
+    }
+}
+
+/// Drain every pending recording-id query, answering each from the daemon's
+/// own store.
+///
+/// The SDK resolves a recording's cloud id by asking the daemon over the
+/// `queries` request-response service instead of reading the daemon's private
+/// SQLite DB directly. Requests are cheap and infrequent (one per
+/// `get_recording_id` poll), so a malformed request or store error is logged
+/// and the next request is served rather than aborting the loop.
+async fn serve_queries(server: &Server<ipc::Service, [u8], (), [u8], ()>, store: &Arc<SqliteStateStore>) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "queries server receive failed");
+                return;
+            }
+        };
+
+        let query = match RecordingIdQuery::decode(active.payload()) {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed recording-id query");
+                continue;
+            }
+        };
+
+        let recording_id = match store
+            .resolve_recording_id_for_marker(
+                &query.robot_id,
+                query.robot_instance,
+                query.timestamp_ns,
+            )
+            .await
+        {
+            Ok(recording_id) => recording_id,
+            Err(error) => {
+                tracing::warn!(%error, robot_id = query.robot_id, "recording-id lookup failed");
+                None
+            }
+        };
+
+        let reply = RecordingIdReply { recording_id };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send recording-id reply");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to loan recording-id reply sample"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode recording-id reply"),
         }
     }
 }

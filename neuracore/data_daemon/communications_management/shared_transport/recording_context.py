@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from importlib import import_module
 from types import ModuleType
 
@@ -285,10 +284,12 @@ class RecordingContext:
 
         The thin-shipper producer never sees the cloud recording id — the
         daemon allocates it and POSTs ``/recording/start`` asynchronously. This
-        method asks the native daemon for the id of the recording whose window
-        brackets ``timestamp_ns`` (defaulting to the marker captured at
-        ``start_recording``) for this source, polling the daemon's state until
-        the id has been minted or ``timeout_s`` elapses.
+        asks the daemon over the native ``queries`` request-response service for
+        the id of the recording identified by this source and the capture
+        ``timestamp_ns`` marker (defaulting to the marker captured at
+        ``start_recording``). The daemon answers authoritatively from its own
+        state; the native call blocks (with the GIL released) until the id is
+        minted or ``timeout_s`` elapses.
 
         It MAY block and is for non-performance-critical paths only (tests,
         ``nc.stop_recording(wait=True)``). Returns ``None`` on timeout or in the
@@ -299,46 +300,9 @@ class RecordingContext:
         marker_ns = (
             timestamp_ns if timestamp_ns is not None else self._recording_marker_ns
         )
-
-        # Imported here to avoid a module-load dependency on the daemon
-        # lifecycle helpers for callers that never resolve a cloud id.
-        import sqlite3
-
-        from neuracore.data_daemon.helpers import get_daemon_db_path
-
-        db_uri = f"file:{get_daemon_db_path()}?mode=ro"
-        deadline = time.monotonic() + timeout_s
-        # Match the recording whose start *equals* the marker rather than
-        # ``<=``. The marker is the producer's capture timestamp for a specific
-        # ``start_recording`` call, stored verbatim as the row's
-        # ``start_timestamp_ns``, so an exact match resolves precisely that
-        # recording. ``<=`` could otherwise fall back to an earlier recording
-        # for the same source during the window where this recording's row /
-        # cloud id has not landed yet (e.g. a just-cancelled prior recording
-        # whose ``cancelled_at`` the daemon has not stamped yet) — which would
-        # resolve a stale, soon-to-be-discarded cloud id.
-        query = (
-            "SELECT recording_id FROM recordings "
-            "WHERE robot_id = ? AND robot_instance = ? AND start_timestamp_ns = ? "
-            "AND cancelled_at IS NULL "
-            "ORDER BY recording_index DESC LIMIT 1"
+        return _load_native().get_recording_id(
+            self._robot_id, self._robot_instance, marker_ns, timeout_s
         )
-        while True:
-            try:
-                connection = sqlite3.connect(db_uri, uri=True, timeout=1.0)
-                try:
-                    row = connection.execute(
-                        query, (self._robot_id, self._robot_instance, marker_ns)
-                    ).fetchone()
-                finally:
-                    connection.close()
-                if row is not None and row[0] is not None:
-                    return str(row[0])
-            except sqlite3.Error as error:
-                logger.debug("recording-id lookup query failed: %s", error)
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(0.2)
 
     def close(self) -> None:
         """Close sockets and cleanup context resources owned by this instance."""
