@@ -109,7 +109,7 @@ def _record_episode(data_types: set[DataType]) -> None:
                 instance=ROBOT_INSTANCE,
                 timestamp=t,
             )
-    nc.stop_recording(wait=False, robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
+    nc.stop_recording(wait=True, robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
 
 
 def _missing_recordings_from_error(error_msg: str) -> dict[str, set[str]]:

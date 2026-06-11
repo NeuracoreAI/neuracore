@@ -2,12 +2,21 @@
 
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import requests
-from neuracore_types import DataType
+from neuracore_types import DataType, Metrics
 
 import neuracore as nc
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
+from neuracore.core.utils.http_session import thread_local_session
+
+if TYPE_CHECKING:
+    from neuracore.core.data.synced_dataset import SynchronizedDataset
+    from neuracore.core.endpoint import Policy
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +69,56 @@ def wait_for_training(
             assert (
                 False
             ), f"Training job {job_id} did not finish within {timeout_minutes} minutes"
+        time.sleep(poll_seconds)
+
+
+def wait_for_training_running_duration(
+    job_id: str,
+    running_minutes: float,
+    timeout_minutes: int = 120,
+    poll_seconds: int = 20,
+) -> str:
+    """Block until *job_id* has been RUNNING for at least *running_minutes*.
+
+    Returns early if the job reaches a terminal state. This is used to give a
+    training job enough time to snapshot/prepare its dataset before a later
+    test step mutates the underlying dataset, so the in-flight run is not
+    affected by the mutation. Returns the last observed status.
+    """
+    deadline = time.time() + timeout_minutes * 60
+    running_since: float | None = None
+    while True:
+        status = nc.get_training_job_status(job_id=job_id)
+        now = time.time()
+        if status in TERMINAL_STATES:
+            logger.info(
+                f"Training job {job_id} reached terminal status {status} before "
+                f"running for {running_minutes} minutes"
+            )
+            return status
+        if status == "RUNNING":
+            if running_since is None:
+                running_since = now
+                logger.info(
+                    f"Training job {job_id} is RUNNING; waiting {running_minutes} "
+                    f"minutes before proceeding"
+                )
+            elapsed_running_minutes = (now - running_since) / 60
+            if elapsed_running_minutes >= running_minutes:
+                logger.info(
+                    f"Training job {job_id} has been RUNNING for "
+                    f"{elapsed_running_minutes:.1f} minutes"
+                )
+                return status
+        else:
+            running_since = None
+            logger.info(f"Training job {job_id}: status={status} (waiting for RUNNING)")
+        if now >= deadline:
+            cancel_incomplete_training_jobs([job_id])
+            assert False, (
+                f"Training job {job_id} did not run for {running_minutes} minutes "
+                f"within {timeout_minutes} minutes"
+            )
         time.sleep(poll_seconds)
 
 
@@ -142,6 +201,101 @@ def assert_no_training_log_errors(
         f"{len(offending_entries)} ERROR/CRITICAL log entries:\n\n"
         f"{format_training_log_entries(offending_entries)}"
     )
+
+
+def get_training_job_metrics(job_id: str) -> Metrics:
+    """Fetch training metrics for a completed or in-progress job."""
+    org_id = get_current_org()
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{org_id}/training/jobs/{job_id}/metrics",
+        headers=get_auth().get_headers(),
+    )
+    response.raise_for_status()
+    return Metrics.model_validate(response.json())
+
+
+def get_final_metric_value(job_id: str, metric_key: str) -> float | None:
+    """Return the value at the highest logged step for *metric_key*, if present."""
+    metrics = get_training_job_metrics(job_id)
+    metric_data = metrics.metrics.get(metric_key)
+    if metric_data is None or not metric_data.data:
+        return None
+    final_step = max(metric_data.data.keys())
+    return float(metric_data.data[final_step])
+
+
+def assert_training_loss_below(
+    job_id: str,
+    metric_key: str,
+    threshold: float,
+    *,
+    context: str = "training loss",
+) -> float:
+    """Assert the final epoch loss metric is below *threshold*."""
+    final_loss = get_final_metric_value(job_id, metric_key)
+    assert (
+        final_loss is not None
+    ), f"{context}: metric {metric_key!r} not found for job {job_id}"
+    assert (
+        final_loss < threshold
+    ), f"{context}: {metric_key}={final_loss:.6g} is not below {threshold:.6g}"
+    return final_loss
+
+
+def evaluate_training_mse(
+    policy: "Policy",
+    synced_dataset: "SynchronizedDataset",
+    ground_truth_by_recording: dict[str, list[float]],
+    target_joint_name: str,
+    *,
+    excluded_recording_ids: set[str] | None = None,
+    included_recording_ids: set[str] | None = None,
+) -> float:
+    """Compute mean MSE between predictions and stored ground truth.
+
+    When *included_recording_ids* is provided, only those recordings are
+    evaluated and any others present in the synced dataset are skipped. This is
+    useful after the dataset has been mutated, when a policy should only be
+    scored against the recordings it was actually trained on.
+
+    Returns the mean MSE across all evaluated frames.
+    """
+    excluded_recording_ids = excluded_recording_ids or set()
+    total_squared_error = 0.0
+    total_frames = 0
+
+    for recording in synced_dataset:
+        recording_id = str(recording.id)
+        assert (
+            recording_id not in excluded_recording_ids
+        ), f"Deleted recording {recording_id} appeared in synced dataset"
+        if (
+            included_recording_ids is not None
+            and recording_id not in included_recording_ids
+        ):
+            continue
+        expected_targets = ground_truth_by_recording[recording_id]
+        for frame_idx, sync_point in enumerate(recording):
+            predictions = policy.predict(sync_point=sync_point, timeout=60)
+            joint_targets = predictions[DataType.JOINT_TARGET_POSITIONS]
+            predicted = float(joint_targets[target_joint_name].value[0, 0, 0].item())
+            expected = expected_targets[frame_idx]
+            squared_error = (predicted - expected) ** 2
+            logger.info(
+                f"Predicted: {predicted}, Expected: {expected}, "
+                f"Squared Error: {squared_error}"
+            )
+            total_squared_error += squared_error
+            total_frames += 1
+
+    assert total_frames > 0, "No frames evaluated"
+    mean_mse = total_squared_error / total_frames
+    logger.info(
+        f"Evaluated {total_frames} frames across "
+        f"{len(synced_dataset)} recordings; mean MSE={mean_mse:.6g}"
+    )
+    return mean_mse
 
 
 def build_cross_embodiment_descriptions(
