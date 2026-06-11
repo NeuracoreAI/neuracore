@@ -2,6 +2,7 @@
 
 import logging
 import sys
+import threading
 import time
 from collections.abc import Generator, Iterator
 from typing import Optional, Union
@@ -91,6 +92,10 @@ class Dataset:
         )
         self._num_recordings: int | None = len(recordings) if recordings else None
         self._start_after: dict | None = None
+        # Protects concurrent page fetches: _start_after and _recordings_cache are
+        # shared mutable state, and SynchronizedDataset prefetches recordings
+        # from multiple threads.
+        self._page_lock = threading.Lock()
         self._robot_ids: list[str] | None = None
         self._robot_names: dict[str, str] | None = None
 
@@ -135,36 +140,42 @@ class Dataset:
             self._num_recordings = 0
 
     def _fetch_next_page(self) -> list[Recording]:
-        """Fetch the next page of recordings and append to cache (lazy)."""
-        if (
-            self._num_recordings is not None
-            and len(self._recordings_cache) >= self._num_recordings
-        ):
-            return []
+        """Fetch the next page of recordings and append to cache (lazy).
 
-        params = {"limit": PAGE_SIZE, "is_shared": self.is_shared}
-        payload = self._start_after or None
+        Thread-safe: concurrent callers are serialized so each page is
+        fetched exactly once. A caller that waited on the lock re-checks the
+        cache size and may find its data already fetched by another thread.
+        """
+        with self._page_lock:
+            if (
+                self._num_recordings is not None
+                and len(self._recordings_cache) >= self._num_recordings
+            ):
+                return []
 
-        session = thread_local_session()
-        response = session.post(
-            f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
-            headers=get_auth().get_headers(),
-            params=params,
-            json=payload,
-        )
-        response.raise_for_status()
-        data = response.json()
+            params = {"limit": PAGE_SIZE, "is_shared": self.is_shared}
+            payload = self._start_after or None
 
-        batch = data.get("data", [])
-        if not batch:
-            return []
+            session = thread_local_session()
+            response = session.post(
+                f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+                headers=get_auth().get_headers(),
+                params=params,
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        self._start_after = batch[-1]
-        self._num_recordings = data.get("total", self._num_recordings)
+            batch = data.get("data", [])
+            if not batch:
+                return []
 
-        wrapped = [self._wrap_raw_recording(r) for r in batch]
-        self._recordings_cache.extend(wrapped)
-        return wrapped
+            self._start_after = batch[-1]
+            self._num_recordings = data.get("total", self._num_recordings)
+
+            wrapped = [self._wrap_raw_recording(r) for r in batch]
+            self._recordings_cache.extend(wrapped)
+            return wrapped
 
     def _recordings_generator(self) -> Generator[Recording, None, None]:
         """A generator yielding Recordings for this dataset.
@@ -620,7 +631,10 @@ class Dataset:
 
             # Load pages until index is available in cache
             while index >= len(self._recordings_cache):
-                if not self._fetch_next_page():
+                fetched = self._fetch_next_page()
+                # An empty fetch can mean another thread loaded our page
+                # while we waited on the lock, so re-check the cache.
+                if not fetched and index >= len(self._recordings_cache):
                     raise IndexError("Dataset index out of range")
             return self._recordings_cache[index]
 

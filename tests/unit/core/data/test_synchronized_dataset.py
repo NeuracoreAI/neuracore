@@ -317,6 +317,68 @@ class TestSynchronizedDataset:
         # The sliced dataset should not have prefetch_videos enabled
         assert sliced._prefetch_videos_needed is False
 
+    def test_slice_reuses_parent_cache(self, synced_dataset, mock_data_requests):
+        """Slicing must hand already-fetched recordings to the new instance."""
+        nc.login()
+        # Populate the parent cache (as the constructor prefetch would)
+        rec0 = synced_dataset[0]
+        rec1 = synced_dataset[1]
+
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            sliced = synced_dataset[0:2]
+            # Cache is complete, so no second prefetch pass
+            mock_prefetch.assert_not_called()
+
+        assert sliced[0] is rec0
+        assert sliced[1] is rec1
+
+    def test_slice_reindexes_parent_cache(self, synced_dataset, mock_data_requests):
+        """A slice not starting at 0 must re-index the inherited cache."""
+        nc.login()
+        rec1 = synced_dataset[1]
+
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            sliced = synced_dataset[1:2]
+            mock_prefetch.assert_not_called()
+
+        assert sliced[0] is rec1
+
+    def test_slice_with_partial_cache_prefetches_missing(
+        self, synced_dataset, mock_data_requests
+    ):
+        """A slice covering uncached recordings still prefetches."""
+        nc.login()
+        # Only recording 0 cached; slice covers both recordings
+        rec0 = synced_dataset[0]
+
+        with patch.object(
+            SynchronizedDataset, "_perform_synced_data_prefetch"
+        ) as mock_prefetch:
+            sliced = synced_dataset[0:2]
+            mock_prefetch.assert_called_once()
+
+        # The cached entry is still inherited rather than re-fetched
+        assert sliced._synced_recording_cache[0] is rec0
+
+    def test_slice_forwards_max_prefetch_workers(self, dataset_mock):
+        """Slicing must preserve the parent's prefetch worker count."""
+        with patch.object(SynchronizedDataset, "_perform_synced_data_prefetch"):
+            parent = SynchronizedDataset(
+                id="synced_dataset_id",
+                dataset=dataset_mock,
+                frequency=30,
+                cross_embodiment_union=None,
+                prefetch_videos=False,
+                max_prefetch_workers=8,
+            )
+            sliced = parent[0:1]
+
+        assert sliced._max_prefetch_workers == 8
+
     def test_getitem_with_instance_info(self, synced_dataset, mock_data_requests):
         """Test that getitem preserves instance information."""
         recording = synced_dataset[0]
