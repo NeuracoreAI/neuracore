@@ -794,20 +794,23 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             recording_timestamp_start_s = (
                 spec.timestamp_start_s + recording_ordinal * case.duration_sec
             )
-            # Capture timestamps for the recording's start/stop (→ backend
-            # start_time / end_time). In manual/stochastic modes frames carry the
-            # synthetic clock and are logged faster than real time, so the
-            # recording's reported window must use that same clock to report a
-            # meaningful duration. Window membership is keyed on the producer's
-            # publish clock regardless, so this never affects data routing. Real
-            # mode lets the producer stamp wall-clock now (``timestamp=None``).
-            recording_capture_start_s = (
-                None if use_real_timestamps else recording_timestamp_start_s
-            )
+            # Deterministic capture timestamps for the recording's start/stop
+            # (→ backend start_time / end_time). In manual/stochastic modes
+            # frames carry a synthetic clock and are logged faster than real
+            # time, so the producer's publish-clock stop would report a
+            # near-zero duration. Anchor to a wall-clock instant captured here:
+            # the reported duration is then exactly ``case.duration_sec`` while
+            # the absolute start_time stays realistic — a 1970-relative
+            # start_time makes the backend drop the recording. The frame data
+            # keeps its own (relative) clock; the recording window is decoupled.
+            # Window membership stays keyed on the producer's publish clock, so
+            # this never affects data routing. Real mode lets the producer stamp
+            # wall-clock now (``timestamp=None``).
+            recording_capture_start_s = None if use_real_timestamps else time.time()
             recording_capture_stop_s = (
                 None
-                if use_real_timestamps
-                else recording_timestamp_start_s + case.duration_sec
+                if recording_capture_start_s is None
+                else recording_capture_start_s + case.duration_sec
             )
 
             with Timer(
