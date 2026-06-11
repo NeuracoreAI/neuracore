@@ -185,6 +185,23 @@ fn run_daemon(
         }
     };
 
+    // Verify ffmpeg is present and supports the options the encoder depends on
+    // *before* standing up the runtime — an incompatible build (e.g. one that
+    // lacks `-vsync passthrough`, or is missing libx264) otherwise fails every
+    // video encode silently at recording time, marking traces `failed`. Mirrors
+    // the fail-fast PID-file acquisition above. Reused as the pipeline's encoder
+    // so the probe and the real encodes share one configured binary.
+    let video_encoder = VideoEncoder::new();
+    match video_encoder.preflight() {
+        Ok(version) => tracing::info!(ffmpeg_version = %version, "ffmpeg preflight passed"),
+        Err(error) => {
+            let message = format!("ffmpeg preflight failed: {error}");
+            tracing::error!("{message}");
+            report_failure(reporter, &message);
+            return Err(anyhow::Error::new(error).context("ffmpeg preflight failed"));
+        }
+    }
+
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -279,7 +296,7 @@ fn run_daemon(
             TraceActorContext::new(
                 recordings_root.clone(),
                 storage_budget,
-                VideoEncoder::new(),
+                video_encoder,
                 trace_write_handle,
             )
             .with_event_bus(event_bus.clone()),
