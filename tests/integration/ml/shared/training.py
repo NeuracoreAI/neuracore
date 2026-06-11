@@ -13,6 +13,27 @@ logger = logging.getLogger(__name__)
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
 
 
+def cancel_incomplete_training_jobs(
+    job_ids: list[str],
+    completed_statuses: dict[str, str] | None = None,
+) -> None:
+    """Cancel training jobs that have not reached a terminal state."""
+    completed_statuses = completed_statuses or {}
+    for job_id in job_ids:
+        if job_id in completed_statuses:
+            continue
+        try:
+            status = nc.get_training_job_status(job_id=job_id)
+            if status in TERMINAL_STATES:
+                continue
+            logger.warning(
+                f"Cancelling incomplete training job {job_id} (status={status})"
+            )
+            nc.cancel_training_job(job_id)
+        except Exception:
+            logger.warning(f"Failed to cancel training job {job_id}", exc_info=True)
+
+
 def wait_for_training(
     job_id: str,
     timeout_minutes: int = 120,
@@ -24,9 +45,11 @@ def wait_for_training(
         logger.info(f"Training job {job_id}: {status}")
         if status in TERMINAL_STATES:
             return status
-        assert (
-            time.time() < deadline
-        ), f"Training job {job_id} did not finish within {timeout_minutes} minutes"
+        if time.time() >= deadline:
+            cancel_incomplete_training_jobs([job_id])
+            assert (
+                False
+            ), f"Training job {job_id} did not finish within {timeout_minutes} minutes"
         time.sleep(poll_seconds)
 
 
@@ -51,9 +74,12 @@ def wait_for_all_training(
         if len(final_statuses) == len(job_ids):
             return final_statuses
 
-        assert (
-            time.time() < deadline
-        ), f"Training job(s) {job_ids} did not finish within {timeout_minutes} minutes"
+        if time.time() >= deadline:
+            cancel_incomplete_training_jobs(job_ids, final_statuses)
+            assert False, (
+                f"Training job(s) {job_ids} did not finish within "
+                f"{timeout_minutes} minutes"
+            )
         time.sleep(poll_seconds)
 
 

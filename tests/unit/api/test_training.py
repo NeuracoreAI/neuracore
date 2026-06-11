@@ -521,6 +521,30 @@ def test_get_training_job_status(
     assert status == "pending"
 
 
+def test_cancel_training_job(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test cancelling a training job."""
+    nc.login("test_api_key")
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
+        status_code=200,
+    )
+
+    nc.cancel_training_job("train_job_123")
+
+    assert mock_auth_requests.called
+    last_request = mock_auth_requests.last_request
+    assert last_request.method == "POST"
+    assert (
+        last_request.url == f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123"
+    )
+
+
 def test_delete_training_job(
     temp_config_dir,
     mock_auth_requests,
