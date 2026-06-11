@@ -1,19 +1,14 @@
 """Integration test for launching multiple training jobs back-to-back."""
 
 import logging
+import os
+import sys
 
 from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
-from tests.integration.ml.shared.constants import (
-    GRIPPER_NAMES,
-    JOINT_NAMES,
-    LANGUAGE_LABEL,
-    NC_CAM_NAME,
-    POSE_SENSOR_NAME,
-)
-from tests.integration.ml.shared.data_collection import (
+from tests.integration.ml.shared.dataset import (
     collect_demo_data,
     wait_for_dataset_recording_count,
 )
@@ -23,10 +18,26 @@ from tests.integration.ml.shared.training import (
 )
 from tests.integration.ml.shared.utils import unique_name
 
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")
+if _EXAMPLES_DIR not in sys.path:
+    sys.path.append(_EXAMPLES_DIR)
+
+# ruff: noqa: E402
+from common.base_env import BimanualViperXTask
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+NC_CAM_NAME = "rgb_angle"
+JOINT_NAMES = (
+    BimanualViperXTask.LEFT_ARM_JOINT_NAMES + BimanualViperXTask.RIGHT_ARM_JOINT_NAMES
+)
+GRIPPER_NAMES = ["left_gripper", "right_gripper"]
+POSE_SENSOR_NAME = "tcp"
+LANGUAGE_LABEL = "instruction"
 
 ROBOT_NAME = "integration_test_robot"
 GPU_TYPE = "NVIDIA_TESLA_V100"

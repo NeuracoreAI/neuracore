@@ -1,14 +1,26 @@
-"""Demonstration data collection helpers for ML integration tests."""
+"""Dataset collection, mutation, and verification helpers for ML integration tests."""
 
+import hashlib
+import json
 import logging
 import os
 import sys
 import time
 
 import numpy as np
+from neuracore_types import Dataset as DatasetModel
+from neuracore_types import DataType
 
 import neuracore as nc
+from neuracore.core.auth import get_auth
+from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
+from neuracore.core.data.recording import Recording
+from neuracore.core.data.synced_dataset import SynchronizedDataset
+from neuracore.core.utils.embodiment_description_utils import (
+    merge_cross_embodiment_description,
+)
+from neuracore.core.utils.http_session import thread_local_session
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "..", "examples")
@@ -194,7 +206,7 @@ def collect_demo_data(
                     robot_name=robot_name,
                     instance=instance_id,
                 )
-            nc.stop_recording(wait=False, robot_name=robot_name, instance=instance_id)
+            nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
             wait_for_dataset_ready(
                 dataset_name,
                 expected_recording_count=ep_idx + 1,
@@ -205,3 +217,124 @@ def collect_demo_data(
                 f"Episode {ep_idx + 1} recorded ({len(expanded_action_traj)} frames)"
             )
     return dataset
+
+
+def delete_recording_from_dataset(dataset: Dataset, recording: Recording) -> None:
+    """Remove a recording from a dataset via the platform API."""
+    session = thread_local_session()
+    response = session.delete(
+        f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/{recording.id}",
+        headers=get_auth().get_headers(),
+    )
+    response.raise_for_status()
+
+
+def fetch_dataset_model(dataset: Dataset) -> DatasetModel:
+    """Fetch full dataset metadata including num_demonstrations and data types."""
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}",
+        headers=get_auth().get_headers(),
+    )
+    response.raise_for_status()
+    return DatasetModel.model_validate(response.json())
+
+
+def assert_active_recordings(
+    dataset: Dataset,
+    *,
+    expected_count: int,
+    expected_types: set[DataType],
+    tracked_ids: set[str] | None = None,
+) -> set[str]:
+    """Assert recording count, datatype presence, and optional ID set equality."""
+    assert (
+        len(dataset) == expected_count
+    ), f"Expected {expected_count} recordings, got {len(dataset)}"
+    active_ids: set[str] = set()
+    for recording in dataset:
+        active_ids.add(str(recording.id))
+        missing = expected_types - recording.data_types
+        assert not missing, (
+            f"Recording {recording.id} missing datatypes "
+            f"{sorted(dt.value for dt in missing)}; "
+            f"has {sorted(dt.value for dt in recording.data_types)}"
+        )
+    if tracked_ids is not None:
+        assert active_ids == tracked_ids, (
+            f"Active recording IDs mismatch.\n"
+            f"Expected: {sorted(tracked_ids)}\n"
+            f"Got: {sorted(active_ids)}"
+        )
+    return active_ids
+
+
+def assert_dataset_metadata(
+    dataset: Dataset,
+    *,
+    expected_count: int,
+    expected_common_types: set[DataType],
+) -> DatasetModel:
+    """Assert dataset metadata reports the expected recording count and types."""
+    model = fetch_dataset_model(dataset)
+    assert model.num_demonstrations == expected_count, (
+        f"Metadata num_demonstrations={model.num_demonstrations}, "
+        f"expected {expected_count}"
+    )
+    common = set(model.common_data_types.keys())
+    missing = expected_common_types - common
+    assert not missing, (
+        f"common_data_types missing {sorted(dt.value for dt in missing)}; "
+        f"has {sorted(dt.value for dt in common)}"
+    )
+    return model
+
+
+def statistics_fingerprint(stats) -> str:
+    """Stable hash of synchronized dataset statistics for refresh checks."""
+    payload = stats.model_dump(mode="json")
+    encoded = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def assert_synced_statistics(
+    dataset: Dataset,
+    input_desc: dict,
+    output_desc: dict,
+    *,
+    expected_count: int,
+    frequency: int = 20,
+) -> tuple[SynchronizedDataset, str]:
+    """Synchronize dataset, calculate statistics, and assert consistency."""
+    cross_embodiment_union = merge_cross_embodiment_description(input_desc, output_desc)
+    synced = dataset.synchronize(
+        frequency=frequency,
+        cross_embodiment_union=cross_embodiment_union,
+    )
+    assert len(synced) == expected_count, (
+        f"Synchronized dataset has {len(synced)} recordings, "
+        f"expected {expected_count}"
+    )
+
+    progress = dataset._get_synchronization_progress(synced.id)
+    assert (
+        not progress.has_failures
+    ), f"Synchronization failures: {progress.failed_recording_ids}"
+    assert progress.num_synchronized_demonstrations == expected_count
+
+    stats = synced.calculate_statistics(
+        input_cross_embodiment_description=input_desc,
+        output_cross_embodiment_description=output_desc,
+    )
+    assert stats.dataset_statistics, "Expected non-empty dataset_statistics"
+
+    robot_ids = list(stats.dataset_statistics.keys())
+    assert len(robot_ids) == 1, f"Expected single robot, got {robot_ids}"
+    robot_stats = stats.dataset_statistics[robot_ids[0]]
+
+    for data_type in input_desc[robot_ids[0]]:
+        assert data_type in robot_stats, f"Input stats missing {data_type.value}"
+    for data_type in output_desc[robot_ids[0]]:
+        assert data_type in robot_stats, f"Output stats missing {data_type.value}"
+
+    return synced, statistics_fingerprint(stats)
