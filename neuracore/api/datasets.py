@@ -12,6 +12,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 
 
@@ -88,6 +89,78 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
     )
     GlobalSingleton()._active_dataset_id = merged.id
     return merged
+
+
+def dataset_clone(
+    new_dataset_name: str,
+    *,
+    dataset: Dataset | None = None,
+    dataset_name: str | None = None,
+    dataset_id: str | None = None,
+) -> Dataset:
+    """Clone a dataset and all of its recordings.
+
+    Args:
+        dataset: Source dataset object, dataset ID, or dataset name. String
+            values are resolved as an ID first and then as a name.
+        new_dataset_name: Name for the cloned dataset.
+        dataset_name: Explicit source dataset name.
+        dataset_id: Explicit source dataset ID.
+
+    Returns:
+        Dataset: The newly cloned dataset.
+
+    Raises:
+        TypeError: If dataset is not a Dataset or string.
+        ValueError: If the source or new dataset name is missing, or if multiple
+            source arguments are provided.
+        DatasetError: If the source dataset cannot be found or cloning fails.
+    """
+    # Checks only one of dataset, dataset_name, or dataset_id is provided
+    assert (
+        sum(arg is not None for arg in [dataset, dataset_name, dataset_id]) == 1
+    ), "Exactly one of dataset, dataset_name, or dataset_id must be provided"
+
+    # If dataset_name is provided, resolve it to a dataset object
+    if dataset_name is not None:
+        dataset = Dataset.get_by_name(dataset_name)
+        if dataset is None:
+            raise DatasetError(f"Source dataset with name '{dataset_name}' not found")
+
+    # No need to resolve dataset_id here because the API can handle it directly,
+    # and this avoids an unnecessary API call if the user already has the ID.
+
+    # Avoid Dataset truthiness here because it delegates to __len__ and may
+    # fetch recordings from the API.
+    if dataset is not None:
+        dataset_id = dataset.id
+
+    auth = get_auth()
+    org_id = get_current_org()
+    session = thread_local_session()
+    response = session.post(
+        f"{API_URL}/org/{org_id}/datasets/clone",
+        headers=auth.get_headers(),
+        json={"name": new_dataset_name, "sourceDatasetId": dataset_id},
+    )
+    if not response.ok:
+        detail = extract_error_detail(response)
+        error_message = detail or f"{response.status_code} {response.reason}"
+        raise DatasetError(f"Failed to clone dataset: {error_message}")
+
+    dataset_model = DatasetModel.model_validate(response.json())
+    cloned = Dataset(
+        id=dataset_model.id,
+        org_id=org_id,
+        name=dataset_model.name,
+        size_bytes=dataset_model.size_bytes,
+        tags=dataset_model.tags,
+        is_shared=dataset_model.is_shared,
+        description=dataset_model.description,
+        data_types=list(dataset_model.all_data_types.keys()),
+    )
+
+    return cloned
 
 
 def create_dataset(
