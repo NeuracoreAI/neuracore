@@ -49,9 +49,10 @@
 pub mod nut_writer;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex, Once};
+use std::sync::mpsc::Sender;
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_daemon_ipc::service_name::{
@@ -197,6 +198,250 @@ static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
         streams: HashMap::new(),
     })
 });
+
+// ---------------------------------------------------------------------------
+// Background video writer
+// ---------------------------------------------------------------------------
+//
+// `log_frame` must never block the caller on disk I/O. The producer spool lives
+// on the same filesystem as the daemon's SQLite WAL and the ffmpeg transcode
+// outputs, so on ext4 (`data=ordered`) a frame `write()` can stall for hundreds
+// of ms behind an unrelated `fsync`/journal commit — and because `log_frame`
+// holds the GIL across that write, the stall freezes the whole producer. To
+// keep the robot-facing ingest path latency-bounded, `log_frame` copies the
+// frame and hands it to a dedicated per-process writer thread, returning at
+// once. The writer owns *every* NUT write, chunk seal, and
+// `VideoChunkReady`/`StopRecording`/`CancelRecording` publish for video, so a
+// disk stall blocks only the writer — never a `log_*` caller.
+//
+// Publishing the tail chunks *and* the `StopRecording`/`CancelRecording` from
+// the one writer thread (its own iceoryx2 publisher).
+//
+// Lifecycle envelopes (`StartRecording` / `StopRecording` / `CancelRecording`)
+// are emphatically NOT routed through the writer: they stay on the *calling*
+// thread's publisher, the same port `StartRecording` uses, so consecutive
+// recordings' start/stop boundaries keep their strict in-order delivery. (Were
+// `StopRecording` published from the writer's port instead, it could be
+// reordered against the next recording's `StartRecording` on the main port —
+// the daemon then sees a start while the prior window is still live and drops
+// the overlapping window's data.) The stop/cancel paths only *barrier* on the
+// writer — seal + announce (or drop) the source's tail chunks, ack — and then
+// publish the lifecycle envelope themselves. Chunk-before-stop ordering is not
+// a same-port guarantee here but is safe anyway: the daemon holds every
+// `VideoChunkReady` back (`NCD_HOLDBACK_MS`, default 500 ms) and retains a
+// just-closed window, so a tail chunk announced just before the stop still
+// routes into the (closing) window by its in-window open timestamp.
+
+/// Backpressure cap for the writer's frame queue. A transient disk stall is
+/// absorbed by buffering frames up to this many bytes before `log_frame`
+/// blocks; only a *sustained* overload (the writer genuinely can't keep up)
+/// propagates backpressure to the caller. 64 MiB holds ~a second of a
+/// multi-camera 256×256@30 workload while staying small next to a worker's RSS.
+const WRITER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// One frame handed to the background writer. Owns its pixel bytes (copied out
+/// of the caller's buffer under the GIL) so the caller can return immediately.
+struct FrameJob {
+    robot_id: String,
+    robot_instance: i64,
+    data_type: String,
+    sensor_name: String,
+    width: u32,
+    height: u32,
+    timestamp_ns: i64,
+    timestamp_s: f64,
+    data: Vec<u8>,
+}
+
+/// Work item for the writer thread.
+enum WriterMsg {
+    /// Append one frame to its `(source, sensor)` in-progress chunk.
+    Frame(FrameJob),
+    /// Stop barrier: drain every frame queued ahead for the source (FIFO), seal
+    /// + announce its open chunks, then acknowledge. The caller publishes
+    /// `StopRecording` itself once acked. No lifecycle envelope is published
+    /// here — see the module note on lifecycle ordering.
+    FlushSource {
+        robot_id: String,
+        robot_instance: i64,
+        ack: Sender<()>,
+    },
+    /// Cancel barrier: drop every open chunk for the source without announcing
+    /// it (the daemon's cancel + recovery sweep reclaim the spooled NUTs), then
+    /// acknowledge. The caller publishes `CancelRecording` itself once acked.
+    DropSource {
+        robot_id: String,
+        robot_instance: i64,
+        ack: Sender<()>,
+    },
+}
+
+impl WriterMsg {
+    /// Bytes this message contributes to the queue's backpressure budget. Only
+    /// frame payloads are throttled; control messages must always enqueue so a
+    /// stop/cancel can drain even a full queue.
+    fn queue_bytes(&self) -> usize {
+        match self {
+            WriterMsg::Frame(job) => job.data.len(),
+            _ => 0,
+        }
+    }
+}
+
+/// Byte-bounded MPSC queue between the logging threads and the writer thread.
+struct FrameQueue {
+    inner: Mutex<FrameQueueInner>,
+    not_full: Condvar,
+    not_empty: Condvar,
+}
+
+struct FrameQueueInner {
+    msgs: VecDeque<WriterMsg>,
+    bytes: usize,
+}
+
+impl FrameQueue {
+    fn new() -> Self {
+        FrameQueue {
+            inner: Mutex::new(FrameQueueInner {
+                msgs: VecDeque::new(),
+                bytes: 0,
+            }),
+            not_full: Condvar::new(),
+            not_empty: Condvar::new(),
+        }
+    }
+
+    /// Enqueue a message, blocking the caller only while a *frame* would push
+    /// the buffered bytes over the cap (control messages never block). A lone
+    /// frame larger than the cap is still admitted once the queue is empty, so
+    /// forward progress is always possible.
+    fn push(&self, msg: WriterMsg) {
+        let add = msg.queue_bytes();
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        if add > 0 {
+            while inner.bytes > 0 && inner.bytes + add > WRITER_QUEUE_MAX_BYTES {
+                inner = self
+                    .not_full
+                    .wait(inner)
+                    .unwrap_or_else(|p| p.into_inner());
+            }
+        }
+        inner.bytes += add;
+        inner.msgs.push_back(msg);
+        self.not_empty.notify_one();
+    }
+
+    /// Block until a message is available, then pop it (FIFO).
+    fn pop(&self) -> WriterMsg {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if let Some(msg) = inner.msgs.pop_front() {
+                inner.bytes -= msg.queue_bytes();
+                self.not_full.notify_one();
+                return msg;
+            }
+            inner = self
+                .not_empty
+                .wait(inner)
+                .unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
+/// Process-wide writer handle, healed across `fork` via `owner_pid` (mirrors
+/// [`VIDEO_CHUNKS`]). The parent's writer thread does not survive into a forked
+/// child, so the child re-spawns one on first use.
+struct WriterRegistry {
+    owner_pid: u32,
+    queue: Option<Arc<FrameQueue>>,
+}
+
+static VIDEO_WRITER: LazyLock<Mutex<WriterRegistry>> = LazyLock::new(|| {
+    Mutex::new(WriterRegistry {
+        owner_pid: 0,
+        queue: None,
+    })
+});
+
+/// Return this process's writer queue, spawning the writer thread on first use
+/// and re-spawning after a fork. On the (near-impossible) spawn failure we log
+/// and return a detached queue *without* recording it, so the next call retries
+/// rather than the caller blocking forever on a consumer-less queue.
+fn writer_queue() -> Arc<FrameQueue> {
+    let mut reg = VIDEO_WRITER.lock().unwrap_or_else(|p| p.into_inner());
+    let pid = std::process::id();
+    if reg.owner_pid == pid {
+        if let Some(queue) = reg.queue.as_ref() {
+            return queue.clone();
+        }
+    }
+
+    let queue = Arc::new(FrameQueue::new());
+    let worker_queue = queue.clone();
+    match std::thread::Builder::new()
+        .name("nc-video-writer".to_string())
+        .spawn(move || writer_loop(&worker_queue))
+    {
+        Ok(_handle) => {
+            reg.owner_pid = pid;
+            reg.queue = Some(queue.clone());
+        }
+        Err(error) => {
+            // Leave the registry unset so the next call retries the spawn. The
+            // returned queue has no consumer; a single `push` of a frame far
+            // under the cap won't block, so the frame is simply dropped when the
+            // queue is freed rather than the producer hanging.
+            tracing::error!(%error, "failed to spawn video writer thread; dropping frame");
+        }
+    }
+    queue
+}
+
+/// The writer thread's run loop. Sole accessor of the in-progress chunk state
+/// and sole publisher of video chunk + stop/cancel envelopes for this process.
+fn writer_loop(queue: &FrameQueue) {
+    loop {
+        match queue.pop() {
+            WriterMsg::Frame(job) => {
+                if let Err(error) = record_video_frame(
+                    &job.robot_id,
+                    job.robot_instance,
+                    &job.data_type,
+                    &job.sensor_name,
+                    job.width,
+                    job.height,
+                    &job.data,
+                    job.timestamp_ns,
+                    job.timestamp_s,
+                ) {
+                    tracing::warn!(%error, sensor_name = job.sensor_name, "failed to spool video frame");
+                }
+            }
+            WriterMsg::FlushSource {
+                robot_id,
+                robot_instance,
+                ack,
+            } => {
+                if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
+                    tracing::warn!(%error, "failed to flush tail video chunks on stop");
+                }
+                let _ = ack.send(());
+            }
+            WriterMsg::DropSource {
+                robot_id,
+                robot_instance,
+                ack,
+            } => {
+                let prefix = source_prefix(&robot_id, robot_instance);
+                with_video_chunks(|streams| {
+                    streams.retain(|key, _| !key.starts_with(&prefix));
+                });
+                let _ = ack.send(());
+            }
+        }
+    }
+}
 
 /// Recordings root, resolved once per process. Mirrors the daemon's
 /// `recordings_root_path()` (`config/env.rs`).
@@ -452,6 +697,33 @@ fn now_ns() -> i64 {
         .unwrap_or(0)
 }
 
+/// A chunk-open timestamp that is strictly increasing within this process.
+///
+/// The spool filename is `chunk_{publish_ns}_{thread_id}.nut`. All video chunks
+/// are now opened by the single background writer thread, so they share one
+/// `thread_id` and uniqueness rests entirely on `publish_ns`. `now_ns()` reads
+/// `CLOCK_REALTIME`, whose granularity can repeat across two opens issued back
+/// to back, which would collide two cameras' chunk files. Bumping past the last
+/// value returned keeps every chunk's name distinct while staying within the
+/// recording window (the window spans seconds; a few ns of skew is irrelevant
+/// to membership). Only the writer thread calls this, but the atomic keeps it
+/// correct regardless.
+fn next_chunk_open_ns() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let mut candidate = now_ns();
+    loop {
+        let last = LAST.load(Ordering::Relaxed);
+        if candidate <= last {
+            candidate = last + 1;
+        }
+        match LAST.compare_exchange_weak(last, candidate, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return candidate,
+            Err(_) => candidate = now_ns(),
+        }
+    }
+}
+
 /// OS thread id of the calling thread (Linux `gettid`). Used to disambiguate a
 /// video chunk's spool filename across producer threads and as a breadcrumb
 /// when inspecting the spool directory.
@@ -603,6 +875,7 @@ fn log_joints(
 #[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, payload, timestamp_ns, timestamp_s = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
+    py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
     data_type: &str,
@@ -637,25 +910,32 @@ fn log_frame(
     }
     let resolved_timestamp_s = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
 
-    // SAFETY: PyO3 holds the GIL for the whole `#[pyfunction]` body, the buffer
-    // is validated `u8` and C-contiguous, the length comes from
-    // `PyBuffer::item_count`, and we only read. We keep the GIL to pass a
-    // zero-copy view straight from numpy into `NutWriter::write_frame` —
-    // releasing it would force a multi-MiB memcpy per frame.
-    let payload_slice: &[u8] =
-        unsafe { std::slice::from_raw_parts(payload.buf_ptr() as *const u8, actual_bytes) };
+    // SAFETY: PyO3 holds the GIL here, the buffer is validated `u8` and
+    // C-contiguous, the length comes from `PyBuffer::item_count`, and we only
+    // read. The frame is owned by the caller's numpy array, which may be reused
+    // the instant this call returns, so we *copy* it into the job under the GIL
+    // (as the buffer protocol requires).
+    let data = unsafe {
+        std::slice::from_raw_parts(payload.buf_ptr() as *const u8, actual_bytes).to_vec()
+    };
 
-    record_video_frame(
-        robot_id,
+    let job = FrameJob {
+        robot_id: robot_id.to_string(),
         robot_instance,
-        data_type,
-        name,
+        data_type: data_type.to_string(),
+        sensor_name: name.to_string(),
         width,
         height,
-        payload_slice,
         timestamp_ns,
-        resolved_timestamp_s,
-    )
+        timestamp_s: resolved_timestamp_s,
+        data,
+    };
+
+    // Hand off to the writer with the GIL released: enqueuing only blocks under
+    // sustained overload (the byte cap), and blocking there while holding the
+    // GIL would stall every Python thread in the process.
+    py.allow_threads(move || writer_queue().push(WriterMsg::Frame(job)));
+    Ok(())
 }
 
 /// Whether the in-progress chunk should be sealed now, checked after each
@@ -688,7 +968,7 @@ fn record_video_frame(
     payload: &[u8],
     timestamp_ns: i64,
     timestamp_s: f64,
-) -> PyResult<()> {
+) -> Result<(), ProducerError> {
     let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
     let slot: VideoChunkSlot = with_video_chunks(|streams| {
         streams
@@ -732,7 +1012,7 @@ fn record_video_frame(
             // (this instant — inside the active recording window) plus the
             // opening thread's id. These name the spool file and ride the
             // announcement so the daemon can both route and locate the chunk.
-            state.chunk_publish_ns = now_ns();
+            state.chunk_publish_ns = next_chunk_open_ns();
             state.chunk_thread_id = current_thread_id();
             let chunk_path = state.spool_dir.join(spool_chunk_filename(
                 state.chunk_publish_ns,
@@ -908,11 +1188,28 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.allow_threads(|| -> PyResult<()> {
-        flush_source_chunks(&robot_id, robot_instance)?;
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
+        // Barrier on the writer: it drains every frame still queued for this
+        // source (FIFO), seals the tail chunks and announces them, then acks.
+        // Blocking here means the stop never returns until those chunks are
+        // durably spooled + announced, so a process exit right after
+        // `stop_recording` can't lose them.
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        writer_queue().push(WriterMsg::FlushSource {
+            robot_id: robot_id.clone(),
+            robot_instance,
+            ack: ack_tx,
+        });
+        let _ = ack_rx.recv();
+        // Publish `StopRecording` from THIS (the calling) thread's publisher —
+        // the same port as `StartRecording` — so consecutive recordings' start
+        // and stop boundaries stay strictly ordered for the daemon. The tail
+        // chunks were announced on the writer's port just above; the daemon's
+        // holdback + closing-window retention route them into this window even
+        // though they ride a different port.
         publish(&Envelope::StopRecording {
             robot_id,
             robot_instance,
@@ -925,7 +1222,7 @@ fn stop_recording(
 
 /// Flush and remove every open video chunk for a source. Each flushed chunk is
 /// announced so the daemon can route it before the `StopRecording` lands.
-fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> PyResult<()> {
+fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), ProducerError> {
     let prefix = source_prefix(robot_id, robot_instance);
     let slots: Vec<(String, VideoChunkSlot)> = with_video_chunks(|streams| {
         let keys: Vec<String> = streams
@@ -988,11 +1285,20 @@ fn cancel_recording(
     }
     let robot_id = robot_id.to_string();
     py.allow_threads(|| -> PyResult<()> {
-        let prefix = source_prefix(&robot_id, robot_instance);
-        with_video_chunks(|streams| {
-            streams.retain(|key, _| !key.starts_with(&prefix));
-        });
         let capture_timestamp_ns = timestamp_ns.unwrap_or_else(now_ns);
+        // Barrier on the writer: it drains any frames still queued for this
+        // source (FIFO) and drops the in-progress chunk state without announcing
+        // it, then acks. Block until acked so the cancel is ordered after those
+        // frames and no late chunk for this recording is announced.
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        writer_queue().push(WriterMsg::DropSource {
+            robot_id: robot_id.clone(),
+            robot_instance,
+            ack: ack_tx,
+        });
+        let _ = ack_rx.recv();
+        // Publish `CancelRecording` from THIS (the calling) thread's publisher,
+        // ordered with Start/Stop on the same port (see the writer module note).
         publish(&Envelope::CancelRecording {
             robot_id,
             robot_instance,

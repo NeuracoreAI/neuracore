@@ -284,6 +284,30 @@ fn run_daemon(
             }
         }
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
+        // Reconcile the storage budget (directory scan + `statvfs`) on a
+        // background interval instead of on the trace actors' per-frame
+        // `check` path: a raw `statvfs` on the shared spool periodically blocks
+        // for hundreds of ms behind an ext4 journal commit, and at the frame
+        // rate that stall would back-pressure the whole dispatcher → IPC drain.
+        // `spawn_blocking` keeps the scan/syscall off the async runtime threads.
+        {
+            let refresh_budget = storage_budget.clone();
+            let refresh_interval = refresh_budget.policy().refresh_interval;
+            if !refresh_interval.is_zero() {
+                tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(refresh_interval).await;
+                        let budget = refresh_budget.clone();
+                        if tokio::task::spawn_blocking(move || budget.refresh())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        }
         let event_bus = EventBus::new();
         // Write-behind for the per-trace actors' high-frequency progress /
         // status / finalise writes: coalesced per trace and flushed in batches
@@ -292,12 +316,22 @@ fn run_daemon(
         // below, after the dispatcher (and so every actor) has stopped.
         let (trace_write_handle, trace_writer) =
             crate::state::trace_writer::spawn(Arc::new(state_store.clone()));
+        // Write-behind for the per-trace `trace.json` appends: the blocking JSON
+        // `write()` periodically stalls behind an ext4 journal commit on the
+        // shared spool, so running it on the actor's hot path back-pressures the
+        // dispatcher and IPC listener and spikes producer `log_*` latency. The
+        // dedicated thread keeps that disk I/O off the drain path (see
+        // `pipeline::json_writer`). The join handle is dropped — the thread exits
+        // once the dispatcher and every actor (the last `JsonWriteHandle` holders)
+        // are gone at shutdown.
+        let (json_write_handle, _json_writer_owner) = crate::pipeline::json_writer::spawn();
         let actor_context = Arc::new(
             TraceActorContext::new(
                 recordings_root.clone(),
                 storage_budget,
                 video_encoder,
                 trace_write_handle,
+                json_write_handle,
             )
             .with_event_bus(event_bus.clone()),
         );
