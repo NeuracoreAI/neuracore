@@ -110,6 +110,13 @@ pub struct StorageBudget {
 
 struct BudgetState {
     used_bytes: u64,
+    /// Free bytes on the recordings filesystem, cached from `statvfs` and
+    /// refreshed on the same interval as `used_bytes`. Reading it per frame
+    /// would put a raw `statvfs` on the trace actor's hot path, and on the
+    /// shared spool that syscall periodically blocks for hundreds of ms behind
+    /// an ext4 journal commit — back-pressuring the dispatcher and IPC drain and
+    /// spiking producer `log_*` latency.
+    free_bytes: u64,
     last_refresh: Instant,
 }
 
@@ -122,11 +129,15 @@ impl StorageBudget {
     pub fn new(recordings_root: impl Into<PathBuf>, policy: StoragePolicy) -> Self {
         let recordings_root = recordings_root.into();
         let used_bytes = directory_bytes(&recordings_root);
+        // Seed the free-space estimate; if `statvfs` is unavailable yet, assume
+        // ample space so writes aren't blocked until the first refresh succeeds.
+        let free_bytes = free_disk_bytes(&recordings_root).unwrap_or(u64::MAX);
         Self {
             recordings_root,
             policy,
             state: Mutex::new(BudgetState {
                 used_bytes,
+                free_bytes,
                 last_refresh: Instant::now(),
             }),
         }
@@ -149,32 +160,58 @@ impl StorageBudget {
     }
 
     /// Rescan the recordings tree if the estimate is older than
-    /// `refresh_interval`.
+    /// `refresh_interval`. Retained for callers (and tests) that want a
+    /// synchronous best-effort refresh; the daemon drives the live refresh from
+    /// a background task instead (see [`refresh`](Self::refresh)) so the
+    /// blocking I/O never lands on a trace actor's hot path.
     pub fn refresh_if_stale(&self) {
         let refresh_interval = self.policy.refresh_interval;
         if refresh_interval.is_zero() {
             return;
         }
-        // The scan can be slow on large trees; do it outside the lock so
-        // other reservers aren't blocked on the I/O.
         let needs_refresh = {
             let state = self.state.lock().expect("budget state");
             state.last_refresh.elapsed() >= refresh_interval
         };
-        if !needs_refresh {
-            return;
+        if needs_refresh {
+            self.refresh();
         }
-        let scanned = directory_bytes(&self.recordings_root);
+    }
+
+    /// Reconcile the cached estimates against the filesystem now. Performs the
+    /// (potentially blocking) directory scan and `statvfs`, so it MUST be called
+    /// off any latency-critical path — the daemon runs it on a dedicated
+    /// interval task. The tree scan only matters when a storage limit is
+    /// configured, so it is skipped otherwise; the free-space `statvfs` always
+    /// runs since the free-disk margin always applies.
+    pub fn refresh(&self) {
+        let scanned = self
+            .policy
+            .storage_limit_bytes
+            .map(|_| directory_bytes(&self.recordings_root));
+        let free = free_disk_bytes(&self.recordings_root);
         let mut state = self.state.lock().expect("budget state");
-        state.used_bytes = scanned;
+        if let Some(scanned) = scanned {
+            state.used_bytes = scanned;
+        }
+        match free {
+            Ok(free) => state.free_bytes = free,
+            // Keep the last good reading on a transient `statvfs` error rather
+            // than blocking writes; a persistent failure simply means the margin
+            // check uses a slightly stale free-space value.
+            Err(error) => {
+                tracing::warn!(%error, "statvfs refresh failed; keeping cached free space")
+            }
+        }
         state.last_refresh = Instant::now();
     }
 
     /// Check (without committing) whether `bytes_to_write` would fit.
+    ///
+    /// Reads only the cached estimates (no filesystem I/O), so it is safe on the
+    /// per-frame hot path; the estimates are kept fresh by [`refresh`](Self::refresh).
     pub fn check(&self, bytes_to_write: u64) -> Result<BudgetCheck, BudgetError> {
-        self.refresh_if_stale();
-
-        let free = free_disk_bytes(&self.recordings_root)?;
+        let free = self.state.lock().expect("budget state").free_bytes;
         if free < bytes_to_write.saturating_add(self.policy.min_free_disk_bytes) {
             return Ok(BudgetCheck::FilesystemFull {
                 requested: bytes_to_write,

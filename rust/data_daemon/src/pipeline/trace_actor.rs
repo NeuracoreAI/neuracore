@@ -38,9 +38,10 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::{self, JoinSet};
 
-use crate::encoding::json_trace::{JsonTraceError, JsonTraceWriter};
+use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{ChunkEncodeRequest, VideoEncodeError, VideoEncoder};
+use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::TraceWriteHandle;
 use crate::storage::budget::StorageBudget;
 use crate::storage::paths::{self, TracePath};
@@ -124,6 +125,12 @@ pub struct TraceActorContext {
     /// actor's hot path — including row creation — off the store's single write
     /// mutex entirely (see [`crate::state::trace_writer`]).
     pub trace_writer: TraceWriteHandle,
+    /// Write-behind handle for this actor's `trace.json` appends. Keeps the
+    /// blocking JSON `write()` — which periodically stalls behind an ext4
+    /// journal commit on the shared spool — off the actor's hot path, so a disk
+    /// stall can't back-pressure the dispatcher / IPC listener (see
+    /// [`crate::pipeline::json_writer`]).
+    pub json_writer: JsonWriteHandle,
 }
 
 impl TraceActorContext {
@@ -135,6 +142,7 @@ impl TraceActorContext {
         storage_budget: Arc<StorageBudget>,
         video_encoder: VideoEncoder,
         trace_writer: TraceWriteHandle,
+        json_writer: JsonWriteHandle,
     ) -> Self {
         Self::with_ffmpeg_permits(
             recordings_root,
@@ -142,6 +150,7 @@ impl TraceActorContext {
             video_encoder,
             Arc::new(Semaphore::new(default_ffmpeg_concurrency())),
             trace_writer,
+            json_writer,
         )
     }
 
@@ -152,6 +161,7 @@ impl TraceActorContext {
         video_encoder: VideoEncoder,
         ffmpeg_permits: Arc<Semaphore>,
         trace_writer: TraceWriteHandle,
+        json_writer: JsonWriteHandle,
     ) -> Self {
         Self {
             recordings_root: Arc::new(recordings_root.into()),
@@ -160,6 +170,7 @@ impl TraceActorContext {
             ffmpeg_permits,
             event_bus: None,
             trace_writer,
+            json_writer,
         }
     }
 
@@ -183,16 +194,20 @@ pub enum TraceActorMessage {
         /// Opaque per-sample bytes.
         payload: Vec<u8>,
     },
-    /// One finished NUT chunk, already relinked by the dispatcher into this
-    /// trace's `chunks/chunk_NNNN.nut` with the daemon-assigned `chunk_index`.
+    /// One finished NUT chunk. The actor relinks it from the producer spool
+    /// into this trace's `chunks/chunk_NNNN.nut` (on a blocking thread, inside
+    /// the background encode task) so the rename's possible journal-commit stall
+    /// stays off the dispatcher's routing path.
     Video {
         /// Daemon-assigned, per-trace monotonic chunk index.
         chunk_index: u32,
+        /// Producer-spooled source NUT to relink into this trace's chunks dir.
+        spool_nut: PathBuf,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels.
         height: u32,
-        /// Size of the relinked NUT file in bytes.
+        /// Size of the spooled NUT file in bytes.
         byte_count: u64,
         /// Number of frames in the chunk.
         frame_count: u32,
@@ -217,8 +232,11 @@ enum TraceWriter {
     /// No frames yet observed; the writer is decided on the first frame or
     /// chunk message.
     Pending,
-    /// Scalar trace streaming into a single `trace.json` array.
-    Json(JsonTraceWriter),
+    /// Scalar trace streaming into a single `trace.json` array. The actual
+    /// [`JsonTraceWriter`] lives on the write-behind thread
+    /// ([`crate::pipeline::json_writer`]); the actor only holds this marker and
+    /// drives it by `trace_id` through [`TraceActorContext::json_writer`].
+    Json,
     /// Video trace whose chunk encodes run concurrently as background tasks.
     Video {
         /// Frame width in pixels (recorded from the first chunk message).
@@ -283,6 +301,7 @@ pub async fn run(
             }
             TraceActorMessage::Video {
                 chunk_index,
+                spool_nut,
                 width,
                 height,
                 byte_count,
@@ -293,6 +312,7 @@ pub async fn run(
                     .handle_video(
                         &context,
                         chunk_index,
+                        spool_nut,
                         width,
                         height,
                         byte_count,
@@ -382,7 +402,7 @@ impl ActorState {
         // UPDATE for this field; the bytes-written debouncer covers the rest.
         let bumped_status = self.frame_count == 0;
 
-        if let Err(error) = self.append_frame(timestamp_ns, &payload).await {
+        if let Err(error) = self.append_frame(context, timestamp_ns, payload) {
             tracing::warn!(
                 %error,
                 trace_id = self.identity.trace_id,
@@ -446,54 +466,44 @@ impl ActorState {
     /// Lazily open the JSON writer for scalar traces. Video traces do not open
     /// a writer on the data path — they wait for the first `Video` message to
     /// allocate the video writer.
+    ///
+    /// The open is dispatched to the write-behind thread fire-and-forget; an
+    /// open failure (e.g. disk full) is surfaced when the trace finalises,
+    /// keeping this hot-path call non-blocking.
     fn ensure_writer_open(&mut self, context: &Arc<TraceActorContext>) -> bool {
         if !matches!(self.writer, TraceWriter::Pending) {
             return true;
         }
 
         let trace_dir = self.trace_directory(context);
-        match JsonTraceWriter::open(&trace_dir) {
-            Ok(json_writer) => {
-                self.bytes_on_disk = json_writer.bytes_on_disk();
-                self.writer = TraceWriter::Json(json_writer);
-                true
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    trace_id = self.identity.trace_id,
-                    path = %trace_dir.display(),
-                    "failed to open JSON trace"
-                );
-                false
-            }
-        }
+        context
+            .json_writer
+            .open(&self.identity.trace_id, trace_dir);
+        self.bytes_on_disk = 0;
+        self.writer = TraceWriter::Json;
+        true
     }
 
-    async fn append_frame(
+    fn append_frame(
         &mut self,
+        context: &Arc<TraceActorContext>,
         timestamp_ns: i64,
-        payload: &[u8],
+        payload: Vec<u8>,
     ) -> Result<(), FrameAppendError> {
-        match &mut self.writer {
+        match &self.writer {
             TraceWriter::Pending => Err(FrameAppendError::WriterNotOpen),
-            TraceWriter::Json(writer) => {
-                // Prefer writing the producer's JSON payload verbatim so
-                // float-precision is preserved bit-for-bit — re-serialising
-                // through serde_json can flip the last decimal digit for
-                // values like `7/60` and break the integration matrix's
-                // exact-match timestamp assertion. A single parse decides
-                // both branches: a successful parse means the payload is
-                // already valid JSON and goes through verbatim; anything
-                // else is wrapped in a small fallback object.
-                match serde_json::from_slice::<serde::de::IgnoredAny>(payload) {
-                    Ok(_) => writer.add_raw_entry(payload)?,
-                    Err(_) => {
-                        let entry = scalar_fallback_entry(timestamp_ns, payload);
-                        writer.add_entry(&entry)?;
-                    }
-                }
-                self.bytes_on_disk = writer.bytes_on_disk();
+            TraceWriter::Json => {
+                // Hand the entry to the write-behind thread, which preserves the
+                // producer's bit-exact JSON formatting on the verbatim path and
+                // wraps non-JSON payloads in a fallback object. Any write error
+                // is deferred to finalise. `bytes_on_disk` is tracked as a
+                // running estimate from the raw payload sizes — exact only at
+                // finalise (the thread returns the true total there) — which is
+                // ample for the debounced progress reports.
+                self.bytes_on_disk = self.bytes_on_disk.saturating_add(payload.len() as u64);
+                context
+                    .json_writer
+                    .append(&self.identity.trace_id, timestamp_ns, payload);
                 Ok(())
             }
             TraceWriter::Video { .. } => {
@@ -517,6 +527,7 @@ impl ActorState {
         &mut self,
         context: &Arc<TraceActorContext>,
         chunk_index: u32,
+        spool_nut: PathBuf,
         width: u32,
         height: u32,
         byte_count: u64,
@@ -583,6 +594,7 @@ impl ActorState {
         let permits = context.ffmpeg_permits.clone();
         let encoder = context.video_encoder.clone();
         let trace_id = self.identity.trace_id.clone();
+        let chunks_dir_for_task = chunks_dir.clone();
         let request = ChunkEncodeRequest {
             raw_nut: raw_nut.clone(),
             lossy_out: lossy_segment.clone(),
@@ -603,6 +615,40 @@ impl ActorState {
                     };
                 }
             };
+            // Relink the producer-spooled NUT into the recording's chunks dir
+            // here rather than on the dispatcher's routing path. The `rename`
+            // (and `mkdir`) are filesystem metadata ops that can stall behind an
+            // ext4 journal commit on the shared spool, so we run them on a
+            // blocking thread — off both the dispatcher and the runtime workers.
+            let relink = {
+                let spool = spool_nut.clone();
+                let dest = request.raw_nut.clone();
+                let chunks = chunks_dir_for_task.clone();
+                tokio::task::spawn_blocking(move || relink_nut(&spool, &chunks, &dest)).await
+            };
+            match relink {
+                Ok(Ok(())) => {}
+                Ok(Err(source)) => {
+                    return ChunkEncodeJobResult {
+                        chunk_index,
+                        outcome: Err(VideoEncodeError::Io {
+                            path: spool_nut.clone(),
+                            source,
+                        }),
+                    };
+                }
+                Err(join_error) => {
+                    return ChunkEncodeJobResult {
+                        chunk_index,
+                        outcome: Err(VideoEncodeError::Spawn {
+                            binary: std::ffi::OsString::from("relink"),
+                            source: std::io::Error::other(format!(
+                                "relink task join failed: {join_error}"
+                            )),
+                        }),
+                    };
+                }
+            }
             let outcome = encoder.encode_chunk(&request).await;
             drop(permit);
             match outcome {
@@ -760,13 +806,15 @@ impl ActorState {
         match writer {
             TraceWriter::Pending => {
                 // Empty trace — no encoder was ever opened. Leave a single
-                // empty `trace.json` behind so the artefact set is complete.
+                // empty `trace.json` behind so the artefact set is complete:
+                // open it on the write-behind thread then finalise it.
                 let trace_dir = self.trace_directory(context);
-                let json = JsonTraceWriter::open(&trace_dir)?;
-                let total = json.finish()?;
-                Ok(total)
+                context.json_writer.open(&self.identity.trace_id, trace_dir);
+                Ok(context.json_writer.finish(&self.identity.trace_id).await?)
             }
-            TraceWriter::Json(writer) => Ok(writer.finish()?),
+            TraceWriter::Json => {
+                Ok(context.json_writer.finish(&self.identity.trace_id).await?)
+            }
             TraceWriter::Video {
                 width,
                 height,
@@ -799,8 +847,8 @@ impl ActorState {
                     // trace.json path so the artefact set isn't missing a
                     // sidecar entirely.
                     let trace_dir = self.trace_directory(context);
-                    let json = JsonTraceWriter::open(&trace_dir)?;
-                    return Ok(json.finish()?);
+                    context.json_writer.open(&self.identity.trace_id, trace_dir);
+                    return Ok(context.json_writer.finish(&self.identity.trace_id).await?);
                 }
 
                 let trace_dir = self.trace_directory(context);
@@ -910,7 +958,10 @@ impl ActorState {
     /// dispatcher issues a single `cancel_recording` transaction once every
     /// actor has exited.
     async fn handle_cancel(&mut self, context: &Arc<TraceActorContext>) {
-        // Drop the writer so any BufWriter inside releases its file handle.
+        // Discard any open JSON write-behind writer (no-op for video / unopened
+        // traces) so its file handle is released without finalising, then drop
+        // the actor-side writer marker.
+        context.json_writer.drop_trace(&self.identity.trace_id);
         self.writer = TraceWriter::Pending;
         if self.bytes_on_disk > 0 {
             context.storage_budget.release(self.bytes_on_disk);
@@ -948,17 +999,6 @@ enum FrameAppendError {
     Metadata(#[from] MetadataError),
 }
 
-/// Wrap a non-JSON scalar payload in a minimal object so the on-disk
-/// `trace.json` array stays parseable. The verbatim path in
-/// [`ActorState::append_frame`] only reaches this helper after a structural
-/// JSON parse has already failed, so this never re-parses the bytes.
-fn scalar_fallback_entry(timestamp_ns: i64, payload: &[u8]) -> Value {
-    let mut map = serde_json::Map::new();
-    map.insert("timestamp_ns".to_string(), Value::from(timestamp_ns));
-    map.insert("payload_len".to_string(), Value::from(payload.len() as u64));
-    Value::Object(map)
-}
-
 /// Flush the in-memory metadata accumulator to `trace.json` on a blocking
 /// thread.
 async fn flush_metadata_blocking(
@@ -973,6 +1013,26 @@ async fn flush_metadata_blocking(
             path: path_for_error,
             source: std::io::Error::other(format!("metadata flush join failed: {join_error}")),
         })),
+    }
+}
+
+/// Relink a producer-spooled NUT into the recording's chunks directory.
+/// Prefers an atomic rename (same filesystem); falls back to copy + remove.
+/// Blocking — the actor runs it via `spawn_blocking` inside the background
+/// encode task so the rename can't stall the dispatcher or a runtime worker.
+fn relink_nut(
+    src: &std::path::Path,
+    chunks_dir: &std::path::Path,
+    dest: &std::path::Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(chunks_dir)?;
+    match std::fs::rename(src, dest) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(src, dest)?;
+            let _ = std::fs::remove_file(src);
+            Ok(())
+        }
     }
 }
 
@@ -1001,11 +1061,13 @@ mod tests {
         };
         let budget = Arc::new(StorageBudget::new(root, policy));
         let (trace_writer, _writer_owner) = crate::state::trace_writer::spawn(store);
+        let (json_writer, _json_owner) = crate::pipeline::json_writer::spawn();
         Arc::new(TraceActorContext::new(
             root.to_path_buf(),
             budget,
             VideoEncoder::new(),
             trace_writer,
+            json_writer,
         ))
     }
 
@@ -1032,7 +1094,7 @@ mod tests {
 
     #[test]
     fn scalar_fallback_entry_wraps_non_json_payload() {
-        let entry = scalar_fallback_entry(123, &[0xFF, 0xFE]);
+        let entry = crate::pipeline::json_writer::scalar_fallback_entry(123, &[0xFF, 0xFE]);
         assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
     }
 
@@ -1116,15 +1178,17 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-vid", "RGB"));
         state.send_create(&context);
 
-        // Build two NUT chunks via ffmpeg testsrc and place them where the
-        // dispatcher would have relinked them.
+        // Build two NUT chunks via ffmpeg testsrc in a spool location; the actor
+        // relinks each into the recording's chunks dir before transcoding, just
+        // as it does for a producer-spooled chunk in production.
         let trace_dir =
             TracePath::new("1", "RGB", "trace-vid").directory(context.recordings_root.as_path());
         let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
-        std::fs::create_dir_all(&chunks_dir).unwrap();
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
 
         for chunk_index in 0..2u32 {
-            let chunk_path = chunks_dir.join(paths::chunk_filename(chunk_index));
+            let spool_nut = spool_dir.join(format!("chunk_{chunk_index}.nut"));
             let status = std::process::Command::new("ffmpeg")
                 .args([
                     "-y",
@@ -1137,20 +1201,22 @@ mod tests {
                 ])
                 .arg("testsrc=duration=4:size=16x16:rate=1")
                 .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
-                .arg(&chunk_path)
+                .arg(&spool_nut)
                 .status()
                 .expect("synth status");
             assert!(status.success(), "synth NUT failed");
 
+            let byte_count = spool_nut.metadata().unwrap().len();
             let frame_timestamps_s: Vec<f64> =
                 (0..4u32).map(|i| (chunk_index * 4 + i) as f64).collect();
             state
                 .handle_video(
                     &context,
                     chunk_index,
+                    spool_nut,
                     16,
                     16,
-                    chunk_path.metadata().unwrap().len(),
+                    byte_count,
                     4,
                     frame_timestamps_s,
                 )

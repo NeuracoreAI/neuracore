@@ -45,7 +45,7 @@ use crate::pipeline::trace_actor::{
     self, TraceActorContext, TraceActorMessage, TraceIdentity, TraceKey,
 };
 use crate::state::{DaemonEvent, NewRecording, SqliteStateStore, StateStore};
-use crate::storage::paths::{self, TracePath};
+use crate::storage::paths;
 
 /// Default holdback: each data envelope waits this long after daemon receipt
 /// before it is routed. Tunable via `NCD_HOLDBACK_MS`. A generous default is
@@ -146,6 +146,10 @@ pub fn spawn_with_context(
 /// A per-trace actor's routing handle, stored inside its window.
 struct TraceHandle {
     sender: mpsc::Sender<TraceActorMessage>,
+    /// The actor's `trace_id`. No longer read on the routing path now that the
+    /// actor owns the NUT relink, but retained for test assertions on trace
+    /// identity.
+    #[allow(dead_code)]
     trace_id: String,
     /// Daemon-assigned, per-trace monotonic video chunk index.
     next_video_chunk: u32,
@@ -867,28 +871,15 @@ impl Dispatcher {
         let chunk_index = handle.next_video_chunk;
         handle.next_video_chunk = handle.next_video_chunk.saturating_add(1);
         let sender = handle.sender.clone();
-        let trace_id = handle.trace_id.clone();
 
-        // Relink the spooled NUT under the recording's trace directory at the
-        // path the actor expects: `{recording_index}/{data_type}/{trace_id}/chunks/chunk_NNNN.nut`.
-        let chunks_dir = TracePath::new(recording_index.to_string(), data_type, trace_id)
-            .chunks_dir(recordings_root.as_path());
-        let dest = chunks_dir.join(paths::chunk_filename(chunk_index));
-        if let Err(error) = relink_nut(&spool_nut, &chunks_dir, &dest) {
-            tracing::warn!(
-                %error,
-                recording_index,
-                src = %spool_nut.display(),
-                dst = %dest.display(),
-                "failed to relink video chunk into recording; dropping"
-            );
-            remove_spool_nut(&spool_nut);
-            return;
-        }
-
+        // The actor relinks the spooled NUT into the recording itself — on a
+        // blocking thread inside its background encode task — so the rename's
+        // possible journal-commit stall never lands on this routing path. The
+        // dispatcher only hands over the source spool path.
         if sender
             .send(TraceActorMessage::Video {
                 chunk_index,
+                spool_nut: spool_nut.clone(),
                 width,
                 height,
                 byte_count,
@@ -902,6 +893,7 @@ impl Dispatcher {
                 recording_index,
                 "video trace actor inbox closed; dropping chunk"
             );
+            remove_spool_nut(&spool_nut);
         }
     }
 
@@ -984,24 +976,6 @@ impl Dispatcher {
     }
 }
 
-/// Relink a producer-spooled NUT into the recording's chunks directory.
-/// Prefers an atomic rename (same filesystem); falls back to copy + remove.
-fn relink_nut(
-    src: &std::path::Path,
-    chunks_dir: &std::path::Path,
-    dest: &std::path::Path,
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(chunks_dir)?;
-    match std::fs::rename(src, dest) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            std::fs::copy(src, dest)?;
-            let _ = std::fs::remove_file(src);
-            Ok(())
-        }
-    }
-}
-
 fn remove_spool_nut(path: &std::path::Path) {
     if let Err(error) = std::fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
@@ -1016,6 +990,7 @@ mod tests {
     use crate::encoding::video_encoder::VideoEncoder;
     use crate::state::{SqliteStateStore, TraceWriteStatus};
     use crate::storage::budget::{StorageBudget, StoragePolicy};
+    use crate::storage::paths::TracePath;
     use std::path::PathBuf;
     use tempfile::TempDir;
     use tokio::sync::broadcast;
@@ -1040,11 +1015,13 @@ mod tests {
         // inside the context does. The dispatcher flushes it on shutdown, so
         // tests see durable trace state after `handle.shutdown().await`.
         let (trace_writer, _writer_owner) = crate::state::trace_writer::spawn(Arc::new(store));
+        let (json_writer, _json_owner) = crate::pipeline::json_writer::spawn();
         Arc::new(TraceActorContext::new(
             recordings_root,
             budget,
             VideoEncoder::new(),
             trace_writer,
+            json_writer,
         ))
     }
 

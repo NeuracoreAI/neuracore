@@ -6,4 +6,5 @@
 //!   trace, updates the SQLite state store, and drives the JSON / NUT writers.
 
 pub mod dispatcher;
+pub mod json_writer;
 pub mod trace_actor;
