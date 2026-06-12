@@ -1,7 +1,7 @@
 """Training parameter validation utilities.
 
 This module provides validation functions for training parameters, including
-algorithm existence, robot existence, and data spec compatibility.
+algorithm existence, robot existence, and embodiment description compatibility.
 """
 
 from __future__ import annotations
@@ -61,15 +61,15 @@ def _validate_algorithm_exists(algorithm_id: str | None, algorithm_name: str) ->
         raise ValueError(f"Algorithm {algorithm_name} not found.")
 
 
-def _validate_data_specs(
+def _validate_cross_embodiment_description(
     dataset: Dataset,
     dataset_name: str,
     algorithm_name: str,
     cross_embodiment_description: CrossEmbodimentDescription,
     supported_data_types: set[DataType],
-    spec_kind: str,
+    description_kind: str,
 ) -> None:
-    """Validate a cross-embodiment data spec against dataset and algorithm constraints.
+    """Validate a cross-embodiment description against dataset and algorithm limits.
 
     Args:
         dataset: Dataset metadata used to validate available robot IDs, data types,
@@ -77,40 +77,41 @@ def _validate_data_specs(
         dataset_name: Human-readable dataset name used in validation errors.
         algorithm_name: Algorithm name used in validation errors when unsupported
             data types are requested.
-        cross_embodiment_description: Requested data specification keyed by robot
+        cross_embodiment_description: Requested embodiment descriptions keyed by robot
             ID and grouped by data type.
-        supported_data_types: Data types supported by the algorithm for this spec.
-        spec_kind: Label describing the spec being validated, such as ``"input"``
-            or ``"output"``.
+        supported_data_types: Data types supported by the algorithm for this
+            description.
+        description_kind: Label describing the description being validated, such as
+            ``"input"`` or ``"output"``.
 
     Raises:
         AssertionError: If a key in ``cross_embodiment_description`` is not a valid
             robot ID.
-        ValueError: If the spec requests a data type or value that is not present
+        ValueError: If the description requests a data type or value not present
             in the dataset, if a requested data type is unsupported by the
             algorithm, or if a data value is in an invalid format.
     """
-    _validate_data_specs_against_dataset(
+    _validate_cross_embodiment_description_against_dataset(
         dataset=dataset,
         dataset_name=dataset_name,
         cross_embodiment_description=cross_embodiment_description,
-        spec_kind=spec_kind,
+        description_kind=description_kind,
     )
-    _validate_data_specs_against_algorithm(
+    _validate_cross_embodiment_description_against_algorithm(
         algorithm_name=algorithm_name,
         cross_embodiment_description=cross_embodiment_description,
         supported_data_types=supported_data_types,
-        spec_kind=spec_kind,
+        description_kind=description_kind,
     )
 
 
-def _validate_data_specs_against_dataset(
+def _validate_cross_embodiment_description_against_dataset(
     dataset: Dataset,
     dataset_name: str,
     cross_embodiment_description: CrossEmbodimentDescription,
-    spec_kind: str,
+    description_kind: str,
 ) -> None:
-    """Validate data spec robot IDs, types, and values against dataset metadata."""
+    """Validate description robot IDs, types, and values against dataset metadata."""
     for robot_id, robot_data in cross_embodiment_description.items():
         assert is_robot_id(robot_id), f"Expected robot_id format for {robot_id}"
         dataset_embodiment: EmbodimentDescription = (
@@ -120,14 +121,14 @@ def _validate_data_specs_against_dataset(
         for data_type, data_value in robot_data.items():
             if data_type not in dataset.data_types:
                 raise ValueError(
-                    f"{spec_kind} data type {data_type} is not present in dataset "
-                    f"{dataset_name}. Please check the dataset contents."
+                    f"{description_kind} data type {data_type} is not present in "
+                    f"dataset {dataset_name}. Please check the dataset contents."
                 )
 
             dataset_values = dataset_embodiment.get(data_type)
             if dataset_values is None:
                 raise ValueError(
-                    f"{spec_kind} data values {sorted(data_value)} for "
+                    f"{description_kind} data values {sorted(data_value)} for "
                     f"{data_type} are not present in dataset {dataset_name}."
                 )
 
@@ -137,8 +138,8 @@ def _validate_data_specs_against_dataset(
                 requested_values = set(data_value)
             else:
                 raise ValueError(
-                    f"Expected {spec_kind} data value for {data_type} to be a dict "
-                    f"of index to string, but got {data_value}."
+                    f"Expected {description_kind} data value for {data_type} to be "
+                    f"a dict of index to string, but got {data_value}."
                 )
 
             if isinstance(dataset_values, dict):
@@ -151,24 +152,25 @@ def _validate_data_specs_against_dataset(
             missing_values = requested_values - available_values
             if missing_values:
                 raise ValueError(
-                    f"{spec_kind} data values {sorted(missing_values)} for "
+                    f"{description_kind} data values {sorted(missing_values)} for "
                     f"{data_type} are not present in dataset {dataset_name}."
                 )
 
 
-def _validate_data_specs_against_algorithm(
+def _validate_cross_embodiment_description_against_algorithm(
     algorithm_name: str,
     cross_embodiment_description: CrossEmbodimentDescription,
     supported_data_types: set[DataType],
-    spec_kind: str,
+    description_kind: str,
 ) -> None:
     """Validate that requested data types are supported by the algorithm."""
     for robot_data in cross_embodiment_description.values():
         for data_type in robot_data:
             if data_type not in supported_data_types:
                 raise ValueError(
-                    f"{spec_kind} data type {data_type} is not supported by algorithm "
-                    f"{algorithm_name}. Please check the training job requirements."
+                    f"{description_kind} data type {data_type} is not supported by "
+                    f"algorithm {algorithm_name}. "
+                    "Please check the training job requirements."
                 )
 
 
@@ -255,7 +257,7 @@ def validate_training_params(
 
     This applies for both cloud and local algorithms and performs the
     following checks:
-      1) All robots referenced in input/output specs exist in the dataset.
+      1) All robots referenced in input/output descriptions exist in the dataset.
       2) All requested input data types are supported by the algorithm and present
          in the dataset.
       3) All requested output data types are supported by the algorithm and present
@@ -265,9 +267,9 @@ def validate_training_params(
         dataset: Dataset metadata object.
         dataset_name: Human-readable dataset name (used for error messages).
         algorithm_name: Algorithm name.
-        input_cross_embodiment_description: Input robot data specification
+        input_cross_embodiment_description: Input cross-embodiment description
             keyed by robot ID.
-        output_cross_embodiment_description: Output robot data specification
+        output_cross_embodiment_description: Output cross-embodiment description
             keyed by robot ID.
         supported_input_data_types: Supported input data types.
         supported_output_data_types: Supported output data types.
@@ -284,20 +286,20 @@ def validate_training_params(
         raise ValueError("Failed to start training run: no input datatypes specified.")
     _validate_per_recording_data_types(dataset, requested_input_types)
 
-    _validate_data_specs(
+    _validate_cross_embodiment_description(
         dataset=dataset,
         dataset_name=dataset_name,
         algorithm_name=algorithm_name,
         cross_embodiment_description=input_cross_embodiment_description,
         supported_data_types=supported_input_data_types,
-        spec_kind="input",
+        description_kind="input",
     )
 
-    _validate_data_specs(
+    _validate_cross_embodiment_description(
         dataset=dataset,
         dataset_name=dataset_name,
         algorithm_name=algorithm_name,
         cross_embodiment_description=output_cross_embodiment_description,
         supported_data_types=supported_output_data_types,
-        spec_kind="output",
+        description_kind="output",
     )

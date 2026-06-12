@@ -61,7 +61,7 @@ class SynchronizedRecording:
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
             frequency: Frequency at which to synchronize the recording.
-            cross_embodiment_union: Union of robot data specifications for
+            cross_embodiment_union: Union of embodiment descriptions for
                 synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
         """

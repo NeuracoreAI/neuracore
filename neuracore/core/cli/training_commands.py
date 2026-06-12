@@ -273,7 +273,7 @@ def _render_local_inspect(metadata: dict) -> None:
             training_runs._format_cross_embodiment_description(
                 metadata.get("input_cross_embodiment_description", {})
             ),
-            title="Model Input Data Spec",
+            title="Model Input Embodiment Description",
             box=box.SQUARE,
         )
     )
@@ -282,7 +282,7 @@ def _render_local_inspect(metadata: dict) -> None:
             training_runs._format_cross_embodiment_description(
                 metadata.get("output_cross_embodiment_description", {})
             ),
-            title="Model Output Data Spec",
+            title="Model Output Embodiment Description",
             box=box.SQUARE,
         )
     )

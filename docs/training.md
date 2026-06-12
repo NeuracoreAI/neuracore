@@ -31,20 +31,20 @@ Use `nc.start_training_run(...)` to start a cloud training job (see [example_lau
 
 ```python
 import neuracore as nc
-from neuracore_types import DataType, RobotDataSpec
+from neuracore_types import CrossEmbodimentDescription, DataType
 
 nc.login()
 dataset = nc.get_dataset("My Dataset")
 robot_id = dataset.robot_ids[0]
 full_spec = dataset.get_full_embodiment_description(robot_id)
 
-input_robot_data_spec: RobotDataSpec = {
+input_cross_embodiment_description: CrossEmbodimentDescription = {
     robot_id: {
         DataType.JOINT_POSITIONS: full_spec.get(DataType.JOINT_POSITIONS, []),
         DataType.RGB_IMAGES: full_spec.get(DataType.RGB_IMAGES, []),
     }
 }
-output_robot_data_spec: RobotDataSpec = {
+output_cross_embodiment_description: CrossEmbodimentDescription = {
     robot_id: {
         DataType.JOINT_TARGET_POSITIONS: full_spec.get(DataType.JOINT_TARGET_POSITIONS, []),
     }
@@ -57,8 +57,8 @@ job_data = nc.start_training_run(
     frequency=50,
     num_gpus=1,
     gpu_type="NVIDIA_TESLA_V100",
-    input_robot_data_spec=input_robot_data_spec,
-    output_robot_data_spec=output_robot_data_spec,
+    input_cross_embodiment_description=input_cross_embodiment_description,
+    output_cross_embodiment_description=output_cross_embodiment_description,
     algorithm_config={"batch_size": 32, "epochs": 100, "output_prediction_horizon": 50},
 )
 # Use name_auto_increment=True to auto-use MyTrainingJob_1, MyTrainingJob_2, etc. if the name already exists.

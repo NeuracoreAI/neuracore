@@ -53,15 +53,16 @@ def convert_cross_embodiment_description_names_to_ids(
     the private robot will take priority.
 
     Args:
-        cross_embodiment_description: Robot data spec keyed by robot names or IDs.
+        cross_embodiment_description: Cross-embodiment description keyed by
+            robot names or IDs.
 
     Returns:
-        Robot data spec keyed by robot IDs.
+        Cross-embodiment description keyed by robot IDs.
 
     Raises:
         DatasetError: If a robot identifier is ambiguous.
     """
-    robot_data_spec_with_ids: CrossEmbodimentDescription = {}
+    cross_embodiment_description_with_ids: CrossEmbodimentDescription = {}
     seen_ids = []
 
     for (
@@ -73,10 +74,10 @@ def convert_cross_embodiment_description_names_to_ids(
             robot_name = robot_name_or_id
             # Assume it's a name and try to resolve to an ID
             robot_id = get_robot_id_from_name(robot_name)
-            robot_data_spec_with_ids[robot_id] = embodiment_description
+            cross_embodiment_description_with_ids[robot_id] = embodiment_description
         else:
             robot_id = robot_name_or_id
-            robot_data_spec_with_ids[robot_id] = embodiment_description
+            cross_embodiment_description_with_ids[robot_id] = embodiment_description
 
         seen_ids.append(robot_id)
 
@@ -86,23 +87,24 @@ def convert_cross_embodiment_description_names_to_ids(
             "Duplicate robot identifiers found after conversion. "
             "Please ensure all robot names and IDs are unique."
         )
-    return robot_data_spec_with_ids
+    return cross_embodiment_description_with_ids
 
 
 def merge_cross_embodiment_description(
-    data_spec_1: CrossEmbodimentDescription,
-    data_spec_2: CrossEmbodimentDescription,
+    cross_embodiment_description_1: CrossEmbodimentDescription,
+    cross_embodiment_description_2: CrossEmbodimentDescription,
 ) -> CrossEmbodimentUnion:
-    """Merge two cross-embodiment descriptions into ordered name lists.
+    """Merge two cross-embodiment descriptions into a cross-embodiment union.
 
-    Order is preserved: data_spec_1's order takes priority, then data_spec_2's
-    items are appended in their original order. Dict-backed item specs are
-    merged by their values, producing the list[str] order spec expected by
-    synchronization and ordering code.
+    Order is preserved: cross_embodiment_description_1's order takes priority,
+    then cross_embodiment_description_2's items are appended in their original
+    order. Indexed item names are merged by their values, producing the
+    list[str] order expected by synchronization and ordering code.
 
     Args:
-        data_spec_1: First dictionary to merge (order takes priority).
-        data_spec_2: Second dictionary to merge.
+        cross_embodiment_description_1: First dictionary to merge (order takes
+            priority).
+        cross_embodiment_description_2: Second dictionary to merge.
 
     Returns:
         Merged dictionary mapping each robot and data type to an ordered list of
@@ -118,27 +120,31 @@ def merge_cross_embodiment_description(
             return list(values.values())
         return list(values)
 
-    cross_embodiment_description: CrossEmbodimentUnion = {}
+    cross_embodiment_union: CrossEmbodimentUnion = {}
 
     # dict.fromkeys() preserves order and removes duplicates
-    all_robot_ids = list(dict.fromkeys(list(data_spec_1) + list(data_spec_2)))
+    all_robot_ids = list(
+        dict.fromkeys(
+            list(cross_embodiment_description_1) + list(cross_embodiment_description_2)
+        )
+    )
 
     for robot_id in all_robot_ids:
-        embodiment_desc_1 = data_spec_1.get(robot_id, {})
-        embodiment_desc_2 = data_spec_2.get(robot_id, {})
+        embodiment_desc_1 = cross_embodiment_description_1.get(robot_id, {})
+        embodiment_desc_2 = cross_embodiment_description_2.get(robot_id, {})
         all_data_types = list(
             dict.fromkeys(list(embodiment_desc_1) + list(embodiment_desc_2))
         )
 
-        cross_embodiment_description[robot_id] = {}
+        cross_embodiment_union[robot_id] = {}
         for data_type in all_data_types:
             items1 = _normalize_item_names(embodiment_desc_1.get(data_type))
             items2 = _normalize_item_names(embodiment_desc_2.get(data_type))
 
-            cross_embodiment_description[robot_id][data_type] = list(
+            cross_embodiment_union[robot_id][data_type] = list(
                 dict.fromkeys(items1 + items2)
             )
-    return cross_embodiment_description
+    return cross_embodiment_union
 
 
 def extract_data_types(

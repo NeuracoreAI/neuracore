@@ -77,10 +77,10 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
     return Path(str(configured_dir)).expanduser()
 
 
-def _serialize_robot_data_spec(
+def _serialize_cross_embodiment_description(
     cross_embodiment_description: CrossEmbodimentDescription,
 ) -> dict[str, dict[str, list[str]]]:
-    """Convert indexed robot data specs to JSON-serializable ordered name lists."""
+    """Convert a cross-embodiment description to JSON-serializable name lists."""
     serializable: dict[str, dict[str, list[str]]] = {}
     for robot_id, data_types in cross_embodiment_description.items():
         serializable[robot_id] = {}
@@ -95,7 +95,7 @@ def _serialize_robot_data_spec(
 def _serialize_cross_embodiment_union(
     cross_embodiment_union: CrossEmbodimentUnion,
 ) -> dict[str, dict[str, list[str]]]:
-    """Convert merged robot data specs to JSON-serializable form."""
+    """Convert a cross-embodiment union to JSON-serializable form."""
     serializable: dict[str, dict[str, list[str]]] = {}
     for robot_id, data_types in cross_embodiment_union.items():
         serializable[robot_id] = {}
@@ -133,10 +133,10 @@ def _save_local_training_metadata(
         "launch_time": time.time(),
         "local_output_dir": str(output_dir),
         "org_id": getattr(cfg, "org_id", None),
-        "input_cross_embodiment_description": _serialize_robot_data_spec(
+        "input_cross_embodiment_description": _serialize_cross_embodiment_description(
             input_cross_embodiment_description
         ),
-        "output_cross_embodiment_description": _serialize_robot_data_spec(
+        "output_cross_embodiment_description": _serialize_cross_embodiment_description(
             output_cross_embodiment_description
         ),
         "frequency": getattr(cfg, "frequency", None),

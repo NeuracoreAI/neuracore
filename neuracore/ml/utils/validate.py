@@ -159,7 +159,7 @@ def run_validation(
             DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
         }
 
-        # Create dummy robot data specs
+        # Create dummy cross-embodiment descriptions
         input_cross_embodiment_description = {
             "robot_1": {
                 data_type: _indexed_names(data_type)

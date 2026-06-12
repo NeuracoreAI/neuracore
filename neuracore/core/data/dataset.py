@@ -545,7 +545,7 @@ class Dataset:
             robot_id: The robot ID to get the embodiment description for.
 
         Returns:
-            An EmbodimentDescription object containing the data spec for the robot.
+            An EmbodimentDescription object containing the data for the robot.
         """
         # Best-effort resolution without additional network calls.
         # If we can resolve a robot_name to an ID, do so; otherwise delegate to server.

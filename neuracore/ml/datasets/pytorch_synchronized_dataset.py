@@ -25,7 +25,7 @@ from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.utils.training_input_args_validation import (
-    _validate_data_specs_against_dataset,
+    _validate_cross_embodiment_description_against_dataset,
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
@@ -210,23 +210,23 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         Args:
             synchronized_dataset: The synchronized dataset to validate against.
-            input_cross_embodiment_description: Input robot data specification.
-            output_cross_embodiment_description: Output robot data specification.
+            input_cross_embodiment_description: Input cross-embodiment description.
+            output_cross_embodiment_description: Output cross-embodiment description.
 
         Raises:
             ValueError: If robot IDs or data types are missing from the dataset.
         """
-        _validate_data_specs_against_dataset(
+        _validate_cross_embodiment_description_against_dataset(
             dataset=synchronized_dataset.dataset,
             dataset_name=f"synchronized dataset {synchronized_dataset.id}",
             cross_embodiment_description=input_cross_embodiment_description,
-            spec_kind="Input",
+            description_kind="Input",
         )
-        _validate_data_specs_against_dataset(
+        _validate_cross_embodiment_description_against_dataset(
             dataset=synchronized_dataset.dataset,
             dataset_name=f"synchronized dataset {synchronized_dataset.id}",
             cross_embodiment_description=output_cross_embodiment_description,
-            spec_kind="Output",
+            description_kind="Output",
         )
 
     def _get_episode_indices(self) -> list[int]:

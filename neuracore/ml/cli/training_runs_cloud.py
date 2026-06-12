@@ -64,14 +64,14 @@ def _format_duration(start_time: float | None, end_time: float | None) -> str:
 def _format_cross_embodiment_description(
     cross_embodiment_description: CrossEmbodimentDescription | None,
 ) -> str:
-    """Format robot data spec for display.
+    """Format cross-embodiment description for display.
 
     Args:
         cross_embodiment_description: Dictionary mapping robot IDs to data
             types and names.
 
     Returns:
-        Formatted string representation of the robot data spec.
+        Formatted string representation of the cross-embodiment description.
     """
     if not cross_embodiment_description:
         return "  (none)"
@@ -403,13 +403,13 @@ def run_inspect(
             typer.echo(f"  Synced Dataset ID: {job.synced_dataset_id}")
 
         # Model Input/Output Ordering
-        typer.echo("\n--- Model Input Data Spec ---")
-        input_spec = job.input_cross_embodiment_description
-        typer.echo(_format_cross_embodiment_description(input_spec))
+        typer.echo("\n--- Model Input Embodiment Description ---")
+        input_description = job.input_cross_embodiment_description
+        typer.echo(_format_cross_embodiment_description(input_description))
 
-        typer.echo("\n--- Model Output Data Spec ---")
-        output_spec = job.output_cross_embodiment_description
-        typer.echo(_format_cross_embodiment_description(output_spec))
+        typer.echo("\n--- Model Output Embodiment Description ---")
+        output_description = job.output_cross_embodiment_description
+        typer.echo(_format_cross_embodiment_description(output_description))
 
         # Synchronization Details
         sync_details = job.synchronization_details

@@ -17,10 +17,10 @@ class TestPytorchDummyDataset:
     """Test suite for PytorchDummyDataset."""
 
     @pytest.fixture
-    def basic_robot_data_spec(self):
-        """Basic robot data specs for testing."""
+    def basic_cross_embodiment_descriptions(self):
+        """Basic cross-embodiment descriptions for testing."""
         return {
-            "input_spec": {
+            "input_description": {
                 "robot_0": {
                     DataType.JOINT_POSITIONS: {
                         0: "joint_0",
@@ -30,7 +30,7 @@ class TestPytorchDummyDataset:
                     DataType.RGB_IMAGES: {0: "camera_0"},
                 }
             },
-            "output_spec": {
+            "output_description": {
                 "robot_0": {
                     DataType.JOINT_TARGET_POSITIONS: {
                         0: "joint_0",
@@ -42,10 +42,10 @@ class TestPytorchDummyDataset:
         }
 
     @pytest.fixture
-    def all_data_types_robot_spec(self):
+    def all_data_types_cross_embodiment_descriptions(self):
         """All supported data types for comprehensive testing."""
         return {
-            "input_spec": {
+            "input_description": {
                 "robot_0": {
                     DataType.JOINT_POSITIONS: ["joint_0", "joint_1"],
                     DataType.JOINT_VELOCITIES: ["joint_0", "joint_1"],
@@ -61,7 +61,7 @@ class TestPytorchDummyDataset:
                     DataType.CUSTOM_1D: ["sensor_0", "sensor_1"],
                 }
             },
-            "output_spec": {
+            "output_description": {
                 "robot_0": {
                     DataType.JOINT_TARGET_POSITIONS: ["joint_0", "joint_1"],
                     DataType.RGB_IMAGES: ["camera_0"],
@@ -69,11 +69,15 @@ class TestPytorchDummyDataset:
             },
         }
 
-    def test_initialization_basic(self, basic_robot_data_spec):
+    def test_initialization_basic(self, basic_cross_embodiment_descriptions):
         """Test basic dataset initialization."""
         dataset = PytorchDummyDataset(
-            input_cross_embodiment_description=basic_robot_data_spec["input_spec"],
-            output_cross_embodiment_description=basic_robot_data_spec["output_spec"],
+            input_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "input_description"
+            ],
+            output_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "output_description"
+            ],
             num_samples=50,
             num_episodes=10,
         )
@@ -82,12 +86,16 @@ class TestPytorchDummyDataset:
         assert dataset.num_samples == 50
         assert dataset.output_prediction_horizon == 5  # default value
 
-    def test_initialization_all_data_types(self, all_data_types_robot_spec):
+    def test_initialization_all_data_types(
+        self, all_data_types_cross_embodiment_descriptions
+    ):
         """Test initialization with all supported data types."""
         dataset = PytorchDummyDataset(
-            input_cross_embodiment_description=all_data_types_robot_spec["input_spec"],
-            output_cross_embodiment_description=all_data_types_robot_spec[
-                "output_spec"
+            input_cross_embodiment_description=all_data_types_cross_embodiment_descriptions[
+                "input_description"
+            ],
+            output_cross_embodiment_description=all_data_types_cross_embodiment_descriptions[
+                "output_description"
             ],
             num_samples=20,
             output_prediction_horizon=8,
@@ -127,11 +135,15 @@ class TestPytorchDummyDataset:
             )
             assert len(dataset) == num_samples
 
-    def test_sample_generation_basic(self, basic_robot_data_spec):
+    def test_sample_generation_basic(self, basic_cross_embodiment_descriptions):
         """Test basic sample generation."""
         dataset = PytorchDummyDataset(
-            input_cross_embodiment_description=basic_robot_data_spec["input_spec"],
-            output_cross_embodiment_description=basic_robot_data_spec["output_spec"],
+            input_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "input_description"
+            ],
+            output_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "output_description"
+            ],
             num_samples=10,
         )
 
@@ -449,11 +461,15 @@ class TestPytorchDummyDataset:
             sample2.outputs[DataType.JOINT_TARGET_POSITIONS]
         )
 
-    def test_collate_fn_basic(self, basic_robot_data_spec):
+    def test_collate_fn_basic(self, basic_cross_embodiment_descriptions):
         """Test basic collation functionality."""
         dataset = PytorchDummyDataset(
-            input_cross_embodiment_description=basic_robot_data_spec["input_spec"],
-            output_cross_embodiment_description=basic_robot_data_spec["output_spec"],
+            input_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "input_description"
+            ],
+            output_cross_embodiment_description=basic_cross_embodiment_descriptions[
+                "output_description"
+            ],
             num_samples=10,
         )
 

@@ -119,10 +119,8 @@ def start_training_run(
         gpu_type: Type of GPU to use for training (e.g., "A100", "V100")
         num_gpus: Number of GPUs to use for training
         frequency: Frequency to sync training data to (in Hz)
-        input_cross_embodiment_description: Input robot data specification.
-            Preferred over input_robot_data_spec.
-        output_cross_embodiment_description: Output robot data specification.
-            Preferred over output_robot_data_spec.
+        input_cross_embodiment_description: Input cross-embodiment description.
+        output_cross_embodiment_description: Output cross-embodiment description.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
         name_auto_increment: If True and a job with this name already exists, use
