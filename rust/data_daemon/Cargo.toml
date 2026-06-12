@@ -20,6 +20,7 @@ dashmap.workspace = true
 data_daemon_ipc = { path = "../data_daemon_ipc" }
 dirs.workspace = true
 iceoryx2.workspace = true
+libc.workspace = true
 md-5.workspace = true
 nix.workspace = true
 reqwest.workspace = true

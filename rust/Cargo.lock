@@ -414,6 +414,7 @@ dependencies = [
  "data_daemon_ipc",
  "dirs",
  "iceoryx2",
+ "libc",
  "md-5",
  "nix",
  "reqwest",
