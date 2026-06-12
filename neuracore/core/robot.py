@@ -733,8 +733,12 @@ class Robot:
         try:
             session = thread_local_session()
             response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/cancel?recording_id={recording_id}",
+                f"{API_URL}/org/{self.org_id}/recording/cancel",
                 headers=self._auth.get_headers(),
+                json={
+                    "recording_id": recording_id,
+                    "end_time": time.time(),
+                },
             )
             response.raise_for_status()
 
