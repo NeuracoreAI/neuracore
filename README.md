@@ -1,6 +1,6 @@
 <!-- fullWidth: false tocVisible: false tableWrap: true -->
 <div align="center">
-  <img src="./docs/assets/neuracore_logo.jpg" alt="Neuracore Logo" width="100%">
+  <img src="https://raw.githubusercontent.com/NeuracoreAI/neuracore/main/docs/assets/neuracore_logo.jpg" alt="Neuracore Logo" width="100%">
 </div>
 
 <br>
