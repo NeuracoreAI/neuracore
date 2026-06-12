@@ -54,7 +54,7 @@ class Auth(metaclass=SingletonMetaclass):
                 credentials
         """
         api_key = api_key or os.environ.get("NEURACORE_API_KEY") or get_api_key()
-
+        self.validate_version()
         # Verify API key with server and get access token
         try:
             session = thread_local_session()
