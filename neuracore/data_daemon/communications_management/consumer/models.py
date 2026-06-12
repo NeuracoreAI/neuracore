@@ -835,7 +835,14 @@ class RecordingCloseRegistry:
         recording_id: str,
         closing_state: RecordingClosingState,
     ) -> None:
-        """Store closing state for a recording awaiting finalization."""
+        """Store closing state for a recording awaiting finalization.
+
+        Ignored for recordings that are already closed: re-entering the
+        closing set would allow a second close to report a zeroed
+        expected_trace_count after the unique-trace history was cleared.
+        """
+        if self.is_closed(recording_id):
+            return
         self._closing_by_recording[recording_id] = closing_state
 
     def get_closing(self, recording_id: str) -> RecordingClosingState | None:
