@@ -166,6 +166,14 @@ export RUST_BACKTRACE=1
 #   6. data_integrity/test_network                 — adds upload + dataset wait
 #   7. performance/test_pre_network                — disk-only perf budgets
 #   8. performance/test_network                    — full network perf run
+#
+# The 300s (5-minute) 1920x1080 performance cases are pulled OUT of the normal
+# order and run last (see `run_tests`): they dominate wall time and their
+# stochastic-timing / upload-readiness budgets are the most fragile under host
+# load, so every cheaper test gets a chance to fail fast first. The 300s
+# pre-network (disk-only) cases run immediately before their network (upload)
+# equivalents. Both perf files keep their case-ids containing "300s", which is
+# the keyword the two phases select on.
 # ---------------------------------------------------------------------------
 
 test_targets=(
@@ -179,28 +187,62 @@ test_targets=(
   "tests/integration/platform/data_daemon/performance/test_network.py"
 )
 
-run_tests() {
-  log "running pytest with NCD_RUST_DAEMON=$NCD_RUST_DAEMON, NEURACORE_API_URL=$NEURACORE_API_URL"
-  log "stdout log: $log_file"
-  log "pytest --log-file: $pytest_log_file"
+# Substring shared by every 300s case-id; the two perf files are the last two
+# `test_targets` entries and the only place these cases live.
+heavy_case_filter="300s"
+perf_targets=( "${test_targets[@]: -2}" )
 
-  # --exitfirst stops on the first failure so the fast-fail ordering pays off.
-  # --log-cli-level=DEBUG turns on live structured logging from the SUT into
-  # pytest's captured stdout (so it ends up in $log_file via tee).
-  # --log-file captures the same at DEBUG level into a separate file so that
-  # the structured records survive even if the tee buffer is cut short.
+# Run one pytest phase. $1 is the --log-file path, $2 the -k expression, and the
+# remaining args are the pytest targets.
+#
+# --exitfirst stops on the first failure so the fast-fail ordering pays off.
+# --log-cli-level=DEBUG turns on live structured logging from the SUT into
+# pytest's captured stdout (so it ends up in $log_file via tee). --log-file
+# captures the same at DEBUG level into a separate file so the structured
+# records survive even if the tee buffer is cut short; each phase gets its own
+# --log-file because pytest opens it in truncate mode and would otherwise
+# clobber the previous phase's records.
+run_pytest_phase() {
+  local phase_log_file="$1"
+  local keyword_expr="$2"
+  shift 2
   pytest \
     --exitfirst \
     --tb=short \
     -vv \
     -o log_cli=true \
     -o log_cli_level=DEBUG \
-    --log-file="$pytest_log_file" \
+    --log-file="$phase_log_file" \
     --log-file-level=DEBUG \
-    "${test_targets[@]}" \
+    -k "$keyword_expr" \
+    "$@" \
     2>&1 | tee -a "$log_file"
   # Return pytest's exit code, not tee's.
   return "${PIPESTATUS[0]}"
+}
+
+run_tests() {
+  log "running pytest with NCD_RUST_DAEMON=$NCD_RUST_DAEMON, NEURACORE_API_URL=$NEURACORE_API_URL"
+  log "stdout log: $log_file"
+  log "pytest --log-file: $pytest_log_file (per-phase _phase1 / _phase2 suffix)"
+
+  # Phase 1: every suite EXCEPT the heavy 300s performance cases, in the
+  # fastest-to-slowest order above, so a real bug surfaces in the cheapest suite
+  # and the lighter performance cases (incl. network upload) aren't blocked by a
+  # flaky 300s case.
+  log "phase 1/2: all suites except the 300s performance cases (-k 'not $heavy_case_filter')"
+  run_pytest_phase "${pytest_log_file%.log}_phase1.log" "not $heavy_case_filter" "${test_targets[@]}"
+  local phase1_rc=$?
+  if [[ $phase1_rc -ne 0 ]]; then
+    return "$phase1_rc"
+  fi
+
+  # Phase 2: the heavy 300s cases at the very end — the pre-network (disk-only)
+  # ones first, immediately before their network (upload) equivalents (perf
+  # files are ordered pre-network then network in `perf_targets`).
+  log "phase 2/2: 300s performance cases — pre-network then network (-k '$heavy_case_filter')"
+  run_pytest_phase "${pytest_log_file%.log}_phase2.log" "$heavy_case_filter" "${perf_targets[@]}"
+  return "$?"
 }
 
 # ---------------------------------------------------------------------------
