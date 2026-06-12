@@ -42,7 +42,7 @@ from neuracore_types.training.training import GPUType
 import neuracore as nc
 from neuracore.core.endpoint import Policy
 
-THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+THIS_DIR = os.path.dirname(__file__)
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
 # ruff: noqa: E402
 from common.transfer_cube import (
@@ -69,6 +69,14 @@ NUM_ROLLOUTS = 20
 # Training should be complete by the time Phase 2 runs; this is a safety buffer
 # for jobs that finish slightly after the Phase 2 workflow starts.
 TRAINING_WAIT_TIMEOUT_MINUTES = 60
+ENDPOINT_ACTIVE_STATE = "active"
+ENDPOINT_TRANSIENT_STATES = {
+    "creating",
+    "deploying",
+    "initializing",
+    "pending",
+    "starting",
+}
 
 JOINT_NAMES = (
     BimanualViperXTask.LEFT_ARM_JOINT_NAMES
@@ -168,6 +176,32 @@ def eval_model(
     return success / num_rollouts
 
 
+def _wait_for_endpoint_active(
+    endpoint_id: str,
+    *,
+    algorithm_name: str,
+    timeout_minutes: int = 30,
+) -> str:
+    """Wait until an endpoint is active or reaches a terminal/non-transient state."""
+    deadline = time.time() + timeout_minutes * 60
+    while True:
+        endpoint_status = nc.get_endpoint_status(endpoint_id=endpoint_id)
+        normalized_status = str(endpoint_status).strip().lower()
+        logger.info(
+            f"[{algorithm_name}] Waiting for endpoint: status={endpoint_status}"
+        )
+        if normalized_status == ENDPOINT_ACTIVE_STATE:
+            return endpoint_status
+        if normalized_status not in ENDPOINT_TRANSIENT_STATES:
+            return endpoint_status
+        if time.time() > deadline:
+            raise TimeoutError(
+                f"[{algorithm_name}] Endpoint {endpoint_id} did not become active "
+                f"within {timeout_minutes} minutes; last status: {endpoint_status!r}"
+            )
+        time.sleep(60)
+
+
 class TestAlgorithmPerformance:
     def test_start_training(self, algorithm_config_entry: dict) -> None:
         """Phase 1: start a training job and record its ID.
@@ -263,16 +297,11 @@ class TestAlgorithmPerformance:
             )
             endpoint_id = endpoint_data["id"]
 
-            endpoint_status = nc.get_endpoint_status(endpoint_id=endpoint_id)
-            while endpoint_status == "creating":
-                logger.info(
-                    f"[{algorithm_name}] Waiting for endpoint: "
-                    f"status={endpoint_status}"
-                )
-                time.sleep(60)
-                endpoint_status = nc.get_endpoint_status(endpoint_id=endpoint_id)
-
-            if endpoint_status != "active":
+            endpoint_status = _wait_for_endpoint_active(
+                endpoint_id=endpoint_id,
+                algorithm_name=algorithm_name,
+            )
+            if str(endpoint_status).strip().lower() != ENDPOINT_ACTIVE_STATE:
                 raise ValueError(
                     f"[{algorithm_name}] Endpoint did not become active: "
                     f"{endpoint_status}"
