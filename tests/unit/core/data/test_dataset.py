@@ -225,6 +225,145 @@ def test_nc_create_dataset_sets_global_state(
     assert GlobalSingleton()._active_dataset_id == dataset.id
 
 
+def test_nc_clone_dataset_from_dataset_object(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    """Test cloning from a Dataset object via the public API."""
+    nc.login("test_api_key")
+    source = Dataset(
+        id="source_dataset",
+        org_id=mocked_org_id,
+        name="source",
+        size_bytes=512,
+        tags=[],
+        data_types=[],
+        is_shared=False,
+    )
+    dataset_response.id = "cloned_dataset"
+    dataset_response.name = "clone"
+    mock_data_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/datasets/clone",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    cloned = nc.clone_dataset("clone", source_dataset=source)
+
+    assert cloned.id == "cloned_dataset"
+    assert cloned.name == "clone"
+    assert GlobalSingleton()._active_dataset_id == cloned.id
+    assert mock_data_requests.last_request.json() == {
+        "name": "clone",
+        "sourceDatasetId": "source_dataset",
+    }
+
+
+def test_nc_clone_dataset_from_dataset_id(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    """Test cloning when the source is provided by ID."""
+    nc.login("test_api_key")
+    dataset_response.id = "cloned_dataset"
+    dataset_response.name = "clone"
+    mock_data_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/datasets/clone",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    cloned = nc.clone_dataset("clone", dataset_id="source_dataset")
+
+    assert cloned.id == "cloned_dataset"
+    assert mock_data_requests.last_request.json()["sourceDatasetId"] == "source_dataset"
+
+
+def test_nc_clone_dataset_from_dataset_name(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    """Test cloning when the source is provided by name."""
+    nc.login("test_api_key")
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+    dataset_response.id = "cloned_dataset"
+    dataset_response.name = "clone"
+    mock_data_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/datasets/clone",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+
+    cloned = nc.clone_dataset(dataset_name="source_name", new_dataset_name="clone")
+
+    assert cloned.id == "cloned_dataset"
+    assert mock_data_requests.last_request.json()["sourceDatasetId"] == "dataset_123"
+
+
+def test_nc_clone_dataset_missing_source_raises(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test that an unresolved source string raises DatasetError."""
+    nc.login("test_api_key")
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/missing",
+        status_code=404,
+    )
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        status_code=404,
+    )
+
+    with pytest.raises(DatasetError, match="Dataset 'missing' not found"):
+        nc.clone_dataset("clone", dataset_name="missing")
+
+
+def test_nc_clone_dataset_api_error(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test that clone API errors include the backend detail."""
+    nc.login("test_api_key")
+    source = Dataset(
+        id="source_dataset",
+        org_id=mocked_org_id,
+        name="source",
+        size_bytes=512,
+        tags=[],
+        data_types=[],
+        is_shared=False,
+    )
+    mock_data_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/datasets/clone",
+        json={"detail": {"error": "Dataset already exists"}},
+        status_code=409,
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match="Failed to clone dataset: Dataset already exists",
+    ):
+        nc.clone_dataset("clone", source_dataset=source)
+
+
 class TestDatasetInitialization:
     """Tests for Dataset initialization."""
 
