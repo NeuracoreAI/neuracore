@@ -834,12 +834,17 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 local_recording_handles.append(local_handle)
 
                 # The daemon assigns the INTEGER recording_index (disk dir name +
-                # DB join key); resolve it from the source as the
-                # (recording_ordinal) newest recording for this source.
+                # DB join key); resolve it as the newest recording for this
+                # source. Gate on an index strictly greater than the previous
+                # recording's (``0`` for the first) rather than a row count: the
+                # reaper deletes fully-uploaded recordings' rows mid-session, so
+                # the source's row count is not monotonic, but the just-started
+                # recording is always the new highest index.
+                previous_index = recording_indexes[-1] if recording_indexes else 0
                 daemon_recording_index = wait_for_recording_index_for_source(
                     source[0],
                     source[1],
-                    expected_count=recording_ordinal + 1,
+                    after_index=previous_index,
                     timeout_s=MAX_TIME_TO_START_S,
                 )
                 recording_indexes.append(daemon_recording_index)

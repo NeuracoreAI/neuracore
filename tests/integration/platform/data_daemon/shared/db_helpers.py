@@ -310,36 +310,42 @@ def wait_for_recording_index_for_source(
     robot_id: str,
     robot_instance: int,
     *,
-    expected_count: int,
+    after_index: int = 0,
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.1,
 ) -> int:
-    """Block until the daemon has assigned ``expected_count`` recordings to a source.
+    """Block until the daemon assigns a recording with index > ``after_index``.
 
-    Returns the ``recording_index`` of the most-recent (highest-index)
-    recording for ``(robot_id, robot_instance)`` once at least
-    ``expected_count`` recordings exist. The daemon assigns ``recording_index``
-    the moment it sees ``StartRecording``, so a short poll covers the small
-    window between the producer's ``start_recording`` call and the daemon
-    persisting the row.
+    Returns the highest ``recording_index`` for ``(robot_id, robot_instance)``
+    once it exceeds ``after_index`` — i.e. the recording just started. The daemon
+    assigns ``recording_index`` the moment it sees ``StartRecording``, so a short
+    poll covers the window between the producer's ``start_recording`` call and the
+    daemon persisting the row.
+
+    Gating on a *new, higher* index rather than a raw row count keeps this robust
+    to the recording reaper, which deletes a recording's row once it is fully
+    uploaded: the just-started recording is always the highest-indexed row for the
+    source and is never reaped before the next recording starts, but older
+    fully-uploaded rows can vanish mid-session, so the row *count* is not
+    monotonic. Pass the previously-resolved index as ``after_index`` (``0`` for
+    the first recording of a source).
 
     Raises:
-        TimeoutError: If ``expected_count`` recordings do not appear in time.
+        TimeoutError: If no recording with index > ``after_index`` appears in time.
     """
     deadline = time.monotonic() + timeout_s
-    last_count = 0
+    newest: int | None = None
     while True:
         rows = fetch_recordings_for_source(robot_id, robot_instance)
-        last_count = len(rows)
-        if last_count >= expected_count:
-            # Rows are ordered ascending by recording_index; the newest is last.
-            return int(rows[-1][COLUMN_RECORDING_INDEX])
+        indices = [int(row[COLUMN_RECORDING_INDEX]) for row in rows]
+        newest = max(indices) if indices else None
+        if newest is not None and newest > after_index:
+            return newest
         if time.monotonic() >= deadline:
             raise TimeoutError(
-                "Daemon did not assign recording_index for source "
-                f"({robot_id}, {robot_instance}); expected at least "
-                f"{expected_count} recording(s), saw {last_count} after "
-                f"{timeout_s}s."
+                "Daemon did not assign a new recording_index for source "
+                f"({robot_id}, {robot_instance}); expected an index greater than "
+                f"{after_index}, newest seen {newest} after {timeout_s}s."
             )
         time.sleep(poll_interval_s)
 
