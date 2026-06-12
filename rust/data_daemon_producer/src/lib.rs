@@ -51,7 +51,7 @@ pub mod nut_writer;
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -439,6 +439,164 @@ fn writer_loop(queue: &FrameQueue) {
                 });
                 let _ = ack.send(());
             }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background data publisher
+// ---------------------------------------------------------------------------
+//
+// Synchronous IPC publishes (`BatchedData` joints, `Data` json, and the
+// `VideoChunkReady` chunk announcements) can briefly block on a full commands
+// buffer when the daemon's listener is preempted off-CPU under heavy
+// (multi-context) load. Routing them through a dedicated per-process publisher
+// thread keeps that block off BOTH the caller's `log_*` thread AND the disk
+// writer thread — crucially, the writer's stop/cancel *barrier* then waits only
+// for the durable on-disk seal, never for an IPC publish.
+//
+// All three are held-back *data* on the daemon side (routed by
+// `publish_timestamp_ns` within the holdback + closing-window retention), so —
+// unlike lifecycle envelopes (`Start/Stop/CancelRecording`, which stay on the
+// caller's publisher for strict ordering) — reordering them onto this thread's
+// publisher is safe. The queue is unbounded: messages are small/infrequent and
+// the thread keeps up in steady state; a transient daemon stall buffers only a
+// few hundred small items.
+
+/// Work item for the publisher thread.
+enum PublishMsg {
+    /// A batch of joint `(name, value)` samples to serialise + publish as one
+    /// `BatchedData`. Serialisation happens on the publisher thread, off the
+    /// caller.
+    Joint {
+        robot_id: String,
+        robot_instance: i64,
+        data_type: String,
+        items: Vec<(String, f64)>,
+        timestamp_ns: i64,
+        timestamp_s: Option<f64>,
+        publish_timestamp_ns: i64,
+    },
+    /// One JSON sample to publish as a `Data` envelope.
+    Json {
+        robot_id: String,
+        robot_instance: i64,
+        data_type: String,
+        sensor_name: String,
+        payload: Vec<u8>,
+        timestamp_ns: i64,
+        timestamp_s: Option<f64>,
+        publish_timestamp_ns: i64,
+    },
+    /// A pre-built `VideoChunkReady` envelope to announce (built by the writer
+    /// thread once the chunk is sealed on disk).
+    Announce(Envelope),
+}
+
+/// Process-wide publisher handle, healed across `fork` via `owner_pid` (mirrors
+/// [`VIDEO_WRITER`]).
+struct PublisherRegistry {
+    owner_pid: u32,
+    tx: Option<Sender<PublishMsg>>,
+}
+
+static PUBLISHER: LazyLock<Mutex<PublisherRegistry>> = LazyLock::new(|| {
+    Mutex::new(PublisherRegistry {
+        owner_pid: 0,
+        tx: None,
+    })
+});
+
+/// Return this process's publisher channel, spawning the publisher thread on
+/// first use and re-spawning after a fork.
+fn publisher_tx() -> Sender<PublishMsg> {
+    let mut reg = PUBLISHER.lock().unwrap_or_else(|p| p.into_inner());
+    let pid = std::process::id();
+    if reg.owner_pid == pid {
+        if let Some(tx) = reg.tx.as_ref() {
+            return tx.clone();
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    match std::thread::Builder::new()
+        .name("nc-data-publisher".to_string())
+        .spawn(move || publish_loop(rx))
+    {
+        Ok(_handle) => {
+            reg.owner_pid = pid;
+            reg.tx = Some(tx.clone());
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to spawn data publisher thread; dropping sample");
+        }
+    }
+    tx
+}
+
+/// The publisher thread's run loop: publish every queued data envelope. Exits
+/// when the last [`Sender`] is dropped (the channel closes).
+fn publish_loop(rx: Receiver<PublishMsg>) {
+    while let Ok(msg) = rx.recv() {
+        let result = match msg {
+            PublishMsg::Joint {
+                robot_id,
+                robot_instance,
+                data_type,
+                items,
+                timestamp_ns,
+                timestamp_s,
+                publish_timestamp_ns,
+            } => {
+                let timestamp_for_json =
+                    timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
+                let mut batch_items = Vec::with_capacity(items.len());
+                for (name, value) in items {
+                    match serde_json::to_vec(&ScalarFrameEntry {
+                        timestamp: timestamp_for_json,
+                        value,
+                    }) {
+                        Ok(payload) => batch_items.push(BatchedDataItem {
+                            data_type: data_type.clone(),
+                            sensor_name: Some(name),
+                            payload,
+                        }),
+                        Err(error) => {
+                            tracing::warn!(%error, "failed to encode joint frame JSON; dropping item")
+                        }
+                    }
+                }
+                publish(&Envelope::BatchedData {
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                    timestamp_s,
+                    items: batch_items,
+                })
+            }
+            PublishMsg::Json {
+                robot_id,
+                robot_instance,
+                data_type,
+                sensor_name,
+                payload,
+                timestamp_ns,
+                timestamp_s,
+                publish_timestamp_ns,
+            } => publish(&Envelope::Data {
+                robot_id,
+                robot_instance,
+                data_type,
+                sensor_name: Some(sensor_name),
+                publish_timestamp_ns,
+                timestamp_ns,
+                timestamp_s,
+                payload,
+            }),
+            PublishMsg::Announce(envelope) => publish(&envelope),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "failed to publish data envelope");
         }
     }
 }
@@ -834,38 +992,23 @@ fn log_joints(
     }
     let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
-    // Fall back to ns→s when the caller omits timestamp_s so the per-frame
-    // "timestamp" field still has a sensible value to write into trace.json.
-    let timestamp_for_json = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
-    py.allow_threads(|| -> PyResult<()> {
-        let mut batch_items = Vec::with_capacity(items.len());
-        for (name, value) in items {
-            // serde_json (via ryu) always emits at least one fractional digit
-            // for f64 — so integer-valued joint values land on disk as `1.0`,
-            // keeping the column consistently typed as a float.
-            let payload = serde_json::to_vec(&ScalarFrameEntry {
-                timestamp: timestamp_for_json,
-                value,
-            })
-            .map_err(|error| {
-                PyRuntimeError::new_err(format!("failed to encode joint frame JSON: {error}"))
-            })?;
-            batch_items.push(BatchedDataItem {
-                data_type: data_type.clone(),
-                sensor_name: Some(name),
-                payload,
-            });
-        }
-        publish(&Envelope::BatchedData {
+    py.allow_threads(move || {
+        // Stamp the window-routing clock at enqueue (inside the recording
+        // window). The publisher thread serialises the items and publishes the
+        // `BatchedData`, keeping the synchronous IPC publish — which can briefly
+        // block on a full commands buffer — off this call.
+        let publish_timestamp_ns = now_ns();
+        let _ = publisher_tx().send(PublishMsg::Joint {
             robot_id,
             robot_instance,
-            publish_timestamp_ns: now_ns(),
+            data_type,
+            items,
             timestamp_ns,
             timestamp_s,
-            items: batch_items,
-        })?;
-        Ok(())
-    })
+            publish_timestamp_ns,
+        });
+    });
+    Ok(())
 }
 
 /// Log one video frame for a camera. The frame is appended to the
@@ -1063,7 +1206,10 @@ fn record_video_frame(
     };
 
     if let Some(envelope) = flush_envelope {
-        publish(&envelope)?;
+        // Hand the sealed chunk's announcement to the publisher thread rather
+        // than publishing inline: this runs on the writer thread, which must
+        // never block on an IPC publish (the stop/cancel barrier waits on it).
+        let _ = publisher_tx().send(PublishMsg::Announce(envelope));
     }
     Ok(())
 }
@@ -1148,19 +1294,22 @@ fn log_json(
     let data_type = data_type.to_string();
     let name = name.to_string();
     let owned_payload = payload.to_vec();
-    py.allow_threads(|| -> PyResult<()> {
-        publish(&Envelope::Data {
+    py.allow_threads(move || {
+        // Stamp the window-routing clock at enqueue; the publisher thread
+        // publishes the `Data` envelope off this call (see [`PublishMsg::Json`]).
+        let publish_timestamp_ns = now_ns();
+        let _ = publisher_tx().send(PublishMsg::Json {
             robot_id,
             robot_instance,
             data_type,
-            sensor_name: Some(name),
-            publish_timestamp_ns: now_ns(),
+            sensor_name: name,
+            payload: owned_payload,
             timestamp_ns,
             timestamp_s,
-            payload: owned_payload,
-        })?;
-        Ok(())
-    })
+            publish_timestamp_ns,
+        });
+    });
+    Ok(())
 }
 
 /// Flush any tail video chunks for the source, then publish one
@@ -1247,7 +1396,9 @@ fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), Produc
             )
         };
         if let Some(envelope) = flush_envelope {
-            publish(&envelope)?;
+            // Announce via the publisher thread so the stop barrier (which awaits
+            // this flush) only ever waits on the on-disk seal, never an IPC send.
+            let _ = publisher_tx().send(PublishMsg::Announce(envelope));
         }
     }
     Ok(())

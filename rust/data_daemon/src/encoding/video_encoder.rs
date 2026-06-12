@@ -33,6 +33,16 @@ use tokio::process::Command;
 /// when they need to point at a specific build.
 pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 
+/// `nice` value applied to each transcode child via `setpriority` before exec.
+///
+/// Per-chunk transcoding is throughput-oriented background work; a robot's
+/// `nc.log_*` calls are latency-critical. On a small (2-vCPU) host an unniced
+/// ffmpeg child preempts the producer's logging threads at recording
+/// boundaries, so a joint publish that does ~3 ms of work spends ~20 ms
+/// descheduled. Renicing the encoder lets the kernel scheduler favour the
+/// foreground logging threads while ffmpeg still consumes otherwise-idle CPU.
+const ENCODER_NICENESS: libc::c_int = 10;
+
 /// Inputs to one per-chunk transcode invocation.
 #[derive(Debug, Clone)]
 pub struct ChunkEncodeRequest {
@@ -359,6 +369,16 @@ impl VideoEncoder {
             // request `kill_on_drop` to clean up if the supervising future is
             // cancelled mid-flight.
             .kill_on_drop(true);
+        // SAFETY: the closure runs in the forked child between `fork` and
+        // `exec`; `setpriority` is async-signal-safe and touches no parent
+        // state. A failed renice is non-fatal (ignored), so the encode still
+        // runs at default priority.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, ENCODER_NICENESS);
+                Ok(())
+            });
+        }
 
         let output = command
             .output()
