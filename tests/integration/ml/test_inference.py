@@ -29,8 +29,15 @@ from neuracore_types import (
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
-from tests.integration.ml.shared.constants import (
+from tests.integration.ml.shared.utils import (
+    SelectedRun,
+    prune_training_runs_except,
+    resolve_latest_completed_run,
+    unique_name,
+)
+from tests.integration.ml.test_training_flow import (
     GRIPPER_NAMES,
+    INFERENCE_MODEL_TRAIN_RUN_PREFIX,
     INPUT_EMBODIMENT_DESCRIPTION,
     JOINT_NAMES,
     LANGUAGE_LABEL,
@@ -39,13 +46,6 @@ from tests.integration.ml.shared.constants import (
     OUTPUT_DATA_TYPES,
     OUTPUT_EMBODIMENT_DESCRIPTION,
 )
-from tests.integration.ml.shared.utils import (
-    SelectedRun,
-    prune_training_runs_except,
-    resolve_latest_completed_run,
-    unique_name,
-)
-from tests.integration.ml.test_training_flow import INFERENCE_MODEL_TRAIN_RUN_PREFIX
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")

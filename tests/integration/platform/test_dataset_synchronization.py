@@ -148,7 +148,7 @@ def _record_one(robot_name: str, instance: int) -> None:
             robot_name=robot_name,
             instance=instance,
         )
-    nc.stop_recording(wait=False, robot_name=robot_name, instance=instance)
+    nc.stop_recording(wait=True, robot_name=robot_name, instance=instance)
 
 
 def _collect_dataset(robot_name: str, dataset_name: str, instance: int) -> Dataset:
