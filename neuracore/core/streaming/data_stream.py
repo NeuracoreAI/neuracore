@@ -150,11 +150,11 @@ class DataStream(ABC):
             if producer_channel.trace_id:
                 producer_channel.cleanup_producer_channel(
                     stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-                    wait_for_slot_drain=wait_for_producer_drain,
+                    wait_for_transport_drain=wait_for_producer_drain,
                 )
         finally:
             producer_channel.stop_producer_channel(
-                wait_for_slot_drain=wait_for_producer_drain,
+                wait_for_transport_drain=wait_for_producer_drain,
             )
 
     def is_recording(self) -> bool:

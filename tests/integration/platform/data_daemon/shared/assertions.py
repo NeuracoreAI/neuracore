@@ -46,7 +46,10 @@ from neuracore_types import Dataset, DataType
 
 import neuracore as nc
 from neuracore.core.data.recording import Recording
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.const import (
+    DURATION_VARIATION_TOLERANCE_SECONDS,
+    SOCKET_PATH,
+)
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
@@ -646,7 +649,7 @@ def _verify_recording_structure(
     # Duration bounds: variable mode allows 0.75–1.25× base; fixed mode uses exact
     # base duration.
     base_duration_s = float(result.duration_sec)
-    clock_tolerance_s = 2.5
+    clock_tolerance_s = DURATION_VARIATION_TOLERANCE_SECONDS
     if case.context_duration_mode == DURATION_MODE_VARIABLE:
         min_duration_s = (
             base_duration_s * DURATION_VARIABLE_MIN_FACTOR - clock_tolerance_s

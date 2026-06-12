@@ -17,20 +17,20 @@ from .models import (
     CompletedChannelMessage,
     FinalChunkRegistry,
     FinalTraceWork,
-    PendingSharedSlotSequenceRegistry,
     PendingTraceEnd,
     PendingTraceEndRegistry,
+    PendingVideoFrameSequenceRegistry,
     ProducerCutoffWatchRegistry,
     ProducerSequenceRegistry,
     RecordingCloseRegistry,
     RecordingClosingState,
     RecordingDataDropRequest,
-    SharedSlotSequenceProgressRequest,
     TraceMetadataRegistrationRequest,
     TraceMetadataRegistry,
     TraceMetadataSnapshot,
     TraceRecordingLookupRequest,
     TraceRecordingRegistry,
+    VideoFrameSequenceProgressRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ class TraceLifecycleCoordinator:
         self._closing_recordings = RecordingCloseRegistry()
         self._producer_cutoff_watches = ProducerCutoffWatchRegistry()
         self._producer_last_sequence_numbers = ProducerSequenceRegistry()
-        self._pending_shared_slot_sequences = PendingSharedSlotSequenceRegistry()
+        self._pending_video_frame_sequences = PendingVideoFrameSequenceRegistry()
 
     def ensure_result_trace_registered(
         self,
@@ -137,13 +137,13 @@ class TraceLifecycleCoordinator:
             return None
         return int(cutoff)
 
-    def has_pending_shared_slot_sequences_at_or_before(
+    def has_pending_video_frame_sequences_at_or_before(
         self,
         producer_id: str,
         sequence_number: int,
     ) -> bool:
-        """Return whether shared-slot spool work is still pending up to a cutoff."""
-        return self._pending_shared_slot_sequences.has_pending_at_or_before(
+        """Return whether video-frame spool work is still pending up to a cutoff."""
+        return self._pending_video_frame_sequences.has_pending_at_or_before(
             producer_id,
             sequence_number,
         )
@@ -175,22 +175,22 @@ class TraceLifecycleCoordinator:
                 incoming_value,
             )
 
-    def mark_shared_slot_sequence_pending(
+    def mark_video_frame_sequence_pending(
         self,
-        request: SharedSlotSequenceProgressRequest,
+        request: VideoFrameSequenceProgressRequest,
     ) -> None:
-        """Record that one shared-slot descriptor still needs spool processing."""
-        self._pending_shared_slot_sequences.add(
+        """Record that one video frame still needs spool processing."""
+        self._pending_video_frame_sequences.add(
             request.producer_id,
             request.sequence_number,
         )
 
-    def mark_shared_slot_sequence_completed(
+    def mark_video_frame_sequence_completed(
         self,
-        request: SharedSlotSequenceProgressRequest,
+        request: VideoFrameSequenceProgressRequest,
     ) -> None:
-        """Record that one shared-slot descriptor reached completion handoff."""
-        self._pending_shared_slot_sequences.complete(
+        """Record that one video frame reached completion handoff."""
+        self._pending_video_frame_sequences.complete(
             request.producer_id,
             request.sequence_number,
         )
@@ -472,7 +472,7 @@ class TraceLifecycleCoordinator:
                 or last_sequence_number < cutoff_sequence_number
             ):
                 return False
-            if self._pending_shared_slot_sequences.has_pending_at_or_before(
+            if self._pending_video_frame_sequences.has_pending_at_or_before(
                 producer_id,
                 cutoff_sequence_number,
             ):

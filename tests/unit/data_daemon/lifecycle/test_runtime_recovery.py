@@ -8,10 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from neuracore.data_daemon.const import (
-    DEFAULT_SHARED_MEMORY_SIZE,
-    SHARED_SLOT_SHM_PREFIX,
-)
+from neuracore.data_daemon.const import DEFAULT_TRANSPORT_BUFFER_SIZE
 from neuracore.data_daemon.lifecycle import runtime_recovery
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     acquire_pid_file,
@@ -21,8 +18,6 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
 from neuracore.data_daemon.lifecycle.runtime_recovery import (
     SharedMemoryCapacityError,
     cleanup_socket_files,
-    cleanup_stale_shared_slot_control_sockets,
-    cleanup_stale_shared_slot_segments,
     ensure_shared_memory_capacity,
     reconcile_state_with_filesystem,
     shared_memory_required_bytes,
@@ -93,60 +88,6 @@ def test_validate_or_recover_sqlite_rotates_corrupt_db(tmp_path: Path) -> None:
     assert any(path.name.startswith("state.db.corrupt-") for path in tmp_path.iterdir())
 
 
-def test_cleanup_stale_shared_slot_segments_removes_stale_shared_slot_segments(
-    tmp_path: Path,
-) -> None:
-    shm_dir = tmp_path / "dev-shm"
-    shm_dir.mkdir()
-
-    stale_names = (
-        f"{SHARED_SLOT_SHM_PREFIX}stale-1",
-        f"{SHARED_SLOT_SHM_PREFIX}stale-2",
-    )
-    for buffer_name in stale_names:
-        (shm_dir / buffer_name).write_bytes(b"shm")
-
-    live_name = "neuracore-keep-live"
-    (shm_dir / live_name).write_bytes(b"shm")
-
-    cleaned = cleanup_stale_shared_slot_segments(shm_dir=shm_dir)
-
-    assert cleaned == len(stale_names)
-    for stale_name in stale_names:
-        assert not (shm_dir / stale_name).exists()
-    assert (shm_dir / live_name).exists()
-
-
-def test_cleanup_stale_shared_slot_control_sockets_removes_ack_sockets(
-    tmp_path: Path,
-) -> None:
-    ack_dir = tmp_path / "slot_acks"
-    ack_dir.mkdir()
-
-    stale_names = (
-        "slot_control_123_first.ipc",
-        "slot_control_456_second.ipc",
-    )
-    for socket_name in stale_names:
-        (ack_dir / socket_name).write_text("stale", encoding="utf-8")
-
-    keep_names = (
-        "management.sock",
-        "slot_control_789_missing_suffix",
-        "other_control_123.ipc",
-    )
-    for socket_name in keep_names:
-        (ack_dir / socket_name).write_text("keep", encoding="utf-8")
-
-    cleaned = cleanup_stale_shared_slot_control_sockets(ack_dir=ack_dir)
-
-    assert cleaned == len(stale_names)
-    for stale_name in stale_names:
-        assert not (ack_dir / stale_name).exists()
-    for keep_name in keep_names:
-        assert (ack_dir / keep_name).exists()
-
-
 def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
     tmp_path: Path,
     monkeypatch,
@@ -165,8 +106,8 @@ def test_ensure_shared_memory_capacity_raises_when_tmpfs_is_full(
 
 def test_shared_memory_required_bytes_matches_default_allocation() -> None:
     assert (
-        shared_memory_required_bytes(DEFAULT_SHARED_MEMORY_SIZE, metadata_size=4096)
-        == DEFAULT_SHARED_MEMORY_SIZE + 4096
+        shared_memory_required_bytes(DEFAULT_TRANSPORT_BUFFER_SIZE, metadata_size=4096)
+        == DEFAULT_TRANSPORT_BUFFER_SIZE + 4096
     )
 
 

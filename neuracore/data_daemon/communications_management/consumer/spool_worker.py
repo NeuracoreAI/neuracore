@@ -1,4 +1,10 @@
-"""Shared-slot spool worker that copies daemon payloads before ACKing them."""
+"""Spool worker that persists decoded video frames before completion.
+
+Frames arrive already copied out of the iceoryx2 ring buffer by the daemon
+drain, so this worker only spools the chunk to disk, resolves recording
+metadata, applies drop policy, and hands the chunk to the completion worker.
+Work is sharded by producer so ordering is preserved per channel.
+"""
 
 from __future__ import annotations
 
@@ -9,44 +15,36 @@ import zlib
 from collections.abc import Callable
 from pathlib import Path
 
-from neuracore.data_daemon.communications_management.shared_transport.models import (
-    SharedSlotTransportResult,
-)
-from neuracore.data_daemon.models import SharedSlotDescriptor
+from neuracore.data_daemon.models import VideoTransportChunkMetadata
 
-from ..shared_transport.shared_slot_daemon_handler import (
-    SharedSlotDaemonHandler,
-    SharedSlotDescriptorAbandoned,
-)
-from .bridge_chunk_spool import BridgeChunkSpool, ChunkSpoolRef
+from .bridge_chunk_spool import BridgeChunkSpool
 from .completion_worker import CompletionWorker
 from .models import (
     ChannelState,
     CompletionChunkWork,
+    DecodedFrameWork,
     RecordingDataDropRequest,
-    SharedSlotSequenceProgressRequest,
-    SpoolDescriptorWork,
     TraceMetadataRegistrationRequest,
     TraceMetadataSnapshot,
     TraceRecordingLookupRequest,
+    VideoFrameSequenceProgressRequest,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class _SpoolShard:
-    """One spool shard that copies shared-slot chunks before ACKing them."""
+    """One spool shard that copies decoded frames before completing them."""
 
     def __init__(
         self,
         *,
         chunk_spool: BridgeChunkSpool,
-        shared_slot_handler: SharedSlotDaemonHandler,
         completion_worker: CompletionWorker,
         acquire_spool_admission: Callable[[], object],
         release_spool_admission: Callable[[], None],
         should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
-        mark_sequence_completed: Callable[[SharedSlotSequenceProgressRequest], None],
+        mark_sequence_completed: Callable[[VideoFrameSequenceProgressRequest], None],
         register_trace: Callable[[str, str], None],
         register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
         get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
@@ -54,7 +52,6 @@ class _SpoolShard:
         shard_index: int,
     ) -> None:
         self._chunk_spool = chunk_spool
-        self._shared_slot_handler = shared_slot_handler
         self._completion_worker = completion_worker
         self._acquire_spool_admission = acquire_spool_admission
         self._release_spool_admission = release_spool_admission
@@ -64,7 +61,7 @@ class _SpoolShard:
         self._register_trace_metadata = register_trace_metadata
         self._get_trace_recording = get_trace_recording
         self._set_channel_trace_id = set_channel_trace_id
-        self._queue: queue.Queue[SpoolDescriptorWork | None] = queue.Queue(maxsize=32)
+        self._queue: queue.Queue[DecodedFrameWork | None] = queue.Queue(maxsize=32)
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
         self._thread = threading.Thread(
@@ -74,11 +71,10 @@ class _SpoolShard:
         )
         self._thread.start()
 
-    def enqueue(self, channel: ChannelState, descriptor_payload: dict) -> None:
+    def enqueue(self, work: DecodedFrameWork) -> None:
+        """Queue one decoded frame for spool processing."""
         self._ensure_running()
-        self._queue.put(
-            SpoolDescriptorWork(channel=channel, descriptor_payload=descriptor_payload)
-        )
+        self._queue.put(work)
 
     def close(self) -> None:
         self._queue.put(None)
@@ -109,66 +105,24 @@ class _SpoolShard:
             finally:
                 self._queue.task_done()
 
-    def _get_transport_result(
-        self, work: SpoolDescriptorWork
-    ) -> tuple[SharedSlotTransportResult, bool] | None:
-        """Gets a transport result from the shared-slot handler."""
-        descriptor: SharedSlotDescriptor | None = None
-        release_admission = True
+    def _process(self, work: DecodedFrameWork) -> None:
+        """Spool one decoded frame and hand it to the completion worker.
 
-        try:
-            transport_result = self._shared_slot_handler.handle_descriptor(
-                work.channel,
-                work.descriptor_payload,
-                self._chunk_spool,
-            )
-            descriptor = transport_result.descriptor
-            release_admission = False
-        except SharedSlotDescriptorAbandoned:
-            descriptor = self._descriptor_from_payload_or_none(work.descriptor_payload)
-            logger.warning(
-                "Skipping abandoned shared-slot descriptor "
-                "producer_id=%s shm_name=%s sequence_id=%s",
-                work.channel.producer_id,
-                (
-                    descriptor.shm_name
-                    if descriptor is not None
-                    else work.descriptor_payload.get("shm_name")
-                ),
-                (
-                    descriptor.sequence_id
-                    if descriptor is not None
-                    else work.descriptor_payload.get("sequence_id")
-                ),
-            )
-            return None
-        finally:
-            if descriptor is None:
-                descriptor = self._descriptor_from_payload_or_none(
-                    work.descriptor_payload
-                )
-            if descriptor is not None:
-                self._shared_slot_handler.mark_descriptor_completed(
-                    work.channel.producer_id,
-                    descriptor,
-                )
-        return (transport_result, release_admission)
-
-    def _process(self, work: SpoolDescriptorWork) -> None:
+        Admission and the chunk-spool reference are owned by this method until
+        the chunk is handed to the completion worker, which then releases both
+        once the chunk has been materialized. On drop/error paths this method
+        releases them itself. The channel sequence is always marked completed so
+        end-of-recording finalization never stalls on this frame.
+        """
         self._acquire_spool_admission()
-        chunk_spool_ref: ChunkSpoolRef | None = None
-        release_admission = True
-
+        chunk_spool_ref = None
+        handed_off = False
         try:
-            transport_result_data = self._get_transport_result(work)
-            if transport_result_data is None:
-                return
+            chunk_metadata = VideoTransportChunkMetadata.from_dict(work.metadata)
+            chunk_spool_ref = self._chunk_spool.append(work.chunk)
 
-            transport_result, release_admission = transport_result_data
-            descriptor = transport_result.descriptor
-            chunk_metadata = transport_result.chunk_metadata
-            trace_id = transport_result.trace_id
-            trace_metadata = transport_result.trace_metadata
+            trace_id = chunk_metadata.trace_id
+            trace_metadata = chunk_metadata.trace_metadata
 
             recording_id = self._get_trace_recording(
                 TraceRecordingLookupRequest(trace_id=trace_id)
@@ -177,20 +131,12 @@ class _SpoolShard:
                 recording_id = trace_metadata.recording_id
 
             if recording_id is None:
-                self._release_chunk_ref(transport_result.chunk_spool_ref)
-                chunk_spool_ref = None
-                self._mark_sequence_completed(
-                    SharedSlotSequenceProgressRequest(
-                        producer_id=work.channel.producer_id,
-                        sequence_number=descriptor.sequence_id,
-                    )
-                )
                 logger.debug(
-                    "Shared-slot packet missing recording metadata "
-                    "trace_id=%s producer_id=%s sequence_id=%s",
+                    "Decoded frame missing recording metadata trace_id=%s "
+                    "producer_id=%s sequence_id=%s",
                     trace_id,
                     work.channel.producer_id,
-                    descriptor.sequence_id,
+                    work.sequence_id,
                 )
                 return
 
@@ -199,17 +145,9 @@ class _SpoolShard:
                     channel=work.channel,
                     recording_id=recording_id,
                     trace_id=trace_id,
-                    sequence_number=descriptor.sequence_id,
+                    sequence_number=work.sequence_id,
                 )
             ):
-                self._release_chunk_ref(transport_result.chunk_spool_ref)
-                chunk_spool_ref = None
-                self._mark_sequence_completed(
-                    SharedSlotSequenceProgressRequest(
-                        producer_id=work.channel.producer_id,
-                        sequence_number=descriptor.sequence_id,
-                    )
-                )
                 return
 
             self._set_channel_trace_id(work.channel, trace_id)
@@ -238,57 +176,44 @@ class _SpoolShard:
                     recording_id=str(recording_id),
                     chunk_index=chunk_metadata.chunk_index,
                     total_chunks=chunk_metadata.total_chunks,
-                    sequence_number=descriptor.sequence_id,
+                    sequence_number=work.sequence_id,
                     chunk_spool=self._chunk_spool,
-                    chunk_spool_ref=transport_result.chunk_spool_ref,
+                    chunk_spool_ref=chunk_spool_ref,
                     trace_metadata=trace_metadata,
                     fallback_data_type=(
                         trace_metadata.data_type if trace_metadata is not None else None
                     ),
                 )
             )
+            handed_off = True
+        finally:
+            if not handed_off:
+                if chunk_spool_ref is not None:
+                    self._chunk_spool.release(chunk_spool_ref)
+                self._release_spool_admission()
+            # Mark the sequence completed only after the chunk has been enqueued
+            # to the completion worker (when handed off), so finalization never
+            # enqueues a final-trace marker ahead of this chunk.
             self._mark_sequence_completed(
-                SharedSlotSequenceProgressRequest(
+                VideoFrameSequenceProgressRequest(
                     producer_id=work.channel.producer_id,
-                    sequence_number=descriptor.sequence_id,
+                    sequence_number=work.sequence_id,
                 )
             )
-            chunk_spool_ref = None
-        finally:
-            if chunk_spool_ref is not None:
-                self._release_chunk_ref(chunk_spool_ref)
-            elif release_admission:
-                self._release_spool_admission()
-
-    @staticmethod
-    def _descriptor_from_payload_or_none(
-        descriptor_payload: dict,
-    ) -> SharedSlotDescriptor | None:
-        try:
-            return SharedSlotDescriptor.from_dict(descriptor_payload)
-        except Exception:
-            return None
-
-    def _release_chunk_ref(self, ref: ChunkSpoolRef) -> None:
-        try:
-            self._chunk_spool.release(ref)
-        finally:
-            self._release_spool_admission()
 
 
 class SpoolWorker:
-    """Route shared-slot descriptors onto per-producer spool shards."""
+    """Route decoded video frames onto per-producer spool shards."""
 
     def __init__(
         self,
         *,
         root: Path,
-        shared_slot_handler: SharedSlotDaemonHandler,
         completion_worker: CompletionWorker,
         acquire_spool_admission: Callable[[], object],
         release_spool_admission: Callable[[], None],
         should_drop_recording_data: Callable[[RecordingDataDropRequest], bool],
-        mark_sequence_completed: Callable[[SharedSlotSequenceProgressRequest], None],
+        mark_sequence_completed: Callable[[VideoFrameSequenceProgressRequest], None],
         register_trace: Callable[[str, str], None],
         register_trace_metadata: Callable[[TraceMetadataRegistrationRequest], None],
         get_trace_recording: Callable[[TraceRecordingLookupRequest], str | None],
@@ -299,7 +224,6 @@ class SpoolWorker:
         self._shards = [
             _SpoolShard(
                 chunk_spool=BridgeChunkSpool(root / f"shard-{index:02d}"),
-                shared_slot_handler=shared_slot_handler,
                 completion_worker=completion_worker,
                 acquire_spool_admission=acquire_spool_admission,
                 release_spool_admission=release_spool_admission,
@@ -314,11 +238,23 @@ class SpoolWorker:
             for index in range(shard_count)
         ]
 
-    def enqueue(self, channel: ChannelState, descriptor_payload: dict) -> None:
-        """Queue one shared-slot descriptor onto its owning shard."""
-        key = channel.producer_id.encode("utf-8", errors="replace")
-        shard = self._shards[zlib.crc32(key) % len(self._shards)]
-        shard.enqueue(channel, descriptor_payload)
+    def enqueue_frame(
+        self,
+        channel: ChannelState,
+        sequence_id: int,
+        metadata: dict,
+        chunk: bytes,
+    ) -> None:
+        """Queue one decoded iceoryx2 frame onto its owning shard."""
+        shard = self._shard_for(channel.producer_id)
+        shard.enqueue(
+            DecodedFrameWork(
+                channel=channel,
+                sequence_id=sequence_id,
+                metadata=metadata,
+                chunk=chunk,
+            )
+        )
 
     def close(self) -> None:
         """Stop all spool shards."""
@@ -329,3 +265,7 @@ class SpoolWorker:
         """Remove spool files created by all owned shards."""
         for shard in self._shards:
             shard.cleanup()
+
+    def _shard_for(self, producer_id: str) -> _SpoolShard:
+        key = producer_id.encode("utf-8", errors="replace")
+        return self._shards[zlib.crc32(key) % len(self._shards)]

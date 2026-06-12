@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
+from neuracore.data_daemon.const import DEFAULT_UPLOAD_WAIT_TIMEOUT_SECONDS
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     NETWORK_INTEGRITY_CASES,
 )
@@ -46,7 +47,7 @@ _CASES = DataDaemonTestBatch(
 def _assert_online_verification_invariants(
     results: list[ContextResult],
     *,
-    timeout_seconds: float = 30.0,
+    timeout_seconds: float = DEFAULT_UPLOAD_WAIT_TIMEOUT_SECONDS,
 ) -> None:
     """Block until every recording in *results* has reached ``upload_complete``
     in the platform DB.  Must be called before cloud frame verification so

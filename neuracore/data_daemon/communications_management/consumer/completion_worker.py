@@ -226,7 +226,7 @@ class _CompletionShard:
 
 
 class CompletionWorker:
-    """Non-blocking sharded completion pipeline for shared-slot ingest."""
+    """Non-blocking sharded completion pipeline for video-frame ingest."""
 
     def __init__(
         self,

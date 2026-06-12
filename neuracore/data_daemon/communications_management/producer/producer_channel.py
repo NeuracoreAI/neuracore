@@ -6,7 +6,6 @@ import logging
 import math
 import queue
 import threading
-import time
 import uuid
 from collections.abc import Iterator, Sequence
 
@@ -20,7 +19,7 @@ from neuracore.data_daemon.communications_management.sequence_allocator import (
 )
 from neuracore.data_daemon.const import (
     DEFAULT_CHUNK_SIZE,
-    DEFAULT_SHARED_MEMORY_SIZE,
+    DEFAULT_TRANSPORT_BUFFER_SIZE,
     DEFAULT_VIDEO_CHUNK_SIZE,
     DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
     DEFAULT_VIDEO_SLOT_SIZE,
@@ -30,17 +29,12 @@ from neuracore.data_daemon.models import (
     CommandType,
     DataChunkPayload,
     DataType,
-    SharedMemoryChunkMetadata,
     TraceTransportMetadata,
+    VideoTransportChunkMetadata,
 )
 
 from ..shared_transport.communications_manager import CommunicationsManager
-from ..shared_transport.registry import (
-    SharedSlotOpenFailedError,
-    SharedSlotTimeout,
-    SharedSlotUnhealthyError,
-)
-from ..shared_transport.shared_slot_transport import SharedSlotVideoTransport
+from ..shared_transport.iox2_video_transport import Iox2VideoTransport
 from .producer_channel_message_sender import ProducerChannelMessageSender
 from .producer_heartbeat_service import ProducerHeartbeatService
 
@@ -50,13 +44,13 @@ BytePart = bytes | bytearray | memoryview
 
 __all__ = [
     "ProducerChannel",
-    "data_type_uses_shared_slot_transport",
+    "data_type_uses_video_transport",
     "producer_transport_args_for_data_type",
 ]
 
 
-def data_type_uses_shared_slot_transport(data_type: DataType) -> bool:
-    """Return True when the data type should use shared-slot transport."""
+def data_type_uses_video_transport(data_type: DataType) -> bool:
+    """Return True when the data type should use the iceoryx2 video transport."""
     return data_type in (
         DataType.RGB_IMAGES,
         DataType.DEPTH_IMAGES,
@@ -81,7 +75,7 @@ def producer_transport_args_for_data_type(
 
     return (
         DEFAULT_CHUNK_SIZE,
-        DEFAULT_SHARED_MEMORY_SIZE,
+        DEFAULT_TRANSPORT_BUFFER_SIZE,
         512,
     )
 
@@ -97,7 +91,7 @@ class ProducerChannel:
         chunk_size: int | None = None,
         send_queue_maxsize: int | None = None,
         recording_id: str | None = None,
-        shared_memory_size: int | None = None,
+        max_frame_bytes: int | None = None,
     ) -> None:
         """Initialize the producer channel."""
         if data_type is None:
@@ -105,7 +99,7 @@ class ProducerChannel:
 
         (
             default_chunk_size,
-            default_shared_memory_size,
+            default_max_frame_bytes,
             default_send_queue_maxsize,
         ) = producer_transport_args_for_data_type(data_type)
 
@@ -125,20 +119,19 @@ class ProducerChannel:
         self.recording_id: str | None = recording_id
         self._heartbeat_interval = 1.0
         self._data_type = data_type
-        self._use_shared_slot_transport = data_type_uses_shared_slot_transport(
-            data_type
-        )
+        self._use_video_transport = data_type_uses_video_transport(data_type)
         self._sequence_allocator = ChannelSequenceAllocator()
-        self._shared_slot_transport: SharedSlotVideoTransport | None = (
-            SharedSlotVideoTransport(
+        self._iox2_transport: Iox2VideoTransport | None = (
+            Iox2VideoTransport(
+                channel_id=self.channel_id,
                 sequence_allocator=self._sequence_allocator,
-                slot_size=int(
-                    default_shared_memory_size
-                    if shared_memory_size is None
-                    else shared_memory_size
+                max_frame_bytes=int(
+                    default_max_frame_bytes
+                    if max_frame_bytes is None
+                    else max_frame_bytes
                 ),
             )
-            if self._use_shared_slot_transport
+            if self._use_video_transport
             else None
         )
         self._message_sender = ProducerChannelMessageSender(
@@ -170,23 +163,31 @@ class ProducerChannel:
         self._heartbeat_service.start()
 
     def heartbeat(self) -> None:
-        """Send a heartbeat message to the daemon."""
-        self._send(CommandType.HEARTBEAT, {})
+        """Send a heartbeat message to the daemon.
+
+        The heartbeat carries the channel data type so the daemon can create the
+        matching iceoryx2 subscriber for video channels on first contact. It also
+        refreshes the publisher connections so a daemon subscriber that just
+        registered receives buffered history frames even while idle.
+        """
+        if self._iox2_transport is not None:
+            self._iox2_transport.update_connections()
+        self._send(CommandType.HEARTBEAT, {"data_type": self._data_type.value})
 
     def set_recording_id(self, recording_id: str | None) -> None:
         """Set the recording ID for the producer."""
         self.recording_id = recording_id
 
     def get_last_accepted_sequence_number(self) -> int:
-        """Return the latest sequence accepted by either sender or shared-slot queue."""
+        """Return the latest sequence accepted by the sender or video transport."""
         last_enqueued = self.get_last_enqueued_sequence_number()
 
-        if self._shared_slot_transport is None:
+        if self._iox2_transport is None:
             return last_enqueued
 
         return max(
             last_enqueued,
-            self._shared_slot_transport.get_last_reserved_sequence_number(),
+            self._iox2_transport.get_last_reserved_sequence_number(),
         )
 
     def mark_recording_stop_requested(self) -> int:
@@ -204,7 +205,7 @@ class ProducerChannel:
     def start_recording_session(
         self,
         recording_id: str | None = None,
-        shared_memory_size: int | None = None,
+        max_frame_bytes: int | None = None,
     ) -> None:
         """Start a fresh recording session for this producer channel."""
         with self._recording_send_lock:
@@ -224,8 +225,21 @@ class ProducerChannel:
             self.start_producer_channel()
             self.start_new_trace()
 
-        if self._use_shared_slot_transport:
-            self.open_fixed_shared_slots(slot_size=shared_memory_size)
+        if self._use_video_transport:
+            self._announce_video_channel()
+
+    def _announce_video_channel(self) -> None:
+        """Prompt the daemon to register its iceoryx2 subscriber for this channel.
+
+        Sends a heartbeat (which carries the data type) and waits for it to be
+        flushed so the daemon learns about the channel before video frames flow.
+        Combined with the iceoryx2 service history, this avoids losing the first
+        frames of a recording to the subscriber-registration race.
+        """
+        sequence_number = self._send(
+            CommandType.HEARTBEAT, {"data_type": self._data_type.value}
+        )
+        self.wait_until_sequence_sent(sequence_number)
 
     def start_new_trace(self) -> None:
         """Start a new trace for the given recording."""
@@ -256,18 +270,16 @@ class ProducerChannel:
 
     def stop_producer_channel(
         self,
-        wait_for_slot_drain: bool = True,
+        wait_for_transport_drain: bool = True,
     ) -> None:
         """Stop the producer channel and release local resources."""
         self._stop_heartbeat_service()
 
         final_flush_sequence = self.get_last_enqueued_sequence_number()
         stop_failure: RuntimeError | None = None
-        sender_failed = False
         if not self.wait_until_sequence_sent(final_flush_sequence):
             sender_error = self._get_message_sender_error()
             if sender_error is not None:
-                sender_failed = True
                 logger.warning(
                     "Producer channel stopping after sender failure without "
                     "flushing final sequence_number=%s error=%r",
@@ -285,36 +297,24 @@ class ProducerChannel:
                     "before stopping producer channel"
                 )
 
-        try:
-            if (
-                stop_failure is None
-                and not sender_failed
-                and self._shared_slot_transport is not None
-            ):
-                self._shared_slot_transport.wait_until_drained(timeout_s=30.0)
-        finally:
-            self._close_shared_slot_transport()
-            self._stop_message_sender()
-            self._comm.cleanup_producer()
+        # Video frames are published synchronously into the iceoryx2 ring as they
+        # are produced, so there is no producer-side queue to drain before
+        # shutdown. The daemon's sequence tracking guarantees all frames up to the
+        # stop cutoff are spooled before finalization.
+        self._close_iox2_transport()
+        self._stop_message_sender()
+        self._comm.cleanup_producer()
 
         if stop_failure is not None:
             raise stop_failure
 
     def _send(self, command: CommandType, payload: dict | None = None) -> int:
         """Send a message to the daemon."""
-        shared_slot_transport = (
-            self._shared_slot_transport if self._use_shared_slot_transport else None
-        )
         sequence_number = self._sequence_allocator.reserve()
         return self._message_sender.send(
             command,
             payload,
             sequence_number=sequence_number,
-            on_failed_send=(
-                shared_slot_transport.notify_sender_failure
-                if shared_slot_transport is not None
-                else None
-            ),
         )
 
     def get_last_sent_sequence_number(self) -> int:
@@ -335,33 +335,6 @@ class ProducerChannel:
             sequence_number,
             timeout_s=timeout_s,
         )
-
-    def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
-        """Announce the fixed shared-slot transport for this producer."""
-        if not self._use_shared_slot_transport or self._shared_slot_transport is None:
-            return
-        if (
-            slot_size is not None
-            and not self._shared_slot_transport.is_announced()
-            and int(slot_size) != self._shared_slot_transport.slot_size
-        ):
-            self._shared_slot_transport.close()
-            self._shared_slot_transport = SharedSlotVideoTransport(
-                sequence_allocator=self._sequence_allocator, slot_size=int(slot_size)
-            )
-        if self._shared_slot_transport.is_announced():
-            return
-        payload = self._shared_slot_transport.open_payload()
-        sequence_number = self._send(
-            CommandType.OPEN_FIXED_SHARED_SLOTS,
-            {
-                "open_fixed_shared_slots": payload.model_dump(exclude_none=True),
-            },
-        )
-        if not self.wait_until_sequence_sent(sequence_number):
-            raise RuntimeError(
-                "Failed to send OPEN_FIXED_SHARED_SLOTS before video transport use"
-            )
 
     def _send_socket_data_chunk(self, payload: DataChunkPayload) -> None:
         """Send one DATA_CHUNK payload directly over the producer socket."""
@@ -454,75 +427,32 @@ class ProducerChannel:
         if chunk_parts:
             yield chunk_parts[0] if len(chunk_parts) == 1 else b"".join(chunk_parts)
 
-    def _ping_daemon_for_shared_slot_recovery(
-        self,
-        timeout_s: float = 2.0,
-    ) -> bool:
-        """Return True when a heartbeat can be sent during slot recovery."""
-        started_at = time.monotonic()
-        try:
-            sequence_number = self._send(CommandType.HEARTBEAT, {})
-            alive = self.wait_until_sequence_sent(
-                sequence_number,
-                timeout_s=timeout_s,
-            )
-        except Exception:
-            elapsed_s = time.monotonic() - started_at
-            logger.warning(
-                "Shared-slot recovery daemon ping failed elapsed=%.3fs",
-                elapsed_s,
-                exc_info=True,
-            )
-            return False
-
-        elapsed_s = time.monotonic() - started_at
-        logger.info(
-            "Shared-slot recovery daemon ping alive=%s elapsed=%.3fs",
-            alive,
-            elapsed_s,
-        )
-        return alive
-
-    def _reset_shared_slot_transport_for_recovery(self) -> None:
-        """Replace the shared-slot transport after a recoverable slot failure."""
-        old_transport = self._shared_slot_transport
-        slot_size = old_transport.slot_size if old_transport is not None else None
-        self._close_shared_slot_transport()
-        self._shared_slot_transport = SharedSlotVideoTransport(
-            sequence_allocator=self._sequence_allocator,
-            slot_size=slot_size or DEFAULT_VIDEO_SLOT_SIZE,
-            allocate_timeout_s=3.0,
-        )
-        self.open_fixed_shared_slots(slot_size=slot_size)
-
-    def _stop_shared_slot_logging_after_failure(self) -> None:
-        """Stop accepting more recording data after unrecoverable slot failure."""
+    def _stop_video_logging_after_failure(self) -> None:
+        """Stop accepting more recording data after an unrecoverable video error."""
         with self._recording_send_lock:
             if self._stop_cutoff_sequence_number is None:
                 self._stop_cutoff_sequence_number = (
                     self.get_last_accepted_sequence_number()
                 )
-        self._close_shared_slot_transport()
+        self._close_iox2_transport()
 
-    def _send_data_parts_shared_slots(
+    def _send_data_parts_iox2(
         self,
         normalised_parts: Sequence[memoryview],
         total_chunks: int,
         trace_metadata: TraceTransportMetadata,
     ) -> None:
-        """Send one logical payload over the shared-slot transport."""
-        self.open_fixed_shared_slots()
-        shared_slot_transport = self._shared_slot_transport
-        if shared_slot_transport is None:
-            raise SharedSlotUnhealthyError("Shared-slot transport is not available")
+        """Publish one logical payload over the iceoryx2 video transport."""
+        transport = self._iox2_transport
+        if transport is None:
+            raise RuntimeError("iceoryx2 video transport is not available")
 
-        produced_chunks = 0
         trace_id = self.trace_id
         if trace_id is None:
-            raise RuntimeError("Trace ID required for shared-slot transport")
+            raise RuntimeError("Trace ID required for video transport")
 
         for idx, chunk in enumerate(self._iter_chunk_views(normalised_parts)):
-            metadata = SharedMemoryChunkMetadata(
+            metadata = VideoTransportChunkMetadata(
                 trace_id=trace_id,
                 chunk_index=idx,
                 total_chunks=total_chunks,
@@ -533,23 +463,20 @@ class ProducerChannel:
                 if self._recording_data_stopped():
                     return
 
-                sequence_number = shared_slot_transport.enqueue_packet(
-                    producer_id=self.channel_id,
-                    sender=self._message_sender,
+                sequence_number = transport.send_frame(
                     metadata=metadata,
                     chunk=chunk,
                     stop_cutoff_sequence_number=self._stop_cutoff_sequence_number,
                 )
 
             if sequence_number is None:
+                # send_frame returns None either because the frame was rejected
+                # by the stop cutoff (transport still healthy) or because the
+                # publisher errored (transport unhealthy).
+                if not transport.is_healthy():
+                    self._stop_video_logging_after_failure()
+                    raise RuntimeError("iceoryx2 video transport became unhealthy")
                 return
-
-            produced_chunks += 1
-
-        if produced_chunks != total_chunks:
-            raise RuntimeError(
-                "Chunk count mismatch while serializing payload for transport"
-            )
 
     def send_data_parts(
         self,
@@ -598,7 +525,7 @@ class ProducerChannel:
             robot_instance=robot_instance,
         )
 
-        if not self._use_shared_slot_transport:
+        if not self._use_video_transport:
             if not normalised_parts:
                 return
             payload_bytes = (
@@ -625,89 +552,48 @@ class ProducerChannel:
             self._send_socket_data_chunk(payload)
             return
 
-        initial_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                self._send_data_parts_shared_slots(
-                    normalised_parts,
-                    total_chunks,
-                    trace_metadata,
-                )
-                return
-            except (SharedSlotTimeout, SharedSlotUnhealthyError) as exc:
-                if attempt > 0 or isinstance(exc, SharedSlotOpenFailedError):
-                    self._stop_shared_slot_logging_after_failure()
-                    raise RuntimeError(
-                        "Shared-slot transport remained unhealthy after recovery"
-                    ) from (initial_exc or exc)
-
-                initial_exc = exc
-                if not self._ping_daemon_for_shared_slot_recovery(timeout_s=2.0):
-                    self._stop_shared_slot_logging_after_failure()
-                    raise RuntimeError(
-                        "Shared-slot transport failed and daemon did not respond "
-                        "to recovery ping"
-                    ) from exc
-
-                logger.warning(
-                    "Shared-slot transport unhealthy; resetting transport and "
-                    "retrying payload once. Initial error: %s",
-                    exc,
-                )
-                self._reset_shared_slot_transport_for_recovery()
+        self._send_data_parts_iox2(
+            normalised_parts,
+            total_chunks,
+            trace_metadata,
+        )
 
     def initialize_new_producer_channel(
         self,
-        shared_memory_size: int | None = None,
+        max_frame_bytes: int | None = None,
     ) -> None:
         """Initialize a new producer channel for recording."""
-        self.start_recording_session(shared_memory_size=shared_memory_size)
+        self.start_recording_session(max_frame_bytes=max_frame_bytes)
 
     def cleanup_producer_channel(
         self,
         stop_cutoff_sequence_number: int,
-        wait_for_slot_drain: bool = True,
+        wait_for_transport_drain: bool = True,
     ) -> None:
-        """Finish one trace after queued recording data up to stop cutoff is sent.
+        """Finish one trace after recording data up to the stop cutoff is sent.
 
-        Shared-slot transports must always drain before a recording session is
-        reset. The wait flag controls higher-level/backend waiting, not whether
-        daemon-owned shm slots may be abandoned with credits still in flight.
+        Video frames are published synchronously into the iceoryx2 ring as they
+        are produced, so there is nothing to drain here. The TRACE_END sent below
+        carries the channel's last sequence number, and the daemon defers
+        finalization until every frame up to the stop cutoff has been spooled.
         """
         if stop_cutoff_sequence_number < 0:
             raise ValueError("stop_cutoff_sequence_number must be non-negative")
 
-        if self._shared_slot_transport is not None:
-            payload_cutoff_sequence_number = (
-                self._shared_slot_transport.get_last_payload_sequence_number()
-            )
-
-            if payload_cutoff_sequence_number > 0:
-                self._shared_slot_transport.wait_until_payload_handed_off(
-                    timeout_s=30.0,
-                    max_sequence_number=payload_cutoff_sequence_number,
-                )
-
-        if not self.wait_until_sequence_sent(stop_cutoff_sequence_number):
-            raise RuntimeError(
-                "Failed to send queued recording data up to stop cutoff before cleanup"
-            )
-
-        if self._shared_slot_transport is not None:
-            payload_cutoff_sequence_number = (
-                self._shared_slot_transport.get_last_payload_sequence_number()
-            )
-
-            if payload_cutoff_sequence_number > 0:
-                self._shared_slot_transport.wait_until_drained(
-                    timeout_s=30.0,
-                    max_sequence_number=payload_cutoff_sequence_number,
-                )
+        # The stop cutoff spans the channel sequence space, so for video channels it
+        # is typically an iceoryx2 frame sequence that never travels over ZMQ — the
+        # ZMQ sender would never report it as "sent". Video frames are published
+        # synchronously into the iceoryx2 ring as they are produced, so only the
+        # ZMQ control/data messages need flushing here. Wait on the sender's own
+        # last-enqueued sequence instead of the global cutoff.
+        flush_sequence_number = self.get_last_enqueued_sequence_number()
+        if not self.wait_until_sequence_sent(flush_sequence_number):
+            raise RuntimeError("Failed to send queued recording data before cleanup")
 
         self.end_trace()
 
-        if self._shared_slot_transport is not None:
-            self._shared_slot_transport.finish_recording_session()
+        if self._iox2_transport is not None:
+            self._iox2_transport.finish_recording_session()
 
     def _stop_heartbeat_service(self) -> None:
         self._heartbeat_service.stop(join_timeout_s=1.0)
@@ -715,10 +601,10 @@ class ProducerChannel:
     def _stop_message_sender(self) -> None:
         self._message_sender.close(join_timeout_s=2.0)
 
-    def _close_shared_slot_transport(self) -> None:
-        if self._shared_slot_transport is not None:
-            self._shared_slot_transport.close()
-            self._shared_slot_transport = None
+    def _close_iox2_transport(self) -> None:
+        if self._iox2_transport is not None:
+            self._iox2_transport.close()
+            self._iox2_transport = None
 
     def _get_message_sender_error(self) -> Exception | None:
         sender = getattr(self, "_message_sender", None)

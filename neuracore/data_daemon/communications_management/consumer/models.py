@@ -114,20 +114,7 @@ class TransportMode(str, Enum):
 
     NONE = "none"
     SOCKET = "socket"
-    SHARED_MEMORY = "shared_memory"
-
-
-@dataclass
-class SharedSlotTransportState:
-    """Mutable daemon-side shared-slot attachment state for one channel."""
-
-    control_endpoint: str | None = None
-    shm_name: str | None = None
-
-    def reset(self) -> None:
-        """Clear any shared-slot attachment details for the channel."""
-        self.control_endpoint = None
-        self.shm_name = None
+    VIDEO = "video"
 
 
 @dataclass(frozen=True)
@@ -220,11 +207,19 @@ class FinalTraceWork:
 
 
 @dataclass(frozen=True)
-class SpoolDescriptorWork:
-    """Spool-worker input for one shared-slot descriptor payload."""
+class DecodedFrameWork:
+    """Spool-worker input for one already-decoded iceoryx2 video frame.
+
+    The frame's payload has already been copied out of the iceoryx2 ring buffer
+    by the daemon drain, so no transport-buffer read is needed here. ``metadata`` is
+    the per-chunk metadata dict and ``sequence_id`` is the channel sequence used
+    for end-of-recording ordering and drop decisions.
+    """
 
     channel: ChannelState
-    descriptor_payload: dict
+    sequence_id: int
+    metadata: dict
+    chunk: bytes
 
 
 @dataclass(frozen=True)
@@ -278,8 +273,8 @@ class TraceRecordingLookupRequest:
 
 
 @dataclass(frozen=True)
-class SharedSlotSequenceProgressRequest:
-    """Request to update shared-slot descriptor progress for one producer."""
+class VideoFrameSequenceProgressRequest:
+    """Request to update video-frame spool progress for one producer."""
 
     producer_id: str
     sequence_number: int
@@ -378,21 +373,21 @@ class ProducerSequenceRegistry:
 
 
 @dataclass
-class PendingSharedSlotSequenceRegistry:
-    """Track shared-slot descriptors still pending completion per producer."""
+class PendingVideoFrameSequenceRegistry:
+    """Track video-frame sequences still pending completion per producer."""
 
     _pending_by_producer: dict[str, set[int]] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def add(self, producer_id: str, sequence_number: int) -> None:
-        """Record a descriptor sequence as pending completion."""
+        """Record a video-frame sequence as pending completion."""
         with self._lock:
             self._pending_by_producer.setdefault(producer_id, set()).add(
                 sequence_number
             )
 
     def complete(self, producer_id: str, sequence_number: int) -> None:
-        """Mark a pending descriptor sequence as completed."""
+        """Mark a pending video-frame sequence as completed."""
         with self._lock:
             pending = self._pending_by_producer.get(producer_id)
             if pending is None:
@@ -426,10 +421,8 @@ class ChannelState:
     opened_at: datetime | None = None
     heartbeat_expired_at: datetime | None = None
     transport_mode: TransportMode = TransportMode.NONE
+    data_type: DataType | None = None
     socket_pending_messages: dict[str, PartialMessage] = field(default_factory=dict)
-    shared_slot: SharedSlotTransportState = field(
-        default_factory=SharedSlotTransportState
-    )
 
     def touch(self) -> None:
         """Refresh heartbeat tracking for this channel."""
@@ -446,34 +439,20 @@ class ChannelState:
         if self.opened_at is None:
             self.opened_at = datetime.now(timezone.utc)
 
-    def mark_shared_slot_transport_open(
-        self,
-        *,
-        control_endpoint: str,
-        shm_name: str,
-    ) -> None:
-        """Mark the channel as using shared-slot transport."""
-        self.transport_mode = TransportMode.SHARED_MEMORY
-        self.shared_slot.control_endpoint = control_endpoint
-        self.shared_slot.shm_name = shm_name
-        self.opened_at = datetime.now(timezone.utc)
-
-    def mark_shared_slot_descriptor_seen(self, *, shm_name: str) -> None:
-        """Record that shared-slot traffic has been observed for this channel."""
-        self.transport_mode = TransportMode.SHARED_MEMORY
-        self.shared_slot.shm_name = shm_name
+    def mark_video_transport_open(self) -> None:
+        """Mark the channel as using the iceoryx2 zero-copy video transport."""
+        self.transport_mode = TransportMode.VIDEO
         if self.opened_at is None:
             self.opened_at = datetime.now(timezone.utc)
 
-    def uses_shared_memory_transport(self) -> bool:
-        """Return whether the channel is currently using shared-slot transport."""
-        return self.transport_mode is TransportMode.SHARED_MEMORY
+    def uses_video_transport(self) -> bool:
+        """Return whether the channel is using the iceoryx2 video transport."""
+        return self.transport_mode is TransportMode.VIDEO
 
     def clear_transport_state(self) -> None:
         """Reset transport-specific state after a trace finishes or closes."""
         self.opened_at = None
         self.transport_mode = TransportMode.NONE
-        self.shared_slot.reset()
         self.socket_pending_messages.clear()
 
     def add_socket_data_chunk(
