@@ -100,9 +100,10 @@ def clone_dataset(
 ) -> Dataset:
     """Clone a dataset and all of its recordings.
 
+    Cloned dataset is set to the active dataset.
+
     Args:
-        source_dataset: Source dataset object, dataset ID, or dataset name. String
-            values are resolved as an ID first and then as a name.
+        source_dataset: Source dataset object to clone
         new_dataset_name: Name for the cloned dataset.
         dataset_name: Explicit source dataset name.
         dataset_id: Explicit source dataset ID.
