@@ -1,0 +1,16 @@
+{
+  "RobotEraseBoard-v1/expert_demos": true,
+  "RobotHangHanger-v1/expert_demos": true,
+  "RobotReach-v1/expert_demos": true,
+  "RobotDoorClose-v1/expert_demos": true,
+  "RobotCupStacking-v1/expert_demos": true,
+  "RobotTurnKnob-v1/expert_demos": true,
+  "RobotInsertPeg-v1/expert_demos_easy": true,
+  "RobotInsertPeg-v1/expert_demos_medium": true,
+  "RobotInsertPeg-v1/expert_demos_hard": true,
+  "RobotButtonPress-v1/expert_demos": true,
+  "RobotHangBag-v1/expert_demos": true,
+  "RobotBoxOpen-v1/expert_demos": false,
+  "RobotPour-v1/expert_demos": true,
+  "RobotHangMug-v1/expert_demos": true
+}
