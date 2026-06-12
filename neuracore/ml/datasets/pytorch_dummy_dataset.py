@@ -83,9 +83,9 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
 
         Args:
             input_cross_embodiment_description: Mapping from robot_id
-                to data spec for model inputs.
+                to embodiment description for model inputs.
             output_cross_embodiment_description: Mapping from robot_id
-                to data spec for model outputs.
+                to embodiment description for model outputs.
             num_samples: Total number of training samples to generate.
             num_episodes: Number of distinct episodes in the dataset.
             output_prediction_horizon: Length of output action sequences.
@@ -130,9 +130,9 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         cross_embodiment_description: CrossEmbodimentDescription,
         data_type: DataType,
     ) -> int:
-        """Return padded width for a data type across all robots in a spec."""
+        """Return padded width for a data type across all robots in a description."""
         max_index: int | None = None
-        has_empty_spec = False
+        has_empty_description = False
 
         for embodiment_description in cross_embodiment_description.values():
             if data_type not in embodiment_description:
@@ -149,13 +149,13 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
                     else max(max_index, data_type_max_index)
                 )
             else:
-                has_empty_spec = True
+                has_empty_description = True
 
         if max_index is not None:
             return max_index + 1
-        if has_empty_spec:
+        if has_empty_description:
             return MAX_LEN_PER_DATA_TYPE
-        raise KeyError(f"Data type {data_type} not found in data specification.")
+        raise KeyError(f"Data type {data_type} not found in embodiment description.")
 
     def _initialize_dataset_statistics(self) -> None:
         """Create one statistics entry per padded slot for each merged data type."""
@@ -227,8 +227,8 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         section: dict[DataType, list[BatchedNCData]] = {}
         section_mask: dict[DataType, torch.Tensor] = {}
 
-        robot_spec = cross_embodiment_description.get(robot_id, {})
-        for data_type, data_names in robot_spec.items():
+        embodiment_description = cross_embodiment_description.get(robot_id, {})
+        for data_type, data_names in embodiment_description.items():
             normalized_data_names = self._normalize_data_names(data_names)
             num_slots = self._get_num_slots_for_data_type(
                 cross_embodiment_description, data_type

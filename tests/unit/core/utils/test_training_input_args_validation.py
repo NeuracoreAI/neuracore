@@ -7,7 +7,7 @@ from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.core.utils.training_input_args_validation import (
     _validate_algorithm_exists,
-    _validate_data_specs,
+    _validate_cross_embodiment_description,
     _validate_per_recording_data_types,
     validate_training_params,
 )
@@ -25,23 +25,27 @@ def dataset() -> Dataset:
     return dataset
 
 
-def test_validate_data_specs_rejects_missing_data_values(dataset: Dataset):
+def test_validate_cross_embodiment_description_rejects_missing_data_values(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     cross_embodiment_description = {
         TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("front", "side")}
     }
     with pytest.raises(ValueError, match="data values .* not present in dataset"):
-        _validate_data_specs(
+        _validate_cross_embodiment_description(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
             cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
-            spec_kind="input",
+            description_kind="input",
         )
 
 
-def test_validate_data_specs_rejects_robot_name_rather_than_id(dataset: Dataset):
+def test_validate_cross_embodiment_description_rejects_robot_name_rather_than_id(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     dataset.get_full_embodiment_description = MagicMock(
         return_value={DataType.RGB_IMAGES: _indexed_names("front")}
@@ -51,17 +55,19 @@ def test_validate_data_specs_rejects_robot_name_rather_than_id(dataset: Dataset)
     }
 
     with pytest.raises(AssertionError, match="Expected robot_id format for robot_name"):
-        _validate_data_specs(
+        _validate_cross_embodiment_description(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
             cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
-            spec_kind="input",
+            description_kind="input",
         )
 
 
-def test_validate_data_specs_allows_subset_of_dataset_values(dataset: Dataset):
+def test_validate_cross_embodiment_description_allows_subset_of_dataset_values(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     dataset.get_full_embodiment_description = MagicMock(
         return_value={DataType.RGB_IMAGES: _indexed_names("front", "side")}
@@ -70,13 +76,13 @@ def test_validate_data_specs_allows_subset_of_dataset_values(dataset: Dataset):
         TEST_ROBOT_ID: {DataType.RGB_IMAGES: _indexed_names("front")}
     }
 
-    _validate_data_specs(
+    _validate_cross_embodiment_description(
         dataset=dataset,
         dataset_name="test-dataset",
         algorithm_name="test-algorithm",
         cross_embodiment_description=cross_embodiment_description,
         supported_data_types={DataType.RGB_IMAGES},
-        spec_kind="input",
+        description_kind="input",
     )
 
 
@@ -85,7 +91,9 @@ def test_validate_algorithm_exists_raises_when_missing():
         _validate_algorithm_exists(None, "MissingAlgorithm")
 
 
-def test_validate_data_specs_rejects_unsupported_data_type(dataset: Dataset):
+def test_validate_cross_embodiment_description_rejects_unsupported_data_type(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     dataset.get_full_embodiment_description = MagicMock(
         return_value={DataType.RGB_IMAGES: _indexed_names("front")}
@@ -95,17 +103,19 @@ def test_validate_data_specs_rejects_unsupported_data_type(dataset: Dataset):
     }
 
     with pytest.raises(ValueError, match="data type .* is not present in dataset"):
-        _validate_data_specs(
+        _validate_cross_embodiment_description(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
             cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
-            spec_kind="input",
+            description_kind="input",
         )
 
 
-def test_validate_data_specs_rejects_missing_data_type_in_dataset(dataset: Dataset):
+def test_validate_cross_embodiment_description_rejects_missing_data_type_in_dataset(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     dataset.get_full_embodiment_description = MagicMock(
         return_value={DataType.RGB_IMAGES: _indexed_names("front")}
@@ -115,17 +125,19 @@ def test_validate_data_specs_rejects_missing_data_type_in_dataset(dataset: Datas
     }
 
     with pytest.raises(ValueError, match="data type .* is not present in dataset"):
-        _validate_data_specs(
+        _validate_cross_embodiment_description(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
             cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.JOINT_POSITIONS},
-            spec_kind="input",
+            description_kind="input",
         )
 
 
-def test_validate_data_specs_rejects_missing_data_type_in_full_spec(dataset: Dataset):
+def test_validate_cross_embodiment_description_rejects_missing_data_type(
+    dataset: Dataset,
+):
     dataset.data_types = [DataType.RGB_IMAGES]
     dataset.get_full_embodiment_description = MagicMock(return_value={})
     cross_embodiment_description = {
@@ -133,13 +145,13 @@ def test_validate_data_specs_rejects_missing_data_type_in_full_spec(dataset: Dat
     }
 
     with pytest.raises(ValueError, match="data values .* not present in dataset"):
-        _validate_data_specs(
+        _validate_cross_embodiment_description(
             dataset=dataset,
             dataset_name="test-dataset",
             algorithm_name="test-algorithm",
             cross_embodiment_description=cross_embodiment_description,
             supported_data_types={DataType.RGB_IMAGES},
-            spec_kind="input",
+            description_kind="input",
         )
 
 

@@ -16,7 +16,7 @@ The true bottleneck was never model capacity or optimization strategy. It was re
 
 Neuracore addresses this problem by making structure explicit and declarative. Instead of allowing each robot to implicitly define tensor layout, Neuracore requires a specification that formally defines how data points map into a shared index space. That specification becomes the single source of truth for model construction.
 
-Rather than hard-coding tensor dimensions into model definitions, Neuracore derives input and output dimensionality directly from the declared robot data specification. The specification defines index positions, and index positions define semantic meaning. Once defined, this layout becomes fixed for the lifetime of the model.
+Rather than hard-coding tensor dimensions into model definitions, Neuracore derives input and output dimensionality directly from the declared embodiment description. The description defines index positions, and index positions define semantic meaning. Once defined, this layout becomes fixed for the lifetime of the model.
 
 Model shape is therefore spec-driven, not robot-driven.
 

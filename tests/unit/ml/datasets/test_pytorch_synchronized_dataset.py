@@ -50,7 +50,7 @@ def _indexed_names(data_type: DataType, count: int) -> dict[int, str]:
     return {i: f"{data_type.value}_{i}" for i in range(count)}
 
 
-def _full_data_spec() -> dict[DataType, dict[int, str]]:
+def _full_embodiment_description() -> dict[DataType, dict[int, str]]:
     return {
         DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
         DataType.JOINT_TARGET_POSITIONS: _indexed_names(
@@ -184,7 +184,7 @@ def mock_synchronized_dataset(
             ]
             self.dataset.get_full_embodiment_description.side_effect = (
                 lambda robot_id: (
-                    _full_data_spec()
+                    _full_embodiment_description()
                     if robot_id == ROBOT_ID
                     else (_ for _ in ()).throw(
                         ValueError(f"Input robot IDs [{robot_id}] not found")
@@ -233,8 +233,8 @@ def mock_synchronized_dataset(
 def _stats_cache_path(
     cache_root,
     synchronized_dataset,
-    input_spec,
-    output_spec,
+    input_description,
+    output_description,
 ):
     recording_fingerprint = [
         {
@@ -251,10 +251,10 @@ def _stats_cache_path(
         {
             "recordings": recording_fingerprint,
             "input_cross_embodiment_description": (
-                _cacheable_cross_embodiment_description(input_spec)
+                _cacheable_cross_embodiment_description(input_description)
             ),
             "output_cross_embodiment_description": (
-                _cacheable_cross_embodiment_description(output_spec)
+                _cacheable_cross_embodiment_description(output_description)
             ),
         },
         sort_keys=True,
@@ -393,7 +393,7 @@ def mock_synchronized_dataset_with_depth(
             self.dataset.get_full_embodiment_description.side_effect = (
                 lambda robot_id: (
                     {
-                        **_full_data_spec(),
+                        **_full_embodiment_description(),
                         DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
                     }
                     if robot_id == ROBOT_ID
@@ -517,12 +517,12 @@ def test_should_throw_error_with_missing_robot_id(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
     """Test validation fails with missing robot ID."""
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         MISSING_ROBOT_ID: {  # Robot ID not in dataset
             DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                 DataType.JOINT_TARGET_POSITIONS, 3
@@ -533,8 +533,8 @@ def test_should_throw_error_with_missing_robot_id(
     with pytest.raises(ValueError, match="Input robot IDs .* not found"):
         PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=5,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -545,13 +545,13 @@ def test_should_throw_error_with_missing_data_type(
     mock_synchronized_dataset: SynchronizedDataset,
 ):
     """Test validation fails with missing data type."""
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
             DataType.POINT_CLOUDS: _indexed_names(DataType.POINT_CLOUDS, 1),
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                 DataType.JOINT_TARGET_POSITIONS, 3
@@ -562,8 +562,8 @@ def test_should_throw_error_with_missing_data_type(
     with pytest.raises(ValueError, match="Input data type .* is not present"):
         PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=5,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -596,7 +596,7 @@ def test_initialization_invalid_synchronized_dataset():
 
 
 def test_merge_cross_embodiment_description_uses_dict_values_in_order():
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: {
                 10: "joint_a",
@@ -604,7 +604,7 @@ def test_merge_cross_embodiment_description_uses_dict_values_in_order():
             }
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: {
                 99: "joint_c",
@@ -615,7 +615,9 @@ def test_merge_cross_embodiment_description_uses_dict_values_in_order():
         }
     }
 
-    assert merge_cross_embodiment_description(input_spec, output_spec) == {
+    assert merge_cross_embodiment_description(
+        input_description, output_description
+    ) == {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: ["joint_a", "joint_b", "joint_c"],
             DataType.JOINT_TARGET_POSITIONS: ["target_a"],
@@ -624,7 +626,7 @@ def test_merge_cross_embodiment_description_uses_dict_values_in_order():
 
 
 def test_merge_cross_embodiment_description_deduplicates_by_name_not_index():
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.RGB_IMAGES: {
                 1: "front_camera",
@@ -632,7 +634,7 @@ def test_merge_cross_embodiment_description_deduplicates_by_name_not_index():
             }
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.RGB_IMAGES: {
                 3: "wrist_camera",
@@ -641,7 +643,9 @@ def test_merge_cross_embodiment_description_deduplicates_by_name_not_index():
         }
     }
 
-    assert merge_cross_embodiment_description(input_spec, output_spec) == {
+    assert merge_cross_embodiment_description(
+        input_description, output_description
+    ) == {
         ROBOT_ID: {
             DataType.RGB_IMAGES: [
                 "front_camera",
@@ -654,14 +658,14 @@ def test_merge_cross_embodiment_description_deduplicates_by_name_not_index():
 
 def test_merge_cross_embodiment_description_preserves_robot_order():
     other_robot_id = "33333333-3333-3333-3333-333333333333"
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: {
                 0: "joint_0",
             }
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         other_robot_id: {
             DataType.JOINT_TARGET_POSITIONS: {
                 0: "target_0",
@@ -669,14 +673,16 @@ def test_merge_cross_embodiment_description_preserves_robot_order():
         }
     }
 
-    assert list(merge_cross_embodiment_description(input_spec, output_spec)) == [
+    assert list(
+        merge_cross_embodiment_description(input_description, output_description)
+    ) == [
         ROBOT_ID,
         other_robot_id,
     ]
 
 
 def test_merge_cross_embodiment_description_handles_config_dict_values():
-    input_spec: CrossEmbodimentDescription = {
+    input_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: {
                 0: "vx300s_right/wrist_angle",
@@ -687,7 +693,7 @@ def test_merge_cross_embodiment_description_handles_config_dict_values():
             },
         }
     }
-    output_spec: CrossEmbodimentDescription = {
+    output_description: CrossEmbodimentDescription = {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: {
                 0: "vx300s_right/wrist_angle",
@@ -696,7 +702,9 @@ def test_merge_cross_embodiment_description_handles_config_dict_values():
         }
     }
 
-    assert merge_cross_embodiment_description(input_spec, output_spec) == {
+    assert merge_cross_embodiment_description(
+        input_description, output_description
+    ) == {
         ROBOT_ID: {
             DataType.JOINT_POSITIONS: [
                 "vx300s_right/wrist_angle",
@@ -713,13 +721,13 @@ class TestDataLoading:
     @patch("neuracore.login")
     def test_load_sample_basic(self, mock_login, mock_synchronized_dataset):
         """Test basic sample loading."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -728,8 +736,8 @@ class TestDataLoading:
         }
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -752,13 +760,13 @@ class TestDataLoading:
     @patch("neuracore.login")
     def test_load_sample_memory_monitoring(self, mock_login, mock_synchronized_dataset):
         """Test memory monitoring during sample loading."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -768,8 +776,8 @@ class TestDataLoading:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -790,14 +798,14 @@ class TestDataLoading:
     def test_load_sample_applies_input_preprocessing(
         self, mock_login, mock_synchronized_dataset_with_depth
     ):
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
                 DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -812,8 +820,8 @@ class TestDataLoading:
         }
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset_with_depth,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=input_preprocessing_config,
             output_preprocessing_config=_default_preprocessing_config(),
@@ -832,14 +840,14 @@ class TestDataLoading:
     def test_load_sample_applies_output_preprocessing(
         self, mock_login, mock_synchronized_dataset_with_depth
     ):
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
                 DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
                 DataType.DEPTH_IMAGES: _indexed_names(DataType.DEPTH_IMAGES, 3),
@@ -856,8 +864,8 @@ class TestDataLoading:
         }
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset_with_depth,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=output_preprocessing_config,
@@ -880,13 +888,13 @@ class TestDataTypeProcessing:
     @patch("neuracore.login")
     def test_inputs_and_outputs_structure(self, mock_login, mock_synchronized_dataset):
         """Test that inputs and outputs have correct structure."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -896,8 +904,8 @@ class TestDataTypeProcessing:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=2,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -930,13 +938,13 @@ class TestDatasetIntegration:
     @patch("neuracore.login")
     def test_getitem_method(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ method."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -946,8 +954,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -964,13 +972,13 @@ class TestDatasetIntegration:
     @patch("neuracore.login")
     def test_getitem_negative_index(self, mock_login, mock_synchronized_dataset):
         """Test __getitem__ with negative index."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -980,8 +988,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -996,12 +1004,12 @@ class TestDatasetIntegration:
 
     def test_getitem_index_out_of_bounds(self, mock_synchronized_dataset):
         """Test __getitem__ with out of bounds index."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1011,8 +1019,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1028,12 +1036,12 @@ class TestDatasetIntegration:
 
     def test_len_method(self, mock_synchronized_dataset):
         """Test __len__ method."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1043,8 +1051,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1057,12 +1065,12 @@ class TestDatasetIntegration:
         self, mock_login, mock_synchronized_dataset
     ):
         """Test __getitem__ propagates load_sample failures."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1072,8 +1080,8 @@ class TestDatasetIntegration:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1093,12 +1101,12 @@ class TestPerformanceAndOptimization:
 
     def test_memory_monitoring_initialization(self, mock_synchronized_dataset):
         """Test memory monitor initialization."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1108,8 +1116,8 @@ class TestPerformanceAndOptimization:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1120,12 +1128,12 @@ class TestPerformanceAndOptimization:
 
     def test_episode_indices_creation(self, mock_synchronized_dataset):
         """Test episode indices are created correctly."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1135,8 +1143,8 @@ class TestPerformanceAndOptimization:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1159,13 +1167,13 @@ class TestIntegrationWithPyTorchDataLoader:
         """Test DataLoader with custom collate function."""
         from torch.utils.data import DataLoader
 
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 2),
                 DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 2),
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 2
@@ -1175,8 +1183,8 @@ class TestIntegrationWithPyTorchDataLoader:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1195,7 +1203,7 @@ class TestIntegrationWithPyTorchDataLoader:
 
             # Check that data is properly batched
             # Each data type should have batched data
-            for data_type in input_spec[ROBOT_ID].keys():
+            for data_type in input_description[ROBOT_ID].keys():
                 assert data_type in batch.inputs
                 assert isinstance(batch.inputs[data_type], list)
 
@@ -1205,12 +1213,12 @@ class TestDatasetStatistics:
 
     def test_dataset_statistics_property(self, mock_synchronized_dataset):
         """Test dataset_statistics property."""
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1220,8 +1228,8 @@ class TestDatasetStatistics:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1238,12 +1246,12 @@ class TestDatasetStatistics:
         import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
 
         monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1252,15 +1260,15 @@ class TestDatasetStatistics:
         }
         stats = SynchronizedDatasetStatistics(
             synchronized_dataset_id=mock_synchronized_dataset.id,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             dataset_statistics=dataset_statistics,
         )
         cache_path = _stats_cache_path(
             tmp_path,
             mock_synchronized_dataset,
-            input_spec,
-            output_spec,
+            input_description,
+            output_description,
         )
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         with cache_path.open("w", encoding="utf-8") as handle:
@@ -1272,8 +1280,8 @@ class TestDatasetStatistics:
 
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1292,12 +1300,12 @@ class TestDatasetStatistics:
         import neuracore.ml.datasets.pytorch_synchronized_dataset as psd
 
         monkeypatch.setattr(psd, "DEFAULT_CACHE_DIR", tmp_path)
-        input_spec: CrossEmbodimentDescription = {
+        input_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
             }
         }
-        output_spec: CrossEmbodimentDescription = {
+        output_description: CrossEmbodimentDescription = {
             ROBOT_ID: {
                 DataType.JOINT_TARGET_POSITIONS: _indexed_names(
                     DataType.JOINT_TARGET_POSITIONS, 3
@@ -1306,16 +1314,16 @@ class TestDatasetStatistics:
         }
         stats = SynchronizedDatasetStatistics(
             synchronized_dataset_id=mock_synchronized_dataset.id,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             dataset_statistics=dataset_statistics,
         )
         mock_synchronized_dataset.calculate_statistics = MagicMock(return_value=stats)
 
         PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset,
-            input_cross_embodiment_description=input_spec,
-            output_cross_embodiment_description=output_spec,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
             output_prediction_horizon=3,
             input_preprocessing_config=_default_preprocessing_config(),
             output_preprocessing_config=_default_preprocessing_config(),
@@ -1325,8 +1333,8 @@ class TestDatasetStatistics:
         cache_path = _stats_cache_path(
             tmp_path,
             mock_synchronized_dataset,
-            input_spec,
-            output_spec,
+            input_description,
+            output_description,
         )
         assert cache_path.exists()
 

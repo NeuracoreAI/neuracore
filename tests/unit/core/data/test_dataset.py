@@ -364,7 +364,7 @@ class TestDatasetRetrieval:
         robot_id = "test-robot-id"
 
         # Mock the API response for get_full_embodiment_description
-        expected_data_spec = {
+        expected_embodiment_description = {
             DataType.RGB_IMAGES.value: _indexed_names("camera_left", "camera_right"),
             DataType.JOINT_POSITIONS.value: _indexed_names(
                 "joint_pos_1", "joint_pos_2"
@@ -373,7 +373,7 @@ class TestDatasetRetrieval:
 
         mock_data_requests.get(
             f"{API_URL}/org/{mocked_org_id}/datasets/{dataset.id}/full-embodiment-description/{robot_id}",
-            json=expected_data_spec,
+            json=expected_embodiment_description,
             status_code=200,
         )
 

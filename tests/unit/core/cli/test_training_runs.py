@@ -183,13 +183,13 @@ class TestHelperFunctions:
         result = _format_duration(1704067200.0, None)
         assert result == "N/A"
 
-    def test_format_robot_data_spec_empty(self):
-        """Test formatting empty robot data spec."""
+    def test_format_cross_embodiment_description_empty(self):
+        """Test formatting empty cross-embodiment description."""
         result = _format_cross_embodiment_description({})
         assert "(none)" in result
 
-    def test_format_robot_data_spec_with_data(self):
-        """Test formatting robot data spec with data."""
+    def test_format_cross_embodiment_description_with_data(self):
+        """Test formatting cross-embodiment description with data."""
         spec = {
             "robot_1": {
                 "RGB_IMAGES": ["cam1", "cam2"],

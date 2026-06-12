@@ -97,7 +97,7 @@ def mock_auth_requests_robots_paginated(
     )
 
 
-def test_convert_robot_data_spec_names_to_ids_resolves_name_across_pages(
+def test_convert_cross_embodiment_description_names_to_ids_resolves_name_across_pages(
     mock_auth_requests,
     mock_auth_requests_robots_paginated,
     mocked_org_id,
@@ -111,7 +111,7 @@ def test_convert_robot_data_spec_names_to_ids_resolves_name_across_pages(
     assert len(list_requests) == 3
 
 
-def test_convert_robot_data_spec_names_to_ids_raises_error_on_duplicates(
+def test_convert_cross_embodiment_description_names_to_ids_raises_error_on_duplicates(
     mock_auth_requests_robots,
 ):
     spec = {
@@ -122,7 +122,7 @@ def test_convert_robot_data_spec_names_to_ids_raises_error_on_duplicates(
         convert_cross_embodiment_description_names_to_ids(spec)
 
 
-def test_convert_robot_data_spec_names_to_ids_raises_on_ambiguous_name(
+def test_convert_cross_embodiment_description_names_to_ids_raises_on_ambiguous_name(
     mock_auth_requests_robots,
 ):
     spec = {"dup_name": {DataType.RGB_IMAGES: _indexed_names("cam")}}
@@ -130,7 +130,7 @@ def test_convert_robot_data_spec_names_to_ids_raises_on_ambiguous_name(
         convert_cross_embodiment_description_names_to_ids(spec)
 
 
-def test_convert_robot_data_spec_names_to_ids_raises_on_name_id_collision(
+def test_convert_cross_embodiment_description_names_to_ids_raises_on_name_id_collision(
     mock_auth_requests_robots,
 ):
     spec = {"robot_id_1": {DataType.RGB_IMAGES: _indexed_names("cam")}}

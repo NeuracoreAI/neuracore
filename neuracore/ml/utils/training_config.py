@@ -355,10 +355,12 @@ def build_cross_embodiment_description_from_data_types(
 
     cross_embodiment_description: CrossEmbodimentDescription = {}
     for robot_id in robot_ids:
-        robot_full_spec = dataset.get_full_embodiment_description(robot_id)
+        robot_full_embodiment_description = dataset.get_full_embodiment_description(
+            robot_id
+        )
         robot_name = robot_names[robot_id] if is_robot_id(robot_id) else robot_id
         cross_embodiment_description[robot_name] = {
-            data_type: dict(robot_full_spec.get(data_type, {}))
+            data_type: dict(robot_full_embodiment_description.get(data_type, {}))
             for data_type in data_types
         }
 
