@@ -1,4 +1,4 @@
-name: Integration ML Dataset Datatype Validation - Production
+name: Integration ML - Dataset Datatype Validation (Production)
 
 on:
   schedule:

@@ -1,4 +1,4 @@
-name: Integration Platform (Staging)
+name: Integration PF (Staging)
 
 on:
   schedule:

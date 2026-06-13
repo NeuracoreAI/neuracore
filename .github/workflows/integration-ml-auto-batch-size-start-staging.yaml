@@ -1,4 +1,4 @@
-name: Integration ML Auto Batch Size - Staging
+name: Integration ML - Auto Batch Size (Staging)
 
 on:
   schedule:

@@ -1,4 +1,4 @@
-name: Integration ML Back To Back Training - Staging
+name: Integration ML - Back To Back Training (Staging)
 
 on:
   schedule:

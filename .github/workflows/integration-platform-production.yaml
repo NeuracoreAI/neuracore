@@ -1,4 +1,4 @@
-name: Integration Platform (Production)
+name: Integration PF (Production)
 
 on:
   schedule:
