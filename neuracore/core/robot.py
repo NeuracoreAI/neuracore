@@ -346,6 +346,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        end_time = time.time()
         get_recording_state_manager().recording_stopped(
             robot_id=self.id, instance=self.instance, recording_id=recording_id
         )
@@ -360,7 +361,7 @@ class Robot:
                 headers=self._auth.get_headers(),
                 json={
                     "recording_id": recording_id,
-                    "end_time": time.time(),
+                    "end_time": end_time,
                 },
             )
 
@@ -727,6 +728,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        end_time = time.time()
         self._stop_all_streams()
         self._get_daemon_recording_context().stop_recording(recording_id=recording_id)
 
@@ -737,7 +739,7 @@ class Robot:
                 headers=self._auth.get_headers(),
                 json={
                     "recording_id": recording_id,
-                    "end_time": time.time(),
+                    "end_time": end_time,
                 },
             )
             response.raise_for_status()
