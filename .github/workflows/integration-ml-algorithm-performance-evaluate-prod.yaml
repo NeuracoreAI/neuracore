@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Performance - Evaluate (Production)
+name: Integration ML - Algorithm Performance Evaluate (Production)
 
 on:
   schedule:

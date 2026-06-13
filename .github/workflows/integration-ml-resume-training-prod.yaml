@@ -1,4 +1,4 @@
-name: Integration ML Resume Training - Production
+name: Integration ML - Resume Training (Production)
 
 on:
   schedule:

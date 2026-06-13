@@ -1,4 +1,4 @@
-name: Integration ML Failure Reporting - Staging
+name: Integration ML - Failure Reporting (Staging)
 
 on:
   schedule:

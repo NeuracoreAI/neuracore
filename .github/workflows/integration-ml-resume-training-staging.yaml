@@ -1,4 +1,4 @@
-name: Integration ML Resume Training - Staging
+name: Integration ML - Resume Training (Staging)
 
 on:
   schedule:

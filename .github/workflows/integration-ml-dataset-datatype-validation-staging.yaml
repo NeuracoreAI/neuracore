@@ -1,4 +1,4 @@
-name: Integration ML Dataset Datatype Validation - Staging
+name: Integration ML - Dataset Datatype Validation (Staging)
 
 on:
   schedule:

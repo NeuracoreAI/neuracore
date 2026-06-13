@@ -1,4 +1,4 @@
-name: Integration Importer (Production)
+name: Integration Platform - Importer (Production)
 
 on:
   schedule:

@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Validation - Staging
+name: Integration ML - Algorithm Validation (Staging)
 
 on:
   schedule:
