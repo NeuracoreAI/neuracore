@@ -38,7 +38,7 @@ from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
     wait_for_all_training,
 )
-from tests.integration.ml.shared.utils import unique_name
+from tests.integration.ml.shared.utils import integration_ml_job_name, unique_name
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -179,7 +179,7 @@ class TestTrainingSyncFailure:
         )
         for case in SYNC_FAILURE_CASES:
             job_data = nc.start_training_run(
-                name=unique_name(prefix=f"sync_failure_job_{case.id}"),
+                name=integration_ml_job_name(f"Training Sync Failure {case.id}"),
                 dataset_name=self.dataset_name,
                 algorithm_name="CNNMLP",
                 algorithm_config=SYNC_FAILURE_CNNMLP_CONFIG,

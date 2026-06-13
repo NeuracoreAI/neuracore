@@ -22,7 +22,7 @@ from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
     wait_for_training,
 )
-from tests.integration.ml.shared.utils import unique_name
+from tests.integration.ml.shared.utils import integration_ml_job_name, unique_name
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -116,7 +116,7 @@ class TestTrainingFailureReporting:
             output_types=OUTPUT_DATA_TYPES,
         )
         job_data = nc.start_training_run(
-            name=unique_name(prefix="failure_report_job"),
+            name=integration_ml_job_name("Failure Reporting"),
             dataset_name=self.dataset_name,
             algorithm_name="CNNMLP",
             algorithm_config=FAILURE_CNNMLP_CONFIG,

@@ -3,6 +3,7 @@
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 import neuracore as nc
 from neuracore.core.auth import get_auth
@@ -17,6 +18,12 @@ COMPLETED_STATUS = "COMPLETED"
 
 def unique_name(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:8]}"
+
+
+def integration_ml_job_name(test_name: str) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    uid = uuid.uuid4().hex[:8]
+    return f"Integration ML - {test_name} - {timestamp} - {uid}"
 
 
 @dataclass(frozen=True)

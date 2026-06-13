@@ -21,7 +21,7 @@ from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
     wait_for_all_training,
 )
-from tests.integration.ml.shared.utils import unique_name
+from tests.integration.ml.shared.utils import integration_ml_job_name, unique_name
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -58,8 +58,8 @@ class TestBackToBackTraining:
         cls.all_steps_passed = True
         cls.dataset_name = unique_name(prefix="back_to_back_training")
         cls.training_names = [
-            unique_name(prefix="ml_integration_back_to_back")
-            for _ in range(BACK_TO_BACK_NUM_JOBS)
+            integration_ml_job_name(f"Back To Back Training {i + 1}")
+            for i in range(BACK_TO_BACK_NUM_JOBS)
         ]
         cls.job_ids = []
         cls.dataset = None

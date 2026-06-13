@@ -40,7 +40,7 @@ from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
     wait_for_training,
 )
-from tests.integration.ml.shared.utils import unique_name
+from tests.integration.ml.shared.utils import integration_ml_job_name, unique_name
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Predefined name prefix for the training run produced by this test. The
 # inference and resume tests scan for the latest COMPLETED run under this prefix
-INFERENCE_MODEL_TRAIN_RUN_PREFIX = "ml_integration_flow"
+INFERENCE_MODEL_TRAIN_RUN_PREFIX = "Integration ML - Training Flow"
 
 # Dataset name prefixes used by this test. The resume training test cleans up
 # datasets matching these prefixes after resume.
@@ -91,7 +91,7 @@ class TestTrainingFlow:
         cls.all_steps_passed = True
         cls.collected_dataset_name = unique_name(prefix=FLOW_COLLECTED_DATASET_PREFIX)
         cls.merged_dataset_name = unique_name(prefix=FLOW_MERGED_DATASET_PREFIX)
-        cls.training_name = unique_name(prefix=INFERENCE_MODEL_TRAIN_RUN_PREFIX)
+        cls.training_name = integration_ml_job_name("Training Flow")
         cls.collected_dataset = None
         cls.merged_dataset = None
         cls.job_id = None

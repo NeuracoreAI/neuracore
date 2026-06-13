@@ -45,6 +45,7 @@ from tests.integration.ml.shared.training import (
 from tests.integration.ml.shared.utils import (
     SelectedRun,
     cleanup_training_flow_datasets,
+    integration_ml_job_name,
     resolve_latest_completed_run,
     unique_name,
 )
@@ -186,7 +187,9 @@ class TestResumeTrainingAfterDataDeletion:
     def setup_class(cls) -> None:
         cls.all_steps_passed = True
         cls.dataset_name = unique_name(prefix="train_after_data_deletion")
-        cls.training_name = unique_name(prefix="ml_integration_data_deletion")
+        cls.training_name = integration_ml_job_name(
+            "Resume Training After Data Deletion"
+        )
         cls.dataset = None
         cls.first_job_id = None
         cls.relaunched_job_id = None
@@ -354,7 +357,9 @@ class TestResumeTrainingAfterDataAddition:
     def setup_class(cls) -> None:
         cls.all_steps_passed = True
         cls.dataset_name = unique_name(prefix="train_after_data_addition")
-        cls.training_name = unique_name(prefix="ml_integration_data_addition")
+        cls.training_name = integration_ml_job_name(
+            "Resume Training After Data Addition"
+        )
         cls.dataset = None
         cls.first_job_id = None
         cls.relaunched_job_id = None
