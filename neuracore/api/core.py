@@ -164,7 +164,6 @@ def connect_robot(
     Returns:
         The initialized and connected robot instance.
     """
-    validate_version()
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
     if robot.archived is True:
