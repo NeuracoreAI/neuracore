@@ -34,6 +34,45 @@ def cancel_incomplete_training_jobs(
             logger.warning(f"Failed to cancel training job {job_id}", exc_info=True)
 
 
+def cleanup_training_job(job_id: str) -> None:
+    """Delete if COMPLETED; cancel if non-terminal; leave if FAILED/CANCELLED.
+
+    On status-check failure, attempts cancel as a fallback to ensure the VM
+    is never left running.
+    """
+    try:
+        status = nc.get_training_job_status(job_id=job_id)
+    except Exception:
+        logger.warning(
+            f"Could not get status for job {job_id}; attempting cancel to "
+            "ensure VM is not left running",
+            exc_info=True,
+        )
+        try:
+            nc.cancel_training_job(job_id)
+        except Exception:
+            logger.warning(
+                f"Fallback cancel also failed for job {job_id}", exc_info=True
+            )
+        return
+
+    if status == "COMPLETED":
+        try:
+            nc.delete_training_job(job_id)
+        except Exception:
+            logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
+    elif status not in TERMINAL_STATES:
+        logger.warning(
+            f"Cancelling non-terminal training job {job_id} (status={status})"
+        )
+        try:
+            nc.cancel_training_job(job_id)
+        except Exception:
+            logger.warning(f"Failed to cancel training job {job_id}", exc_info=True)
+    else:
+        logger.info(f"Leaving job {job_id} for debugging (status={status})")
+
+
 def wait_for_training(
     job_id: str,
     timeout_minutes: int = 120,

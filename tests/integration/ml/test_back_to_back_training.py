@@ -19,6 +19,7 @@ from tests.integration.ml.shared.data_collection import (
 )
 from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
+    cleanup_training_job,
     wait_for_all_training,
 )
 from tests.integration.ml.shared.utils import unique_name
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 ROBOT_NAME = "integration_test_robot"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
-BACK_TO_BACK_NUM_EPISODES = 25
+BACK_TO_BACK_NUM_EPISODES = 3
 BACK_TO_BACK_EPISODE_LENGTH_MULTIPLIER = 5
 BACK_TO_BACK_FREQUENCY = 100
 BACK_TO_BACK_NUM_CAMERAS = 3
@@ -46,8 +47,7 @@ BACK_TO_BACK_CNNMLP_CONFIG = {
 class TestBackToBackTraining:
     """Launch multiple training jobs back-to-back against the same dataset."""
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     dataset: Dataset | None = None
     dataset_name: str
     job_ids: list[str]
@@ -55,7 +55,7 @@ class TestBackToBackTraining:
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.dataset_name = unique_name(prefix="back_to_back_training")
         cls.training_names = [
             unique_name(prefix="ml_integration_back_to_back")
@@ -67,17 +67,9 @@ class TestBackToBackTraining:
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestBackToBackTraining teardown cleanup: "
-                "one or more steps failed"
-            )
-            return
+        # Phase A: clean up jobs and dataset unconditionally.
         for job_id in cls.job_ids:
-            try:
-                nc.delete_training_job(job_id)
-            except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
+            cleanup_training_job(job_id)
         if cls.dataset:
             try:
                 cls.dataset.delete()

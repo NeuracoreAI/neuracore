@@ -20,6 +20,7 @@ from tests.integration.ml.shared.constants import (
 from tests.integration.ml.shared.data_collection import collect_demo_data
 from tests.integration.ml.shared.training import (
     build_cross_embodiment_descriptions,
+    cleanup_training_job,
     wait_for_training,
 )
 from tests.integration.ml.shared.utils import unique_name
@@ -56,15 +57,14 @@ class TestTrainingFailureReporting:
        confirming that the error was propagated back to the server.
     """
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     job_id: str | None = None
     dataset: Dataset | None = None
     dataset_name: str
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.dataset_name = unique_name(prefix="failure_report_test")
         cls.job_id = None
         cls.dataset = None
@@ -72,17 +72,9 @@ class TestTrainingFailureReporting:
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestTrainingFailureReporting teardown cleanup: "
-                "one or more steps failed"
-            )
-            return
+        # Phase A: clean up job and dataset unconditionally.
         if cls.job_id:
-            try:
-                nc.delete_training_job(cls.job_id)
-            except Exception:
-                logger.warning(f"Failed to delete job {cls.job_id}", exc_info=True)
+            cleanup_training_job(cls.job_id)
         if cls.dataset:
             try:
                 cls.dataset.delete()

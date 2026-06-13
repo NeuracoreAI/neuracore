@@ -40,19 +40,15 @@ from tests.integration.ml.shared.data_collection import (
 from tests.integration.ml.shared.training import (
     assert_no_training_log_errors,
     build_cross_embodiment_descriptions,
+    cleanup_training_job,
     wait_for_training,
 )
 from tests.integration.ml.shared.utils import (
     SelectedRun,
-    cleanup_training_flow_datasets,
     resolve_latest_completed_run,
     unique_name,
 )
-from tests.integration.ml.test_training_flow import (
-    FLOW_COLLECTED_DATASET_PREFIX,
-    FLOW_MERGED_DATASET_PREFIX,
-    INFERENCE_MODEL_TRAIN_RUN_PREFIX,
-)
+from tests.integration.ml.test_training_flow import INFERENCE_MODEL_TRAIN_RUN_PREFIX
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -85,31 +81,18 @@ DATA_ADDITION_CNNMLP_CONFIG = {
 class TestResumeTraining:
     """Resume the latest COMPLETED training run and verify resume behavior."""
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     selected_run: SelectedRun | None = None
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.selected_run = None
         nc.login()
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestResumeTraining teardown cleanup: "
-                "one or more steps failed"
-            )
-            return
-        try:
-            cleanup_training_flow_datasets(
-                collected_prefix=FLOW_COLLECTED_DATASET_PREFIX,
-                merged_prefix=FLOW_MERGED_DATASET_PREFIX,
-            )
-        except Exception:
-            logger.warning("Failed to clean up training-flow datasets", exc_info=True)
+        pass
 
     def test_step1_resolve_trained_model(self) -> None:
         self.__class__.selected_run = resolve_latest_completed_run(
@@ -174,8 +157,7 @@ def delete_recording_from_dataset(dataset: Dataset, recording: Recording) -> Non
 class TestResumeTrainingAfterDataDeletion:
     """Train on a dataset, delete some recordings, then relaunch training."""
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     dataset: Dataset | None = None
     dataset_name: str
     training_name: str
@@ -184,7 +166,7 @@ class TestResumeTrainingAfterDataDeletion:
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.dataset_name = unique_name(prefix="train_after_data_deletion")
         cls.training_name = unique_name(prefix="ml_integration_data_deletion")
         cls.dataset = None
@@ -194,19 +176,10 @@ class TestResumeTrainingAfterDataDeletion:
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestResumeTrainingAfterDataDeletion teardown cleanup: "
-                "one or more steps failed"
-            )
-            return
+        # Phase A: clean up jobs and dataset unconditionally.
         for job_id in (cls.first_job_id, cls.relaunched_job_id):
-            if job_id is None:
-                continue
-            try:
-                nc.delete_training_job(job_id)
-            except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
+            if job_id:
+                cleanup_training_job(job_id)
         if cls.dataset:
             try:
                 cls.dataset.delete()
@@ -342,8 +315,7 @@ class TestResumeTrainingAfterDataDeletion:
 class TestResumeTrainingAfterDataAddition:
     """Train on a dataset, add more recordings, then relaunch training."""
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     dataset: Dataset | None = None
     dataset_name: str
     training_name: str
@@ -352,7 +324,7 @@ class TestResumeTrainingAfterDataAddition:
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.dataset_name = unique_name(prefix="train_after_data_addition")
         cls.training_name = unique_name(prefix="ml_integration_data_addition")
         cls.dataset = None
@@ -362,19 +334,10 @@ class TestResumeTrainingAfterDataAddition:
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestResumeTrainingAfterDataAddition teardown cleanup: "
-                "one or more steps failed"
-            )
-            return
+        # Phase A: clean up jobs and dataset unconditionally.
         for job_id in (cls.first_job_id, cls.relaunched_job_id):
-            if job_id is None:
-                continue
-            try:
-                nc.delete_training_job(job_id)
-            except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
+            if job_id:
+                cleanup_training_job(job_id)
         if cls.dataset:
             try:
                 cls.dataset.delete()

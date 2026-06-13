@@ -21,15 +21,15 @@ def _load_algorithm_configs() -> list[dict]:
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[Any]) -> None:
-    """Attach per-phase reports and mark step-test classes when a step fails."""
+    """Attach per-phase reports and record step pass/fail in step-test classes."""
     outcome = yield
     rep = outcome.get_result()
     setattr(item, f"rep_{rep.when}", rep)
-    if call.when != "call" or not rep.failed:
+    if call.when != "call":
         return
     test_cls = getattr(item, "cls", None)
-    if test_cls is not None and getattr(test_cls, "track_step_teardown", False):
-        test_cls.all_steps_passed = False
+    if test_cls is not None and hasattr(test_cls, "step_results"):
+        test_cls.step_results[item.name] = not rep.failed
 
 
 def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:

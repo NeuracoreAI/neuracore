@@ -38,9 +38,13 @@ from tests.integration.ml.shared.training import (
     TERMINAL_STATES,
     assert_no_training_log_errors,
     build_cross_embodiment_descriptions,
+    cancel_incomplete_training_jobs,
     wait_for_training,
 )
-from tests.integration.ml.shared.utils import unique_name
+from tests.integration.ml.shared.utils import (
+    cleanup_training_flow_datasets,
+    unique_name,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -77,8 +81,7 @@ class TestTrainingFlow:
     """
 
     # Shared state across test_step* methods within one pytest session
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     collected_dataset_name: str
     merged_dataset_name: str
     training_name: str
@@ -88,7 +91,7 @@ class TestTrainingFlow:
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.collected_dataset_name = unique_name(prefix=FLOW_COLLECTED_DATASET_PREFIX)
         cls.merged_dataset_name = unique_name(prefix=FLOW_MERGED_DATASET_PREFIX)
         cls.training_name = unique_name(prefix=INFERENCE_MODEL_TRAIN_RUN_PREFIX)
@@ -99,14 +102,22 @@ class TestTrainingFlow:
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestTrainingFlow teardown cleanup: one or more steps failed"
+        # Phase A: cancel job if not completed to terminate the GCP VM.
+        if cls.job_id and not cls.step_results.get(
+            "test_step5_assert_training_completed"
+        ):
+            cancel_incomplete_training_jobs([cls.job_id])
+
+        # Phase A: always clean up test-created datasets.
+        try:
+            cleanup_training_flow_datasets(
+                collected_prefix=FLOW_COLLECTED_DATASET_PREFIX,
+                merged_prefix=FLOW_MERGED_DATASET_PREFIX,
             )
-            return
-        # NOTE: the training job and datasets are intentionally NOT deleted here.
-        # The resume-training test needs the datasets, and the inference test
-        # keeps the job as a known-good model (pruning only superseded runs).
+        except Exception:
+            logger.warning("Failed to clean up training-flow datasets", exc_info=True)
+        # NOTE: the training job is intentionally NOT deleted here.
+        # The inference test retains it as a known-good model.
 
     def test_step1_collect_demo_data(self) -> None:
         self.__class__.collected_dataset = collect_demo_data(

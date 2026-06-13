@@ -170,25 +170,20 @@ def run_policy_inference(
 class TestInference:
     """Serve the latest COMPLETED training run via direct, local, and remote paths."""
 
-    track_step_teardown = True
-    all_steps_passed: bool = True
+    step_results: dict[str, bool] = {}
     selected_run: SelectedRun | None = None
     endpoint_id: str | None = None
 
     @classmethod
     def setup_class(cls) -> None:
-        cls.all_steps_passed = True
+        cls.step_results = {}
         cls.selected_run = None
         cls.endpoint_id = None
         nc.login()
 
     @classmethod
     def teardown_class(cls) -> None:
-        if not cls.all_steps_passed:
-            logger.warning(
-                "Skipping TestInference teardown cleanup: one or more steps failed"
-            )
-            return
+        # Phase A: always delete endpoint to terminate its GCP VM.
         if cls.endpoint_id:
             try:
                 nc.delete_endpoint(cls.endpoint_id)
@@ -196,6 +191,12 @@ class TestInference:
                 logger.warning(
                     f"Failed to delete endpoint {cls.endpoint_id}", exc_info=True
                 )
+
+        if not cls.step_results or not all(cls.step_results.values()):
+            logger.warning("Skipping TestInference prune: not all steps passed")
+            return
+
+        # Phase B: prune superseded runs on success.
         # Keep the run we used as a known-good model for future sessions (so a
         # later run whose training fails can fall back to it), and prune the
         # superseded prefixed runs to avoid unbounded job accumulation.
