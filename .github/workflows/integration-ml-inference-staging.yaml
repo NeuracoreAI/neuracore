@@ -1,4 +1,4 @@
-name: Integration ML Inference - Staging
+name: Integration ML - Inference (Staging)
 
 on:
   schedule:

@@ -1,4 +1,4 @@
-name: Integration ML Failure Reporting - Production
+name: Integration ML - Failure Reporting (Production)
 
 on:
   schedule:

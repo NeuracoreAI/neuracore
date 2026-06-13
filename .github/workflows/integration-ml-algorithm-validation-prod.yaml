@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Validation - Production
+name: Integration ML - Algorithm Validation (Production)
 
 on:
   schedule:
