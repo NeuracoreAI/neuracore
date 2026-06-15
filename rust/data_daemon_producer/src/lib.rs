@@ -106,14 +106,24 @@ fn start_recording(
 
 /// Log one scalar sample for each of several joints captured at the same
 /// instant, packed into one `BatchedData` envelope.
+///
+/// **Flattened transfer:** the joint names arrive as a single `\0`-joined
+/// string and the values as one flat list, so the GIL-held cost is one string
+/// copy plus one `Vec<f64>` extraction. The previous `Vec<(String, f64)>`
+/// signature made PyO3 extract N `(name, value)` tuples — N allocations + N
+/// downcasts under the GIL — which dominated this call at high joint counts
+/// (~1000 joints ≈ 2 ms). The names are split and zipped with the values on the
+/// publisher thread, off this path.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, items, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, names, values, timestamp_ns, timestamp_s = None))]
+#[allow(clippy::too_many_arguments)]
 fn log_joints(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
     data_type: &str,
-    items: Vec<(String, f64)>,
+    names: &str,
+    values: Vec<f64>,
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
 ) -> PyResult<()> {
@@ -122,27 +132,25 @@ fn log_joints(
             "robot_id and data_type must not be empty",
         ));
     }
-    if items.is_empty() {
+    if values.is_empty() {
         return Ok(());
-    }
-    if let Some(bad_index) = items.iter().position(|(name, _)| name.is_empty()) {
-        return Err(PyValueError::new_err(format!(
-            "joint name must not be empty (item index {bad_index})"
-        )));
     }
     let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
+    let joined_names = names.to_string();
     py.allow_threads(move || {
         // Stamp the window-routing clock at enqueue (inside the recording
-        // window). The publisher thread serialises the items and publishes the
-        // `BatchedData`, keeping the synchronous IPC publish — which can briefly
-        // block on a full commands buffer — off this call.
+        // window). The publisher thread splits the names, zips them with the
+        // values, serialises, and publishes the `BatchedData`, keeping that work
+        // — and the synchronous IPC publish, which can briefly block on a full
+        // commands buffer — off this call.
         let publish_timestamp_ns = now_ns();
         let _ = publisher_tx().send(PublishMsg::Joint {
             robot_id,
             robot_instance,
             data_type,
-            items,
+            joined_names,
+            values,
             timestamp_ns,
             timestamp_s,
             publish_timestamp_ns,

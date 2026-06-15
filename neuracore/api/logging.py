@@ -36,6 +36,7 @@ from neuracore.core.streaming.data_stream import (
     DataRecordingContext,
     DataStream,
     DepthDataStream,
+    JointDataStream,
     JsonDataStream,
     RGBDataStream,
     VideoDataStream,
@@ -72,7 +73,7 @@ class JointStreamBinding:
 
     stream_id: str
     storage_name: str
-    stream: JsonDataStream
+    stream: JointDataStream
 
 
 @dataclass(frozen=True)
@@ -253,16 +254,16 @@ def _get_or_create_joint_stream(
     name: str,
     robot: Robot,
 ) -> JointStreamBinding:
-    """Return the stream id, storage name, and JsonDataStream for one joint."""
+    """Return the stream id, storage name, and JointDataStream for one joint."""
     storage_name = validate_safe_name(name)
     str_id = f"{data_type.value}:{name}"
     joint_stream = robot.get_data_stream(str_id)
     if joint_stream is None:
-        joint_stream = JsonDataStream(data_type=data_type, data_type_name=storage_name)
+        joint_stream = JointDataStream(data_type=data_type, data_type_name=storage_name)
         robot.add_data_stream(str_id, joint_stream)
     assert isinstance(
-        joint_stream, JsonDataStream
-    ), "Expected stream to be instance of JSONDataStream"
+        joint_stream, JointDataStream
+    ), "Expected stream to be instance of JointDataStream"
     return JointStreamBinding(
         stream_id=str_id,
         storage_name=storage_name,
@@ -379,10 +380,11 @@ def _log_group_of_joint_data(
         if current_recording_id is not None and not joint_stream.is_recording():
             start_stream(robot, joint_stream)
 
-        data = JointData(timestamp=timestamp, value=joint_value)
-        joint_stream.log(data=data, send_to_daemon=False)
-
         if live_data_orchestrator is not None and robot_id is not None:
+            # A live consumer needs the materialised sample now, so build it and
+            # publish it; the stream keeps it as its latest data.
+            data = JointData(timestamp=timestamp, value=joint_value)
+            joint_stream.log(data=data, send_to_daemon=False)
             live_data_orchestrator.get_provider_manager(
                 robot_id, robot_instance
             ).get_json_source(
@@ -390,6 +392,11 @@ def _log_group_of_joint_data(
             ).publish(
                 data.model_dump(mode="json")
             )
+        else:
+            # No live consumer: stash the raw scalar and defer building the
+            # JointData to get_latest_data(), keeping the per-joint hot path
+            # allocation-free (see JointDataStream).
+            joint_stream.record_scalar(timestamp, joint_value)
 
         if rust_mode:
             if current_recording_id is not None:

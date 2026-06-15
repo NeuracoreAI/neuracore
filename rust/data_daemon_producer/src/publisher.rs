@@ -110,7 +110,10 @@ pub(crate) enum PublishMsg {
         robot_id: String,
         robot_instance: i64,
         data_type: String,
-        items: Vec<(String, f64)>,
+        /// Joint names joined by `\0` (split + zipped with `values` here, off
+        /// the caller's GIL-held path).
+        joined_names: String,
+        values: Vec<f64>,
         timestamp_ns: i64,
         timestamp_s: Option<f64>,
         publish_timestamp_ns: i64,
@@ -204,21 +207,26 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 robot_id,
                 robot_instance,
                 data_type,
-                items,
+                joined_names,
+                values,
                 timestamp_ns,
                 timestamp_s,
                 publish_timestamp_ns,
             } => {
                 let timestamp_for_json =
                     timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
-                let mut batch_items = Vec::with_capacity(items.len());
-                for (name, value) in items {
+                let mut batch_items = Vec::with_capacity(values.len());
+                // Split the `\0`-joined names and pair each with its value — all
+                // on the publisher thread, off the caller's GIL-held path. The
+                // caller guarantees name/value counts match; `zip` is a safety
+                // net if they ever don't (it stops at the shorter).
+                for (name, value) in joined_names.split('\u{0}').zip(values) {
                     match serde_json::to_vec(&ScalarFrameEntry {
                         timestamp: timestamp_for_json,
                         value,
                     }) {
                         Ok(payload) => batch_items.push(BatchedDataItem {
-                            sensor_name: Some(name),
+                            sensor_name: Some(name.to_string()),
                             payload,
                         }),
                         Err(error) => {

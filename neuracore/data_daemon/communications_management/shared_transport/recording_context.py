@@ -139,8 +139,15 @@ class RecordingContext:
             return
         robot_id = self._require_source("log_joints")
         timestamp_ns = int(timestamp * 1_000_000_000)
+        names, values = zip(*items)
         _load_native().log_joints(
-            robot_id, self._robot_instance, data_type, items, timestamp_ns, timestamp
+            robot_id,
+            self._robot_instance,
+            data_type,
+            "\0".join(names),
+            list(values),
+            timestamp_ns,
+            timestamp,
         )
 
     def log_frame(

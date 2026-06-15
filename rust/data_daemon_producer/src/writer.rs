@@ -462,34 +462,44 @@ fn record_video_frame(
     // misconfiguration — and on the writer thread we can't surface a `PyErr`, so
     // log once and drop the frame rather than panic (which would kill the
     // writer silently, stopping all further video).
-    let Some(stream_spool_dir) = spool_dir(robot_id, robot_instance, data_type, sensor_name) else {
-        tracing::error!(
-            sensor_name,
-            "recordings root unresolved on writer thread; dropping video frame"
-        );
-        return Ok(());
-    };
     let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
-    let slot: VideoChunkSlot = with_video_chunks(|streams| {
-        streams
-            .entry(key)
-            .or_insert_with(|| {
-                Arc::new(Mutex::new(VideoChunkState {
-                    width,
-                    height,
-                    spool_dir: stream_spool_dir,
-                    nut_writer: None,
-                    chunk_publish_ns: 0,
-                    chunk_thread_id: 0,
-                    frame_count: 0,
-                    pts_origin_us: None,
-                    last_pts_us: None,
-                    frame_timestamps_ns: Vec::new(),
-                    frame_timestamps_s: Vec::new(),
-                }))
-            })
-            .clone()
-    });
+    // Resolve the slot, building the per-stream state (and its spool dir) only
+    // on the FIRST frame of a stream. The spool-dir path build is several
+    // allocations, so doing it per frame (as an earlier revision did) added
+    // allocation churn to the writer's hot path and backed up the frame queue
+    // at high frame rates. The recordings root is pre-validated on the GIL in
+    // `log_frame`, so `spool_dir` only returns `None` on a genuine
+    // misconfiguration — drop the frame (never panic on the writer thread).
+    let slot: VideoChunkSlot = match with_video_chunks(|streams| {
+        if let Some(slot) = streams.get(&key) {
+            return Some(slot.clone());
+        }
+        let spool = spool_dir(robot_id, robot_instance, data_type, sensor_name)?;
+        let slot = Arc::new(Mutex::new(VideoChunkState {
+            width,
+            height,
+            spool_dir: spool,
+            nut_writer: None,
+            chunk_publish_ns: 0,
+            chunk_thread_id: 0,
+            frame_count: 0,
+            pts_origin_us: None,
+            last_pts_us: None,
+            frame_timestamps_ns: Vec::new(),
+            frame_timestamps_s: Vec::new(),
+        }));
+        streams.insert(key.clone(), slot.clone());
+        Some(slot)
+    }) {
+        Some(slot) => slot,
+        None => {
+            tracing::error!(
+                sensor_name,
+                "recordings root unresolved on writer thread; dropping video frame"
+            );
+            return Ok(());
+        }
+    };
 
     // The announcements are built under the per-stream lock but published
     // outside it — `publish()` blocks the calling thread when the daemon falls

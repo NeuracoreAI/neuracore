@@ -14,7 +14,7 @@ from abc import ABC
 from dataclasses import dataclass
 
 import numpy as np
-from neuracore_types import CameraData, DataType, NCData
+from neuracore_types import CameraData, DataType, JointData, NCData
 
 from neuracore.data_daemon.communications_management.producer import ProducerChannel
 from neuracore.data_daemon.rust_selection import rust_daemon_enabled
@@ -277,6 +277,56 @@ class JsonDataStream(DataStream):
         # Serialize to JSON bytes and send to daemon
         json_bytes = json.dumps(data.model_dump(mode="json")).encode("utf-8")
         self._send_to_daemon(json_bytes)
+
+
+class JointDataStream(JsonDataStream):
+    """JSON stream for scalar joint samples with deferred latest-data builds.
+
+    Joint logging is the hottest path in the SDK: during a recording one
+    :class:`JointData` was materialised per joint per frame purely to keep
+    ``_latest_data`` current for live-data / endpoint consumers, which read it
+    at serving rate — far below the logging rate. At high joint counts that
+    per-sample Pydantic construction, and the GC churn it drove, dominated the
+    ``log_joint_*`` calls.
+
+    This stream lets the logging layer hand over the raw ``(timestamp, value)``
+    cheaply via :meth:`record_scalar` and defers building the ``JointData``
+    until :meth:`get_latest_data` is actually called, so the hot path performs
+    two attribute writes instead of a model construction.
+    """
+
+    def __init__(self, data_type: DataType, data_type_name: str) -> None:
+        """Initialize the joint data stream."""
+        super().__init__(data_type=data_type, data_type_name=data_type_name)
+        self._pending_timestamp: float = 0.0
+        self._pending_value: float = 0.0
+        self._has_pending_latest = False
+
+    def record_scalar(self, timestamp: float, value: float) -> None:
+        """Stash the latest scalar sample without building a ``JointData``.
+
+        The model is materialised lazily in :meth:`get_latest_data`. The
+        ``_has_pending_latest`` flag is set last so a concurrent reader either
+        sees the previous sample or a fully written new one.
+        """
+        self._pending_timestamp = timestamp
+        self._pending_value = value
+        self._has_pending_latest = True
+
+    def log(self, data: NCData, *, send_to_daemon: bool = True) -> None:
+        """Log a materialised sample, superseding any deferred scalar."""
+        self._has_pending_latest = False
+        super().log(data=data, send_to_daemon=send_to_daemon)
+
+    def get_latest_data(self) -> NCData | None:
+        """Return the latest sample, materialising a deferred scalar on demand."""
+        if self._has_pending_latest:
+            self._latest_data = JointData(
+                timestamp=self._pending_timestamp,
+                value=self._pending_value,
+            )
+            self._has_pending_latest = False
+        return self._latest_data
 
 
 class VideoDataStream(DataStream):
