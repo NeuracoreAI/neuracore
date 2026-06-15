@@ -99,6 +99,26 @@ class Dataset:
         self._robot_ids: list[str] | None = None
         self._robot_names: dict[str, str] | None = None
 
+    def __getstate__(self) -> dict:
+        """Return picklable state, dropping the unpicklable page lock.
+
+        A threading.Lock cannot be pickled or deep-copied, and a copy or
+        child process must get its own lock anyway. train.py deep-copies the
+        dataset for batch-size validation/autotuning and spawn subprocesses
+        pickle it, so the lock is excluded here and recreated in
+        __setstate__.
+        """
+        with self._page_lock:
+            state = self.__dict__.copy()
+            state["_recordings_cache"] = list(self._recordings_cache)
+        state["_page_lock"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state and create a fresh page lock for this instance."""
+        self.__dict__.update(state)
+        self._page_lock = threading.Lock()
+
     def _wrap_raw_recording(self, raw_recording: dict) -> Recording:
         """Wrap a raw recording dict into a Recording object.
 
