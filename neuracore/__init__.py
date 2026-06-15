@@ -1,4 +1,9 @@
+# ruff: noqa: E402
 """Init."""
+
+import logging
+
+logging.getLogger("neuracore").addHandler(logging.NullHandler())
 
 from .api.core import *  # noqa: F403
 from .api.datasets import *  # noqa: F403

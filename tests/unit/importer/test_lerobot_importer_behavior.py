@@ -483,26 +483,24 @@ def test_lerobot_resolve_frequency_prefers_config_and_warns_on_mismatch():
     """Configured frequency should be used even if metadata differs."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer.data_config = SimpleNamespace(frequency=30.0)
-    importer.logger = MagicMock()
 
-    frequency = importer._resolve_frequency(meta_frequency=15.0)
+    with patch("neuracore.importer.lerobot_importer.logger") as mock_logger:
+        frequency = importer._resolve_frequency(meta_frequency=15.0)
 
     assert frequency == 30.0
-    importer.logger.warning.assert_called_once_with(
-        "Dataset FPS %s does not match configured FPS %s", 15.0, 30.0
-    )
+    mock_logger.warning.assert_called_once()
 
 
 def test_lerobot_resolve_frequency_falls_back_to_metadata():
     """Metadata FPS should be used when config frequency is missing."""
     importer = object.__new__(LeRobotDatasetImporter)
     importer.data_config = SimpleNamespace(frequency=None)
-    importer.logger = MagicMock()
 
-    frequency = importer._resolve_frequency(meta_frequency=25.0)
+    with patch("neuracore.importer.lerobot_importer.logger") as mock_logger:
+        frequency = importer._resolve_frequency(meta_frequency=25.0)
 
     assert frequency == 25.0
-    importer.logger.warning.assert_not_called()
+    mock_logger.warning.assert_not_called()
 
 
 def test_lerobot_resolve_frequency_raises_when_missing_everywhere():

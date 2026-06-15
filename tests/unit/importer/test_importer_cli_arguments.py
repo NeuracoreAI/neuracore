@@ -31,6 +31,7 @@ def test_import_command_invokes_run_import_with_defaults(monkeypatch, tmp_path):
     result = runner.invoke(
         app,
         [
+            "import",
             "--dataset-config",
             str(config_path),
             "--dataset-dir",
@@ -73,6 +74,7 @@ def test_import_command_propagates_flags(monkeypatch, tmp_path):
     result = runner.invoke(
         app,
         [
+            "import",
             "--dataset-config",
             str(config_path),
             "--dataset-dir",
@@ -117,11 +119,11 @@ def test_import_command_handles_cli_error(monkeypatch, tmp_path, caplog):
         "_run_import",
         lambda **_: (_ for _ in ()).throw(CLIError("bad input")),
     )
-
     with caplog.at_level(logging.ERROR):
         result = runner.invoke(
             app,
             [
+                "import",
                 "--dataset-config",
                 str(config_path),
                 "--dataset-dir",
@@ -146,6 +148,7 @@ def test_import_command_validates_paths_with_click(tmp_path):
     result = runner.invoke(
         app,
         [
+            "import",
             "--dataset-config",
             str(missing_config),
             "--dataset-dir",

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -176,7 +175,6 @@ def test_image_decoder_handles_base64_compressed_payload():
         DataType.DEPTH_IMAGES,
         message["data"],
         message,
-        logger=logging.getLogger(__name__),
     )
     assert isinstance(image_data, np.ndarray)
     assert image_data.shape == (1, 2)
@@ -457,12 +455,7 @@ def test_clip_depth_non_array_passthrough(value):
 
 def test_read_image_data_non_image_type_passthrough():
     data = {"position": 1.0}
-    assert (
-        read_image_data(
-            DataType.JOINT_POSITIONS, data, data, logger=logging.getLogger(__name__)
-        )
-        is data
-    )
+    assert read_image_data(DataType.JOINT_POSITIONS, data, data) is data
 
 
 def test_read_image_data_decodes_raw_rgb8():
@@ -477,9 +470,7 @@ def test_read_image_data_decodes_raw_rgb8():
         is_bigendian=False,
         data=raw.tobytes(),
     )
-    result = read_image_data(
-        DataType.RGB_IMAGES, message.data, message, logger=logging.getLogger(__name__)
-    )
+    result = read_image_data(DataType.RGB_IMAGES, message.data, message)
     assert isinstance(result, np.ndarray)
     assert result.shape == (h, w, 3)
 
@@ -499,7 +490,6 @@ def test_read_image_data_decodes_bigendian_mono16():
         DataType.DEPTH_IMAGES,
         message.data,
         message,
-        logger=logging.getLogger(__name__),
     )
 
     assert result.dtype == np.float32
@@ -520,7 +510,6 @@ def test_read_image_data_raises_on_unsupported_encoding():
             DataType.RGB_IMAGES,
             message.data,
             message,
-            logger=logging.getLogger(__name__),
         )
 
 
@@ -606,7 +595,6 @@ def test_iter_mcap_source_events_yields_source_event():
             "/joint",
             decoded_data,
             topic_map=topic_map,
-            logger=logging.getLogger(__name__),
             timestamp=1.0,
         )
     )
@@ -633,7 +621,6 @@ def test_iter_mcap_source_events_unknown_topic_yields_nothing():
             "/unknown",
             {},
             topic_map=topic_map,
-            logger=logging.getLogger(__name__),
             timestamp=0.0,
         )
     )

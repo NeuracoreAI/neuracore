@@ -42,7 +42,6 @@ from neuracore.ml.train import (
     get_model_and_algorithm_config,
     main,
     run_training,
-    setup_logging,
 )
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
 from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
@@ -53,6 +52,7 @@ from neuracore.ml.utils.training_config import (
     resolve_to_complete_config,
     resolve_user_input_config,
 )
+from neuracore.utils import setup_logging
 
 SKIP_TEST = (
     os.environ.get("CI", "false").lower() == "true" or not torch.cuda.is_available()
@@ -613,24 +613,31 @@ class TestSetupLogging:
     """Tests for setup_logging function."""
 
     @pytest.mark.parametrize("rank,should_create_log_file", [(0, True), (1, False)])
-    def test_setup_logging(self, temp_output_dir, rank, should_create_log_file):
-        setup_logging(str(temp_output_dir), rank=rank)
+    def test_setup_logging_creates_log_file(
+        self, temp_output_dir, rank, should_create_log_file
+    ):
+        log_file = temp_output_dir / "train.log" if rank == 0 else None
+        setup_logging(json_format=True, log_file=log_file, force=True)
+        assert (temp_output_dir / "train.log").exists() == should_create_log_file
 
-        log_file = temp_output_dir / "train.log"
-        if should_create_log_file:
-            assert log_file.exists()
-        else:
-            assert not log_file.exists()
-
-        logger = logging.getLogger(__name__)
-        assert logger.level <= logging.INFO
+    @pytest.mark.parametrize("rank", [1, 2, 4])
+    def test_setup_logging_rank_log_file_name(self, temp_output_dir, rank):
+        log_file = temp_output_dir / f"train-rank{rank}.log"
+        setup_logging(json_format=True, log_file=log_file, force=True)
+        assert log_file.exists()
 
     def test_setup_logging_creates_directory(self, temp_output_dir):
         new_dir = temp_output_dir / "new_dir"
-        setup_logging(str(new_dir), rank=0)
-
+        log_file = new_dir / "train.log"
+        setup_logging(json_format=True, log_file=log_file, force=True)
         assert new_dir.exists()
-        assert (new_dir / "train.log").exists()
+        assert log_file.exists()
+
+    def test_setup_logging_sets_level(self, temp_output_dir):
+        import logging
+
+        setup_logging(level=logging.DEBUG, force=True)
+        assert logging.getLogger().level == logging.DEBUG
 
 
 class TestResolveOutputDir:
@@ -2599,12 +2606,12 @@ class TestResolveAlgorithmNameAndSupportedDataTypes:
         setup = MainTestSetup(monkeypatch)
         setup.setup_mocks()
 
-        mock_setup_logging = Mock()
-        monkeypatch.setattr("neuracore.ml.train.setup_logging", mock_setup_logging)
+        mock_logging = Mock()
+        monkeypatch.setattr("neuracore.ml.train.setup_logging", mock_logging)
 
         main(cfg)
 
-        mock_setup_logging.assert_called_once_with(cfg.local_output_dir)
+        mock_logging.assert_called_once()
 
     def test_main_sets_up_logging_before_login(self, monkeypatch, temp_output_dir):
         cfg = OmegaConf.create({

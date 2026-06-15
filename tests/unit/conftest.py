@@ -1,3 +1,10 @@
+# ruff: noqa: E402
+import os
+
+# silence TF warnings
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+
 import pathlib
 import re
 import tempfile
@@ -26,7 +33,11 @@ def temp_config_dir(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = pathlib.Path(tmpdir)
         with patch.object(config_manager, "CONFIG_DIR", tmpdir):
+            mgr = config_manager.get_config_manager()
+            saved = mgr._config
+            mgr._config = None  # force reload from patched CONFIG_DIR
             yield tmpdir
+            mgr._config = saved
 
 
 MOCKED_ORG_ID = "test-org-id"
@@ -38,10 +49,13 @@ def mocked_org_id():
 
 
 @pytest.fixture
-def mock_auth_requests() -> Generator[requests_mock.Mocker, None, None]:
+def mock_auth_requests(monkeypatch) -> Generator[requests_mock.Mocker, None, None]:
     """Fixture to mock authentication and API requests."""
     get_provide_live_data_enabled_manager().disable()
     get_consume_live_data_enabled_manager().disable()
+
+    # Pin org to the mocked value so real dev env vars don't leak into tests.
+    monkeypatch.setenv("NEURACORE_ORG_ID", MOCKED_ORG_ID)
 
     with requests_mock.Mocker(real_http=True) as m:
         # Mock API Key Verification
@@ -161,17 +175,28 @@ def mock_model_mar(tmp_path):
 @pytest.fixture
 def reset_neuracore():
     """Reset Neuracore global state between tests."""
+    from neuracore.core.auth import Auth
+    from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
+
     original_auth = nc.core.auth._auth
+    original_singleton = SingletonMetaclass._instances.get(Auth)
 
     nc.api._active_robot = None
     nc.api._active_dataset_id = None
     nc.api._active_recording_id = None
 
-    nc.core.auth._auth = nc.core.auth.Auth()
+    # Evict stale singleton so Auth() constructs a fresh instance.
+    SingletonMetaclass._instances.pop(Auth, None)
+    fresh = nc.core.auth.Auth()
+    nc.core.auth._auth = fresh
 
     yield
 
+    # Restore original singleton state.
     nc.core.auth._auth = original_auth
+    SingletonMetaclass._instances.pop(Auth, None)
+    if original_singleton is not None:
+        SingletonMetaclass._instances[Auth] = original_singleton
 
 
 @pytest.fixture

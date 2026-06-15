@@ -29,7 +29,8 @@ repos:
     hooks:
       - id: ruff
         # Ignoring unused imports within __init__.py files.
-        args: [--per-file-ignores, "*__init__.py:F401", --fix]
+        # E402 in train.py: env vars must be set before torch import triggers TF C++ init.
+        args: [--per-file-ignores, "*__init__.py:F401,neuracore/ml/train.py:E402", --fix]
 
   - repo: https://github.com/pycqa/pydocstyle
     rev: 6.3.0

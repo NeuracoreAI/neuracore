@@ -180,7 +180,7 @@ def _collect_demo_data(
     dataset = nc.create_dataset(name=dataset_name)
 
     for ep_idx in range(num_episodes):
-        logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
+        logger.info("Collecting episode %s/%s", ep_idx + 1, num_episodes)
         action_traj = rollout_policy()
         expanded_action_traj = [
             action_dict
@@ -295,7 +295,7 @@ def _wait_for_training(
     deadline = time.time() + timeout_minutes * 60
     while True:
         status = nc.get_training_job_status(job_id=job_id)
-        logger.info(f"Training job {job_id}: {status}")
+        logger.info("Training job %s: %s", job_id, status)
         if status in TERMINAL_STATES:
             return status
         assert (
@@ -316,7 +316,7 @@ def _wait_for_all_training(
             if job_id in final_statuses:
                 continue
             status = nc.get_training_job_status(job_id=job_id)
-            logger.info(f"Training job {job_id}: {status}")
+            logger.info("Training job %s: %s", job_id, status)
             if status in TERMINAL_STATES:
                 final_statuses[job_id] = status
 
@@ -373,7 +373,7 @@ def _wait_for_endpoint(
     deadline = time.time() + timeout_minutes * 60
     while True:
         status = nc.get_endpoint_status(endpoint_id=endpoint_id)
-        logger.info(f"Endpoint {endpoint_id}: {status}")
+        logger.info("Endpoint %s: %s", endpoint_id, status)
         if status != "creating":
             return status
         assert time.time() < deadline, (
@@ -447,7 +447,7 @@ def _run_policy_inference(policy: Policy) -> None:
                 f"Expected {data_type.value} in local "
                 f"server output, got: {list(predictions.keys())}"
             )
-        logger.info(f"Path 1 passed — output keys: {[k.value for k in predictions]}")
+        logger.info("Path 1 passed — output keys: %s", [k.value for k in predictions])
 
         # Path 2: nc.log_* → get_latest_sync_point internally
         logger.info("Running logging-function inference (Path 2)")
@@ -464,7 +464,7 @@ def _run_policy_inference(policy: Policy) -> None:
             "Expected JOINT_POSITIONS in local "
             f"server output, got: {list(predictions.keys())}"
         )
-        logger.info(f"Path 2 passed — output keys: {[k.value for k in predictions]}")
+        logger.info("Path 2 passed — output keys: %s", [k.value for k in predictions])
     finally:
         policy.disconnect()
 
@@ -570,7 +570,7 @@ class TestTrainingFlow:
             expected_recordings=expected_merged_recordings,
         )
         assert self.merged_dataset is not None
-        logger.info(f"[STEP 2] [PASSED] Merged Dataset Id={self.merged_dataset.id}")
+        logger.info("[STEP 2] [PASSED] Merged Dataset Id=%s", self.merged_dataset.id)
 
     def test_step3_start_training(self) -> None:
         assert self.merged_dataset is not None, "[STEP 2] Did Not Complete"
@@ -578,7 +578,7 @@ class TestTrainingFlow:
         assert (
             len(dataset.robot_ids) == 2
         ), f"Expected 2 robots in merged dataset, got {dataset.robot_ids}"
-        logger.info(f"Found {len(dataset.robot_ids)} robots: {dataset.robot_ids}")
+        logger.info("Found %s robots: %s", len(dataset.robot_ids), dataset.robot_ids)
 
         input_desc, output_desc = _build_cross_embodiment_descriptions(
             dataset=self.merged_dataset,
@@ -607,7 +607,7 @@ class TestTrainingFlow:
             output_cross_embodiment_description=output_desc,
         )
         self.__class__.job_id = job_data["id"]
-        logger.info(f"[STEP 3] [PASSED] Training Job Started: {self.job_id}")
+        logger.info("[STEP 3] [PASSED] Training Job Started: %s", self.job_id)
 
     def test_step4_retrieve_logs_while_running(self) -> None:
         assert self.job_id is not None, "[STEP 3] Did Not Complete"
@@ -616,7 +616,9 @@ class TestTrainingFlow:
         running_deadline = time.time() + RUNNING_STATE_TIMEOUT_MINUTES * 60
         while True:
             job_status = nc.get_training_job_status(job_id=self.job_id)
-            logger.info(f"Job {self.job_id} status: {job_status} (waiting for RUNNING)")
+            logger.info(
+                "Job %s status: %s (waiting for RUNNING)", self.job_id, job_status
+            )
             if job_status == "RUNNING":
                 break
             assert (
@@ -669,13 +671,13 @@ class TestTrainingFlow:
             job_id=self.job_id,
             context="Step 5 (training completion)",
         )
-        logger.info(f"[STEP 5] [PASSED] Job {self.job_id} Completed")
+        logger.info("[STEP 5] [PASSED] Job %s Completed", self.job_id)
 
     def test_step6_resume_training(self) -> None:
         assert self.job_id is not None, "[STEP 3] Did Not Complete"
         initial_epoch = nc.get_training_job_data(job_id=self.job_id).get("epoch", 0)
         resumed_job = nc.resume_training_run(job_id=self.job_id, additional_epochs=1)
-        logger.info(f"Resume response: {resumed_job}")
+        logger.info("Resume response: %s", resumed_job)
 
         assert resumed_job["status"] in {
             "PENDING",
@@ -746,7 +748,7 @@ class TestTrainingFlow:
         assert (
             final_status == "active"
         ), f"Endpoint did not become active, status: {final_status!r}"
-        logger.info(f"[STEP 9] [PASSED] Endpoint {self.endpoint_id} Is Active")
+        logger.info("[STEP 9] [PASSED] Endpoint %s Is Active", self.endpoint_id)
 
 
 class TestTrainingFailureReporting:
@@ -781,7 +783,7 @@ class TestTrainingFailureReporting:
             try:
                 nc.delete_training_job(cls.job_id)
             except Exception:
-                logger.warning(f"Failed to delete job {cls.job_id}", exc_info=True)
+                logger.warning("Failed to delete job %s", cls.job_id, exc_info=True)
         if cls.dataset:
             try:
                 cls.dataset.delete()
@@ -878,7 +880,9 @@ class TestBackToBackTraining:
             try:
                 nc.delete_training_job(job_id)
             except Exception:
-                logger.warning(f"Failed to delete training job {job_id}", exc_info=True)
+                logger.warning(
+                    "Failed to delete training job %s", job_id, exc_info=True
+                )
         if cls.dataset:
             try:
                 cls.dataset.delete()

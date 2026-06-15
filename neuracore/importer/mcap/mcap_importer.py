@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,8 @@ from neuracore.importer.mcap.utils import (
     validate_channel_decoder_support,
     validate_requested_topics,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class MCAPDatasetImporter(NeuracoreDatasetImporter):
@@ -73,7 +76,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             debug_target_ee_frame=debug_target_ee_frame,
         )
         if max_workers is not None and max_workers > 1:
-            self.logger.warning(
+            logger.warning(
                 f"MCAP import is configured with {max_workers} workers. Each MCAP "
                 "file is streamed as one episode, so memory use remains bounded per "
                 "worker.",
@@ -86,7 +89,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         self._decoder_factories: list[DecoderFactory] | None = None
         self._init_runtime_components()
 
-        self.logger.info(
+        logger.info(
             f"Initialized MCAP importer for '{self.dataset_name}' "
             f"(files={len(self.mcap_files)}, "
             f"topics={len(get_mcap_topics(topic_map=self.topic_map))}, "
@@ -129,7 +132,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
 
         label = item.description or file_path.name
         instance = max(0, self._worker_id)
-        self.logger.info(
+        logger.info(
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )
 
@@ -147,7 +150,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                     robot_name=self.robot_name, instance=instance, wait=True
                 )
 
-        self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
+        logger.info("Completed MCAP file %s | messages=%s", label, message_count)
 
     def _record_step(self, step: dict, timestamp: float) -> None:
         """Log decoded data from each MCAP source topic in this step."""
@@ -156,7 +159,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 topic=topic,
                 decoded_data=decoded_data,
                 topic_map=self.topic_map,
-                logger=self.logger,
                 timestamp=timestamp,
             ):
                 self._log_data(
@@ -179,15 +181,14 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         with episode_file_path.open("rb") as stream:
             reader = make_reader(stream=stream, decoder_factories=factories)
             header = read_mcap_header(reader=reader)
-            log_mcap_header(header=header, logger=self.logger)
+            log_mcap_header(header=header)
             summary = read_mcap_summary(reader=reader)
-            log_mcap_summary_details(summary=summary, logger=self.logger)
+            log_mcap_summary_details(summary=summary)
             validate_requested_topics(summary=summary, topics=topics)
             validate_channel_decoder_support(
                 summary=summary,
                 topics=topics,
                 decoder_factories=factories,
-                logger=self.logger,
             )
             total = estimate_total_messages(summary=summary, topics=topics)
 
@@ -234,7 +235,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
     ) -> None:
         """Clip depth arrays before delegating to the base logging path."""
         if data_type == DataType.DEPTH_IMAGES:
-            transformed_data = clip_depth(data=transformed_data, logger=self.logger)
+            transformed_data = clip_depth(data=transformed_data)
         super()._log_transformed_data(
             data_type=data_type,
             transformed_data=transformed_data,
@@ -245,7 +246,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         )
 
     def _init_runtime_components(self) -> None:
-        self._decoder_factories = list_decoder_factories(logger=self.logger)
+        self._decoder_factories = list_decoder_factories()
 
     def _ensure_runtime_components(self) -> None:
         if self._decoder_factories is None:

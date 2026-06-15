@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 import typer
@@ -16,10 +17,31 @@ from neuracore.importer.core.exceptions import (
 )
 from neuracore.importer.core.utils import parse_storage_size
 from neuracore.importer.importer import _run_import
+from neuracore.utils import setup_logging
+
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     add_completion=False, help="Neuracore dataset import command line interface."
 )
+
+
+@app.callback()
+def callback(
+    log_level: str | None = typer.Option(
+        None,
+        "--log-level",
+        help="Set log level (e.g. DEBUG, INFO, WARNING, ERROR).",
+    ),
+) -> None:
+    """Configure importer command options."""
+    from neuracore.importer.core.base import get_shared_console
+
+    if log_level:
+        os.environ["NEURACORE_LOG_LEVEL"] = log_level
+    setup_logging(
+        console=get_shared_console(), level=log_level, force=log_level is not None
+    )
 
 
 @app.command("import")
@@ -58,8 +80,7 @@ def import_dataset(
         False,
         "--shared",
         help=(
-            "Create the output dataset as shared "
-            "(only available for administrators)."
+            "Create the output dataset as shared (only available for administrators)."
         ),
     ),
     dry_run: bool = typer.Option(
@@ -139,13 +160,13 @@ def import_dataset(
         DatasetOperationError,
         DatasetDetectionError,
     ) as exc:
-        logging.getLogger(__name__).error("%s", exc)
+        logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
     except ImporterError as exc:
-        logging.getLogger(__name__).error("%s", exc)
+        logger.error("%s", exc)
         raise typer.Exit(code=1) from exc
     except Exception:
-        logging.getLogger(__name__).exception("Unexpected error during dataset import.")
+        logger.exception("Unexpected error during dataset import.")
         raise typer.Exit(code=1) from None
 
 

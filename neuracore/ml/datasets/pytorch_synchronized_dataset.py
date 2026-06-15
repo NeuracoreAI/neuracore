@@ -528,7 +528,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 return self.load_sample(episode_idx, timestep)
             except Exception:
                 self._error_count += 1
-                logger.error(f"Error loading item {idx}.", exc_info=True)
+                logger.error("Error loading item %s.", idx, exc_info=True)
                 if self._error_count >= self._max_error_count:
                     raise
         raise Exception(

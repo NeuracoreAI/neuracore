@@ -13,6 +13,13 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+# Must precede torch import: torch.backends.opt_einsum eagerly imports
+# opt_einsum/backends/tensorflow.py which loads the TF C++ runtime.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
+os.environ["PJRT_DEVICE"] = "GPU"
+os.environ.setdefault("HYDRA_FULL_ERROR", "1")
+
 import hydra
 import torch
 import torch.multiprocessing as mp
@@ -38,7 +45,6 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
-from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.trainers.batch_autotuner import (
     find_optimal_batch_size,
@@ -62,9 +68,7 @@ from neuracore.ml.utils.training_config import (
     validate_complete_config,
 )
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
-
-# Environment setup
-os.environ["PJRT_DEVICE"] = "GPU"
+from neuracore.utils import setup_logging
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -285,26 +289,6 @@ def _save_local_training_metadata(
     metadata_path.write_text(json.dumps(metadata, indent=2))
 
 
-def setup_logging(output_dir: str, rank: int = 0) -> None:
-    """Setup logging configuration."""
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-    stream_handler = logging.StreamHandler()
-
-    if rank == 0:
-        file_handler = logging.FileHandler(output_path / "train.log")
-    else:
-        file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
-    file_handler.setFormatter(JsonLineLogFormatter())
-
-    handlers: list[logging.Handler] = [file_handler, stream_handler]
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=handlers,
-        force=True,
-    )
-
-
 def get_model_and_algorithm_config(
     cfg: DictConfig,
     model_init_description: ModelInitDescription,
@@ -315,7 +299,7 @@ def get_model_and_algorithm_config(
         algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
         algorithm_config.pop("_target_", None)
         logger.info("Using custom algorithm parameters")
-        logger.info(f"Algorithm parameters: {algorithm_config}")
+        logger.info("Algorithm parameters: %s", algorithm_config)
 
         model = hydra.utils.instantiate(
             cfg.algorithm,
@@ -329,7 +313,7 @@ def get_model_and_algorithm_config(
                 cfg.algorithm_params, resolve=True
             )
             logger.info("Using custom algorithm parameters")
-            logger.info(f"Algorithm parameters: {algorithm_config}")
+            logger.info("Algorithm parameters: %s", algorithm_config)
 
         extract_dir = Path(cfg.local_output_dir) / "algorithm"
         algorithm_loader = AlgorithmLoader(extract_dir)
@@ -340,8 +324,7 @@ def get_model_and_algorithm_config(
         )
     else:
         raise ValueError(
-            "Either 'algorithm' or 'algorithm_id' "
-            "must be provided in the configuration"
+            "Either 'algorithm' or 'algorithm_id' must be provided in the configuration"
         )
     return model, algorithm_config
 
@@ -379,7 +362,7 @@ def assert_valid_batch_size(
     if device is None:
         device = get_default_device()
 
-    logger.info(f"Validating batch size {batch_size} on {device}...")
+    logger.info("Validating batch size %s on %s...", batch_size, device)
 
     # Avoid altering the original dataset
     assert_dataset = copy.deepcopy(dataset)
@@ -421,7 +404,7 @@ def assert_valid_batch_size(
             "find the largest batch size that fits."
         )
 
-    logger.info(f"Batch size {batch_size} is valid.")
+    logger.info("Batch size %s is valid.", batch_size)
 
 
 def determine_optimal_batch_size(
@@ -440,7 +423,7 @@ def determine_optimal_batch_size(
     if device is None:
         device = get_default_device()
 
-    logger.info(f"Starting batch size autotuning on {device}...")
+    logger.info("Starting batch size autotuning on %s...", device)
 
     # Avoid altering the original dataset
     autotuning_dataset = copy.deepcopy(dataset)
@@ -500,14 +483,17 @@ def run_training(
         setup_distributed(rank, world_size)
 
     # Setup logging (different file per process)
-    setup_logging(cfg.local_output_dir, rank)
+    log_file = Path(cfg.local_output_dir) / (
+        "train.log" if rank == 0 else f"train-rank{rank}.log"
+    )
+    setup_logging(json_format=True, log_file=log_file, force=True, rich_console=True)
     logger = logging.getLogger(__name__)
 
     # Set random seed (different for each process to ensure different data sampling)
     torch.manual_seed(cfg.seed + rank)
 
     try:
-        logger.info(f"Using batch size: {batch_size}")
+        logger.info("Using batch size: %s", batch_size)
 
         # Merge data_types for synchronization
         merge_cross_embodiment_description(
@@ -656,7 +642,7 @@ def run_training(
             try:
                 checkpoint = trainer.load_checkpoint(cfg.resume_checkpoint_path)
                 start_epoch = checkpoint.get("epoch", 0) + 1
-                logger.info(f"Resumed from checkpoint at epoch {start_epoch}")
+                logger.info("Resumed from checkpoint at epoch %s", start_epoch)
             except Exception:
                 logger.error("Failed to load checkpoint.", exc_info=True)
 
@@ -674,7 +660,7 @@ def run_training(
         if world_size > 1:
             cleanup_distributed()
 
-        logger.info(f"Process {rank} completed")
+        logger.info("Process %s completed", rank)
 
 
 # Register the resolver with OmegaConf
@@ -724,7 +710,12 @@ def _main(cfg: DictConfig) -> None:
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
 
-    setup_logging(cfg.local_output_dir)
+    setup_logging(
+        json_format=True,
+        log_file=Path(cfg.local_output_dir) / "train.log",
+        force=True,
+        rich_console=True,
+    )
     log_streamer: CloudLogStreamer | None = None
 
     try:
@@ -758,7 +749,7 @@ def _main(cfg: DictConfig) -> None:
         cfg = resolve_to_complete_config(cfg, dataset=dataset)
         logger.info("Training configuration:")
         logger.info(OmegaConf.to_yaml(cfg, resolve=False))
-        logger.info(f"Training run directory: {cfg.local_output_dir}")
+        logger.info("Training run directory: %s", cfg.local_output_dir)
 
         dataset.cache_dir = _resolve_recording_cache_dir(cfg)
         dataset.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -807,11 +798,13 @@ def _main(cfg: DictConfig) -> None:
 
         if cfg.algorithm_id is not None:
             # Download the algorithm so that it can be processed later
-            logger.info(f"Downloading algorithm from cloud with ID: {cfg.algorithm_id}")
+            logger.info(
+                "Downloading algorithm from cloud with ID: %s", cfg.algorithm_id
+            )
             storage_handler = AlgorithmStorageHandler(algorithm_id=cfg.algorithm_id)
             extract_dir = Path(cfg.local_output_dir) / "algorithm"
             storage_handler.download_algorithm(extract_dir=extract_dir)
-            logger.info(f"Algorithm extracted to {extract_dir}")
+            logger.info("Algorithm extracted to %s", extract_dir)
 
         device = None
         if cfg.device is not None:

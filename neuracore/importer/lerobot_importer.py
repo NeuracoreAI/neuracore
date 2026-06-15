@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
@@ -30,6 +31,8 @@ from neuracore.importer.core.base import (
     WorkerError,
 )
 from neuracore.importer.core.exceptions import ImportError
+
+logger = logging.getLogger(__name__)
 
 
 class LeRobotDatasetImporter(NeuracoreDatasetImporter):
@@ -144,12 +147,9 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         worker_label = (
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
-        self.logger.info(
-            "[%s] Importing episode %s (%s/%s)",
-            worker_label,
-            episode_id,
-            item.index + 1,
-            self.num_episodes,
+        logger.info(
+            f"[{worker_label}] Importing episode {episode_id} "
+            f"({item.index + 1}/{self.num_episodes})"
         )
         if not self.dry_run:
             nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
@@ -188,19 +188,15 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             nc.stop_recording(
                 robot_name=self.robot_name, instance=self._worker_id, wait=True
             )
-        self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
+        logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
     def _load_metadata(self) -> LeRobotDatasetMetadata:
         """Fetch metadata without pulling down the entire dataset."""
         ds_meta = LeRobotDatasetMetadata(self.dataset_name, root=self.dataset_root)
-        self.logger.info(
-            "Dataset metadata loaded: name=%s root=%s episodes=%s "
-            "camera_keys=%s fps=%s",
-            self.dataset_name,
-            self.dataset_root,
-            ds_meta.total_episodes,
-            ds_meta.camera_keys,
-            ds_meta.fps,
+        logger.info(
+            f"Dataset metadata loaded: name={self.dataset_name} "
+            f"root={self.dataset_root} episodes={ds_meta.total_episodes} "
+            f"camera_keys={ds_meta.camera_keys} fps={ds_meta.fps}"
         )
         return ds_meta
 
@@ -208,10 +204,9 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         """Pick the frequency from config or dataset metadata."""
         if self.data_config.frequency is not None:
             if meta_frequency and meta_frequency != self.data_config.frequency:
-                self.logger.warning(
-                    "Dataset FPS %s does not match configured FPS %s",
-                    meta_frequency,
-                    self.data_config.frequency,
+                logger.warning(
+                    f"Dataset FPS {meta_frequency} does not match "
+                    f"configured FPS {self.data_config.frequency}"
                 )
             return self.data_config.frequency
         if meta_frequency is None:
@@ -222,8 +217,8 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
     def _load_dataset(self) -> LeRobotDataset:
         """Load the actual dataset."""
-        self.logger.info(
-            "Loading LeRobot dataset '%s' from %s", self.dataset_name, self.dataset_root
+        logger.info(
+            f"Loading LeRobot dataset '{self.dataset_name}' from {self.dataset_root}"
         )
         try:
             return LeRobotDataset(self.dataset_name, root=self.dataset_root)
