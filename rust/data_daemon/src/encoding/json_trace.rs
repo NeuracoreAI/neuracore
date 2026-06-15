@@ -1,9 +1,9 @@
 //! Incremental JSON-array writer for scalar / sensor traces.
 //!
 //! Entries are buffered in memory, the file is opened lazily on the first
-//! frame, and whole `CHUNK_SIZE` chunks are flushed to disk. The on-disk byte
-//! layout is a single JSON array with one entry per frame, comma-separated,
-//! no whitespace.
+//! frame, and the buffer is flushed to disk once it reaches
+//! [`DEFAULT_FLUSH_BYTES`]. The on-disk byte layout is a single JSON array with
+//! one entry per frame, comma-separated, no whitespace.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};

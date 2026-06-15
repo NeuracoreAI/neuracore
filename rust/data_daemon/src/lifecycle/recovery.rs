@@ -155,8 +155,22 @@ pub async fn sweep_partial_recordings(
     let mut report = PartialSweepReport::default();
     // Reclaim the producer video spool up front: any recording in flight at
     // restart is corrupt, so the spooled NUT chunks staged under the spool dir
-    // are reclaimed wholesale rather than resumed.
-    let _ = std::fs::remove_dir_all(crate::storage::paths::spool_root(recordings_root));
+    // are reclaimed wholesale rather than resumed. `tokio::fs` keeps the
+    // possibly-large tree removal off the runtime worker. A failure here is worth
+    // surfacing — a surviving spool can let a stale chunk relink into the next
+    // recording (cf. the `video_chunk_spans_recording` history).
+    let spool_root = crate::storage::paths::spool_root(recordings_root);
+    match tokio::fs::remove_dir_all(&spool_root).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                path = %spool_root.display(),
+                "failed to purge producer video spool at recovery; stale chunks may relink"
+            );
+        }
+    }
     let recordings = store.list_recordings().await?;
     for recording in recordings {
         if recording.cancelled_at.is_some() {
@@ -181,7 +195,7 @@ pub async fn sweep_partial_recordings(
         }
 
         let dir = recordings_root.join(recording.recording_index.to_string());
-        match std::fs::remove_dir_all(&dir) {
+        match tokio::fs::remove_dir_all(&dir).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {

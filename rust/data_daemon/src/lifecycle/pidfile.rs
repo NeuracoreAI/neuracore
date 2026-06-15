@@ -4,7 +4,9 @@
 //! non-blocking exclusive `flock`, writes its own PID, and keeps the file
 //! descriptor open for the rest of the daemon's life. When the [`PidFile`]
 //! value is dropped — either explicitly on graceful shutdown or implicitly on
-//! process exit — the kernel releases the lock and the file is unlinked.
+//! process exit — the kernel releases the lock. The file itself is left in
+//! place (unlinking an `flock`'d file races with a concurrent launcher); the
+//! next launcher reuses it under the lock.
 //!
 //! The `flock` gives atomic single-instance semantics across crash, SIGKILL,
 //! and parallel launches: a stale PID file from a SIGKILL'd daemon has no
@@ -31,10 +33,9 @@ pub enum PidFileError {
     Io(#[from] io::Error),
 }
 
-/// An exclusively `flock`'d PID file that releases the lock and removes the
-/// file on drop.
+/// An exclusively `flock`'d PID file that releases the lock on drop. The file
+/// is left in place (see [`PidFile::release`]); the next launcher reuses it.
 pub struct PidFile {
-    path: PathBuf,
     lock: Option<Flock<File>>,
 }
 
@@ -74,21 +75,22 @@ impl PidFile {
         writeln!(lock, "{}", Pid::this().as_raw())?;
         lock.flush()?;
 
-        Ok(PidFile {
-            path,
-            lock: Some(lock),
-        })
+        Ok(PidFile { lock: Some(lock) })
     }
 
-    /// Release the flock and remove the PID file. Idempotent.
+    /// Release the flock, relinquishing single-instance ownership. Idempotent.
+    ///
+    /// Deliberately does **not** unlink the file. Unlinking an `flock`'d PID
+    /// file races in *both* orderings: unlink-then-drop lets the exiting process
+    /// briefly co-hold with a starting one, and drop-then-unlink is worse — a
+    /// new launcher can grab the lock on the existing inode in the gap, after
+    /// which our `remove_file` deletes *its* live PID file, letting a third
+    /// launcher create a fresh inode and run a second daemon. The flock alone is
+    /// the single-instance authority, so we just release it and leave the file
+    /// for the next launcher to reuse in place — exactly the path `acquire`
+    /// already takes after a SIGKILL (lock, truncate, rewrite).
     pub fn release(&mut self) {
         if let Some(lock) = self.lock.take() {
-            // Unlink first so the path is gone before the lock releases — the
-            // next launcher's `open(O_CREAT)` then creates a fresh inode
-            // rather than reusing the file we just wrote our PID into. The
-            // `Flock::Drop` impl releases the lock when `lock` falls out of
-            // scope on the next line.
-            let _ = std::fs::remove_file(&self.path);
             drop(lock);
         }
     }
@@ -169,7 +171,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn acquire_writes_current_pid_and_release_removes_file() {
+    fn acquire_writes_current_pid_and_release_frees_the_lock() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("daemon.pid");
 
@@ -178,7 +180,15 @@ mod tests {
         assert_eq!(read_pid_from_file(&path), Some(std::process::id() as i32));
 
         pid_file.release();
-        assert!(!path.exists());
+        // The file is intentionally left in place (unlinking an flock'd file
+        // races a concurrent launcher); releasing only frees the lock, so a
+        // fresh acquire on the same path must succeed.
+        assert!(
+            path.exists(),
+            "release leaves the pid file for in-place reuse"
+        );
+        let reacquired = PidFile::acquire(&path).expect("re-acquire after release");
+        drop(reacquired);
     }
 
     #[test]

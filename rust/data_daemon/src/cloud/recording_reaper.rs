@@ -29,9 +29,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::state::{
-    ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceUploadStatus,
-};
+use crate::state::{RecordingRow, SqliteStateStore, StateStore};
 use crate::storage::paths::recording_dir;
 
 /// Interval between reclaim sweeps. Reclamation is never latency-sensitive —
@@ -81,62 +79,22 @@ pub fn spawn_recording_reaper(
 }
 
 async fn sweep_once(store: &Arc<SqliteStateStore>, recordings_root: &Arc<PathBuf>) {
-    let recordings = match store.list_recordings().await {
+    // Server-side filter returns *only* durably-settled, reclaimable
+    // recordings (cancel-notified, or stopped + fully uploaded with the
+    // expected trace count met). This walks neither every recording nor the
+    // traces of a recording wedged on a permanently-failed upload — both of
+    // which the old `list_recordings` + per-row trace fetch re-scanned every
+    // sweep, forever.
+    let recordings = match store.recordings_pending_reclaim().await {
         Ok(rows) => rows,
         Err(error) => {
-            tracing::warn!(%error, "recording reaper could not list recordings");
+            tracing::warn!(%error, "recording reaper could not list reclaimable recordings");
             return;
         }
     };
     for recording in recordings {
-        if should_reclaim(store, &recording).await {
-            reclaim(store, recordings_root, &recording).await;
-        }
+        reclaim(store, recordings_root, &recording).await;
     }
-}
-
-/// Decide whether a recording is durably settled and its local copy redundant.
-///
-/// Two terminal shapes qualify:
-///   * **Cancelled** — the data was discarded; once the backend has been told
-///     (`backend_cancel_notified_at`) there is nothing left to keep. No trace
-///     scan is needed.
-///   * **Stopped + fully uploaded** — every declared trace uploaded and the
-///     backend was told the recording stopped, how many traces to expect, and
-///     the per-trace progress snapshot (`progress_reported == reported`).
-///
-/// Live recordings (neither stopped nor cancelled), and stopped recordings with
-/// a still-pending or permanently-failed trace, are retained.
-async fn should_reclaim(store: &Arc<SqliteStateStore>, recording: &RecordingRow) -> bool {
-    if recording.cancelled_at.is_some() {
-        return recording.backend_cancel_notified_at.is_some();
-    }
-    if recording.stopped_at.is_none() {
-        return false;
-    }
-    let traces = match store
-        .list_traces_for_recording(recording.recording_index)
-        .await
-    {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                recording_index = recording.recording_index,
-                "recording reaper could not list traces"
-            );
-            return false;
-        }
-    };
-    let uploaded = traces
-        .iter()
-        .filter(|trace| trace.upload_status == TraceUploadStatus::Uploaded)
-        .count() as i64;
-    !traces.is_empty()
-        && recording.backend_stop_notified_at.is_some()
-        && matches!(recording.progress_reported, ProgressReportStatus::Reported)
-        && recording.expected_trace_count == Some(traces.len() as i64)
-        && uploaded == traces.len() as i64
 }
 
 /// Remove the recording's on-disk directory, then its DB rows. Files are
@@ -148,7 +106,9 @@ async fn reclaim(
     recording: &RecordingRow,
 ) {
     let dir = recording_dir(recordings_root, recording.recording_index);
-    match std::fs::remove_dir_all(&dir) {
+    // `tokio::fs` so a large directory tree doesn't block a runtime worker
+    // (the sweep runs on the async reaper task).
+    match tokio::fs::remove_dir_all(&dir).await {
         Ok(()) => {}
         // Already gone (e.g. reclaimed on a prior sweep that crashed before the
         // row delete committed) — fall through and finish removing the rows.

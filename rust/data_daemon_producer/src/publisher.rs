@@ -33,7 +33,7 @@
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{LazyLock, Mutex, Once};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use data_daemon_ipc::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
@@ -145,9 +145,33 @@ static PUBLISHER: LazyLock<Mutex<PublisherRegistry>> = LazyLock::new(|| {
     })
 });
 
+thread_local! {
+    /// Per-thread cache of the process publisher channel. The hot `log_*` path
+    /// hits this slot — a plain TLS load with no global `Mutex` and no
+    /// `getpid()` syscall (glibc removed the pid cache, so `process::id()` is a
+    /// real syscall on every call). Const-initialised and cleared by
+    /// `on_fork_in_child` alongside `PRODUCER`, so a forked child rebuilds.
+    static PUBLISHER_TX: RefCell<Option<Sender<PublishMsg>>> = const { RefCell::new(None) };
+}
+
 /// Return this process's publisher channel, spawning the publisher thread on
 /// first use and re-spawning after a fork.
+///
+/// Fast path: the thread-local cache (no lock, no syscall). Slow path (first
+/// call on a thread, or first call after a fork cleared the slot): heal/spawn
+/// the process publisher under the global lock and cache the channel.
 pub(crate) fn publisher_tx() -> Sender<PublishMsg> {
+    if let Some(tx) = PUBLISHER_TX.with(|cell| cell.borrow().clone()) {
+        return tx;
+    }
+    let tx = publisher_tx_global();
+    PUBLISHER_TX.with(|cell| *cell.borrow_mut() = Some(tx.clone()));
+    tx
+}
+
+/// Heal/spawn the process-wide publisher thread under the global lock and
+/// return its channel. Keyed by `owner_pid` so a post-fork child re-spawns.
+fn publisher_tx_global() -> Sender<PublishMsg> {
     let mut reg = PUBLISHER.lock().unwrap_or_else(|p| p.into_inner());
     let pid = std::process::id();
     if reg.owner_pid == pid {
@@ -394,6 +418,13 @@ extern "C" fn on_fork_in_child() {
             std::mem::forget(stale);
         }
     });
+    // Drop the cached publisher channel so the next `publisher_tx` rebuilds
+    // through the global (pid-keyed) heal path. The `Sender` is a plain mpsc
+    // handle, so a normal drop is safe here (no parent-side bookkeeping to
+    // corrupt, unlike `PRODUCER`'s iceoryx2 ports).
+    PUBLISHER_TX.with(|cell| {
+        cell.borrow_mut().take();
+    });
 }
 
 /// Producer wall-clock time in nanoseconds since the Unix epoch, stamped onto
@@ -403,10 +434,26 @@ extern "C" fn on_fork_in_child() {
 /// envelopes carry the same publish clock as their `publish_timestamp_ns`, so
 /// window boundaries and data are directly comparable.
 pub(crate) fn now_ns() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos() as i64)
-        .unwrap_or(0)
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(elapsed) => elapsed.as_nanos() as i64,
+        // The system clock is set before the Unix epoch (a mis-set RTC). A 0
+        // here is the worst possible value: it routes the datum before *every*
+        // window → silent orphan-drop, indistinguishable from a real sample.
+        // Fall back to a positive, strictly-increasing monotonic-anchored value
+        // so the datum still lands in a window rather than vanishing.
+        Err(_) => clock_fallback_ns(),
+    }
+}
+
+/// Positive, strictly-increasing fallback for [`now_ns`] when the wall clock is
+/// unusable. Anchored to a fixed epoch base plus a process-monotonic offset, so
+/// every envelope a mis-clocked process emits stays mutually comparable.
+fn clock_fallback_ns() -> i64 {
+    /// Monotonic anchor captured on first use.
+    static ANCHOR: LazyLock<Instant> = LazyLock::new(Instant::now);
+    /// 2024-01-01T00:00:00Z in epoch-ns — an arbitrary but sane positive base.
+    const BASE_NS: i64 = 1_704_067_200_000_000_000;
+    BASE_NS.saturating_add(ANCHOR.elapsed().as_nanos() as i64)
 }
 
 /// Encode `envelope` and publish it on the commands service.

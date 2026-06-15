@@ -56,7 +56,6 @@ pub fn run(assume_yes: bool) -> Result<()> {
 
     let pid = pid_path();
     purge_path("pid file", &pid);
-    purge_path("pid lock", &with_extension(&pid, "lock"));
 
     purge_iceoryx_state();
 
@@ -183,15 +182,6 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// Return `path` with an added extension (`daemon.pid` + `lock` ->
-/// `daemon.pid.lock`), preserving the existing one.
-fn with_extension(path: &Path, extension: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(".");
-    name.push(extension);
-    path.with_file_name(name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,14 +192,6 @@ mod tests {
         assert_eq!(
             sidecar(Path::new("/a/b/state.db"), "-wal"),
             PathBuf::from("/a/b/state.db-wal")
-        );
-    }
-
-    #[test]
-    fn with_extension_preserves_existing_extension() {
-        assert_eq!(
-            with_extension(Path::new("/a/b/daemon.pid"), "lock"),
-            PathBuf::from("/a/b/daemon.pid.lock")
         );
     }
 

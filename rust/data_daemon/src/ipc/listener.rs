@@ -30,7 +30,7 @@ use crate::state::{SqliteStateStore, StateStore};
 
 /// Poll cadence while envelopes are actively flowing.
 ///
-/// 1 ms bounds the worst-case producer-block time on a full subscriber
+/// 200 µs bounds the worst-case producer-block time on a full subscriber
 /// buffer. At the integration matrix's heaviest fanout (8 multiprocess
 /// workers × ~4 producer threads each = ~32 publishers competing for
 /// LIFECYCLE_SUBSCRIBER_BUFFER_SIZE=64 slots), 10 ms left producer-side
@@ -40,14 +40,14 @@ const POLL_INTERVAL: Duration = Duration::from_micros(200);
 
 /// Poll cadence once the subscriber has been empty for [`IDLE_POLL_AFTER_EMPTY`]
 /// consecutive drains. iceoryx2 0.8 has no async waker, so the listener must
-/// poll — but a *fixed* 1 ms tick wakes 1000×/s on a daemon with no producer
+/// poll — but a *fixed* 200 µs tick wakes 5000×/s on a daemon with no producer
 /// attached. Decaying to 25 ms when idle keeps an idle daemon near-quiescent
-/// while the first arriving sample snaps the cadence straight back to 1 ms, so
+/// while the first arriving sample snaps the cadence straight back to 200 µs, so
 /// active-load latency is unchanged.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Number of consecutive empty drains before the poll cadence relaxes to
-/// [`IDLE_POLL_INTERVAL`]. A handful of empty ticks at 1 ms is a negligible
+/// [`IDLE_POLL_INTERVAL`]. A handful of empty ticks at 200 µs is a negligible
 /// cost and avoids relaxing during a brief lull mid-recording.
 const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 

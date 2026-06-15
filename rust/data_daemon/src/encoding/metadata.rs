@@ -50,11 +50,12 @@ pub enum MetadataError {
 /// Accumulator for per-frame metadata dictionaries.
 ///
 /// Construction is allocation-only; the file isn't touched until
-/// [`finish`](Self::finish) runs, which writes the sidecar in one shot after
-/// both mp4 encoders close. Buffering in memory is acceptable here because
-/// video metadata is tiny relative to the
-/// raw frame payloads — a 30 minute capture at 30 fps caps out around 50 K
-/// entries with a handful of small numeric fields each.
+/// [`finish`](Self::finish) runs, which streams the sidecar entry-by-entry to a
+/// `BufWriter` (no whole-array serialised intermediate) after both mp4 encoders
+/// close. Buffering the entry maps in memory is acceptable here because video
+/// metadata is tiny relative to the raw frame payloads — a 30 minute capture at
+/// 30 fps caps out around 50 K entries with a handful of small numeric fields
+/// each.
 #[derive(Debug, Default)]
 pub struct VideoMetadataAccumulator {
     entries: Vec<Map<String, Value>>,
@@ -126,17 +127,6 @@ impl VideoMetadataAccumulator {
         })?;
         let path = output_dir.join(filename);
 
-        for (index, entry) in self.entries.iter_mut().enumerate() {
-            // `frame_idx` is the 0-based position; `frame` is the base64
-            // thumbnail slot the dashboard schema expects but the pipeline
-            // does not populate. Stamping both here keeps the sidecar
-            // well-formed even when the producer omitted them upstream.
-            entry.insert("frame_idx".to_string(), Value::from(index as u64));
-            entry.insert("frame".to_string(), Value::Null);
-        }
-
-        let bytes = serde_json::to_vec(&self.entries).map_err(MetadataError::Serialize)?;
-
         let file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -147,17 +137,47 @@ impl VideoMetadataAccumulator {
                 source,
             })?;
         let mut writer = BufWriter::new(file);
-        writer
-            .write_all(&bytes)
-            .map_err(|source| MetadataError::Write {
-                path: path.clone(),
-                source,
-            })?;
+
+        // Stream the array one entry at a time rather than building the whole
+        // serialised blob in a single `serde_json::to_vec` of every entry — for
+        // the doc's 50 K-entry figure that intermediate is multiple MB allocated
+        // just to be copied straight to the writer. Concatenating compact
+        // per-entry encodings with `,` separators inside `[` … `]` is byte-for-
+        // byte identical to serialising the array as a whole.
+        let mut written: u64 = 0;
+        let mut write = |bytes: &[u8]| -> Result<(), MetadataError> {
+            writer
+                .write_all(bytes)
+                .map_err(|source| MetadataError::Write {
+                    path: path.clone(),
+                    source,
+                })?;
+            written += bytes.len() as u64;
+            Ok(())
+        };
+
+        write(b"[")?;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            // `frame_idx` is the 0-based position; `frame` is the base64
+            // thumbnail slot the dashboard schema expects but the pipeline
+            // does not populate. Stamping both here keeps the sidecar
+            // well-formed even when the producer omitted them upstream.
+            entry.insert("frame_idx".to_string(), Value::from(index as u64));
+            entry.insert("frame".to_string(), Value::Null);
+
+            if index > 0 {
+                write(b",")?;
+            }
+            let entry_bytes = serde_json::to_vec(entry).map_err(MetadataError::Serialize)?;
+            write(&entry_bytes)?;
+        }
+        write(b"]")?;
+
         writer.flush().map_err(|source| MetadataError::Write {
             path: path.clone(),
             source,
         })?;
-        Ok(bytes.len() as u64)
+        Ok(written)
     }
 }
 

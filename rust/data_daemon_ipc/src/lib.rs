@@ -148,8 +148,19 @@ pub mod service_name {
     /// 40+ nodes plus the daemon. 512 gives enough headroom that the cap is
     /// never approached in any test configuration.
     ///
+    /// **Failure mode when the cap *is* reached** (a long-lived process that
+    /// churns through >512 distinct OS threads, each lazily building its own
+    /// node on first `log_*`): `open_or_create` on the service returns
+    /// `ExceedsMaxNumberOfNodes`. In the producer that surfaces as a
+    /// `ProducerError` the publish path swallows (the sample is dropped, logged
+    /// once) — data from new threads silently stops flowing; in the daemon a
+    /// failed attach is fatal to that service. The node count never shrinks
+    /// while the process lives (nodes are released only on process exit / fork),
+    /// so a thread-churning workload leaks toward the cap monotonically.
+    ///
     /// The scalable fix (one node shared per process, not per thread) is tracked
-    /// separately and would reduce the live count to single digits.
+    /// separately and would reduce the live count to single digits and remove
+    /// the cliff entirely.
     pub const MAX_NODES_PER_SERVICE: usize = 512;
 
     /// Request-response service the SDK uses to resolve a recording's

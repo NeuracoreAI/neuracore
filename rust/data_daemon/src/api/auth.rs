@@ -238,6 +238,14 @@ fn verify_api_key_url(api_url: &str) -> String {
 #[async_trait]
 impl AuthProvider for FileAuthProvider {
     async fn bearer_token(&self) -> Result<String, AuthError> {
+        // The cache lock is intentionally held across `load().await` (the
+        // verify-api-key exchange, up to ~30 s on a slow link). This makes the
+        // method single-flight: a cold-cache thundering herd triggers exactly
+        // ONE backend exchange while the rest wait, then all observe the cached
+        // token — instead of every caller firing its own verify. The cost is
+        // that those concurrent callers serialise for the duration of that one
+        // exchange; acceptable because it is bounded by the client request
+        // timeout and only happens on a cold/just-reloaded cache.
         let mut cached = self.cached.lock().await;
         if let Some(token) = cached.as_ref() {
             return Ok(token.clone());

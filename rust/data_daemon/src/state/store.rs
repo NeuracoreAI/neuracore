@@ -5,14 +5,12 @@
 //! coordinator rely on.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
-use tokio::sync::Mutex;
 
 use crate::state::schema::{
     ProgressReportStatus, RecordingRow, TraceErrorCode, TraceRecord, TraceRegistrationStatus,
@@ -23,7 +21,18 @@ use crate::state::schema::{
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 /// Busy timeout (`PRAGMA busy_timeout`) applied to every connection.
-const BUSY_TIMEOUT_MS: u32 = 1000;
+///
+/// Raised from 1 s: with the read/write pool split the daemon's own writers
+/// can no longer collide (only one connection ever writes), but a background
+/// WAL checkpoint or an external reader can still briefly hold the database
+/// lock, and a 1 s ceiling under load surfaced as spurious `SQLITE_BUSY`
+/// errors. 5 s comfortably absorbs those without masking a genuine deadlock.
+const BUSY_TIMEOUT_MS: u32 = 5000;
+
+/// Connections in the read pool. Only the cloud coordinators (a handful of
+/// periodic tasks) read concurrently, so a small pool is ample; the writer
+/// lives on its own single-connection pool and never competes for these.
+const READ_POOL_CONNECTIONS: u32 = 4;
 
 /// Errors surfaced by [`StateStore`] operations.
 #[derive(Debug, Error)]
@@ -119,14 +128,15 @@ pub trait StateStore: Send + Sync {
 
     /// Apply a partial update to an existing trace.
     ///
-    /// Only set fields are written; unset fields preserve their existing
-    /// value. Returns the trace row after the update, or `None` if the row
-    /// does not exist.
+    /// Only set fields are written; unset fields preserve their existing value.
+    /// Returns `Ok(())` whether or not a row matched — no caller consumes the
+    /// updated row, so the previous mandatory read-back `SELECT` (a second
+    /// round-trip on the contended write path) was pure waste.
     async fn update_trace(
         &self,
         trace_id: &str,
         update: TraceUpdate,
-    ) -> Result<Option<TraceRecord>, StateStoreError>;
+    ) -> Result<(), StateStoreError>;
 
     /// Fetch a trace by ID, returning `None` when absent.
     async fn get_trace(&self, trace_id: &str) -> Result<Option<TraceRecord>, StateStoreError>;
@@ -230,6 +240,15 @@ pub trait StateStore: Send + Sync {
     /// reporter's periodic sweep instead of being scanned (and their traces
     /// re-fetched) forever. Returned in `created_at` order.
     async fn recordings_pending_progress(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// List recordings the reaper can reclaim *now*: either cancelled with the
+    /// backend cancel notified, or stopped + stop-notified + progress-reported
+    /// with every declared trace uploaded (expected count met, none non-
+    /// `uploaded`). The per-trace "all uploaded" test is folded into the query
+    /// so the reaper neither walks every recording nor re-fetches the traces of
+    /// a recording stuck on a permanently-failed upload on every 60 s sweep.
+    /// Returned in `created_at` order.
+    async fn recordings_pending_reclaim(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Resolve the cloud `recording_id` for the recording identified by
     /// `(robot_id, robot_instance, start_timestamp_ns)`.
@@ -399,11 +418,19 @@ pub struct TraceCreate {
 /// One coalesced set of actor-owned column updates for a single trace — the
 /// unit the [`crate::state::trace_writer::TraceWriter`] batcher flushes.
 ///
-/// Only the columns a per-trace actor owns appear here (`write_status`, the
-/// byte counters, the write-phase error). The registration / upload columns
-/// are owned by the cloud coordinators, so a batched flush can never clobber
-/// them. `None` fields are left untouched (`COALESCE`-preserved). `create` is
-/// set only on the trace's first write and triggers an idempotent row insert.
+/// The per-trace actor owns the write-phase columns (`write_status`, the
+/// on-disk byte counter, `total_bytes`, the write-phase error). The uploader's
+/// rolling `bytes_uploaded` checkpoint is also coalesced here — it is the one
+/// cloud-owned column that is hot (one write per 64 MiB per concurrent upload),
+/// purely advisory (resume correctness comes from the server's 308 offset, not
+/// this row), and last-writer-wins, so it fits the write-behind exactly. The
+/// remaining cloud columns (`upload_status`, `registration_status`,
+/// `upload_session_uris`, `path`) stay on the synchronous write path: they gate
+/// reads (e.g. `traces_ready_for_upload`) and must be ordered against the bus
+/// events the coordinators publish, so deferring them would reintroduce
+/// read-after-write races. `None` fields are left untouched
+/// (`COALESCE`-preserved). `create` is set only on the trace's first write and
+/// triggers an idempotent row insert.
 #[derive(Debug, Clone, Default)]
 pub struct CoalescedTraceWrite {
     /// Target trace row.
@@ -416,6 +443,8 @@ pub struct CoalescedTraceWrite {
     pub bytes_written: Option<i64>,
     /// Final byte total (set on finalise).
     pub total_bytes: Option<i64>,
+    /// Latest rolling upload offset (advisory progress checkpoint).
+    pub bytes_uploaded: Option<i64>,
     /// Write-phase error code.
     pub error_code: Option<TraceErrorCode>,
     /// Write-phase error message.
@@ -423,9 +452,12 @@ pub struct CoalescedTraceWrite {
 }
 
 impl CoalescedTraceWrite {
-    /// True when no actor-owned column changed — a create-only write whose
-    /// batched flush needs the row INSERT but no follow-up UPDATE.
-    fn has_column_update(&self) -> bool {
+    /// True when a write-phase column changed and the guarded write-phase
+    /// UPDATE must run. A create-only write (and an upload-progress-only write)
+    /// skips it; `bytes_uploaded` is applied by its own statement because it
+    /// updates legitimately *after* the row has reached the terminal
+    /// `written` state, which the write-phase guard forbids.
+    fn has_write_column_update(&self) -> bool {
         self.write_status.is_some()
             || self.bytes_written.is_some()
             || self.total_bytes.is_some()
@@ -436,13 +468,25 @@ impl CoalescedTraceWrite {
 
 /// SQLite-backed [`StateStore`].
 ///
-/// Writes are serialised through a `Mutex<()>` mirroring the
-/// `asyncio.Semaphore(1)` guard in `state_store_sqlite.py:63`. Reads run in
-/// parallel through the underlying pool.
+/// Writers serialise on a dedicated single-connection [`write_pool`], so the
+/// daemon needs no app-level write mutex: only one connection ever writes, so
+/// WAL never returns `SQLITE_BUSY` between the daemon's own writers and nothing
+/// is held across a transaction's `.await`s. The earlier `Arc<Mutex<()>>`
+/// guard (mirroring `state_store_sqlite.py`'s `asyncio.Semaphore(1)`) was held
+/// across `begin..commit` and dominated the DB-layer profile (~96% of time was
+/// spent waiting on it under load); letting the single write connection
+/// serialise writers removes that wait entirely.
+///
+/// Reads run on a separate multi-connection [`read_pool`] so they never queue
+/// behind the writer — under WAL a reader observes a consistent snapshot while
+/// the writer commits.
+///
+/// [`write_pool`]: SqliteStateStore::write_pool
+/// [`read_pool`]: SqliteStateStore::read_pool
 #[derive(Clone)]
 pub struct SqliteStateStore {
-    pool: SqlitePool,
-    write_guard: Arc<Mutex<()>>,
+    read_pool: SqlitePool,
+    write_pool: SqlitePool,
 }
 
 impl SqliteStateStore {
@@ -459,38 +503,55 @@ impl SqliteStateStore {
             }
         }
 
-        let mut options = SqliteConnectOptions::new()
+        let options = SqliteConnectOptions::new()
             .filename(db_path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64));
-        // sqlx prints every statement at INFO by default; quiet that down so
-        // the daemon's tracing output isn't drowned out by the same SQL on
-        // every trace write.
-        options = options.log_statements(tracing::log::LevelFilter::Debug);
+            .busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))
+            // sqlx prints every statement at INFO by default; quiet that down so
+            // the daemon's tracing output isn't drowned out by the same SQL on
+            // every trace write.
+            .log_statements(tracing::log::LevelFilter::Debug);
 
-        let pool = SqlitePoolOptions::new()
-            .max_connections(8)
+        // Single writer: serialises commits without an app-level mutex and makes
+        // SQLITE_BUSY between the daemon's own writers impossible.
+        let write_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await?;
+        // Reads run concurrently on their own pool so they never wait behind the
+        // writer.
+        let read_pool = SqlitePoolOptions::new()
+            .max_connections(READ_POOL_CONNECTIONS)
             .connect_with(options)
             .await?;
 
-        MIGRATOR.run(&pool).await?;
+        // Migrations are writes — run them on the write connection.
+        MIGRATOR.run(&write_pool).await?;
 
         Ok(SqliteStateStore {
-            pool,
-            write_guard: Arc::new(Mutex::new(())),
+            read_pool,
+            write_pool,
         })
     }
 
-    /// Borrow the underlying pool, e.g. for diagnostics in tests.
+    /// Borrow the read pool, e.g. for diagnostics in tests.
     pub fn pool(&self) -> &SqlitePool {
-        &self.pool
+        &self.read_pool
     }
 
-    /// Close the pool, draining outstanding connections.
+    /// Borrow the write pool. Test-only: production code reaches the write
+    /// connection exclusively through the typed write methods.
+    #[cfg(test)]
+    pub(crate) fn write_pool(&self) -> &SqlitePool {
+        &self.write_pool
+    }
+
+    /// Close both pools, draining outstanding connections.
     pub async fn close(self) {
-        self.pool.close().await;
+        self.write_pool.close().await;
+        self.read_pool.close().await;
     }
 
     /// Apply a batch of coalesced per-trace writes in a single transaction.
@@ -503,21 +564,63 @@ impl SqliteStateStore {
     /// form (only supplied columns change; statement stays prepared-cache
     /// friendly) and there is no read-back `SELECT`.
     ///
-    /// The `WHERE` guard keys off the *target* lifecycle state so a flush is
-    /// monotonic w.r.t. terminal states — a late coalesced progress write can
-    /// never resurrect a row a concurrent [`StateStore::cancel_recording`]
-    /// already burned to `failed`, nor un-finish a `written` row. That
-    /// invariant is what lets the batcher run without tight coordination with
-    /// the cancel path.
+    /// The write-phase `WHERE` guard keys off the *target* lifecycle state so a
+    /// flush is monotonic w.r.t. terminal states — a late coalesced progress
+    /// write can never resurrect a row a concurrent
+    /// [`StateStore::cancel_recording`] already burned to `failed`, nor
+    /// un-finish a `written` row. That invariant is what lets the batcher run
+    /// without tight coordination with the cancel path. The three guard
+    /// variants are fixed `const` statements (not `format!`-ed per row) so they
+    /// stay friendly to sqlx's prepared-statement cache.
     pub async fn apply_trace_writes(
         &self,
         writes: &[CoalescedTraceWrite],
     ) -> Result<(), StateStoreError> {
+        // The write-phase UPDATE, one fixed statement per terminal guard so
+        // sqlx's prepared-statement cache sees the same SQL every flush. Bind
+        // order is identical across the three: ?1 write_status, ?2
+        // bytes_written, ?3 total_bytes, ?4 error_code, ?5 error_message, ?6
+        // last_updated, ?7 trace_id; only the trailing guard differs.
+        //
+        // Finalise: apply unless cancel already burned the row.
+        const SQL_WRITE_FINALISE: &str = "UPDATE traces SET \
+             write_status = COALESCE(?1, write_status), \
+             bytes_written = COALESCE(?2, bytes_written), \
+             total_bytes = COALESCE(?3, total_bytes), \
+             error_code = COALESCE(?4, error_code), \
+             error_message = COALESCE(?5, error_message), \
+             last_updated = ?6 \
+           WHERE trace_id = ?7 AND write_status != 'failed'";
+        // Fail: apply unless the trace already finished writing.
+        const SQL_WRITE_FAIL: &str = "UPDATE traces SET \
+             write_status = COALESCE(?1, write_status), \
+             bytes_written = COALESCE(?2, bytes_written), \
+             total_bytes = COALESCE(?3, total_bytes), \
+             error_code = COALESCE(?4, error_code), \
+             error_message = COALESCE(?5, error_message), \
+             last_updated = ?6 \
+           WHERE trace_id = ?7 AND write_status != 'written'";
+        // Progress / Writing / byte-only: live (non-terminal) rows only.
+        const SQL_WRITE_PROGRESS: &str = "UPDATE traces SET \
+             write_status = COALESCE(?1, write_status), \
+             bytes_written = COALESCE(?2, bytes_written), \
+             total_bytes = COALESCE(?3, total_bytes), \
+             error_code = COALESCE(?4, error_code), \
+             error_message = COALESCE(?5, error_message), \
+             last_updated = ?6 \
+           WHERE trace_id = ?7 AND write_status NOT IN ('written', 'failed')";
+        // The advisory upload checkpoint. Updates while the upload is live;
+        // skipped once it has settled (`uploaded`/`failed`) so a late flush
+        // can't touch a terminal row. Bind order: ?1 bytes_uploaded,
+        // ?2 last_updated, ?3 trace_id.
+        const SQL_UPLOAD_PROGRESS: &str = "UPDATE traces SET \
+             bytes_uploaded = ?1, last_updated = ?2 \
+           WHERE trace_id = ?3 AND upload_status NOT IN ('uploaded', 'failed')";
+
         if writes.is_empty() {
             return Ok(());
         }
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         for write in writes {
             // First write for a trace carries its create fields: insert the row
@@ -541,40 +644,32 @@ impl SqliteStateStore {
                 .await?;
             }
 
-            // A create-only write (actor just spawned, no data yet) needs no
-            // follow-up UPDATE.
-            if !write.has_column_update() {
-                continue;
+            if write.has_write_column_update() {
+                let sql = match write.write_status {
+                    Some(TraceWriteStatus::Written) => SQL_WRITE_FINALISE,
+                    Some(TraceWriteStatus::Failed) => SQL_WRITE_FAIL,
+                    _ => SQL_WRITE_PROGRESS,
+                };
+                sqlx::query(sql)
+                    .bind(write.write_status.as_ref().map(|status| status.as_str()))
+                    .bind(write.bytes_written)
+                    .bind(write.total_bytes)
+                    .bind(write.error_code.as_ref().map(|code| code.as_str()))
+                    .bind(write.error_message.as_deref())
+                    .bind(now)
+                    .bind(&write.trace_id)
+                    .execute(&mut *tx)
+                    .await?;
             }
 
-            let guard = match write.write_status {
-                // Finalise: apply unless cancel already burned the row.
-                Some(TraceWriteStatus::Written) => "write_status != 'failed'",
-                // Fail: apply unless the trace already finished writing.
-                Some(TraceWriteStatus::Failed) => "write_status != 'written'",
-                // Progress / Writing / byte-only: live (non-terminal) rows only.
-                _ => "write_status NOT IN ('written', 'failed')",
-            };
-            let sql = format!(
-                "UPDATE traces SET \
-                     write_status = COALESCE(?1, write_status), \
-                     bytes_written = COALESCE(?2, bytes_written), \
-                     total_bytes = COALESCE(?3, total_bytes), \
-                     error_code = COALESCE(?4, error_code), \
-                     error_message = COALESCE(?5, error_message), \
-                     last_updated = ?6 \
-                   WHERE trace_id = ?7 AND {guard}"
-            );
-            sqlx::query(&sql)
-                .bind(write.write_status.as_ref().map(|status| status.as_str()))
-                .bind(write.bytes_written)
-                .bind(write.total_bytes)
-                .bind(write.error_code.as_ref().map(|code| code.as_str()))
-                .bind(write.error_message.as_deref())
-                .bind(now)
-                .bind(&write.trace_id)
-                .execute(&mut *tx)
-                .await?;
+            if let Some(bytes_uploaded) = write.bytes_uploaded {
+                sqlx::query(SQL_UPLOAD_PROGRESS)
+                    .bind(bytes_uploaded)
+                    .bind(now)
+                    .bind(&write.trace_id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
         }
         tx.commit().await?;
         Ok(())
@@ -602,8 +697,7 @@ impl StateStore for SqliteStateStore {
         &self,
         new: NewRecording<'_>,
     ) -> Result<RecordingRow, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         let result = sqlx::query(
             "INSERT INTO recordings ( \
@@ -633,7 +727,7 @@ impl StateStore for SqliteStateStore {
     ) -> Result<Option<RecordingRow>, StateStoreError> {
         let row = sqlx::query("SELECT * FROM recordings WHERE recording_index = ?1")
             .bind(recording_index)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(match row {
             Some(row) => Some(RecordingRow::from_row(&row)?),
@@ -653,7 +747,7 @@ impl StateStore for SqliteStateStore {
         )
         .bind(robot_id)
         .bind(robot_instance)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -666,8 +760,7 @@ impl StateStore for SqliteStateStore {
         recording_index: i64,
         recording_id: &str,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -694,7 +787,7 @@ impl StateStore for SqliteStateStore {
                 AND cancelled_at IS NULL \
            ORDER BY recording_index ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -709,8 +802,7 @@ impl StateStore for SqliteStateStore {
         data_type: Option<&str>,
         data_type_name: Option<&str>,
     ) -> Result<TraceRecord, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
@@ -742,13 +834,12 @@ impl StateStore for SqliteStateStore {
         &self,
         trace_id: &str,
         update: TraceUpdate,
-    ) -> Result<Option<TraceRecord>, StateStoreError> {
+    ) -> Result<(), StateStoreError> {
         if update.is_empty() {
-            return self.get_trace(trace_id).await;
+            return Ok(());
         }
 
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
 
         // Build the UPDATE dynamically so we only touch fields the caller set.
         // Always bump `last_updated` so the registration coordinator's
@@ -824,26 +915,17 @@ impl StateStore for SqliteStateStore {
         }
         query = query.bind(now).bind(trace_id);
 
-        let result = query.execute(&mut *tx).await?;
-        if result.rows_affected() == 0 {
-            tx.rollback().await?;
-            return Ok(None);
-        }
-
-        let row = sqlx::query("SELECT * FROM traces WHERE trace_id = ?1")
-            .bind(trace_id)
-            .fetch_one(&mut *tx)
-            .await?;
-        let record = TraceRecord::from_row(&row)?;
-
+        // No read-back: a non-matching `trace_id` is a harmless no-op UPDATE
+        // (0 rows affected) and no caller distinguishes it from a hit.
+        query.execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Some(record))
+        Ok(())
     }
 
     async fn get_trace(&self, trace_id: &str) -> Result<Option<TraceRecord>, StateStoreError> {
         let row = sqlx::query("SELECT * FROM traces WHERE trace_id = ?1")
             .bind(trace_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&self.read_pool)
             .await?;
         Ok(match row {
             Some(row) => Some(TraceRecord::from_row(&row)?),
@@ -859,7 +941,7 @@ impl StateStore for SqliteStateStore {
             "SELECT * FROM traces WHERE recording_index = ?1 ORDER BY created_at ASC, trace_id ASC",
         )
         .bind(recording_index)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(TraceRecord::from_row)
@@ -872,12 +954,15 @@ impl StateStore for SqliteStateStore {
         limit: usize,
         max_wait_secs: f64,
     ) -> Result<Vec<TraceRecord>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let limit_i64 = limit as i64;
+        if limit_i64 <= 0 {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.write_pool.begin().await?;
 
         // Count ready traces first so the size-vs-age policy stays explicit.
-        // SQLite's transactional snapshot means this count is stable across
-        // the subsequent SELECT.
+        // SQLite's transactional snapshot means this count is stable across the
+        // subsequent claim.
         let ready_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM traces \
               WHERE write_status = ?1 AND registration_status = ?2",
@@ -887,29 +972,49 @@ impl StateStore for SqliteStateStore {
         .fetch_one(&mut *tx)
         .await?;
 
-        let limit_i64 = limit as i64;
-        let rows = if ready_count >= limit_i64 && limit_i64 > 0 {
+        // Select the eligible trace_ids (oldest first, capped at `limit`) and
+        // flip them to `registering` in a single `UPDATE … RETURNING`, so two
+        // coordinators can't double-claim and there's neither a separate SELECT
+        // round-trip nor a per-row UPDATE loop. The `IN (subquery)` form is used
+        // because SQLite's stock build doesn't support `LIMIT` directly on
+        // `UPDATE`; the subquery materialises before the UPDATE runs, so the
+        // claim sees a stable candidate set.
+        let now = Utc::now().naive_utc();
+        let rows = if ready_count >= limit_i64 {
+            // Size trigger: enough are ready — claim the oldest `limit`
+            // regardless of age.
             sqlx::query(
-                "SELECT * FROM traces \
-                  WHERE write_status = ?1 AND registration_status = ?2 \
-               ORDER BY last_updated ASC \
-                  LIMIT ?3",
+                "UPDATE traces SET registration_status = ?1, last_updated = ?2 \
+                  WHERE trace_id IN ( \
+                      SELECT trace_id FROM traces \
+                       WHERE write_status = ?3 AND registration_status = ?4 \
+                    ORDER BY last_updated ASC LIMIT ?5 \
+                  ) \
+                RETURNING *",
             )
+            .bind(TraceRegistrationStatus::Registering.as_str())
+            .bind(now)
             .bind(TraceWriteStatus::Written.as_str())
             .bind(TraceRegistrationStatus::Pending.as_str())
             .bind(limit_i64)
             .fetch_all(&mut *tx)
             .await?
         } else {
-            let cutoff = Utc::now().naive_utc()
-                - chrono::Duration::milliseconds((max_wait_secs * 1000.0) as i64);
+            // Age trigger: claim only those whose `last_updated` is older than
+            // the debounce cutoff.
+            let cutoff = now - chrono::Duration::milliseconds((max_wait_secs * 1000.0) as i64);
             sqlx::query(
-                "SELECT * FROM traces \
-                  WHERE write_status = ?1 AND registration_status = ?2 \
-                    AND last_updated <= ?3 \
-               ORDER BY last_updated ASC \
-                  LIMIT ?4",
+                "UPDATE traces SET registration_status = ?1, last_updated = ?2 \
+                  WHERE trace_id IN ( \
+                      SELECT trace_id FROM traces \
+                       WHERE write_status = ?3 AND registration_status = ?4 \
+                         AND last_updated <= ?5 \
+                    ORDER BY last_updated ASC LIMIT ?6 \
+                  ) \
+                RETURNING *",
             )
+            .bind(TraceRegistrationStatus::Registering.as_str())
+            .bind(now)
             .bind(TraceWriteStatus::Written.as_str())
             .bind(TraceRegistrationStatus::Pending.as_str())
             .bind(cutoff)
@@ -918,29 +1023,11 @@ impl StateStore for SqliteStateStore {
             .await?
         };
 
-        let mut claimed = Vec::with_capacity(rows.len());
-        let now = Utc::now().naive_utc();
-        for row in &rows {
-            let trace = TraceRecord::from_row(row)?;
-            sqlx::query(
-                "UPDATE traces SET registration_status = ?1, last_updated = ?2 \
-                  WHERE trace_id = ?3 AND registration_status = ?4",
-            )
-            .bind(TraceRegistrationStatus::Registering.as_str())
-            .bind(now)
-            .bind(&trace.trace_id)
-            .bind(TraceRegistrationStatus::Pending.as_str())
-            .execute(&mut *tx)
-            .await?;
-            claimed.push(TraceRecord {
-                registration_status: TraceRegistrationStatus::Registering,
-                last_updated: now,
-                ..trace
-            });
-        }
-
         tx.commit().await?;
-        Ok(claimed)
+        rows.iter()
+            .map(TraceRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     async fn mark_recording_stopped(
@@ -948,8 +1035,7 @@ impl StateStore for SqliteStateStore {
         recording_index: i64,
         stop_timestamp_ns: i64,
     ) -> Result<RecordingRow, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
@@ -975,7 +1061,7 @@ impl StateStore for SqliteStateStore {
 
     async fn list_recordings(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
         let rows = sqlx::query("SELECT * FROM recordings ORDER BY created_at ASC")
-            .fetch_all(&self.pool)
+            .fetch_all(&self.read_pool)
             .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -987,7 +1073,7 @@ impl StateStore for SqliteStateStore {
         let ids = sqlx::query_scalar::<_, String>(
             "SELECT trace_id FROM traces WHERE upload_status IN ('queued', 'retrying')",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         Ok(ids)
     }
@@ -1001,7 +1087,36 @@ impl StateStore for SqliteStateStore {
                 AND (progress_reported != 'reported' OR expected_trace_count_reported = 0) \
            ORDER BY created_at ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    async fn recordings_pending_reclaim(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT r.* FROM recordings r \
+              WHERE (r.cancelled_at IS NOT NULL AND r.backend_cancel_notified_at IS NOT NULL) \
+                 OR ( \
+                     r.cancelled_at IS NULL \
+                     AND r.stopped_at IS NOT NULL \
+                     AND r.backend_stop_notified_at IS NOT NULL \
+                     AND r.progress_reported = 'reported' \
+                     AND r.expected_trace_count IS NOT NULL \
+                     AND r.expected_trace_count = \
+                         (SELECT COUNT(*) FROM traces t WHERE t.recording_index = r.recording_index) \
+                     AND EXISTS \
+                         (SELECT 1 FROM traces t WHERE t.recording_index = r.recording_index) \
+                     AND NOT EXISTS \
+                         (SELECT 1 FROM traces t \
+                           WHERE t.recording_index = r.recording_index \
+                             AND t.upload_status != 'uploaded') \
+                 ) \
+           ORDER BY r.created_at ASC",
+        )
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -1024,7 +1139,7 @@ impl StateStore for SqliteStateStore {
         .bind(robot_id)
         .bind(robot_instance)
         .bind(start_timestamp_ns)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&self.read_pool)
         .await?;
         // Outer `Option` = row present; inner = the nullable column. A matching
         // row whose cloud id has not been minted yet flattens to `None`.
@@ -1035,8 +1150,7 @@ impl StateStore for SqliteStateStore {
         &self,
         recording_index: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -1058,8 +1172,7 @@ impl StateStore for SqliteStateStore {
         &self,
         recording_index: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -1084,7 +1197,7 @@ impl StateStore for SqliteStateStore {
                 AND backend_cancel_notified_at IS NULL \
            ORDER BY cancelled_at ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -1101,7 +1214,7 @@ impl StateStore for SqliteStateStore {
                 AND cancelled_at IS NULL \
            ORDER BY stopped_at ASC",
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -1129,7 +1242,7 @@ impl StateStore for SqliteStateStore {
         .bind(robot_id)
         .bind(robot_instance)
         .bind(before_index)
-        .fetch_all(&self.pool)
+        .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
@@ -1143,8 +1256,7 @@ impl StateStore for SqliteStateStore {
         expected: ProgressReportStatus,
         next: ProgressReportStatus,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -1168,8 +1280,7 @@ impl StateStore for SqliteStateStore {
         recording_index: i64,
         expected_trace_count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -1192,8 +1303,7 @@ impl StateStore for SqliteStateStore {
         recording_index: i64,
         count: i64,
     ) -> Result<Option<RecordingRow>, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
@@ -1212,8 +1322,7 @@ impl StateStore for SqliteStateStore {
     }
 
     async fn reset_stale_pipeline_states(&self) -> Result<u64, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         // `registering` → `pending` so the registration coordinator's claim
         // query sees the row again on the next tick.
@@ -1249,8 +1358,7 @@ impl StateStore for SqliteStateStore {
         &self,
         stale_threshold_secs: i64,
     ) -> Result<u64, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let now = Utc::now().naive_utc();
         let cutoff = now - chrono::Duration::seconds(stale_threshold_secs);
         let result = sqlx::query(
@@ -1281,8 +1389,7 @@ impl StateStore for SqliteStateStore {
         recording_index: i64,
         stop_timestamp_ns: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
@@ -1356,8 +1463,7 @@ impl StateStore for SqliteStateStore {
     }
 
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError> {
-        let _guard = self.write_guard.lock().await;
-        let mut tx = self.pool.begin().await?;
+        let mut tx = self.write_pool.begin().await?;
         let traces_deleted = sqlx::query("DELETE FROM traces WHERE recording_index = ?1")
             .bind(recording_index)
             .execute(&mut *tx)
@@ -1544,7 +1650,7 @@ mod tests {
             .await
             .expect("create_trace");
 
-        let updated = store
+        store
             .update_trace(
                 "trace-1",
                 TraceUpdate {
@@ -1554,15 +1660,16 @@ mod tests {
                 },
             )
             .await
-            .expect("update_trace")
-            .expect("trace exists");
+            .expect("update_trace");
+        let updated = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(updated.write_status, TraceWriteStatus::Writing);
         assert_eq!(updated.bytes_written, 2048);
         // Unset fields keep their prior values.
         assert_eq!(updated.bytes_uploaded, 0);
         assert_eq!(updated.upload_status, TraceUploadStatus::Pending);
 
-        let missing = store
+        // Updating an unknown trace is a harmless no-op (no row created).
+        store
             .update_trace(
                 "unknown-trace",
                 TraceUpdate {
@@ -1572,7 +1679,7 @@ mod tests {
             )
             .await
             .expect("update_trace");
-        assert!(missing.is_none());
+        assert!(store.get_trace("unknown-trace").await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -1730,7 +1837,7 @@ mod tests {
             sqlx::query("UPDATE traces SET last_updated = ?1 WHERE trace_id = ?2")
                 .bind(stale_at)
                 .bind(trace_id)
-                .execute(store.pool())
+                .execute(store.write_pool())
                 .await
                 .unwrap();
         }
@@ -1899,6 +2006,172 @@ mod tests {
         assert_eq!(
             claimed[0].registration_status,
             TraceRegistrationStatus::Registering
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_trace_writes_records_upload_progress_until_settled() {
+        let (store, _tempdir) = open_store().await;
+        let index = seed_recording(&store, 0).await;
+        store
+            .create_trace(index, "trace-up", Some("RGB"), None)
+            .await
+            .unwrap();
+        // Write phase done, upload phase begins.
+        store
+            .update_trace(
+                "trace-up",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(TraceUploadStatus::Uploading),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // A rolling checkpoint applies while the upload is live — and it does so
+        // even though the row is already `written`, which the write-phase guard
+        // forbids (so it must travel on its own statement).
+        store
+            .apply_trace_writes(&[CoalescedTraceWrite {
+                trace_id: "trace-up".to_string(),
+                bytes_uploaded: Some(4_000_000),
+                ..Default::default()
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_trace("trace-up")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes_uploaded,
+            4_000_000
+        );
+
+        // Once the upload settles, a late/duplicate coalesced checkpoint must
+        // not touch the terminal row (it would otherwise rewind the final
+        // byte count the synchronous finalise wrote).
+        store
+            .update_trace(
+                "trace-up",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Uploaded),
+                    bytes_uploaded: Some(8_000_000),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .apply_trace_writes(&[CoalescedTraceWrite {
+                trace_id: "trace-up".to_string(),
+                bytes_uploaded: Some(1),
+                ..Default::default()
+            }])
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .get_trace("trace-up")
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes_uploaded,
+            8_000_000,
+            "a late checkpoint must not touch a settled upload"
+        );
+    }
+
+    #[tokio::test]
+    async fn recordings_pending_reclaim_only_returns_settled_recordings() {
+        let (store, _tempdir) = open_store().await;
+
+        // Helper: drive a stopped recording with one trace at `upload` status
+        // through the full notify/progress gates.
+        async fn stopped_with_trace(
+            store: &SqliteStateStore,
+            instance: i64,
+            trace_id: &str,
+            upload: TraceUploadStatus,
+        ) -> i64 {
+            let index = seed_recording(store, instance).await;
+            store
+                .mark_recording_start_notified(index, &format!("cloud-{instance}"))
+                .await
+                .unwrap();
+            store
+                .create_trace(index, trace_id, Some("J"), None)
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    trace_id,
+                    TraceUpdate {
+                        write_status: Some(TraceWriteStatus::Written),
+                        upload_status: Some(upload),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+            store.mark_recording_stopped(index, 1).await.unwrap();
+            store.mark_recording_stop_notified(index).await.unwrap();
+            store.set_expected_trace_count(index, 1).await.unwrap();
+            store
+                .set_progress_report_status(
+                    index,
+                    ProgressReportStatus::Pending,
+                    ProgressReportStatus::Reported,
+                )
+                .await
+                .unwrap();
+            index
+        }
+
+        // A: stopped + fully uploaded → reclaimable.
+        let uploaded = stopped_with_trace(&store, 0, "a1", TraceUploadStatus::Uploaded).await;
+        // B: stopped, settled at the recording level, but one trace failed to
+        // upload → must NOT be reclaimable (and must not be re-scanned forever).
+        let failed = stopped_with_trace(&store, 1, "b1", TraceUploadStatus::Failed).await;
+        // C: cancelled + backend notified → reclaimable with no trace scan.
+        let cancelled = seed_recording(&store, 2).await;
+        store
+            .mark_recording_start_notified(cancelled, "cloud-c")
+            .await
+            .unwrap();
+        store.cancel_recording(cancelled, 1).await.unwrap();
+        store
+            .mark_recording_cancel_notified(cancelled)
+            .await
+            .unwrap();
+        // D: live (never stopped) → not reclaimable.
+        let live = seed_recording(&store, 3).await;
+
+        let reclaimable: Vec<i64> = store
+            .recordings_pending_reclaim()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.recording_index)
+            .collect();
+        assert!(
+            reclaimable.contains(&uploaded),
+            "fully-uploaded stopped recording reclaims"
+        );
+        assert!(
+            reclaimable.contains(&cancelled),
+            "cancelled+notified recording reclaims"
+        );
+        assert!(
+            !reclaimable.contains(&failed),
+            "a permanently-failed trace blocks reclaim (M10: no perpetual re-scan)"
+        );
+        assert!(
+            !reclaimable.contains(&live),
+            "a live recording never reclaims"
         );
     }
 

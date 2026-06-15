@@ -214,15 +214,22 @@ impl VideoEncoder {
         Ok(parse_ffmpeg_version(&output.stdout))
     }
 
-    /// Encode one synthetic frame with `-vsync passthrough` + libx264 to the
-    /// null muxer; a non-zero exit means the local ffmpeg lacks a capability
-    /// the encoder needs.
+    /// Encode one synthetic frame to the null muxer through **both** output
+    /// configurations the real [`encode_chunk`](Self::encode_chunk) uses — the
+    /// `yuv420p` lossy pass *and* the `yuv444p10le -qp 0` lossless pass. A
+    /// non-zero exit means the local ffmpeg lacks a capability the encoder
+    /// needs. The lossless 10-bit 4:4:4 path is the one that actually varies
+    /// between builds, so probing only the lossy pass (as before) let the
+    /// "fail fast at startup" check pass while every real lossless encode failed
+    /// at recording time.
     fn probe_passthrough_encode(&self, version: &str) -> Result<(), FfmpegPreflightError> {
         // One 16x16 yuv420p frame (a 16x16 plane plus two 8x8 planes = 384
         // bytes) fed via the rawvideo demuxer on stdin — no lavfi/input-file
         // dependency, so the probe works even on a minimal build. ffmpeg parses
         // (and would reject) the options before reading stdin, so an unsupported
-        // `-vsync passthrough` fails immediately rather than on a healthy input.
+        // `-vsync passthrough` or `yuv444p10le` encode fails immediately rather
+        // than on a healthy input. The two `-map 0:v -c:v …` blocks mirror
+        // `encode_chunk` so the probe exercises the exact codec/pixel-format pairs.
         const PROBE_FRAME_LEN: usize = 16 * 16 * 3 / 2;
         let frame = vec![128u8; PROBE_FRAME_LEN];
 
@@ -238,12 +245,32 @@ impl VideoEncoder {
             .arg("16x16")
             .arg("-i")
             .arg("-")
+            // Lossy pass (matches encode_chunk's first output).
+            .arg("-map")
+            .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
             .arg("yuv420p")
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-f")
+            .arg("null")
+            .arg("-")
+            // Lossless pass (matches encode_chunk's second output) — the
+            // build-dependent 10-bit 4:4:4 capability the encoder relies on.
+            .arg("-map")
+            .arg("0:v")
+            .arg("-vsync")
+            .arg("passthrough")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-pix_fmt")
+            .arg("yuv444p10le")
+            .arg("-qp")
+            .arg("0")
             .arg("-preset")
             .arg("ultrafast")
             .arg("-f")

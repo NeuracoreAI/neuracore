@@ -63,25 +63,29 @@ pub(crate) fn split_stream_key(key: &str) -> (String, String) {
     (data_type, sensor_name)
 }
 
-/// Build the spool directory for a `(source, sensor)` stream. Mirrors
-/// `storage::paths::spool_dir` on the daemon side; the two must agree
-/// byte-for-byte so the daemon finds exactly what the producer wrote.
+/// Build the spool directory for a `(source, sensor)` stream, or `None` if the
+/// recordings root is unresolved. Mirrors `storage::paths::spool_dir` on the
+/// daemon side; the two must agree byte-for-byte so the daemon finds exactly
+/// what the producer wrote.
+///
+/// The root is validated at the `log_frame` boundary before any frame is
+/// enqueued, so on the writer thread this is effectively infallible — but it
+/// returns `Option` rather than `.expect()`-ing, because a writer-thread panic
+/// would silently kill the thread (no more frames, no error surfaced) instead
+/// of being logged and recovered from.
 pub(crate) fn spool_dir(
     robot_id: &str,
     robot_instance: i64,
     data_type: &str,
     sensor_name: &str,
-) -> PathBuf {
-    // The recordings root is validated at the `log_frame` boundary before any
-    // frame is enqueued, so by the time the writer thread builds a spool path
-    // resolution has already succeeded.
-    recordings_root()
-        .expect("recordings root validated at the log_frame boundary")
-        .join(SPOOL_DIRNAME)
-        .join(robot_id)
-        .join(robot_instance.to_string())
-        .join(data_type)
-        .join(sensor_name)
+) -> Option<PathBuf> {
+    recordings_root().ok().map(|root| {
+        root.join(SPOOL_DIRNAME)
+            .join(robot_id)
+            .join(robot_instance.to_string())
+            .join(data_type)
+            .join(sensor_name)
+    })
 }
 
 /// Spool chunk filename — must match `storage::paths::spool_chunk_filename`.

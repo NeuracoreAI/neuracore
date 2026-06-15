@@ -167,8 +167,10 @@ const SYNCPOINT_INTERVAL_BYTES: u64 = 32_768;
 /// strictly better than the 8 KiB default for very small frames (where
 /// many frames coalesce per syscall) and for very large frames (where the
 /// buffer absorbs short writes the kernel returns under writeback
-/// pressure). Although the 0.5-3 MiB frame zone the buffer causes
-/// occasional ~7 ms flush spikes
+/// pressure). The caveat: in the 0.5-3 MiB frame zone this buffer can cause
+/// occasional ~7 ms flush spikes when a frame tips it past capacity and the
+/// whole 8 MiB drains in one `write` — a known tail-latency cost, absorbed by
+/// the writer thread rather than a `log_*` caller.
 const BUF_WRITER_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Issue an async writeback hint at least this often, measured by bytes
@@ -247,7 +249,10 @@ impl NutWriter {
         &self.path
     }
 
-    /// Bytes physically flushed to disk so far.
+    /// Total bytes appended to the chunk so far. Counts bytes handed to the
+    /// `BufWriter` (which may still be buffered in memory, not yet `fsync`'d),
+    /// so it is the logical chunk size — what the flush threshold keys off — not
+    /// a durability guarantee.
     pub fn bytes_written(&self) -> u64 {
         self.bytes_written
     }

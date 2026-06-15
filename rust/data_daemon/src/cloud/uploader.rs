@@ -18,7 +18,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::ApiClient;
-use crate::cloud::cloud_files::{content_type_for, ContentKind};
+use crate::cloud::cloud_files::content_type_for_filename;
 use crate::cloud::status::StatusUpdate;
 use crate::cloud::upload_transfer::{upload_one_file, UploadFileOutcome};
 use crate::cloud::OrgIdRx;
@@ -26,7 +26,7 @@ use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
     ConnectionState, DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRecord,
-    TraceUploadStatus,
+    TraceUploadStatus, TraceWriteHandle,
 };
 use crate::storage::paths::TracePath;
 
@@ -51,8 +51,10 @@ impl UploaderHandle {
 }
 
 /// Spawn the uploader task on the current Tokio runtime.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_uploader(
     store: SqliteStateStore,
+    trace_writer: TraceWriteHandle,
     bus: EventBus,
     client: Arc<ApiClient>,
     recordings_root: Arc<PathBuf>,
@@ -92,6 +94,7 @@ pub fn spawn_uploader(
                     if connected {
                         drain_ready_traces(
                             &store,
+                            &trace_writer,
                             &bus,
                             &client,
                             &recordings_root,
@@ -111,6 +114,7 @@ pub fn spawn_uploader(
                             if connected {
                                 drain_ready_traces(
                                     &store,
+                                    &trace_writer,
                                     &bus,
                                     &client,
                                     &recordings_root,
@@ -130,6 +134,7 @@ pub fn spawn_uploader(
                             }
                             spawn_upload_task(
                                 &store,
+                                &trace_writer,
                                 &bus,
                                 &client,
                                 &recordings_root,
@@ -147,6 +152,7 @@ pub fn spawn_uploader(
                             if connected {
                                 drain_ready_traces(
                                     &store,
+                                    &trace_writer,
                                     &bus,
                                     &client,
                                     &recordings_root,
@@ -166,6 +172,7 @@ pub fn spawn_uploader(
                     if connected {
                         drain_ready_traces(
                             &store,
+                            &trace_writer,
                             &bus,
                             &client,
                             &recordings_root,
@@ -188,6 +195,7 @@ pub fn spawn_uploader(
 #[allow(clippy::too_many_arguments)]
 async fn drain_ready_traces(
     store: &Arc<SqliteStateStore>,
+    trace_writer: &TraceWriteHandle,
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
@@ -211,6 +219,7 @@ async fn drain_ready_traces(
     for trace_id in trace_ids {
         spawn_upload_task(
             store,
+            trace_writer,
             bus,
             client,
             recordings_root,
@@ -227,6 +236,7 @@ async fn drain_ready_traces(
 #[allow(clippy::too_many_arguments)]
 fn spawn_upload_task(
     store: &Arc<SqliteStateStore>,
+    trace_writer: &TraceWriteHandle,
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
@@ -247,6 +257,7 @@ fn spawn_upload_task(
     };
     in_flight_ids.insert(trace_id.clone());
     let store = Arc::clone(store);
+    let trace_writer = trace_writer.clone();
     let bus = bus.clone();
     let client = Arc::clone(client);
     let recordings_root = Arc::clone(recordings_root);
@@ -255,6 +266,7 @@ fn spawn_upload_task(
     in_flight.spawn(async move {
         upload_single(
             &store,
+            &trace_writer,
             &bus,
             &client,
             &recordings_root,
@@ -268,8 +280,10 @@ fn spawn_upload_task(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_single(
     store: &Arc<SqliteStateStore>,
+    trace_writer: &TraceWriteHandle,
     bus: &EventBus,
     client: &Arc<ApiClient>,
     recordings_root: &Arc<PathBuf>,
@@ -370,20 +384,14 @@ async fn upload_single(
             return;
         }
 
-        // `content_type` here drives the GCS-side metadata when we
-        // re-acquire a session URI on 410; we derive it from the daemon's
-        // cloud-file classification so the refresh matches what
-        // registration originally registered.
-        let content_type = if matches!(content_type_for(data_type), ContentKind::Rgb)
-            && filename.ends_with(".mp4")
-        {
-            "video/mp4"
-        } else {
-            "application/json"
-        };
+        // `content_type` here drives the GCS-side metadata when we re-acquire a
+        // session URI on 410. Use the same filename→type mapping registration
+        // used (`cloud_files::content_type_for_filename`) so the refresh can't
+        // disagree with what was originally registered.
+        let content_type = content_type_for_filename(&filename);
         let outcome = upload_one_file(
             client,
-            store,
+            trace_writer,
             bus,
             org_rx,
             status_tx,
@@ -684,9 +692,12 @@ mod tests {
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
         let store_arc = Arc::new(store.clone());
+        let (trace_writer, _trace_writer_owner) =
+            crate::state::trace_writer::spawn(store_arc.clone());
         let recordings_root = Arc::new(recordings_root);
         upload_single(
             &store_arc,
+            &trace_writer,
             &bus,
             &api,
             &recordings_root,
@@ -740,9 +751,12 @@ mod tests {
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
         let store_arc = Arc::new(store.clone());
+        let (trace_writer, _trace_writer_owner) =
+            crate::state::trace_writer::spawn(store_arc.clone());
         let recordings_root = Arc::new(recordings_root);
         upload_single(
             &store_arc,
+            &trace_writer,
             &bus,
             &api,
             &recordings_root,
@@ -820,9 +834,12 @@ mod tests {
         let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
         let store_arc = Arc::new(store.clone());
+        let (trace_writer, _trace_writer_owner) =
+            crate::state::trace_writer::spawn(store_arc.clone());
         let recordings_root = Arc::new(recordings_root);
         upload_single(
             &store_arc,
+            &trace_writer,
             &bus,
             &api,
             &recordings_root,
@@ -895,9 +912,12 @@ mod tests {
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
         let store_arc = Arc::new(store.clone());
+        let (trace_writer, _trace_writer_owner) =
+            crate::state::trace_writer::spawn(store_arc.clone());
         let recordings_root = Arc::new(recordings_root);
         upload_single(
             &store_arc,
+            &trace_writer,
             &bus,
             &api,
             &recordings_root,

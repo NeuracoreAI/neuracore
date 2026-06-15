@@ -113,6 +113,20 @@ impl TraceWriteHandle {
         });
     }
 
+    /// Record the latest rolling upload offset (advisory progress). Coalesced
+    /// like the write-phase progress so the uploader's per-64-MiB checkpoint
+    /// across many concurrent uploads collapses to one batched row write
+    /// instead of a synchronous transaction each. Resume correctness comes from
+    /// the server's 308 offset, not this row, so a coalesced/late value is
+    /// harmless; the store skips it once the upload has settled.
+    pub fn upload_progress(&self, trace_id: &str, bytes_uploaded: i64) {
+        self.enqueue(CoalescedTraceWrite {
+            trace_id: trace_id.to_string(),
+            bytes_uploaded: Some(bytes_uploaded),
+            ..Default::default()
+        });
+    }
+
     /// Finalise the trace: `written`, with the final byte total.
     pub fn finalise(&self, trace_id: &str, total_bytes: i64) {
         self.enqueue(CoalescedTraceWrite {
@@ -243,6 +257,9 @@ fn merge(pending: &mut HashMap<String, CoalescedTraceWrite>, write: CoalescedTra
     if write.total_bytes.is_some() {
         entry.total_bytes = write.total_bytes;
     }
+    if write.bytes_uploaded.is_some() {
+        entry.bytes_uploaded = write.bytes_uploaded;
+    }
     if write.error_code.is_some() {
         entry.error_code = write.error_code;
     }
@@ -266,7 +283,15 @@ fn drop_recording_creates(
     });
 }
 
-/// Flush the pending set in one batched transaction, then clear it.
+/// Flush the pending set in one batched transaction, clearing it only on a
+/// successful commit.
+///
+/// On error the drained batch is **re-merged** into `pending` rather than
+/// discarded: dropping it loses a `finalise`/`failed`, which wedges the trace
+/// in `writing` and retains its parent recording forever. Re-merging keeps the
+/// updates for the next tick's retry and, because the merge is keyed by
+/// `trace_id`, coalesces with any writes that arrived since — so a persistent
+/// failure can't grow `pending` past the live trace count.
 async fn flush(store: &SqliteStateStore, pending: &mut HashMap<String, CoalescedTraceWrite>) {
     if pending.is_empty() {
         return;
@@ -276,8 +301,11 @@ async fn flush(store: &SqliteStateStore, pending: &mut HashMap<String, Coalesced
         tracing::warn!(
             %error,
             rows = batch.len(),
-            "trace-writer batch flush failed; updates dropped"
+            "trace-writer batch flush failed; re-queueing batch for retry"
         );
+        for write in batch {
+            merge(pending, write);
+        }
     }
 }
 
@@ -433,6 +461,33 @@ mod tests {
         let trace = store.get_trace(&trace_id).await.unwrap().unwrap();
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert_eq!(trace.total_bytes, 42);
+    }
+
+    #[tokio::test]
+    async fn flush_retains_batch_when_apply_fails() {
+        let (store, _dir, trace_id) = store_with_trace().await;
+        let mut pending = HashMap::new();
+        merge(
+            &mut pending,
+            CoalescedTraceWrite {
+                trace_id: trace_id.clone(),
+                write_status: Some(TraceWriteStatus::Written),
+                total_bytes: Some(99),
+                ..Default::default()
+            },
+        );
+
+        // Force apply_trace_writes to fail by closing the write connection.
+        store.write_pool().close().await;
+        flush(&store, &mut pending).await;
+
+        // Regression guard for H2: a failed flush must NOT silently drop the
+        // batch — a lost `finalise` would wedge the trace in `writing` and
+        // retain its parent recording forever.
+        assert_eq!(pending.len(), 1, "failed flush must retain the batch");
+        let retained = pending.get(&trace_id).expect("batch retained for retry");
+        assert_eq!(retained.write_status, Some(TraceWriteStatus::Written));
+        assert_eq!(retained.total_bytes, Some(99));
     }
 
     async fn store_with_recording() -> (Arc<SqliteStateStore>, TempDir, i64) {

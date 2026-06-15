@@ -2,7 +2,7 @@
 //!
 //! The per-file and per-chunk PUT machinery the upload coordinator
 //! ([`super::uploader`]) drives: [`upload_one_file`] streams a single on-disk
-//! artefact as 64 MiB chunks to the GCS resumable session URI, handling the
+//! artefact as 4 MiB chunks to the GCS resumable session URI, handling the
 //! 308-continue, 410-session-expired, and 401-auth-refresh transitions, and
 //! verifies the server-side MD5 on completion.
 
@@ -22,8 +22,7 @@ use tokio::time::{sleep, timeout};
 use crate::api::ApiClient;
 use crate::cloud::status::StatusUpdate;
 use crate::cloud::OrgIdRx;
-use crate::state::store::TraceUpdate;
-use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRecord};
+use crate::state::{DaemonEvent, EventBus, TraceRecord, TraceWriteHandle};
 
 /// Chunk size used for resumable uploads.
 ///
@@ -31,9 +30,9 @@ use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRec
 /// every non-final chunk); 4 MiB = 16 × 256 KiB. Smaller chunks trade a
 /// little peak throughput on fast links (more sequential PUTs) for finer
 /// upload-progress granularity, lower per-upload memory, and tolerance of
-/// slow links: a chunk must transfer within `CHUNK_UPLOAD_TIMEOUT`, so the
-/// minimum sustained speed is `CHUNK_SIZE / CHUNK_UPLOAD_TIMEOUT`
-/// (4 MiB / 120 s ≈ 0.28 Mbit/s, vs ≈ 4.5 Mbit/s at 64 MiB).
+/// slow links: a chunk must transfer within `CHUNK_UPLOAD_TIMEOUT` (200 s), so
+/// the minimum sustained speed is `CHUNK_SIZE / CHUNK_UPLOAD_TIMEOUT`
+/// (4 MiB / 200 s ≈ 0.17 Mbit/s).
 pub const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 /// Persist `bytes_uploaded` to SQLite only every Nth chunk (plus once when the
 /// file finishes), instead of every chunk. The per-chunk write took the store's
@@ -64,7 +63,7 @@ pub(crate) struct UploadFileOutcome {
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_one_file(
     client: &Arc<ApiClient>,
-    store: &Arc<SqliteStateStore>,
+    trace_writer: &TraceWriteHandle,
     bus: &EventBus,
     org_rx: &OrgIdRx,
     status_tx: &tokio::sync::mpsc::UnboundedSender<StatusUpdate>,
@@ -141,35 +140,47 @@ pub(crate) async fn upload_one_file(
                 offset += chunk_len as u64;
             }
             PutChunkOutcome::Incomplete { headers } => {
-                // 308 — the server tells us how much it actually committed
-                // via the Range header. Trust that number unconditionally:
-                // if it's less than what we sent, the server dropped the
-                // tail and we must re-send it; if it's equal, we're in
-                // sync; if it's missing, the server has nothing yet and we
-                // should retry the same offset (a 0-byte advance).
-                hasher.update(&chunk);
+                // 308 — the server reports how much it actually committed via
+                // the Range header. GCS commits in 256 KiB units, so it can
+                // accept only a *prefix* of a 4 MiB chunk. We must hash exactly
+                // the committed prefix: hashing the whole chunk then resuming at
+                // `server_offset` re-reads — and re-hashes — the uncommitted
+                // tail on the next iteration, double-counting it into the local
+                // MD5 and failing the final compare with a spurious mismatch.
                 let server_offset = parse_resume_offset(&headers).unwrap_or(offset);
-                if server_offset < offset {
-                    return Err(format!(
-                        "server resume offset {server_offset} is behind local offset {offset}; \
-                         refusing to corrupt {}",
-                        local_path.display()
-                    ));
+                match resume_decision(offset, chunk_len, server_offset) {
+                    ResumeDecision::Behind => {
+                        return Err(format!(
+                            "server resume offset {server_offset} is behind local offset \
+                             {offset}; refusing to corrupt {}",
+                            local_path.display()
+                        ));
+                    }
+                    ResumeDecision::Ahead { new_offset } => {
+                        // Server has bytes we didn't send this session (e.g. a
+                        // prior session) and can't re-hash — accept its view but
+                        // flag the local checksum untrustworthy.
+                        tracing::warn!(
+                            server_offset,
+                            local_offset = offset + chunk_len as u64,
+                            path = %local_path.display(),
+                            "server resume offset is ahead of local; skipping local checksum"
+                        );
+                        hasher.update(&chunk);
+                        server_md5_hex = None;
+                        offset = new_offset;
+                    }
+                    ResumeDecision::Committed {
+                        hash_len,
+                        new_offset,
+                    } => {
+                        // Fold in only the committed prefix; the tail is re-sent
+                        // (and hashed) on the next read, so every byte is hashed
+                        // exactly once.
+                        hasher.update(&chunk[..hash_len]);
+                        offset = new_offset;
+                    }
                 }
-                if server_offset > offset + chunk_len as u64 {
-                    // Server claims more bytes than we sent — accept its
-                    // view but log loudly; this is the only branch that
-                    // can move ahead of the local checksum, so flag the
-                    // hash as untrustworthy by clearing it.
-                    tracing::warn!(
-                        server_offset,
-                        local_offset = offset + chunk_len as u64,
-                        path = %local_path.display(),
-                        "server resume offset is ahead of local; skipping local checksum"
-                    );
-                    server_md5_hex = None;
-                }
-                offset = server_offset;
             }
             PutChunkOutcome::SessionExpired => {
                 tracing::info!(
@@ -220,7 +231,7 @@ pub(crate) async fn upload_one_file(
         // correctness comes from the server's 308 offset, not this row.
         chunks_since_persist += 1;
         if chunks_since_persist >= PROGRESS_PERSIST_EVERY_CHUNKS {
-            persist_upload_offset(store, &trace_id, offset).await;
+            persist_upload_offset(trace_writer, &trace_id, offset);
             chunks_since_persist = 0;
             last_persisted_offset = offset;
         }
@@ -229,7 +240,7 @@ pub(crate) async fn upload_one_file(
     // Persist the final offset once so the DB row reflects the completed bytes
     // even if the last persisted checkpoint was several chunks back.
     if offset != last_persisted_offset {
-        persist_upload_offset(store, &trace_id, offset).await;
+        persist_upload_offset(trace_writer, &trace_id, offset);
     }
 
     tracing::info!(
@@ -255,17 +266,13 @@ pub(crate) async fn upload_one_file(
     })
 }
 
-/// Persist the rolling `bytes_uploaded` checkpoint for a trace, logging (but
-/// not propagating) a failure — a missed checkpoint only costs re-sending a few
-/// chunks on restart, never correctness.
-async fn persist_upload_offset(store: &Arc<SqliteStateStore>, trace_id: &str, offset: u64) {
-    let update = TraceUpdate {
-        bytes_uploaded: Some(offset as i64),
-        ..TraceUpdate::default()
-    };
-    if let Err(error) = store.update_trace(trace_id, update).await {
-        tracing::warn!(%error, trace_id, "failed to persist upload progress");
-    }
+/// Persist the rolling `bytes_uploaded` checkpoint for a trace via the
+/// coalescing write-behind — fire-and-forget, so a burst of concurrent uploads
+/// collapses to one batched row write per flush tick instead of a synchronous
+/// transaction each. A missed checkpoint only costs re-sending a few chunks on
+/// restart, never correctness (resume uses the server's 308 offset).
+fn persist_upload_offset(trace_writer: &TraceWriteHandle, trace_id: &str, offset: u64) {
+    trace_writer.upload_progress(trace_id, offset as i64);
 }
 
 /// Outcome of a single PUT to the resumable session URI. Returned by
@@ -325,7 +332,7 @@ async fn put_chunk(
         );
 
         // `Bytes` is cheaply cloneable (Arc-backed), so re-sending the
-        // same chunk on retry is a refcount bump, not a 64 MiB copy.
+        // same chunk on retry is a refcount bump, not a 4 MiB copy.
         let request = client
             .raw_client()
             .put(session_uri)
@@ -425,6 +432,39 @@ fn parse_resume_offset(headers: &HeaderMap) -> Option<u64> {
     Some(last_byte + 1)
 }
 
+/// How a 308's committed `server_offset` reconciles against the just-sent chunk
+/// `[offset, offset + chunk_len)`.
+#[derive(Debug, PartialEq, Eq)]
+enum ResumeDecision {
+    /// Server is behind our local offset — would corrupt the object; abort.
+    Behind,
+    /// Server is ahead of anything we sent this session (bytes we can't
+    /// re-hash); accept its offset but treat the local checksum as unusable.
+    Ahead { new_offset: u64 },
+    /// Server committed `hash_len` bytes of this chunk; fold exactly that prefix
+    /// into the running MD5 and resume from `new_offset`.
+    Committed { hash_len: usize, new_offset: u64 },
+}
+
+/// Decide how many bytes of the just-sent chunk the running MD5 should absorb
+/// after a 308, given the server's committed `server_offset`. Hashing only the
+/// committed prefix is what keeps every byte hashed exactly once across a
+/// partial (sub-chunk) commit and the resend of its tail.
+fn resume_decision(offset: u64, chunk_len: usize, server_offset: u64) -> ResumeDecision {
+    if server_offset < offset {
+        ResumeDecision::Behind
+    } else if server_offset > offset + chunk_len as u64 {
+        ResumeDecision::Ahead {
+            new_offset: server_offset,
+        }
+    } else {
+        ResumeDecision::Committed {
+            hash_len: (server_offset - offset) as usize,
+            new_offset: server_offset,
+        }
+    }
+}
+
 fn extract_server_md5(headers: &HeaderMap, body: &str) -> Option<String> {
     if let Some(value) = headers.get("x-checksum-md5") {
         if let Ok(text) = value.to_str() {
@@ -479,5 +519,61 @@ mod tests {
         let mut empty = HeaderMap::new();
         empty.insert("range", HeaderValue::from_static("bytes=*"));
         assert_eq!(parse_resume_offset(&empty), None);
+    }
+
+    #[test]
+    fn resume_full_chunk_commit_hashes_whole_chunk() {
+        // Server committed the entire chunk → hash all of it, advance fully.
+        assert_eq!(
+            resume_decision(0, CHUNK_SIZE, CHUNK_SIZE as u64),
+            ResumeDecision::Committed {
+                hash_len: CHUNK_SIZE,
+                new_offset: CHUNK_SIZE as u64,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_partial_commit_hashes_only_committed_prefix() {
+        // M7 regression: GCS commits in 256 KiB units, so a 4 MiB chunk can be
+        // committed only up to, say, 4 MiB − 256 KiB. We must hash exactly that
+        // committed prefix — NOT the whole chunk — or the re-sent tail is hashed
+        // twice and the final MD5 spuriously mismatches.
+        let committed = (CHUNK_SIZE - 256 * 1024) as u64;
+        assert_eq!(
+            resume_decision(0, CHUNK_SIZE, committed),
+            ResumeDecision::Committed {
+                hash_len: committed as usize,
+                new_offset: committed,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_zero_advance_hashes_nothing() {
+        // Server has nothing yet (missing/zero Range) → hash nothing, retry the
+        // same offset; otherwise the whole chunk would be double-hashed.
+        assert_eq!(
+            resume_decision(100, CHUNK_SIZE, 100),
+            ResumeDecision::Committed {
+                hash_len: 0,
+                new_offset: 100,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_ahead_marks_checksum_untrustworthy() {
+        assert_eq!(
+            resume_decision(0, CHUNK_SIZE, CHUNK_SIZE as u64 + 1),
+            ResumeDecision::Ahead {
+                new_offset: CHUNK_SIZE as u64 + 1,
+            }
+        );
+    }
+
+    #[test]
+    fn resume_behind_is_a_corruption_guard() {
+        assert_eq!(resume_decision(100, CHUNK_SIZE, 50), ResumeDecision::Behind);
     }
 }

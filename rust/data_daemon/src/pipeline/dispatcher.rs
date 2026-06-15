@@ -246,6 +246,11 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// When the eviction + idle-reap scans last ran. Those scans are throttled
+    /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
+    /// doesn't re-run the two full window scans (and their `Vec` allocations)
+    /// on every inbound envelope — only the cheap holdback release does.
+    last_housekeep: Instant,
 }
 
 impl Dispatcher {
@@ -263,6 +268,7 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            last_housekeep: Instant::now(),
         }
     }
 
@@ -301,7 +307,17 @@ impl Dispatcher {
                 _ = sleep(housekeep_after) => {}
             }
 
-            self.process_due(Instant::now()).await;
+            // Holdback releases are cheap (pop only what's due) and must run
+            // promptly on every wake-up. The window-eviction + idle-reap scans
+            // are throttled to HOUSEKEEP_INTERVAL: on a fast data stream the
+            // `rx.recv()` arm fires far more often than 25 ms, and re-running
+            // both full scans per envelope was pure overhead.
+            let now = Instant::now();
+            self.release_due_holdback(now).await;
+            if now.duration_since(self.last_housekeep) >= HOUSEKEEP_INTERVAL {
+                self.housekeep(now).await;
+                self.last_housekeep = now;
+            }
         }
 
         self.shutdown().await;
@@ -435,7 +451,15 @@ impl Dispatcher {
     }
 
     fn touch_source(&mut self, source: &Source, recv_at: Instant) {
-        self.windows.entry(source.clone()).or_default().last_seen = Some(recv_at);
+        // Hot path: every inbound `Data` / `BatchedData` / `VideoChunkReady`
+        // envelope touches its source. The common case is an existing window, so
+        // probe with `get_mut` (no allocation) and only clone the `(String, i64)`
+        // key on the rare first-insert.
+        if let Some(window) = self.windows.get_mut(source) {
+            window.last_seen = Some(recv_at);
+        } else {
+            self.windows.entry(source.clone()).or_default().last_seen = Some(recv_at);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -593,16 +617,21 @@ impl Dispatcher {
         self.windows.values().any(|entry| !entry.closing.is_empty())
     }
 
-    /// Release every due held envelope, evict windows past their retention,
-    /// and force-close idle sources.
-    async fn process_due(&mut self, now: Instant) {
-        // 1. Holdback releases — process strictly before evictions so a datum
-        //    releasing in this tick still finds its (possibly closing) window.
+    /// Release every held envelope whose hold has elapsed. Cheap — pops only
+    /// what is due — and runs on every dispatcher wake-up. Kept strictly ahead
+    /// of [`housekeep`](Self::housekeep)'s evictions so a datum releasing in
+    /// this tick still finds its (possibly closing) window.
+    async fn release_due_holdback(&mut self, now: Instant) {
         while self.held.front().is_some_and(|held| held.release_at <= now) {
             let held = self.held.pop_front().expect("front checked");
             self.route(held).await;
         }
+    }
 
+    /// Evict windows past their retention and force-close idle sources. Two full
+    /// window scans, so throttled to [`HOUSEKEEP_INTERVAL`] by the caller rather
+    /// than run per inbound envelope.
+    async fn housekeep(&mut self, now: Instant) {
         // 2. Window evictions: a closing window is retained for 2·HOLDBACK
         //    after its stop, by which point all in-window data has released.
         let retention = self.holdback * 2;

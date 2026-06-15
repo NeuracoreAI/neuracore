@@ -33,6 +33,15 @@ pub const BATCH_SIZE: usize = 50;
 pub const MAX_WAIT: Duration = Duration::from_millis(200);
 /// Poll interval the coordinator falls back to when the bus is quiet.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
+/// How many times a trace the backend explicitly rejects (returns in
+/// `failed_traces`) is rolled back to `pending` and retried before being marked
+/// terminally `failed`. Backend registration errors are frequently transient
+/// (e.g. a staging "Unexpected error during registration" under a large
+/// registration burst); terminally failing on the first one permanently wedges
+/// the whole recording (its traces never upload, so it never reaches "all
+/// uploaded" and is never reaped). A small bounded retry rides out the hiccup
+/// while still terminating a genuinely-permanent failure.
+const MAX_REGISTRATION_ATTEMPTS: u32 = 5;
 
 /// Handle returned by [`spawn_registration`].
 pub struct RegistrationCoordinatorHandle {
@@ -62,6 +71,12 @@ pub fn spawn_registration(
         let mut ticker = interval(POLL_INTERVAL);
         ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        // Per-trace count of backend-rejected registration attempts, kept for
+        // the coordinator's lifetime so the retry budget spans drains. Entries
+        // are removed once a trace registers or is terminally failed, so the map
+        // only ever holds currently-retrying traces.
+        let mut registration_attempts: HashMap<String, u32> = HashMap::new();
+
         loop {
             tokio::select! {
                 biased;
@@ -72,7 +87,7 @@ pub fn spawn_registration(
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::TraceWritten { .. }) => {
-                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
+                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -81,13 +96,13 @@ pub fn spawn_registration(
                                 "registration coordinator missed bus events; \
                                 falling back to a drain"
                             );
-                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
+                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_once(&store, &bus, &client, &org_rx, MAX_WAIT).await;
+                    drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
                 }
             }
         }
@@ -101,6 +116,7 @@ async fn drain_once(
     client: &Arc<ApiClient>,
     org_rx: &OrgIdRx,
     max_wait: Duration,
+    registration_attempts: &mut HashMap<String, u32>,
 ) {
     let claimed = match store
         .claim_traces_for_registration(BATCH_SIZE, max_wait.as_secs_f64())
@@ -116,7 +132,7 @@ async fn drain_once(
         return;
     }
     tracing::debug!(count = claimed.len(), "claimed traces for registration");
-    submit_batch(store, bus, client, org_rx, claimed).await;
+    submit_batch(store, bus, client, org_rx, claimed, registration_attempts).await;
 }
 
 async fn submit_batch(
@@ -125,6 +141,7 @@ async fn submit_batch(
     client: &Arc<ApiClient>,
     org_rx: &OrgIdRx,
     traces: Vec<TraceRecord>,
+    registration_attempts: &mut HashMap<String, u32>,
 ) {
     // Group by recording so we can look up the recording row once per
     // recording rather than once per trace; in practice every claim ships
@@ -202,10 +219,19 @@ async fn submit_batch(
 
                 for trace in &traces {
                     if let Some(uris) = registered_ids.get(&trace.trace_id) {
-                        let serialised = serde_json::to_string(uris).unwrap_or_else(|error| {
-                            tracing::warn!(%error, trace_id = trace.trace_id, "failed to serialise session URIs");
-                            "{}".to_string()
-                        });
+                        // A serialise failure must NOT mark the trace registered
+                        // with a "{}" placeholder — that records an empty URI map
+                        // and the uploader later finalises it as 0 bytes uploaded
+                        // (silent data loss). Roll back to pending so the next
+                        // tick re-registers it instead.
+                        let serialised = match serde_json::to_string(uris) {
+                            Ok(serialised) => serialised,
+                            Err(error) => {
+                                tracing::warn!(%error, trace_id = trace.trace_id, "failed to serialise session URIs; rolling back to pending");
+                                rollback_single_to_pending(store, &trace.trace_id).await;
+                                continue;
+                            }
+                        };
                         let update = TraceUpdate {
                             registration_status: Some(TraceRegistrationStatus::Registered),
                             upload_session_uris: Some(serialised),
@@ -216,6 +242,8 @@ async fn submit_batch(
                             tracing::warn!(%error, trace_id = trace.trace_id, "failed to persist registration outcome");
                             continue;
                         }
+                        // Registered — clear any accumulated retry budget.
+                        registration_attempts.remove(&trace.trace_id);
                         bus.publish(DaemonEvent::TraceRegistered {
                             trace_id: trace.trace_id.clone(),
                             recording_index,
@@ -225,17 +253,47 @@ async fn submit_batch(
                             recording_index,
                         });
                     } else if let Some(error) = failed_ids.get(&trace.trace_id) {
-                        tracing::warn!(
-                            trace_id = trace.trace_id,
-                            error = error.as_deref().unwrap_or(""),
-                            "trace registration failed"
-                        );
-                        let update = TraceUpdate {
-                            registration_status: Some(TraceRegistrationStatus::Failed),
-                            error_message: Some(error.clone()),
-                            ..TraceUpdate::default()
-                        };
-                        let _ = store.update_trace(&trace.trace_id, update).await;
+                        // Backend rejections are usually transient (e.g. a
+                        // staging burst error). Roll the trace back to `pending`
+                        // and retry up to MAX_REGISTRATION_ATTEMPTS before giving
+                        // up — terminally failing on the first rejection would
+                        // permanently wedge the whole recording.
+                        let attempts = registration_attempts
+                            .entry(trace.trace_id.clone())
+                            .or_insert(0);
+                        *attempts += 1;
+                        if *attempts < MAX_REGISTRATION_ATTEMPTS {
+                            tracing::warn!(
+                                trace_id = trace.trace_id,
+                                error = error.as_deref().unwrap_or(""),
+                                attempt = *attempts,
+                                "trace registration rejected by backend; rolling back to pending for retry"
+                            );
+                            rollback_single_to_pending(store, &trace.trace_id).await;
+                        } else {
+                            tracing::warn!(
+                                trace_id = trace.trace_id,
+                                error = error.as_deref().unwrap_or(""),
+                                attempts = *attempts,
+                                "trace registration rejected by backend after retry budget exhausted; marking failed"
+                            );
+                            registration_attempts.remove(&trace.trace_id);
+                            let update = TraceUpdate {
+                                registration_status: Some(TraceRegistrationStatus::Failed),
+                                error_message: Some(error.clone()),
+                                ..TraceUpdate::default()
+                            };
+                            // If persisting the `failed` status itself fails the
+                            // trace would otherwise sit in `registering` forever
+                            // (no coordinator re-claims that state mid-session).
+                            // Roll it back to `pending` so the next tick retries.
+                            if let Err(persist_error) =
+                                store.update_trace(&trace.trace_id, update).await
+                            {
+                                tracing::warn!(%persist_error, trace_id = trace.trace_id, "failed to persist registration failure; rolling back to pending");
+                                rollback_single_to_pending(store, &trace.trace_id).await;
+                            }
+                        }
                     } else {
                         // Backend silently dropped the trace — treat as a
                         // transient failure so the next tick retries it.
@@ -385,6 +443,7 @@ mod tests {
             &api,
             &org_rx(Some("org-1")),
             claimed,
+            &mut HashMap::new(),
         )
         .await;
 
@@ -452,6 +511,7 @@ mod tests {
             &api,
             &org_rx(Some("org-1")),
             claimed,
+            &mut HashMap::new(),
         )
         .await;
 
@@ -499,7 +559,15 @@ mod tests {
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
-        submit_batch(&Arc::new(store.clone()), &bus, &api, &org_rx(None), claimed).await;
+        submit_batch(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(None),
+            claimed,
+            &mut HashMap::new(),
+        )
+        .await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
@@ -542,6 +610,7 @@ mod tests {
             &api,
             &org_rx(Some("org-1")),
             claimed,
+            &mut HashMap::new(),
         )
         .await;
 
@@ -554,5 +623,83 @@ mod tests {
         // The trace is rolled back to pending for a later retry.
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.registration_status, TraceRegistrationStatus::Pending);
+    }
+
+    #[tokio::test]
+    async fn backend_rejection_retries_then_fails_after_budget() {
+        // A backend that rejects a trace (returns it in `failed_traces`) is
+        // treated as transient: the trace is rolled back to `pending` and
+        // retried up to MAX_REGISTRATION_ATTEMPTS, then marked terminally
+        // `failed`. Terminally failing on the first rejection would permanently
+        // wedge the recording (the regression a staging burst-error exposed).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [],
+                "failed_traces": [{
+                    "trace_id": "trace-1",
+                    "error": "Unexpected error during registration"
+                }]
+            })))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
+        let bus = EventBus::new();
+        let api = client(&server);
+        let store_arc = Arc::new(store.clone());
+        let mut attempts = HashMap::new();
+
+        // Each of the first MAX-1 rejections rolls the trace back to pending so
+        // the next tick re-claims and retries it.
+        for attempt in 1..MAX_REGISTRATION_ATTEMPTS {
+            let claimed = store
+                .claim_traces_for_registration(BATCH_SIZE, 0.0)
+                .await
+                .unwrap();
+            assert_eq!(claimed.len(), 1, "the pending trace is re-claimable");
+            submit_batch(
+                &store_arc,
+                &bus,
+                &api,
+                &org_rx(Some("org-1")),
+                claimed,
+                &mut attempts,
+            )
+            .await;
+            let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+            assert_eq!(
+                trace.registration_status,
+                TraceRegistrationStatus::Pending,
+                "attempt {attempt} (< budget) must retry, not terminate"
+            );
+        }
+
+        // The final rejection exhausts the budget → terminal failure.
+        let claimed = store
+            .claim_traces_for_registration(BATCH_SIZE, 0.0)
+            .await
+            .unwrap();
+        submit_batch(
+            &store_arc,
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            claimed,
+            &mut attempts,
+        )
+        .await;
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.registration_status,
+            TraceRegistrationStatus::Failed,
+            "an exhausted retry budget terminates the trace"
+        );
+        assert_eq!(
+            trace.error_message.as_deref(),
+            Some("Unexpected error during registration")
+        );
     }
 }

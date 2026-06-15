@@ -19,7 +19,7 @@
 //! would need a per-platform shim (the macOS-equivalent stay-awake CLI);
 //! this feature is Linux-only.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::process::{Child, Command, Stdio};
 
 use tokio::sync::broadcast;
@@ -55,7 +55,7 @@ pub fn spawn_wakelock(
 ) -> WakelockHandle {
     let join = tokio::spawn(async move {
         let mut subscriber = bus.subscribe();
-        let mut active: HashSet<String> = HashSet::new();
+        let mut active = ActiveUploads::default();
         let mut inhibitor = InhibitorChild::new();
 
         loop {
@@ -67,31 +67,33 @@ pub fn spawn_wakelock(
                 }
                 event = subscriber.recv() => {
                     match event {
-                        Ok(DaemonEvent::ReadyForUpload { trace_id, .. }) => {
-                            if active.insert(trace_id) {
+                        Ok(DaemonEvent::ReadyForUpload { trace_id, recording_index }) => {
+                            if active.add(trace_id, recording_index) {
                                 inhibitor.ensure_held();
                             }
                         }
                         Ok(DaemonEvent::UploadComplete { trace_id, .. }) => {
-                            if active.remove(&trace_id) && active.is_empty() {
+                            if active.complete(&trace_id) {
                                 inhibitor.release();
                             }
                         }
                         Ok(DaemonEvent::RecordingCancelled { recording_index }) => {
-                            // Cancellation tears down every per-trace actor
-                            // we may have been counting; without an explicit
-                            // sweep here a cancelled recording's
-                            // `ReadyForUpload` events stay in `active` and
-                            // the inhibitor never releases. We don't know
-                            // the trace ids any more, so we conservatively
-                            // drop them all when the cancellation arrives.
+                            // Drop only the cancelled recording's in-flight
+                            // traces (whose actors were torn down, so their
+                            // `UploadComplete` will never arrive) — releasing
+                            // the inhibitor only if nothing else is uploading.
+                            // Clearing *all* traces here would drop the
+                            // inhibitor another recording's still-running
+                            // upload needs.
+                            let released = active.cancel_recording(recording_index);
                             tracing::debug!(
                                 recording_index,
-                                pending = active.len(),
-                                "wakelock dropping all pending traces on recording cancel"
+                                remaining = active.len(),
+                                "wakelock dropping cancelled recording's pending traces"
                             );
-                            active.clear();
-                            inhibitor.release();
+                            if released {
+                                inhibitor.release();
+                            }
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -117,6 +119,48 @@ pub fn spawn_wakelock(
         inhibitor.release();
     });
     WakelockHandle { join }
+}
+
+/// In-flight upload bookkeeping for the wakelock: each pending trace mapped to
+/// the recording it belongs to, so a recording cancel releases only *its* own
+/// traces rather than every recording's.
+#[derive(Default)]
+struct ActiveUploads {
+    /// `trace_id → recording_index` for every trace currently uploading.
+    by_trace: HashMap<String, i64>,
+}
+
+impl ActiveUploads {
+    /// Record a trace as in-flight. Returns `true` on the 0→non-empty
+    /// transition, i.e. when the caller should acquire the inhibitor.
+    fn add(&mut self, trace_id: String, recording_index: i64) -> bool {
+        let was_empty = self.by_trace.is_empty();
+        self.by_trace.insert(trace_id, recording_index);
+        was_empty
+    }
+
+    /// Remove a finished trace. Returns `true` when the last in-flight trace
+    /// completed, i.e. when the caller should release the inhibitor.
+    fn complete(&mut self, trace_id: &str) -> bool {
+        self.by_trace.remove(trace_id).is_some() && self.by_trace.is_empty()
+    }
+
+    /// Drop every trace belonging to `recording_index` (its actors are gone, so
+    /// their `UploadComplete` will never arrive). Returns `true` when nothing
+    /// remains in flight, i.e. when the caller should release the inhibitor.
+    fn cancel_recording(&mut self, recording_index: i64) -> bool {
+        self.by_trace.retain(|_, index| *index != recording_index);
+        self.by_trace.is_empty()
+    }
+
+    /// Forget every in-flight trace (used on a lagged-bus resync).
+    fn clear(&mut self) {
+        self.by_trace.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.by_trace.len()
+    }
 }
 
 /// Owns the optional `systemd-inhibit` child process. Each `ensure_held` is
@@ -224,5 +268,62 @@ mod tests {
         // task calls it once at startup before any traces are in flight.
         let mut inhibitor = InhibitorChild::new();
         inhibitor.release();
+    }
+
+    #[test]
+    fn add_signals_acquire_only_on_first_trace() {
+        let mut active = ActiveUploads::default();
+        assert!(
+            active.add("a".into(), 1),
+            "first trace acquires the inhibitor"
+        );
+        assert!(
+            !active.add("b".into(), 1),
+            "a later trace does not re-acquire"
+        );
+    }
+
+    #[test]
+    fn complete_signals_release_only_when_last_trace_finishes() {
+        let mut active = ActiveUploads::default();
+        active.add("a".into(), 1);
+        active.add("b".into(), 1);
+        assert!(!active.complete("a"), "one trace still in flight");
+        assert!(active.complete("b"), "last trace finishing releases");
+        // Completing an unknown trace never signals a release.
+        assert!(!active.complete("a"));
+    }
+
+    #[test]
+    fn cancel_releases_only_the_cancelled_recordings_traces() {
+        // M6 regression: cancelling recording A must NOT release the inhibitor
+        // while recording B still has an upload in flight.
+        let mut active = ActiveUploads::default();
+        active.add("a-trace".into(), 1);
+        active.add("b-trace".into(), 2);
+
+        let released = active.cancel_recording(1);
+        assert!(
+            !released,
+            "recording B is still uploading, so the inhibitor must stay held"
+        );
+        assert_eq!(active.len(), 1, "only A's trace was dropped");
+
+        // B finishing now releases.
+        assert!(
+            active.complete("b-trace"),
+            "B's completion releases the inhibitor"
+        );
+    }
+
+    #[test]
+    fn cancel_releases_when_it_empties_the_set() {
+        let mut active = ActiveUploads::default();
+        active.add("a-trace".into(), 1);
+        assert!(
+            active.cancel_recording(1),
+            "cancelling the only in-flight recording releases the inhibitor"
+        );
+        assert_eq!(active.len(), 0);
     }
 }

@@ -217,11 +217,26 @@ async fn flush_all(
             batch,
         ));
     }
+    // Deferred batches (org_id / cloud id not yet known) can't be sent and are
+    // dropped on shutdown. That's acceptable — the persisted trace rows are the
+    // source of truth and the progress reporter re-derives status — but count
+    // them so a surprising number is visible rather than silent.
+    let mut dropped = 0usize;
     while let Some(result) = tasks.join_next().await {
-        if let Err(panic_err) = result {
-            tracing::warn!(?panic_err, "flush_batch task panicked on shutdown");
+        match result {
+            Ok(Some(_deferred_batch)) => dropped += 1,
+            Ok(None) => {}
+            Err(panic_err) => {
+                tracing::warn!(?panic_err, "flush_batch task panicked on shutdown");
+            }
         }
-        // Deferred batches (missing org_id) are dropped on shutdown.
+    }
+    if dropped > 0 {
+        tracing::info!(
+            dropped,
+            "dropped deferred status batches on shutdown (no org/cloud id yet; \
+             persisted rows remain source-of-truth)"
+        );
     }
 }
 

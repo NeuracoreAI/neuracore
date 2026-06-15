@@ -37,10 +37,11 @@
 //! [`VIDEO_WRITER`] handle heals the same way: the parent's writer thread does
 //! not survive into a forked child, so the child re-spawns one on first use.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 
 use data_daemon_ipc::service_name::MAX_VIDEO_CHUNK_FRAMES;
 use data_daemon_ipc::Envelope;
@@ -264,11 +265,31 @@ static VIDEO_WRITER: LazyLock<Mutex<WriterRegistry>> = LazyLock::new(|| {
     })
 });
 
-/// Return this process's writer queue, spawning the writer thread on first use
-/// and re-spawning after a fork. On the (near-impossible) spawn failure we log
-/// and return a detached queue *without* recording it, so the next call retries
-/// rather than the caller blocking forever on a consumer-less queue.
+thread_local! {
+    /// Per-thread cache of the process video-writer queue. The hot `log_frame`
+    /// path hits this slot — a plain TLS load — instead of taking the global
+    /// `VIDEO_WRITER` mutex and a `getpid()` syscall on every frame. Cleared by
+    /// the fork child handler so a forked child rebuilds.
+    static WRITER_QUEUE: RefCell<Option<Arc<FrameQueue>>> = const { RefCell::new(None) };
+}
+
+/// Return this process's writer queue. Fast path: the thread-local cache (no
+/// lock, no syscall). Slow path: heal/spawn under the global lock and cache.
 pub(crate) fn writer_queue() -> Arc<FrameQueue> {
+    if let Some(queue) = WRITER_QUEUE.with(|cell| cell.borrow().clone()) {
+        return queue;
+    }
+    let queue = writer_queue_global();
+    WRITER_QUEUE.with(|cell| *cell.borrow_mut() = Some(queue.clone()));
+    queue
+}
+
+/// Heal/spawn the process writer thread under the global lock, returning its
+/// queue. On the (near-impossible) spawn failure we log and return a detached
+/// queue *without* recording it, so the next call retries rather than the caller
+/// blocking forever on a consumer-less queue.
+fn writer_queue_global() -> Arc<FrameQueue> {
+    ensure_writer_fork_handler_registered();
     let mut reg = VIDEO_WRITER.lock().unwrap_or_else(|p| p.into_inner());
     let pid = std::process::id();
     if reg.owner_pid == pid {
@@ -296,6 +317,33 @@ pub(crate) fn writer_queue() -> Arc<FrameQueue> {
         }
     }
     queue
+}
+
+/// Install a `pthread_atfork` child handler (once) that clears this thread's
+/// cached [`WRITER_QUEUE`]. The global `VIDEO_WRITER` self-heals via its
+/// `owner_pid`, but the per-thread cache would otherwise hand a forked child a
+/// stale queue whose writer thread didn't survive the fork.
+fn ensure_writer_fork_handler_registered() {
+    static REGISTER: Once = Once::new();
+    REGISTER.call_once(|| {
+        // SAFETY: standard libc fork-callback registration. `clear_queue_cache`
+        // is `extern "C"` and only drops a const-initialised TLS `Arc`.
+        let result = unsafe { libc::pthread_atfork(None, None, Some(clear_queue_cache)) };
+        if result != 0 {
+            tracing::warn!(
+                errno = result,
+                "pthread_atfork registration failed; video writer-queue cache relies on PID heal",
+            );
+        }
+    });
+}
+
+/// `pthread_atfork` child callback: drop the surviving thread's cached writer
+/// queue so the next [`writer_queue`] rebuilds through the PID-keyed heal path.
+extern "C" fn clear_queue_cache() {
+    WRITER_QUEUE.with(|cell| {
+        cell.borrow_mut().take();
+    });
 }
 
 /// The writer thread's run loop. Sole accessor of the in-progress chunk state
@@ -409,6 +457,18 @@ fn record_video_frame(
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Result<(), ProducerError> {
+    // Resolve the spool dir before touching the registry. The recordings root
+    // is validated at the `log_frame` boundary, so this only fails on a genuine
+    // misconfiguration — and on the writer thread we can't surface a `PyErr`, so
+    // log once and drop the frame rather than panic (which would kill the
+    // writer silently, stopping all further video).
+    let Some(stream_spool_dir) = spool_dir(robot_id, robot_instance, data_type, sensor_name) else {
+        tracing::error!(
+            sensor_name,
+            "recordings root unresolved on writer thread; dropping video frame"
+        );
+        return Ok(());
+    };
     let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
     let slot: VideoChunkSlot = with_video_chunks(|streams| {
         streams
@@ -417,7 +477,7 @@ fn record_video_frame(
                 Arc::new(Mutex::new(VideoChunkState {
                     width,
                     height,
-                    spool_dir: spool_dir(robot_id, robot_instance, data_type, sensor_name),
+                    spool_dir: stream_spool_dir,
                     nut_writer: None,
                     chunk_publish_ns: 0,
                     chunk_thread_id: 0,
@@ -431,84 +491,145 @@ fn record_video_frame(
             .clone()
     });
 
-    // The flush envelope is built under the per-stream lock but published
+    // The announcements are built under the per-stream lock but published
     // outside it — `publish()` blocks the calling thread when the daemon falls
     // behind, and holding the mutex across that block would stall this
     // camera's next frame.
-    let flush_envelope = {
+    let announcements = {
         let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-
-        let origin_us = *state.pts_origin_us.get_or_insert(timestamp_ns / 1_000);
-        let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
-        let mut pts = relative_us as u64;
-        if let Some(previous) = state.last_pts_us {
-            if pts <= previous {
-                pts = previous.saturating_add(1);
-            }
-        }
-
-        if state.nut_writer.is_none() {
-            // Stamp the chunk's identity at open: its `publish_timestamp_ns`
-            // (this instant — inside the active recording window) plus the
-            // opening thread's id. These name the spool file and ride the
-            // announcement so the daemon can both route and locate the chunk.
-            state.chunk_publish_ns = next_chunk_open_ns();
-            state.chunk_thread_id = current_thread_id();
-            let chunk_path = state.spool_dir.join(spool_chunk_filename(
-                state.chunk_publish_ns,
-                state.chunk_thread_id,
-            ));
-            let config = NutVideoConfig {
-                width: state.width,
-                height: state.height,
-                time_base_num: 1,
-                time_base_den: 1_000_000,
-            };
-            match NutWriter::create(&chunk_path, config) {
-                Ok(writer) => state.nut_writer = Some(writer),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        sensor_name,
-                        path = %chunk_path.display(),
-                        "failed to open NUT chunk; dropping frame"
-                    );
-                    return Ok(());
-                }
-            }
-        }
-
-        let bytes_after_write = {
-            let writer = state.nut_writer.as_mut().expect("opened immediately above");
-            if let Err(error) = writer.write_frame(pts, payload) {
-                tracing::warn!(
-                    %error,
-                    sensor_name,
-                    "failed to write video frame to NUT chunk; dropping frame"
-                );
-                return Ok(());
-            }
-            writer.bytes_written()
-        };
-        state.last_pts_us = Some(pts);
-        state.frame_count = state.frame_count.saturating_add(1);
-        state.frame_timestamps_ns.push(timestamp_ns);
-        state.frame_timestamps_s.push(timestamp_s);
-
-        if should_flush_chunk(bytes_after_write, state.frame_count) {
-            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, &mut state)
-        } else {
-            None
-        }
+        append_frame_locked(
+            &mut state,
+            robot_id,
+            robot_instance,
+            data_type,
+            sensor_name,
+            width,
+            height,
+            payload,
+            timestamp_ns,
+            timestamp_s,
+        )
     };
 
-    if let Some(envelope) = flush_envelope {
-        // Hand the sealed chunk's announcement to the publisher thread rather
+    for envelope in announcements {
+        // Hand each sealed chunk's announcement to the publisher thread rather
         // than publishing inline: this runs on the writer thread, which must
         // never block on an IPC publish (the stop/cancel barrier waits on it).
         let _ = publisher_tx().send(PublishMsg::Announce(envelope));
     }
     Ok(())
+}
+
+/// Append one frame to the locked per-stream chunk `state`, returning every
+/// chunk announcement produced this call: a geometry-change seal and/or a
+/// size/frame-cap flush (so a single call can yield two). Pure with respect to
+/// IPC — the caller publishes the returned envelopes outside the lock — which
+/// also makes the open/seal/roll logic unit-testable without a live daemon.
+/// Best-effort: a NUT open/write error logs and drops the frame.
+#[allow(clippy::too_many_arguments)]
+fn append_frame_locked(
+    state: &mut VideoChunkState,
+    robot_id: &str,
+    robot_instance: i64,
+    data_type: &str,
+    sensor_name: &str,
+    width: u32,
+    height: u32,
+    payload: &[u8],
+    timestamp_ns: i64,
+    timestamp_s: f64,
+) -> Vec<Envelope> {
+    let mut announcements: Vec<Envelope> = Vec::new();
+
+    // A mid-stream resolution change can't share a chunk with the prior
+    // geometry: the NUT header advertises the opening frame's size, so a
+    // differently-sized frame fails the writer's size check and is silently
+    // dropped (or, on a coincidental `w*h*3` match, corrupts the encode). Seal
+    // the open chunk (announced below) and reopen a fresh one with the new
+    // geometry rather than dropping every later frame.
+    if state.nut_writer.is_some() && (state.width != width || state.height != height) {
+        tracing::warn!(
+            sensor_name,
+            old_width = state.width,
+            old_height = state.height,
+            new_width = width,
+            new_height = height,
+            "video frame geometry changed mid-stream; sealing chunk and reopening"
+        );
+        if let Some(envelope) =
+            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
+        {
+            announcements.push(envelope);
+        }
+    }
+    state.width = width;
+    state.height = height;
+
+    let origin_us = *state.pts_origin_us.get_or_insert(timestamp_ns / 1_000);
+    let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
+    let mut pts = relative_us as u64;
+    if let Some(previous) = state.last_pts_us {
+        if pts <= previous {
+            pts = previous.saturating_add(1);
+        }
+    }
+
+    if state.nut_writer.is_none() {
+        // Stamp the chunk's identity at open: its `publish_timestamp_ns`
+        // (this instant — inside the active recording window) plus the
+        // opening thread's id. These name the spool file and ride the
+        // announcement so the daemon can both route and locate the chunk.
+        state.chunk_publish_ns = next_chunk_open_ns();
+        state.chunk_thread_id = current_thread_id();
+        let chunk_path = state.spool_dir.join(spool_chunk_filename(
+            state.chunk_publish_ns,
+            state.chunk_thread_id,
+        ));
+        let config = NutVideoConfig {
+            width: state.width,
+            height: state.height,
+            time_base_num: 1,
+            time_base_den: 1_000_000,
+        };
+        match NutWriter::create(&chunk_path, config) {
+            Ok(writer) => state.nut_writer = Some(writer),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    sensor_name,
+                    path = %chunk_path.display(),
+                    "failed to open NUT chunk; dropping frame"
+                );
+                return announcements;
+            }
+        }
+    }
+
+    let bytes_after_write = {
+        let writer = state.nut_writer.as_mut().expect("opened immediately above");
+        if let Err(error) = writer.write_frame(pts, payload) {
+            tracing::warn!(
+                %error,
+                sensor_name,
+                "failed to write video frame to NUT chunk; dropping frame"
+            );
+            return announcements;
+        }
+        writer.bytes_written()
+    };
+    state.last_pts_us = Some(pts);
+    state.frame_count = state.frame_count.saturating_add(1);
+    state.frame_timestamps_ns.push(timestamp_ns);
+    state.frame_timestamps_s.push(timestamp_s);
+
+    if should_flush_chunk(bytes_after_write, state.frame_count) {
+        if let Some(envelope) =
+            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
+        {
+            announcements.push(envelope);
+        }
+    }
+    announcements
 }
 
 /// Seal the in-progress chunk and return the announcement envelope. The caller
@@ -633,5 +754,76 @@ mod tests {
         assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES));
         // ...and a byte-heavy chunk is sealed before the frame cap.
         assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
+    }
+
+    /// Build a fresh, empty per-stream chunk state rooted at `spool_dir`.
+    fn fresh_state(spool_dir: PathBuf, width: u32, height: u32) -> VideoChunkState {
+        VideoChunkState {
+            width,
+            height,
+            spool_dir,
+            nut_writer: None,
+            chunk_publish_ns: 0,
+            chunk_thread_id: 0,
+            frame_count: 0,
+            pts_origin_us: None,
+            last_pts_us: None,
+            frame_timestamps_ns: Vec::new(),
+            frame_timestamps_s: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn geometry_change_seals_chunk_and_reopens_at_new_size() {
+        // M11 regression: a mid-stream resolution change must seal the open
+        // chunk (so its frames aren't lost) and reopen at the new geometry,
+        // rather than silently dropping every later, differently-sized frame.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+
+        // First frame at 2x2 (rgb24 = 2*2*3 bytes) just opens a chunk.
+        let frame_2x2 = vec![0u8; 2 * 2 * 3];
+        let opened = append_frame_locked(
+            &mut state, "r", 0, "RGB", "cam", 2, 2, &frame_2x2, 1_000, 0.0,
+        );
+        assert!(
+            opened.is_empty(),
+            "opening the first chunk emits no announcement"
+        );
+        assert!(state.nut_writer.is_some());
+        assert_eq!(state.frame_count, 1);
+
+        // Second frame at 4x4 must seal the 2x2 chunk and reopen at 4x4.
+        let frame_4x4 = vec![0u8; 4 * 4 * 3];
+        let sealed = append_frame_locked(
+            &mut state, "r", 0, "RGB", "cam", 4, 4, &frame_4x4, 2_000, 0.001,
+        );
+        assert_eq!(sealed.len(), 1, "the geometry change seals the prior chunk");
+        match &sealed[0] {
+            Envelope::VideoChunkReady {
+                width,
+                height,
+                frame_count,
+                ..
+            } => {
+                assert_eq!(
+                    (*width, *height),
+                    (2, 2),
+                    "the sealed chunk keeps the original geometry"
+                );
+                assert_eq!(*frame_count, 1, "it carries the single 2x2 frame");
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+        assert_eq!(
+            (state.width, state.height),
+            (4, 4),
+            "state adopts the new geometry"
+        );
+        assert!(
+            state.nut_writer.is_some(),
+            "a fresh chunk is reopened at the new geometry"
+        );
+        assert_eq!(state.frame_count, 1, "the new chunk holds the 4x4 frame");
     }
 }

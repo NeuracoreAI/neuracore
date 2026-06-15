@@ -108,13 +108,6 @@ def _publish_json_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
-    # Short-circuit before the Pydantic `model_dump` when live-data provision
-    # is globally disabled (e.g. `NEURACORE_PROVIDE_LIVE_DATA=no`, or after a
-    # runtime `disable()` on the manager). The downstream `JSONSource.publish`
-    # already returns early in that case, but it does so *after* receiving the
-    # serialized dict — and `model_dump(mode="json")` is the dominant cost at
-    # 1 kHz+ logging rates. Checking the manager first turns the whole call
-    # into a single attribute lookup when there is no consumer.
     if get_provide_live_data_enabled_manager().is_disabled():
         return
     StreamManagerOrchestrator().get_provider_manager(
@@ -183,6 +176,8 @@ def _publish_video_to_p2p(
     """
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
+    if get_provide_live_data_enabled_manager().is_disabled():
+        return
     StreamManagerOrchestrator().get_provider_manager(
         robot.id, robot.instance
     ).get_video_source(name, camera_type, f"{name}_{camera_type}").add_frame(

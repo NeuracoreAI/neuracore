@@ -6,12 +6,14 @@
 
 use crate::api::models::CloudFile;
 
-/// Filename of the lossy MP4 emitted for video traces.
-pub const LOSSY_VIDEO_NAME: &str = "lossy.mp4";
-/// Filename of the lossless MP4 emitted for video traces.
-pub const LOSSLESS_VIDEO_NAME: &str = "lossless.mp4";
-/// Filename of the JSON trace artefact (or sidecar metadata for video).
-pub const TRACE_FILE: &str = "trace.json";
+// The artefact filenames are wire-critical and owned by `storage::paths`, where
+// the on-disk writers stamp them. Re-export rather than redefine so there is a
+// single source of truth — two copies could silently drift and break the
+// upload↔disk filename contract.
+pub use crate::storage::paths::{
+    LOSSLESS_VIDEO_FILENAME as LOSSLESS_VIDEO_NAME, LOSSY_VIDEO_FILENAME as LOSSY_VIDEO_NAME,
+    TRACE_JSON_FILENAME as TRACE_FILE,
+};
 
 /// Wire-side classification used to build the cloud-file list. The set of
 /// data types that produce video is small and stable, so a hard-coded match
@@ -39,6 +41,19 @@ pub fn content_type_for(data_type: &str) -> ContentKind {
     }
 }
 
+/// The MIME content-type the daemon registers (and re-acquires session URIs)
+/// for an artefact, keyed off its filename suffix. The single source of truth
+/// for the mapping, shared by [`cloud_file_list`] and the uploader's session
+/// refresh so the two can't disagree. Only the `.mp4` video artefacts are
+/// `video/mp4`; everything else (the JSON trace / sidecar) is `application/json`.
+pub fn content_type_for_filename(filename: &str) -> &'static str {
+    if filename.ends_with(".mp4") {
+        "video/mp4"
+    } else {
+        "application/json"
+    }
+}
+
 /// Build the cloud-file list for a trace.
 ///
 /// `data_type` is the wire label. `data_type_name` is the producer-supplied
@@ -46,22 +61,19 @@ pub fn content_type_for(data_type: &str) -> ContentKind {
 /// so the path is well-formed.
 pub fn cloud_file_list(data_type: &str, data_type_name: Option<&str>) -> Vec<CloudFile> {
     let prefix = format!("{data_type}/{}", data_type_name.unwrap_or("_"));
-    let mut files = Vec::with_capacity(3);
+    let mut filenames = Vec::with_capacity(3);
     if matches!(content_type_for(data_type), ContentKind::Rgb) {
-        files.push(CloudFile {
-            filepath: format!("{prefix}/{LOSSY_VIDEO_NAME}"),
-            content_type: "video/mp4".to_string(),
-        });
-        files.push(CloudFile {
-            filepath: format!("{prefix}/{LOSSLESS_VIDEO_NAME}"),
-            content_type: "video/mp4".to_string(),
-        });
+        filenames.push(LOSSY_VIDEO_NAME);
+        filenames.push(LOSSLESS_VIDEO_NAME);
     }
-    files.push(CloudFile {
-        filepath: format!("{prefix}/{TRACE_FILE}"),
-        content_type: "application/json".to_string(),
-    });
-    files
+    filenames.push(TRACE_FILE);
+    filenames
+        .into_iter()
+        .map(|filename| CloudFile {
+            filepath: format!("{prefix}/{filename}"),
+            content_type: content_type_for_filename(filename).to_string(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

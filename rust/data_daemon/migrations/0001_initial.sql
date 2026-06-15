@@ -59,8 +59,19 @@ CREATE INDEX IF NOT EXISTS idx_recordings_source
     ON recordings(robot_id, robot_instance, recording_index);
 CREATE INDEX IF NOT EXISTS idx_recordings_start_notify
     ON recordings(recording_id, backend_start_notified_at);
-CREATE INDEX IF NOT EXISTS idx_traces_recording_index
-    ON traces(recording_index);
+-- `traces.recording_index` deliberately carries NO foreign key, and
+-- `PRAGMA foreign_keys` is left at SQLite's OFF default. The recording → trace
+-- cascade is hand-rolled in `SqliteStateStore::delete_recording_cascade` (two
+-- DELETEs in one transaction) as the single, deliberate integrity mechanism:
+-- it keeps the reaper's delete free of FK-ordering constraints and avoids
+-- enabling the pragma on every pooled connection. If that cascade is ever
+-- split or reordered, orphan trace rows become possible — keep both deletes in
+-- one transaction.
+--
+-- No `idx_traces_recording_index` on `traces(recording_index)`: the composite
+-- `idx_traces_recording_upload` below has `recording_index` as its leading
+-- column, so SQLite already uses it for plain `WHERE recording_index = ?`
+-- lookups. A separate single-column index would be pure write amplification.
 CREATE INDEX IF NOT EXISTS idx_traces_recording_upload
     ON traces(recording_index, upload_status);
 CREATE INDEX IF NOT EXISTS idx_traces_write_status

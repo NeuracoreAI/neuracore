@@ -18,7 +18,7 @@ use crate::cloud::{
     spawn_status_updater, spawn_uploader, OrgWatcherHandle, StatusUpdate,
 };
 use crate::connection::spawn_connection_monitor;
-use crate::state::{EventBus, SqliteStateStore};
+use crate::state::{EventBus, SqliteStateStore, TraceWriteHandle};
 
 /// Bundle of handles for the cloud coordinators.
 pub(crate) struct CloudHandles {
@@ -61,8 +61,10 @@ pub(crate) fn build_api_client(api_url: &str, config_path: &Path) -> Result<Arc<
     Ok(Arc::new(client))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_cloud_coordinators(
     state_store: SqliteStateStore,
+    trace_writer: TraceWriteHandle,
     event_bus: EventBus,
     client: Arc<ApiClient>,
     recordings_root: Arc<PathBuf>,
@@ -90,6 +92,7 @@ pub(crate) fn spawn_cloud_coordinators(
     );
     let uploader = spawn_uploader(
         state_store.clone(),
+        trace_writer,
         event_bus.clone(),
         Arc::clone(&client),
         Arc::clone(&recordings_root),

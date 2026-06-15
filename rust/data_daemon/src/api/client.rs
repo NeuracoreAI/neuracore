@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::{Client, Method, Request, Response, StatusCode};
@@ -263,7 +263,21 @@ impl ApiClient {
         recording_id: &str,
         end_time: f64,
     ) -> Result<(), ApiClientError> {
-        let path = format!("/org/{org_id}/recording/stop");
+        self.recording_lifecycle_post(org_id, "stop", recording_id, end_time)
+            .await
+    }
+
+    /// Shared body/send for the byte-identical `/recording/stop` and
+    /// `/recording/cancel` POSTs — they differ only in the trailing URL segment
+    /// (`action`) and both carry `{recording_id, end_time}`.
+    async fn recording_lifecycle_post(
+        &self,
+        org_id: &str,
+        action: &str,
+        recording_id: &str,
+        end_time: f64,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{action}");
         #[derive(Serialize)]
         struct Body<'a> {
             recording_id: &'a str,
@@ -294,20 +308,8 @@ impl ApiClient {
         recording_id: &str,
         end_time: f64,
     ) -> Result<(), ApiClientError> {
-        let path = format!("/org/{org_id}/recording/cancel");
-        #[derive(Serialize)]
-        struct Body<'a> {
-            recording_id: &'a str,
-            end_time: f64,
-        }
-        let body = Body {
-            recording_id,
-            end_time,
-        };
-        let _ = self
-            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
-            .await?;
-        Ok(())
+        self.recording_lifecycle_post(org_id, "cancel", recording_id, end_time)
+            .await
     }
 
     /// `POST /org/{org}/recording/start`.
@@ -403,7 +405,27 @@ impl ApiClient {
                 .headers(headers.clone());
             let builder = build(builder);
             let request: Request = builder.build()?;
-            let response = self.inner.execute(request).await?;
+            let response = match self.inner.execute(request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    // Transport-level failures — connection resets, DNS blips,
+                    // TLS errors, and request timeouts — are the common failure
+                    // on a flaky robot link and would otherwise bypass the
+                    // status-code retry below entirely. Retry them within the
+                    // same attempt budget; a non-transient error (or an
+                    // exhausted budget) propagates.
+                    if (error.is_timeout() || error.is_connect())
+                        && attempt + 1 < self.options.max_retries
+                    {
+                        attempt += 1;
+                        let backoff = self.backoff(attempt);
+                        tracing::warn!(%url, %error, attempt, "retrying after transport error");
+                        sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
 
             let status = response.status();
             if status == StatusCode::UNAUTHORIZED && !refreshed_auth {
@@ -458,8 +480,27 @@ impl ApiClient {
     fn backoff(&self, attempt: u32) -> Duration {
         let secs = 2u64.saturating_pow(attempt.saturating_sub(1));
         let capped = secs.min(self.options.max_backoff.as_secs().max(1));
-        Duration::from_secs(capped)
+        // Equal jitter: a fixed half plus a random half in `[0, base/2]`. Pure
+        // `2^n` backoff makes every client that backed off together retry on the
+        // same tick, stampeding the backend the instant it recovers; spreading
+        // each client's wake over a window decorrelates them. (Mean wait is also
+        // ≤ the old fixed value.)
+        let base_ms = capped.saturating_mul(1000);
+        let half = base_ms / 2;
+        let jitter = if half > 0 { jitter_below(half) } else { 0 };
+        Duration::from_millis(half + jitter)
     }
+}
+
+/// A pseudo-random value in `[0, upper]`, seeded from the wall clock's
+/// nanosecond component. Good enough to decorrelate retry delays across
+/// clients without pulling in a `rand` dependency for a non-cryptographic use.
+fn jitter_below(upper: u64) -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    (nanos % (u128::from(upper) + 1)) as u64
 }
 
 #[cfg(test)]

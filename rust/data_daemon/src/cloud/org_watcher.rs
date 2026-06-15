@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::cloud::read_org_id_from_config;
+use crate::cloud::{read_org_id_from_config, read_org_id_from_config_async};
 use crate::lifecycle::signals::ShutdownSignal;
 
 /// Shared read handle for the current `org_id`. Cheap to clone; read the
@@ -26,7 +26,8 @@ pub type OrgIdRx = tokio::sync::watch::Receiver<Option<String>>;
 /// user-driven, and the file is tiny, so a coarse poll that re-parses each
 /// tick is plenty — cheaper to reason about than mtime gating, which would
 /// miss two writes landing within the same mtime granularity (e.g. `login`
-/// immediately followed by `set_organization`).
+/// immediately followed by `set_organization`). The per-tick read is async
+/// (`tokio::fs`), so it never blocks a runtime worker.
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Handle for the config-file watcher task.
@@ -54,7 +55,8 @@ pub fn spawn_org_watcher(
     fallback: Option<String>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (OrgIdRx, OrgWatcherHandle) {
-    let initial = resolve(&config_path, &fallback);
+    // One-shot blocking seed is fine — it runs once before the task spawns.
+    let initial = read_org_id_from_config(&config_path).or_else(|| fallback.clone());
     let (org_tx, org_rx) = watch::channel(initial);
 
     let join = tokio::spawn(async move {
@@ -69,7 +71,9 @@ pub fn spawn_org_watcher(
                     break;
                 }
                 _ = ticker.tick() => {
-                    let current = resolve(&config_path, &fallback);
+                    let current = read_org_id_from_config_async(&config_path)
+                        .await
+                        .or_else(|| fallback.clone());
                     org_tx.send_if_modified(|existing| {
                         if *existing == current {
                             false
@@ -88,11 +92,6 @@ pub fn spawn_org_watcher(
     });
 
     (org_rx, OrgWatcherHandle { join })
-}
-
-/// Resolve the org from config, falling back to the daemon-profile override.
-fn resolve(config_path: &std::path::Path, fallback: &Option<String>) -> Option<String> {
-    read_org_id_from_config(config_path).or_else(|| fallback.clone())
 }
 
 #[cfg(test)]
@@ -130,6 +129,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("config.json");
         write_config(&path, None);
+
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let (org_rx, handle) = spawn_org_watcher(
+            path,
+            Some("profile-org".to_string()),
+            shutdown_tx.subscribe(),
+        );
+        assert_eq!(org_rx.borrow().as_deref(), Some("profile-org"));
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_config_falls_back_without_crashing() {
+        // M15: a present-but-corrupt config must not crash the watcher or wipe
+        // the fallback org — it logs and is treated as "no org in config".
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, b"{ this is not valid json ").unwrap();
 
         let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
         let (org_rx, handle) = spawn_org_watcher(

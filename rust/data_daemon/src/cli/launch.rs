@@ -135,11 +135,21 @@ fn run_daemon(
     // recover via flock + truncate even without this — but doing it eagerly
     // keeps the on-disk PID file consistent for everyone, not just the
     // launcher.
-    match reclaim_stale_pid_file(&runtime_env.pid_path).unwrap_or(PidReclaim::Absent) {
-        PidReclaim::RemovedStale(prev) => {
+    match reclaim_stale_pid_file(&runtime_env.pid_path) {
+        Ok(PidReclaim::RemovedStale(prev)) => {
             tracing::info!(previous_pid = ?prev, "removed stale pid file from prior unclean exit");
         }
-        PidReclaim::StillRunning(_) | PidReclaim::Absent => {}
+        Ok(PidReclaim::StillRunning(_) | PidReclaim::Absent) => {}
+        Err(error) => {
+            // Non-fatal: `PidFile::acquire` below still recovers via flock +
+            // truncate. But a failure here (e.g. a permissions problem on the
+            // pid dir) is worth surfacing rather than silently discarding.
+            tracing::warn!(
+                %error,
+                path = %runtime_env.pid_path.display(),
+                "failed to reclaim stale pid file at startup; relying on acquire's flock recovery"
+            );
+        }
     }
     let cleaned = cleanup_stale_ipc();
     if cleaned > 0 {
@@ -182,10 +192,24 @@ fn run_daemon(
         }
     }
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-    {
+    let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+    runtime_builder.enable_all();
+    // Honour the configured worker-thread count (`NCD_NUM_THREADS` / the YAML
+    // `num_threads` / `--num-threads`); a non-positive value falls back to
+    // tokio's default (one worker per core).
+    match config.num_threads {
+        Some(threads) if threads > 0 => {
+            runtime_builder.worker_threads(threads as usize);
+        }
+        Some(threads) => {
+            tracing::warn!(
+                num_threads = threads,
+                "ignoring non-positive num_threads; using default"
+            );
+        }
+        None => {}
+    }
+    let runtime = match runtime_builder.build() {
         Ok(runtime) => runtime,
         Err(error) => {
             let message = format!("failed to build tokio runtime: {error}");
@@ -289,7 +313,7 @@ fn run_daemon(
                 recordings_root.clone(),
                 storage_budget,
                 video_encoder,
-                trace_write_handle,
+                trace_write_handle.clone(),
                 json_write_handle,
             )
             .with_event_bus(event_bus.clone()),
@@ -337,6 +361,7 @@ fn run_daemon(
                 match build_api_client(&api_url, &config_path) {
                     Ok(api_client) => Some(spawn_cloud_coordinators(
                         state_store.clone(),
+                        trace_write_handle.clone(),
                         event_bus.clone(),
                         api_client,
                         Arc::new(recordings_root.clone()),
@@ -502,5 +527,4 @@ fn print_preflight(
     );
     println!("  api url:            {}", runtime_env.api_url);
     println!("  manage pid:         {}", runtime_env.manage_pid);
-    println!("  max spooled chunks: {}", runtime_env.max_spooled_chunks);
 }

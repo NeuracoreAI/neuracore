@@ -21,7 +21,10 @@ use async_trait::async_trait;
 use tokio::sync::broadcast;
 
 use crate::api::ApiClient;
-use crate::cloud::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
+use crate::cloud::notifier::{
+    notify_recording_lifecycle, spawn_notifier, LifecycleKind, NotifierCtx, NotifierHandle,
+    RecordingNotifier,
+};
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{
@@ -58,7 +61,14 @@ impl RecordingNotifier for StopNotifier {
     }
 
     async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
-        notify_backend(&ctx.store, &ctx.client, &ctx.org_rx, recording_index).await;
+        notify_recording_lifecycle(
+            LifecycleKind::Stop,
+            &ctx.store,
+            &ctx.client,
+            &ctx.org_rx,
+            recording_index,
+        )
+        .await;
     }
 }
 
@@ -71,128 +81,6 @@ pub fn spawn_recording_stop_notifier(
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> NotifierHandle {
     spawn_notifier(StopNotifier, store, bus, client, org_rx, shutdown_rx)
-}
-
-async fn notify_backend(
-    store: &Arc<SqliteStateStore>,
-    client: &Arc<ApiClient>,
-    org_rx: &OrgIdRx,
-    recording_index: i64,
-) {
-    let row = match store.get_recording(recording_index).await {
-        Ok(Some(row)) => row,
-        Ok(None) => {
-            tracing::warn!(
-                recording_index,
-                "recording row missing on stop; skipping backend notify",
-            );
-            return;
-        }
-        Err(error) => {
-            tracing::warn!(
-                %error,
-                recording_index,
-                "failed to look up recording for stop notify",
-            );
-            return;
-        }
-    };
-    if row.backend_stop_notified_at.is_some() {
-        // Another path (sweep or earlier event) already notified.
-        return;
-    }
-    if row.stopped_at.is_none() {
-        // Not stopped yet. Reached here via `RecordingCloudIdAssigned` for a
-        // still-running recording; the stop will arrive on its own event.
-        return;
-    }
-    let Some(recording_id) = row.recording_id else {
-        // The `/start` was never notified, so there is nothing to stop
-        // server-side. The stop sweep will re-fire once the start notifier
-        // fills in the cloud id.
-        tracing::debug!(
-            recording_index,
-            "recording has no cloud id at stop time; deferring backend notify",
-        );
-        return;
-    };
-    let Some(org_id) = org_rx.borrow().clone() else {
-        // No current org configured yet. Without it we can't address the POST;
-        // the next sweep retries once the config watcher has a current org.
-        tracing::warn!(
-            recording_index,
-            recording_id,
-            "no current org_id configured at stop time; skipping backend notify",
-        );
-        return;
-    };
-    let Some(stop_timestamp_ns) = row.stop_timestamp_ns else {
-        tracing::warn!(
-            recording_index,
-            recording_id,
-            "recording has no stop_timestamp_ns at stop time; skipping backend notify",
-        );
-        return;
-    };
-    // The producer captured this as the recording window's real upper bound;
-    // the backend requires it (seconds) and derives the reported duration from
-    // it, so a late notify (e.g. after reconnecting) still reports correctly.
-    let end_time = stop_timestamp_ns as f64 / 1_000_000_000.0;
-
-    match client
-        .recording_stop(&org_id, &recording_id, end_time)
-        .await
-    {
-        Ok(()) => {
-            if let Err(error) = store.mark_recording_stop_notified(recording_index).await {
-                tracing::warn!(
-                    %error,
-                    recording_index,
-                    recording_id,
-                    "POST succeeded but persisting backend_stop_notified_at failed; \
-                     the next sweep will re-post (the backend POST is idempotent)",
-                );
-            } else {
-                tracing::info!(
-                    recording_index,
-                    recording_id,
-                    "backend notified of recording stop",
-                );
-            }
-        }
-        Err(error) if error.is_not_found() => {
-            // 404 means the backend no longer has this recording open — the
-            // start-notifier's `resolve_prior_pending` already closed it when
-            // the next recording for this source opened. That is the
-            // post-condition we wanted, so record it as notified rather than
-            // re-sweeping forever.
-            if let Err(error) = store.mark_recording_stop_notified(recording_index).await {
-                tracing::warn!(
-                    %error,
-                    recording_index,
-                    recording_id,
-                    "persisting backend_stop_notified_at after a 404 failed; will re-sweep",
-                );
-            } else {
-                tracing::debug!(
-                    recording_index,
-                    recording_id,
-                    "recording already closed on backend (404); treated as stop-notified",
-                );
-            }
-        }
-        Err(error) => {
-            // The producer-side iceoryx2 publish has already succeeded by
-            // the time we get here; logging is the only available recourse
-            // until the next sweep retries.
-            tracing::warn!(
-                %error,
-                recording_index,
-                recording_id,
-                "failed to notify backend of recording stop",
-            );
-        }
-    }
 }
 
 #[cfg(test)]

@@ -17,9 +17,6 @@ const YES_VALUES: [&str; 4] = ["1", "true", "yes", "y"];
 /// Default backend API URL, from `const.py::API_URL`.
 const DEFAULT_API_URL: &str = "https://api.neuracore.app/api";
 
-/// Default spooled-chunk cap, from `data_bridge.py::DEFAULT_MAX_SPOOLED_CHUNKS`.
-const DEFAULT_MAX_SPOOLED_CHUNKS: u32 = 128;
-
 /// Parse a byte quantity from an integer-or-unit-suffixed string.
 ///
 /// Mirrors `config_manager/helpers.py::parse_bytes`. Supported units
@@ -87,10 +84,13 @@ where
     }
 }
 
-/// Read an environment variable, returning `None` when it is unset or holds
-/// non-UTF-8 bytes. An empty value is returned as `Some("")`.
+/// Read an environment variable, returning `None` when it is unset, holds
+/// non-UTF-8 bytes, **or is empty**. Treating empty as unset is the safe
+/// default: a blank `NCD_API_KEY` / `NCD_CURRENT_ORG_ID` (common when a shell
+/// exports an unset variable as the empty string) must not clobber a profile's
+/// real value — it should fall through to the configured one.
 fn env_var(name: &str) -> Option<String> {
-    std::env::var(name).ok()
+    std::env::var(name).ok().filter(|value| !value.is_empty())
 }
 
 /// Whether an environment value should be treated as truthy.
@@ -195,8 +195,6 @@ pub struct RuntimeEnv {
     pub debug: bool,
     /// Backend API base URL (`NEURACORE_API_URL`).
     pub api_url: String,
-    /// Spooled-chunk cap (`NCD_MAX_SPOOLED_CHUNKS`).
-    pub max_spooled_chunks: u32,
 }
 
 impl RuntimeEnv {
@@ -216,9 +214,6 @@ impl RuntimeEnv {
             api_url: env_var("NEURACORE_API_URL")
                 .filter(|value| !value.is_empty())
                 .unwrap_or_else(|| DEFAULT_API_URL.to_string()),
-            max_spooled_chunks: env_var("NCD_MAX_SPOOLED_CHUNKS")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(DEFAULT_MAX_SPOOLED_CHUNKS),
         }
     }
 }
