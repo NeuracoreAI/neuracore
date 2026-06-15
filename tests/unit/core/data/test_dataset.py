@@ -1,6 +1,7 @@
 """Tests for Dataset class."""
 
 import copy
+import pickle
 import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -1236,3 +1237,48 @@ class TestDatasetConcurrentPagination:
 
         num_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
         assert request_count == 10 * num_pages, "pages fetched more than once"
+
+
+class TestDatasetCopyAndPickle:
+    """Regression tests for copy/pickle support around the page lock.
+
+    Dataset holds a threading.Lock (_page_lock) for thread-safe page
+    fetching. train.py deep-copies the dataset for batch-size validation and
+    autotuning, and spawn subprocesses pickle it. A raw lock cannot be
+    deep-copied or pickled, so it must be dropped and recreated on copy/restore.
+    """
+
+    def test_dataset_deepcopy_recreates_page_lock(self, dataset_dict):
+        """copy.deepcopy must not choke on the page lock."""
+        dataset = Dataset(**dataset_dict)
+
+        clone = copy.deepcopy(dataset)
+
+        # Each instance gets its own usable lock, never a shared/dead one.
+        assert clone._page_lock is not dataset._page_lock
+        with clone._page_lock:
+            pass
+
+    def test_dataset_pickle_recreates_page_lock(self, dataset_dict):
+        """Pickling must work so the autotuner can spawn subprocesses."""
+        dataset = Dataset(**dataset_dict)
+
+        restored = pickle.loads(pickle.dumps(dataset))
+
+        assert restored._page_lock is not None
+        with restored._page_lock:
+            pass
+
+    def test_getstate_snapshots_cache_into_private_list(self, dataset_dict):
+        """__getstate__ drops the lock and copies the cache into a private list.
+
+        The private list is what makes a copy safe against a concurrent page
+        fetch extending the live cache mid-copy.
+        """
+        dataset = Dataset(**dataset_dict)
+
+        state = dataset.__getstate__()
+
+        assert state["_page_lock"] is None
+        assert state["_recordings_cache"] is not dataset._recordings_cache
+        assert state["_recordings_cache"] == dataset._recordings_cache
