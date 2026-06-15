@@ -945,7 +945,8 @@ class NeuracoreDatasetImporter(ABC):
 
         if self.random_sample is not None:
             n = min(self.random_sample, len(items))
-            items = random.sample(items, n)
+            start = random.randint(0, max(0, len(items) - n))
+            items = items[start : start + n]
             self.logger.info(
                 "Sampling %s random episode(s) from %s episodes.",
                 n,
