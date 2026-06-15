@@ -29,9 +29,9 @@ from scipy.spatial.transform import Rotation as R
 import neuracore as nc
 from neuracore.importer.core.robot_utils import RobotUtils
 
-EXPERT_DEMOS_ZIP = Path.home() / "Downloads" / "osfstorage-archive.zip"
+EXPERT_DEMOS_ZIP = Path.home() / "Downloads" / "expert_demos.zip"
 EXTRACT_DIR = Path("/tmp/nyu_rot_extract")
-URDF_PATH = Path.home() / "xarm_ros2" / "xarm7.urdf"
+URDF_PATH = Path.home() / "Datasets/URDF/xarm/xarm7_with_gripper.urdf"
 FPS = 5
 ACTION_SCALE_POS = 0.25  # stored_action * this = delta EE pos in decimeters
 ACTION_SCALE_ROT = 40.0  # stored_action[3] * this = delta joint7 in degrees
@@ -122,18 +122,29 @@ def build_ee_pose(pos_dm: np.ndarray, quat_xyzw: np.ndarray) -> np.ndarray:
 
 def extract_data() -> Path:
     EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
-    demos_zip = EXTRACT_DIR / "expert_demos.zip"
-    if not demos_zip.exists():
-        print("Extracting expert_demos.zip from archive...")
-        with zipfile.ZipFile(EXPERT_DEMOS_ZIP) as zf:
-            zf.extract("expert_demos.zip", EXTRACT_DIR)
     robotgym_dir = EXTRACT_DIR / "expert_demos" / "robotgym"
-    if not robotgym_dir.exists():
-        print("Extracting robotgym pkl files...")
-        with zipfile.ZipFile(demos_zip) as zf:
-            for name in zf.namelist():
+    if robotgym_dir.exists():
+        return robotgym_dir
+
+    with zipfile.ZipFile(EXPERT_DEMOS_ZIP) as zf:
+        names = zf.namelist()
+        if "expert_demos.zip" in names:
+            print("Extracting expert_demos.zip from archive...")
+            zf.extract("expert_demos.zip", EXTRACT_DIR)
+            with zipfile.ZipFile(EXTRACT_DIR / "expert_demos.zip") as inner:
+                print("Extracting robotgym pkl files...")
+                for name in inner.namelist():
+                    if name.startswith("expert_demos/robotgym/"):
+                        inner.extract(name, EXTRACT_DIR)
+        elif any(name.startswith("expert_demos/robotgym/") for name in names):
+            print("Extracting robotgym pkl files...")
+            for name in names:
                 if name.startswith("expert_demos/robotgym/"):
                     zf.extract(name, EXTRACT_DIR)
+        else:
+            raise FileNotFoundError(
+                f"Could not find expert_demos/robotgym/ in {EXPERT_DEMOS_ZIP}"
+            )
     return robotgym_dir
 
 
@@ -238,18 +249,21 @@ def main():
         nc.start_recording()
         t = time.time()
         dt = 1.0 / FPS
-        prev_ik = None
-        prev_target_ik = None
+        prev_ik: dict[str, float] | None = None
+        prev_target_ik: dict[str, float] | None = None
 
         for step in range(n_steps):
             pos_m = states[step, :3] / 10.0  # decimeters → meters
+            joint_pos: dict[str, float] | None = None
 
-            # IK for current EE pose
+            # IK for current EE pose. Keep prev_ik as a {joint_name: angle} dict:
+            # a bare list of arm joint values is not a valid q0 (model.nq includes
+            # gripper joints), so IK would restart from the limit midpoint each frame.
             try:
                 joint_pos = robot_utils.end_effector_to_joint_positions(
                     build_ee_pose(pos_m, quat), EE_FRAME, prev_ik
                 )
-                prev_ik = list(joint_pos.values())
+                prev_ik = joint_pos
                 arm_joints = {
                     k: v for k, v in joint_pos.items() if k not in GRIPPER_JOINT_NAMES
                 }
@@ -258,13 +272,15 @@ def main():
             except ValueError:
                 print(f"    IK failed at step {step}, skipping joint positions")
 
-            # IK for target EE pose
+            # IK for target EE pose. Seed from the current solution when available
+            # since the target pose is a small delta from the current pose.
             target_pos_m = pos_m + actions[step, :3] * ACTION_SCALE_POS / 10.0
             try:
+                target_seed = joint_pos if joint_pos is not None else prev_target_ik
                 target_joint_pos = robot_utils.end_effector_to_joint_positions(
-                    build_ee_pose(target_pos_m, quat), EE_FRAME, prev_target_ik
+                    build_ee_pose(target_pos_m, quat), EE_FRAME, target_seed
                 )
-                prev_target_ik = list(target_joint_pos.values())
+                prev_target_ik = target_joint_pos
                 arm_target_joints = {
                     k: v
                     for k, v in target_joint_pos.items()
@@ -298,13 +314,17 @@ def main():
                 nc.log_joint_positions({"joint7": j7_rad}, timestamp=t)
                 nc.log_visual_joint_positions({"joint7": j7_rad}, timestamp=t)
                 nc.log_joint_target_positions({"joint7": target_j7}, timestamp=t)
+                if prev_ik is not None:
+                    prev_ik = {**prev_ik, "joint7": j7_rad}
+                if prev_target_ik is not None:
+                    prev_target_ik = {**prev_target_ik, "joint7": target_j7}
 
             nc.log_rgb("image", np.transpose(images[step], (1, 2, 0)), timestamp=t)
             nc.log_language("instruction", meta.instruction, timestamp=t)
 
             t += dt
 
-        nc.stop_recording()
+        nc.stop_recording(wait=True)
         print("  Done")
 
     print("All episodes imported.")

@@ -69,18 +69,27 @@ DEFAULTS = {
 def load_episodes() -> dict[str, np.ndarray]:
     """Load images for all episodes from pkl files."""
     EXTRACT_DIR.mkdir(parents=True, exist_ok=True)
-    demos_zip = EXTRACT_DIR / "expert_demos.zip"
-    if not demos_zip.exists():
-        print("Extracting expert_demos.zip...")
-        with zipfile.ZipFile(EXPERT_DEMOS_ZIP) as zf:
-            zf.extract("expert_demos.zip", EXTRACT_DIR)
     robotgym_dir = EXTRACT_DIR / "expert_demos" / "robotgym"
     if not robotgym_dir.exists():
-        print("Extracting robotgym pkl files...")
-        with zipfile.ZipFile(demos_zip) as zf:
-            for name in zf.namelist():
-                if name.startswith("expert_demos/robotgym/"):
-                    zf.extract(name, EXTRACT_DIR)
+        with zipfile.ZipFile(EXPERT_DEMOS_ZIP) as zf:
+            names = zf.namelist()
+            if "expert_demos.zip" in names:
+                print("Extracting expert_demos.zip...")
+                zf.extract("expert_demos.zip", EXTRACT_DIR)
+                with zipfile.ZipFile(EXTRACT_DIR / "expert_demos.zip") as inner:
+                    print("Extracting robotgym pkl files...")
+                    for name in inner.namelist():
+                        if name.startswith("expert_demos/robotgym/"):
+                            inner.extract(name, EXTRACT_DIR)
+            elif any(name.startswith("expert_demos/robotgym/") for name in names):
+                print("Extracting robotgym pkl files...")
+                for name in names:
+                    if name.startswith("expert_demos/robotgym/"):
+                        zf.extract(name, EXTRACT_DIR)
+            else:
+                raise FileNotFoundError(
+                    f"Could not find expert_demos/robotgym/ in {EXPERT_DEMOS_ZIP}"
+                )
 
     episodes = {}
     for task_dir in sorted(robotgym_dir.iterdir()):
