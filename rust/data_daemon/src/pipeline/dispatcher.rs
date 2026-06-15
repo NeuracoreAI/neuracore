@@ -214,6 +214,7 @@ enum HeldPayload {
         payload: Vec<u8>,
     },
     Batch {
+        data_type: String,
         timestamp_ns: i64,
         timestamp_s: Option<f64>,
         items: Vec<BatchedDataItem>,
@@ -377,6 +378,7 @@ impl Dispatcher {
             Envelope::BatchedData {
                 robot_id,
                 robot_instance,
+                data_type,
                 publish_timestamp_ns,
                 timestamp_ns,
                 timestamp_s,
@@ -389,6 +391,7 @@ impl Dispatcher {
                     release_at: recv_at + self.holdback,
                     publish_timestamp_ns,
                     payload: HeldPayload::Batch {
+                        data_type,
                         timestamp_ns,
                         timestamp_s,
                         items,
@@ -715,6 +718,7 @@ impl Dispatcher {
                 .await;
             }
             HeldPayload::Batch {
+                data_type,
                 timestamp_ns,
                 timestamp_s,
                 items,
@@ -723,7 +727,7 @@ impl Dispatcher {
                     self.route_data(
                         &held.source,
                         publish_ts,
-                        item.data_type,
+                        data_type.clone(),
                         item.sensor_name,
                         timestamp_ns,
                         timestamp_s,

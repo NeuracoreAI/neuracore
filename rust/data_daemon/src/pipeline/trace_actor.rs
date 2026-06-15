@@ -435,10 +435,14 @@ impl ActorState {
         }
     }
 
-    /// Ask the storage budget whether `payload_len` bytes may be written
-    /// against the currently open writer.
+    /// Reserve `payload_len` bytes against the storage budget before the frame
+    /// is written. Uses `reserve` (not `check`) so the in-tree usage estimate is
+    /// actually incremented on the write path — otherwise the cap only ever
+    /// moved via the periodic rescan and `release`, letting the estimate drift
+    /// low between scans (see `StorageBudget` docs). `reserve` only increments
+    /// when the result is `Available`, so a refused frame doesn't over-count.
     fn budget_allows_frame(&mut self, budget: &Arc<StorageBudget>, payload_len: usize) -> bool {
-        match budget.check(payload_len as u64) {
+        match budget.reserve(payload_len as u64) {
             Ok(check) if check.is_available() => true,
             Ok(check) => {
                 self.dropped_over_budget = self.dropped_over_budget.saturating_add(1);
@@ -476,9 +480,7 @@ impl ActorState {
         }
 
         let trace_dir = self.trace_directory(context);
-        context
-            .json_writer
-            .open(&self.identity.trace_id, trace_dir);
+        context.json_writer.open(&self.identity.trace_id, trace_dir);
         self.bytes_on_disk = 0;
         self.writer = TraceWriter::Json;
         true
@@ -812,9 +814,7 @@ impl ActorState {
                 context.json_writer.open(&self.identity.trace_id, trace_dir);
                 Ok(context.json_writer.finish(&self.identity.trace_id).await?)
             }
-            TraceWriter::Json => {
-                Ok(context.json_writer.finish(&self.identity.trace_id).await?)
-            }
+            TraceWriter::Json => Ok(context.json_writer.finish(&self.identity.trace_id).await?),
             TraceWriter::Video {
                 width,
                 height,

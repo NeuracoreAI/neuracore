@@ -214,6 +214,23 @@ pub trait StateStore: Send + Sync {
     /// traces have all finished uploading. Returned in `created_at` order.
     async fn list_recordings(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
+    /// List the `trace_id`s of every trace currently ready to upload
+    /// (`upload_status` is `queued` or `retrying`).
+    ///
+    /// Server-side filtered via `idx_traces_upload_status` so the uploader's
+    /// post-completion rescan does not walk every recording's full trace set
+    /// (an O(recordings × traces) N+1 scan after each completed upload).
+    async fn traces_ready_for_upload(&self) -> Result<Vec<String>, StateStoreError>;
+
+    /// List recordings the progress reporter still has work for: stopped, not
+    /// cancelled, with a cloud id, and not yet fully reported (either the
+    /// progress report or the expected-trace-count PUT is still outstanding).
+    ///
+    /// Server-side filtered so fully-settled recordings drop out of the
+    /// reporter's periodic sweep instead of being scanned (and their traces
+    /// re-fetched) forever. Returned in `created_at` order.
+    async fn recordings_pending_progress(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
     /// Resolve the cloud `recording_id` for the recording identified by
     /// `(robot_id, robot_instance, start_timestamp_ns)`.
     ///
@@ -314,10 +331,7 @@ pub trait StateStore: Send + Sync {
     /// Called by the recording reaper once a recording is fully settled (every
     /// trace uploaded and the backend notified), after its on-disk artefacts
     /// have been removed. Returns the number of trace rows deleted.
-    async fn delete_recording_cascade(
-        &self,
-        recording_index: i64,
-    ) -> Result<u64, StateStoreError>;
+    async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError>;
 }
 
 /// Optional fields to update on a trace row.
@@ -969,6 +983,32 @@ impl StateStore for SqliteStateStore {
             .map_err(Into::into)
     }
 
+    async fn traces_ready_for_upload(&self) -> Result<Vec<String>, StateStoreError> {
+        let ids = sqlx::query_scalar::<_, String>(
+            "SELECT trace_id FROM traces WHERE upload_status IN ('queued', 'retrying')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(ids)
+    }
+
+    async fn recordings_pending_progress(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
+        let rows = sqlx::query(
+            "SELECT * FROM recordings \
+              WHERE stopped_at IS NOT NULL \
+                AND cancelled_at IS NULL \
+                AND recording_id IS NOT NULL \
+                AND (progress_reported != 'reported' OR expected_trace_count_reported = 0) \
+           ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(RecordingRow::from_row)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     async fn resolve_recording_id_for_marker(
         &self,
         robot_id: &str,
@@ -1315,10 +1355,7 @@ impl StateStore for SqliteStateStore {
         Ok((record, write_result.rows_affected()))
     }
 
-    async fn delete_recording_cascade(
-        &self,
-        recording_index: i64,
-    ) -> Result<u64, StateStoreError> {
+    async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError> {
         let _guard = self.write_guard.lock().await;
         let mut tx = self.pool.begin().await?;
         let traces_deleted = sqlx::query("DELETE FROM traces WHERE recording_index = ?1")

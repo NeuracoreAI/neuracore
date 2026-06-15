@@ -17,6 +17,67 @@ use iceoryx2::prelude::ipc;
 use crate::lifecycle::pidfile::{pid_is_running, read_pid_from_file};
 use crate::state::{SqliteStateStore, StateStore, StateStoreError, TraceWriteStatus};
 
+/// `last_updated` age (in seconds) below which a `writing` /
+/// `pending_metadata` / `initializing` trace row is left alone by the
+/// startup-time sweep. Comfortably larger than the trace_actor's debounce
+/// flush interval, so a row a current daemon has just begun writing isn't
+/// caught.
+const STALE_WRITE_THRESHOLD_SECS: i64 = 30;
+
+/// Run the startup recovery sweeps over the state store.
+///
+/// Re-arms rows stuck in transient pipeline states, burns trace rows left
+/// mid-write, and purges partial recordings left behind by a previous daemon
+/// run. Each sweep logs its outcome and is best-effort: a failure is logged
+/// and startup continues.
+pub async fn run_startup_sweeps(store: &SqliteStateStore, recordings_root: &Path) {
+    // Re-arm rows stuck in transient `registering` / `uploading` states
+    // from a previous unclean exit — the claim/drain queries that drive
+    // the coordinators only scan terminal-or-pending rows, so without
+    // this sweep a SIGKILL mid-upload would leak traces.
+    match store.reset_stale_pipeline_states().await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "re-armed stale pipeline rows from prior run"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to reset stale pipeline states (continuing)")
+        }
+    }
+    // Burn trace rows the previous daemon left mid-write.
+    // Those rows can never reach `written` (the actor that owned them
+    // is gone) and would otherwise pin their recording in the
+    // "all traces written" gate the progress reporter waits on. The
+    // 30 s threshold gives a future daemon launched on top of an
+    // earlier orderly-shutdown's tail a chance to recover; in
+    // practice every row caught by this sweep is hours stale.
+    match store
+        .mark_stale_writing_traces_failed(STALE_WRITE_THRESHOLD_SECS)
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(count, "marked stale writing traces as failed"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to mark stale writing traces failed (continuing)")
+        }
+    }
+    // Purge any recording the prior daemon left mid-write. Producer-side
+    // chunk spooling means we may have stranded NUT chunks, half-encoded
+    // segments, and partial concat outputs on disk; mid-encode resume is
+    // intentionally out of scope so anything not in the `written`
+    // terminal state at startup is removed and the recording marked
+    // cancelled.
+    match sweep_partial_recordings(store, recordings_root).await {
+        Ok(report) if report == Default::default() => {}
+        Ok(report) => tracing::info!(
+            purged = report.recordings_purged,
+            preserved = report.recordings_preserved,
+            "partial-recording sweep completed",
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "partial-recording sweep failed (continuing)")
+        }
+    }
+}
+
 /// Outcome of [`reclaim_stale_pid_file`], surfaced for logging.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PidReclaim {

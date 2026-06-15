@@ -436,6 +436,7 @@ dependencies = [
 name = "data_daemon_ipc"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "postcard",
  "serde",
  "thiserror 1.0.69",
@@ -447,7 +448,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "data_daemon_ipc",
- "dirs",
  "iceoryx2",
  "libc",
  "pyo3",

@@ -14,9 +14,6 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 data_daemon_ipc = { path = "../data_daemon_ipc" }
-# Mirrors the daemon's recordings-root resolution so the producer-spooled NUT
-# chunk paths match what the daemon expects to encode.
-dirs.workspace = true
 iceoryx2.workspace = true
 libc.workspace = true
 pyo3.workspace = true
@@ -37,4 +34,4 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3"

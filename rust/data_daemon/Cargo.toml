@@ -39,6 +39,6 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
+tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
-wiremock.workspace = true
+wiremock = "0.6"

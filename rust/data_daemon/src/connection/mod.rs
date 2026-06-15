@@ -1,8 +1,8 @@
 //! Connection-state monitoring for the daemon.
 //!
 //! Runs a 10 s `HEAD /status/health` tick and publishes
-//! [`DaemonEvent::ConnectionState`] transitions to the broadcast bus so the
-//! upload coordinator can pause / resume on persistent network failures.
+//! [`DaemonEvent::ConnectionStateChanged`] transitions to the broadcast bus so
+//! the upload coordinator can pause / resume on persistent network failures.
 
 pub mod monitor;
 pub mod wakelock;

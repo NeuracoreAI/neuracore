@@ -17,114 +17,69 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
+use crate::cloud::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
+use crate::state::{
+    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+};
 
-/// Handle returned by [`spawn_recording_start_notifier`].
-pub struct RecordingStartNotifierHandle {
-    join: JoinHandle<()>,
-}
+/// Notifier that POSTs `/recording/start` and persists the cloud `recording_id`
+/// the backend mints. The cloud id is always minted here — every downstream
+/// coordinator waits on it — so an offline recording stays pending until the
+/// daemon is online and the start POST lands. Before opening the new recording
+/// it closes any earlier still-pending recording for the same source (see
+/// [`resolve_prior_pending`]).
+struct StartNotifier;
 
-impl RecordingStartNotifierHandle {
-    /// Wait for the notifier task to exit.
-    pub async fn join(self) {
-        if let Err(error) = self.join.await {
-            tracing::warn!(?error, "recording-start notifier join failed");
+#[async_trait]
+impl RecordingNotifier for StartNotifier {
+    fn label(&self) -> &'static str {
+        "recording-start"
+    }
+
+    fn triggered_by(&self, event: &DaemonEvent) -> Option<i64> {
+        match event {
+            DaemonEvent::RecordingStarted { recording_index } => Some(*recording_index),
+            _ => None,
         }
+    }
+
+    async fn pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        store.recordings_pending_start_notify().await
+    }
+
+    async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
+        notify_backend(
+            &ctx.store,
+            &ctx.client,
+            &ctx.bus,
+            &ctx.org_rx,
+            recording_index,
+        )
+        .await;
     }
 }
 
 /// Spawn the recording-start notifier on the current Tokio runtime.
-///
-/// The task first sweeps any recordings opened while the daemon was offline
-/// (rows whose `/recording/start` POST has not yet succeeded), then drops into
-/// the event-bus loop and POSTs whenever a fresh `RecordingStarted` event
-/// fires.
 pub fn spawn_recording_start_notifier(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
-    mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
-) -> RecordingStartNotifierHandle {
-    let mut subscriber = bus.subscribe();
-    let store = Arc::new(store);
-    let join = tokio::spawn(async move {
-        // Recover any opened-while-offline recordings before serving live
-        // events. Run inside a `select!` against the shutdown signal so a
-        // long sweep cannot hold the daemon shutting down.
-        tokio::select! {
-            biased;
-            signal = shutdown_rx.recv() => {
-                tracing::debug!(?signal, "recording-start notifier shutting down before sweep");
-                return;
-            }
-            _ = sweep_pending(&store, &client, &bus, &org_rx) => {}
-        }
-        loop {
-            tokio::select! {
-                biased;
-                signal = shutdown_rx.recv() => {
-                    tracing::debug!(?signal, "recording-start notifier shutting down");
-                    break;
-                }
-                event = subscriber.recv() => {
-                    match event {
-                        Ok(DaemonEvent::RecordingStarted { recording_index }) => {
-                            notify(&store, &client, &bus, &org_rx, recording_index).await;
-                        }
-                        Ok(_) => {}
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                skipped,
-                                "recording-start notifier missed bus events; \
-                                 re-sweeping pending notifications",
-                            );
-                            sweep_pending(&store, &client, &bus, &org_rx).await;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            tracing::debug!("event bus closed; recording-start notifier exiting");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
-    RecordingStartNotifierHandle { join }
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> NotifierHandle {
+    spawn_notifier(StartNotifier, store, bus, client, org_rx, shutdown_rx)
 }
 
-async fn sweep_pending(
-    store: &Arc<SqliteStateStore>,
-    client: &Arc<ApiClient>,
-    bus: &EventBus,
-    org_rx: &OrgIdRx,
-) {
-    let pending = match store.recordings_pending_start_notify().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(%error, "failed to query recordings pending start notify");
-            return;
-        }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    tracing::info!(
-        count = pending.len(),
-        "sweeping recordings with pending backend start notify",
-    );
-    for row in pending {
-        notify(store, client, bus, org_rx, row.recording_index).await;
-    }
-}
-
-async fn notify(
+async fn notify_backend(
     store: &Arc<SqliteStateStore>,
     client: &Arc<ApiClient>,
     bus: &EventBus,

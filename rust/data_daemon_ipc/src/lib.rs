@@ -37,6 +37,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod paths;
+
 /// iceoryx2 service-name conventions shared by daemon and producer.
 pub mod service_name {
     /// Pub/sub service carrying every IPC envelope: lifecycle
@@ -303,6 +305,12 @@ pub enum Envelope {
         robot_id: String,
         /// Robot instance — the second half of the source key.
         robot_instance: i64,
+        /// Wire data-type label shared by every item (e.g. `"JOINT_POSITIONS"`).
+        /// A batch is one `log_*` call for a single sensor group, so the type
+        /// is constant across the batch — carried once here rather than
+        /// duplicated into every [`BatchedDataItem`] (which, for the 1000-joint
+        /// worst case, was ~16% of the envelope's wire size).
+        data_type: String,
         /// Producer wall-clock publish time (Unix nanoseconds), shared by every
         /// item. The sole key for window membership (see [`Envelope::Data`]).
         publish_timestamp_ns: i64,
@@ -369,14 +377,13 @@ pub enum Envelope {
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
 ///
-/// Carries only the fields that differ between items — the `timestamp_ns` /
-/// `timestamp_s` are hoisted onto the parent envelope because every sensor in
-/// a batch is captured at the same instant. Each item self-tags its sensor
-/// because there is no pre-registered trace to look up.
+/// Carries only the fields that differ between items — `data_type`,
+/// `timestamp_ns` and `timestamp_s` are hoisted onto the parent envelope
+/// because every sensor in a batch shares them (one `log_*` call, one sensor
+/// group, one capture instant). Each item self-tags its `sensor_name` because
+/// there is no pre-registered trace to look up.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BatchedDataItem {
-    /// Wire data-type label for this item.
-    pub data_type: String,
     /// Per-stream sensor label (joint name, …).
     pub sensor_name: Option<String>,
     /// Opaque per-sample bytes. Transported length-prefix + raw, exactly as
@@ -600,17 +607,16 @@ mod tests {
         let original = Envelope::BatchedData {
             robot_id: "robot-1".into(),
             robot_instance: 0,
+            data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_s: Some(1_700_000_000.5),
             items: vec![
                 BatchedDataItem {
-                    data_type: "JOINT_POSITIONS".into(),
                     sensor_name: Some("joint-0".into()),
                     payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
                 },
                 BatchedDataItem {
-                    data_type: "JOINT_POSITIONS".into(),
                     sensor_name: Some("joint-1".into()),
                     payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
                 },
@@ -631,7 +637,6 @@ mod tests {
         // publish it in one go.
         let items: Vec<BatchedDataItem> = (0..1000)
             .map(|index| BatchedDataItem {
-                data_type: "JOINT_POSITIONS".into(),
                 sensor_name: Some(format!("vx300s_left_joint_{index:04}")),
                 payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
             })
@@ -639,6 +644,7 @@ mod tests {
         let envelope = Envelope::BatchedData {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
+            data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_747_740_000_123_456_700,
             timestamp_ns: 1_747_740_000_123_456_700,
             timestamp_s: Some(1_747_740_000.123_456_7),

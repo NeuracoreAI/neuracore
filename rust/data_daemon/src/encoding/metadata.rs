@@ -93,7 +93,10 @@ impl VideoMetadataAccumulator {
             Value::Object(map) => self.record_frame(map),
             Value::Array(items) => {
                 for item in items {
-                    self.record_value(item);
+                    match item {
+                        Value::Object(map) => self.record_frame(map),
+                        _ => tracing::trace!("ignoring non-object metadata list item"),
+                    }
                 }
             }
             _ => {

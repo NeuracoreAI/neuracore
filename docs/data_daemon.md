@@ -115,13 +115,18 @@ When you run:
 neuracore data-daemon launch
 ```
 
-the CLI starts the daemon as a separate Python process by running:
+the CLI launches the daemon as a separate background process. There are two
+daemon implementations and the launcher picks one based on the `NCD_RUST_DAEMON`
+flag (see [rust_data_daemon_development.md](rust_data_daemon_development.md)):
 
-```text
-python -m neuracore.data_daemon.runner_entry
-```
+- **Rust daemon** — when `NCD_RUST_DAEMON` is truthy,
+  the launcher `exec`s the bundled native binary shipped in the wheel at
+  `neuracore/data_daemon/bin/data-daemon`. This is the implementation described
+  throughout this guide.
+- **Legacy Python daemon (default)** — when `NCD_RUST_DAEMON` is unset or not
+  truthy, the launcher runs the Python implementation instead.
 
-That daemon process:
+Either daemon process:
 - boots the internal components it needs
 - starts its main loop
 - stays running until you stop it (or the machine shuts down)
@@ -132,20 +137,16 @@ You may see simple messages when it stops:
 
 ### Startup and schema migration
 
-On startup, the daemon initializes the SQLite store and ensures schema compatibility.
+On startup the daemon opens its SQLite store (WAL mode) and applies any pending
+schema migrations before serving requests.
 
-If an older single-table schema is detected (legacy `traces.status` format), the daemon
-automatically migrates data to the current schema:
-
-- `traces` rows are transformed into lifecycle fields:
-  - `write_status`
-  - `registration_status`
-  - `upload_status`
-- `recordings` rows are generated per unique `recording_id`
-- Existing trace metadata/bytes/error fields are preserved
-- Migration runs before normal startup reconciliation
-
-Migration runs once per DB file. After a successful migration, startup continues normally.
+The Rust daemon's schema is defined by the SQL migrations under
+[rust/data_daemon/migrations/](../rust/data_daemon/migrations/) and applied
+automatically with `sqlx::migrate!`. A fresh database is created and migrated on
+first launch; an existing one has only the not-yet-applied migrations run. There
+is no legacy single-table conversion — the migrations are the single source of
+truth for the schema. To inspect the live database see
+[rust_data_daemon_development.md#sqlite-state-inspection](rust_data_daemon_development.md#sqlite-state-inspection).
 
 ---
 

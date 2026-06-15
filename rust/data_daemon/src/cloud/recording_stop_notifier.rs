@@ -17,113 +17,60 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
+use crate::cloud::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
+use crate::state::{
+    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+};
 
-/// Handle returned by [`spawn_recording_stop_notifier`].
-pub struct RecordingStopNotifierHandle {
-    join: JoinHandle<()>,
-}
+/// Notifier that POSTs `/recording/stop` once a recording stops and its cloud
+/// id is known. Triggered by `RecordingStopped` (the live path) and by
+/// `RecordingCloudIdAssigned` (offline recovery: a recording stopped while
+/// offline already fired `RecordingStopped` before any coordinator could see
+/// it, so the POST is unblocked only when the start notifier later mints the
+/// cloud id — `notify_backend` no-ops for a not-yet-stopped recording).
+struct StopNotifier;
 
-impl RecordingStopNotifierHandle {
-    /// Wait for the notifier task to exit.
-    pub async fn join(self) {
-        if let Err(error) = self.join.await {
-            tracing::warn!(?error, "recording-stop notifier join failed");
+#[async_trait]
+impl RecordingNotifier for StopNotifier {
+    fn label(&self) -> &'static str {
+        "recording-stop"
+    }
+
+    fn triggered_by(&self, event: &DaemonEvent) -> Option<i64> {
+        match event {
+            DaemonEvent::RecordingStopped { recording_index }
+            | DaemonEvent::RecordingCloudIdAssigned { recording_index } => Some(*recording_index),
+            _ => None,
         }
+    }
+
+    async fn pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        store.recordings_pending_stop_notify().await
+    }
+
+    async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
+        notify_backend(&ctx.store, &ctx.client, &ctx.org_rx, recording_index).await;
     }
 }
 
 /// Spawn the recording-stop notifier on the current Tokio runtime.
-///
-/// The task first sweeps any recordings stopped while the daemon was offline
-/// (rows with `stopped_at NOT NULL` and no `backend_stop_notified_at`), then
-/// drops into the event-bus loop and POSTs whenever a fresh `RecordingStopped`
-/// event fires.
 pub fn spawn_recording_stop_notifier(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
-    mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
-) -> RecordingStopNotifierHandle {
-    let mut subscriber = bus.subscribe();
-    let store = Arc::new(store);
-    let join = tokio::spawn(async move {
-        // Recover any stopped-while-offline recordings before serving live
-        // events. Run inside a `select!` against the shutdown signal so a
-        // long sweep cannot hold the daemon shutting down.
-        tokio::select! {
-            biased;
-            signal = shutdown_rx.recv() => {
-                tracing::debug!(?signal, "recording-stop notifier shutting down before sweep");
-                return;
-            }
-            _ = sweep_pending(&store, &client, &org_rx) => {}
-        }
-        loop {
-            tokio::select! {
-                biased;
-                signal = shutdown_rx.recv() => {
-                    tracing::debug!(?signal, "recording-stop notifier shutting down");
-                    break;
-                }
-                event = subscriber.recv() => {
-                    match event {
-                        // `RecordingStopped` is the live path. `RecordingCloudIdAssigned`
-                        // covers offline recovery: a recording stopped while offline has
-                        // already fired its `RecordingStopped` (which no coordinator was
-                        // running to see), so the stop POST is unblocked only once the
-                        // start notifier later assigns the cloud id. `notify_backend`
-                        // no-ops for a recording that is not yet stopped.
-                        Ok(DaemonEvent::RecordingStopped { recording_index })
-                        | Ok(DaemonEvent::RecordingCloudIdAssigned { recording_index }) => {
-                            notify_backend(&store, &client, &org_rx, recording_index).await;
-                        }
-                        Ok(_) => {}
-                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                skipped,
-                                "recording-stop notifier missed bus events; \
-                                 re-sweeping pending notifications",
-                            );
-                            sweep_pending(&store, &client, &org_rx).await;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            tracing::debug!("event bus closed; recording-stop notifier exiting");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
-    RecordingStopNotifierHandle { join }
-}
-
-async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
-    let pending = match store.recordings_pending_stop_notify().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(%error, "failed to query recordings pending stop notify");
-            return;
-        }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    tracing::info!(
-        count = pending.len(),
-        "sweeping recordings with pending backend stop notify",
-    );
-    for row in pending {
-        notify_backend(store, client, org_rx, row.recording_index).await;
-    }
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> NotifierHandle {
+    spawn_notifier(StopNotifier, store, bus, client, org_rx, shutdown_rx)
 }
 
 async fn notify_backend(

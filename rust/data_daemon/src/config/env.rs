@@ -4,7 +4,7 @@
 //! Mirrors `config_manager/config.py`, `config_manager/helpers.py`,
 //! `data_daemon/helpers.py`, and `data_daemon/const.py`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Deserializer};
 
@@ -147,18 +147,6 @@ pub(crate) fn home_dir() -> PathBuf {
     dirs::home_dir().expect("could not determine the user's home directory")
 }
 
-/// Expand a leading `~` in a path string against the home directory, matching
-/// `pathlib.Path.expanduser`.
-fn expand_user(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        return home_dir().join(stripped);
-    }
-    if path == "~" {
-        return home_dir();
-    }
-    PathBuf::from(path)
-}
-
 /// Resolve the daemon PID file path.
 ///
 /// Mirrors `helpers.py::get_daemon_pid_path`: `NEURACORE_DAEMON_PID_PATH` or
@@ -170,37 +158,20 @@ pub fn pid_path() -> PathBuf {
     }
 }
 
-/// Resolve the daemon SQLite database path.
-///
-/// Mirrors `helpers.py::get_daemon_db_path`: `NEURACORE_DAEMON_DB_PATH`
-/// (with `~` expansion) or `~/.neuracore/data_daemon/state.db`.
+/// Resolve the daemon SQLite database path via the shared resolver, so the
+/// daemon and the producer agree on its location. Panics with a clear message
+/// when the home directory is required but unavailable — acceptable for the
+/// daemon binary (it exits at startup before writing anything); the producer
+/// surfaces the same condition as a Python error.
 pub fn db_path() -> PathBuf {
-    match env_var("NEURACORE_DAEMON_DB_PATH").filter(|value| !value.is_empty()) {
-        Some(value) => expand_user(&value),
-        None => home_dir()
-            .join(".neuracore")
-            .join("data_daemon")
-            .join("state.db"),
-    }
+    data_daemon_ipc::paths::db_path()
+        .expect("home directory required to resolve the daemon database path")
 }
 
-/// Resolve the recordings root directory.
-///
-/// Mirrors `helpers.py::get_daemon_recordings_root_path`:
-/// `NEURACORE_DAEMON_RECORDINGS_ROOT` or `<db_dir>/recordings`.
+/// Resolve the recordings root via the shared resolver (see [`db_path`]).
 pub fn recordings_root_path() -> PathBuf {
-    match env_var("NEURACORE_DAEMON_RECORDINGS_ROOT") {
-        Some(value) => PathBuf::from(value),
-        None => default_recordings_root(&db_path()),
-    }
-}
-
-/// `<db_dir>/recordings` — the recordings root when no override is set.
-fn default_recordings_root(db_path: &Path) -> PathBuf {
-    db_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("recordings")
+    data_daemon_ipc::paths::recordings_root()
+        .expect("home directory required to resolve the recordings root")
 }
 
 /// Resolved runtime environment: paths and flags read from
@@ -275,21 +246,5 @@ mod tests {
         assert!(parse_bytes("abc").is_err());
         assert!(parse_bytes("12tb").is_err());
         assert!(parse_bytes("1 g").is_err());
-    }
-
-    #[test]
-    fn expand_user_resolves_leading_tilde_only() {
-        assert_eq!(expand_user("~"), home_dir());
-        assert_eq!(expand_user("~/foo"), home_dir().join("foo"));
-        assert_eq!(expand_user("/abs/path"), PathBuf::from("/abs/path"));
-        assert_eq!(expand_user("rel/~/path"), PathBuf::from("rel/~/path"));
-    }
-
-    #[test]
-    fn default_recordings_root_is_sibling_of_db() {
-        assert_eq!(
-            default_recordings_root(Path::new("/a/b/state.db")),
-            PathBuf::from("/a/b/recordings")
-        );
     }
 }

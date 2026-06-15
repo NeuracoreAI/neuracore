@@ -15,103 +15,56 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tokio::sync::broadcast;
-use tokio::task::JoinHandle;
 
 use crate::api::ApiClient;
+use crate::cloud::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::signals::ShutdownSignal;
-use crate::state::{DaemonEvent, EventBus, SqliteStateStore, StateStore};
+use crate::state::{
+    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+};
 
-/// Handle returned by [`spawn_recording_cancel_notifier`].
-pub struct RecordingCancelNotifierHandle {
-    join: JoinHandle<()>,
-}
+/// Notifier that POSTs `/recording/cancel` once a recording is cancelled and
+/// its cloud id is known. Recordings cancelled before `/recording/start` ever
+/// landed have no cloud representation, so `notify_backend` skips them.
+struct CancelNotifier;
 
-impl RecordingCancelNotifierHandle {
-    /// Wait for the notifier task to exit.
-    pub async fn join(self) {
-        if let Err(error) = self.join.await {
-            tracing::warn!(?error, "recording-cancel notifier join failed");
+#[async_trait]
+impl RecordingNotifier for CancelNotifier {
+    fn label(&self) -> &'static str {
+        "recording-cancel"
+    }
+
+    fn triggered_by(&self, event: &DaemonEvent) -> Option<i64> {
+        match event {
+            DaemonEvent::RecordingCancelled { recording_index } => Some(*recording_index),
+            _ => None,
         }
+    }
+
+    async fn pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        store.recordings_pending_cancel_notify().await
+    }
+
+    async fn notify(&self, ctx: &NotifierCtx, recording_index: i64) {
+        notify_backend(&ctx.store, &ctx.client, &ctx.org_rx, recording_index).await;
     }
 }
 
 /// Spawn the recording-cancel notifier on the current Tokio runtime.
-///
-/// The task first sweeps any recordings cancelled while the daemon was offline
-/// (rows with `cancelled_at NOT NULL`, `recording_id NOT NULL`, and no
-/// `backend_cancel_notified_at`), then drops into the event-bus loop and POSTs
-/// whenever a fresh `RecordingCancelled` event fires.
 pub fn spawn_recording_cancel_notifier(
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
-    mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
-) -> RecordingCancelNotifierHandle {
-    let mut subscriber = bus.subscribe();
-    let store = Arc::new(store);
-    let join = tokio::spawn(async move {
-        tokio::select! {
-            biased;
-            signal = shutdown_rx.recv() => {
-                tracing::debug!(?signal, "recording-cancel notifier shutting down before sweep");
-                return;
-            }
-            _ = sweep_pending(&store, &client, &org_rx) => {}
-        }
-        loop {
-            tokio::select! {
-                biased;
-                signal = shutdown_rx.recv() => {
-                    tracing::debug!(?signal, "recording-cancel notifier shutting down");
-                    break;
-                }
-                event = subscriber.recv() => {
-                    match event {
-                        Ok(DaemonEvent::RecordingCancelled { recording_index }) => {
-                            notify_backend(&store, &client, &org_rx, recording_index).await;
-                        }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                skipped,
-                                "recording-cancel notifier missed bus events; \
-                                 re-sweeping pending notifications",
-                            );
-                            sweep_pending(&store, &client, &org_rx).await;
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            tracing::debug!("event bus closed; recording-cancel notifier exiting");
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    });
-    RecordingCancelNotifierHandle { join }
-}
-
-async fn sweep_pending(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
-    let pending = match store.recordings_pending_cancel_notify().await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(%error, "failed to query recordings pending cancel notify");
-            return;
-        }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    tracing::info!(
-        count = pending.len(),
-        "sweeping recordings with pending backend cancel notify",
-    );
-    for row in pending {
-        notify_backend(store, client, org_rx, row.recording_index).await;
-    }
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> NotifierHandle {
+    spawn_notifier(CancelNotifier, store, bus, client, org_rx, shutdown_rx)
 }
 
 async fn notify_backend(

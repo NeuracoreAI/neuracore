@@ -95,10 +95,19 @@ pub fn spawn_wakelock(
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            // We may have dropped `UploadComplete`s, which would
+                            // otherwise pin phantom trace-ids in `active` and
+                            // leave the inhibitor held forever. Resync
+                            // conservatively: clear the bookkeeping and release.
+                            // The next `ReadyForUpload` re-acquires — a brief
+                            // inhibitor gap beats an inhibitor stuck on.
                             tracing::warn!(
                                 skipped,
-                                "wakelock task missed bus events; bookkeeping may drift"
+                                pending = active.len(),
+                                "wakelock missed bus events; resyncing (clearing pending + releasing)"
                             );
+                            active.clear();
+                            inhibitor.release();
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

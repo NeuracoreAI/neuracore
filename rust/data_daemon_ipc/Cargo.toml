@@ -9,6 +9,9 @@ description = "Shared IPC envelope, payload, and service-name definitions for th
 path = "src/lib.rs"
 
 [dependencies]
+# Shared recordings-root resolution (`paths`) needs the user's home directory so
+# the daemon and the producer compute the same default root.
+dirs.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true

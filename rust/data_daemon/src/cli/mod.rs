@@ -4,7 +4,9 @@
 //! — is part of the daemon's public contract: `python -m neuracore.data_daemon
 //! <cmd>` execs this binary, so the surface here must stay stable.
 
+mod coordinators;
 mod launch;
+mod launch_logging;
 mod profile;
 mod reset;
 mod status;

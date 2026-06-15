@@ -28,7 +28,7 @@ use crate::ipc::node::IpcTransport;
 use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::{SqliteStateStore, StateStore};
 
-/// How often the listener polls the iceoryx2 subscriber.
+/// Poll cadence while envelopes are actively flowing.
 ///
 /// 1 ms bounds the worst-case producer-block time on a full subscriber
 /// buffer. At the integration matrix's heaviest fanout (8 multiprocess
@@ -36,7 +36,20 @@ use crate::state::{SqliteStateStore, StateStore};
 /// LIFECYCLE_SUBSCRIBER_BUFFER_SIZE=64 slots), 10 ms left producer-side
 /// `log_*` calls blocked for ~1 s at a stretch on 2-vCPU hosts when the
 /// listener task was preempted off-CPU by ffmpeg / per-trace work.
-const POLL_INTERVAL: Duration = Duration::from_millis(1);
+const POLL_INTERVAL: Duration = Duration::from_micros(200);
+
+/// Poll cadence once the subscriber has been empty for [`IDLE_POLL_AFTER_EMPTY`]
+/// consecutive drains. iceoryx2 0.8 has no async waker, so the listener must
+/// poll — but a *fixed* 1 ms tick wakes 1000×/s on a daemon with no producer
+/// attached. Decaying to 25 ms when idle keeps an idle daemon near-quiescent
+/// while the first arriving sample snaps the cadence straight back to 1 ms, so
+/// active-load latency is unchanged.
+const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+/// Number of consecutive empty drains before the poll cadence relaxes to
+/// [`IDLE_POLL_INTERVAL`]. A handful of empty ticks at 1 ms is a negligible
+/// cost and avoids relaxing during a brief lull mid-recording.
+const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 
 /// Drain the iceoryx2 subscriber until a shutdown signal arrives.
 ///
@@ -62,6 +75,9 @@ pub async fn run(
 
     let mut counters = LoopCounters::default();
     let mut batch: Vec<Envelope> = Vec::with_capacity(64);
+    // Consecutive empty drains, used to relax the poll cadence on an idle
+    // daemon. Reset to 0 the moment any envelope arrives.
+    let mut empty_drains: u32 = 0;
 
     loop {
         // -- Synchronous drain --------------------------------------------------
@@ -69,6 +85,12 @@ pub async fn run(
         // any of these calls). The local `batch` is `Send`, so it can survive
         // across the awaits below without infecting the task with !Send.
         drain_subscriber(transport.commands_subscriber(), &mut batch, &mut counters);
+
+        empty_drains = if batch.is_empty() {
+            empty_drains.saturating_add(1)
+        } else {
+            0
+        };
 
         // -- Async forward ------------------------------------------------------
         for envelope in batch.drain(..) {
@@ -91,13 +113,20 @@ pub async fn run(
         serve_queries(transport.queries_server(), &store).await;
 
         // -- Yield / shutdown ---------------------------------------------------
+        // Poll fast while data is flowing; relax once the bus has been empty
+        // for a while so an idle daemon isn't woken 1000×/s.
+        let poll_interval = if empty_drains >= IDLE_POLL_AFTER_EMPTY {
+            IDLE_POLL_INTERVAL
+        } else {
+            POLL_INTERVAL
+        };
         select! {
             biased;
             signal = shutdown_rx.recv() => {
                 tracing::debug!(?signal, "ipc listener shutting down");
                 return;
             }
-            _ = sleep(POLL_INTERVAL) => {}
+            _ = sleep(poll_interval) => {}
         }
     }
 }
@@ -110,7 +139,10 @@ pub async fn run(
 /// SQLite DB directly. Requests are cheap and infrequent (one per
 /// `get_recording_id` poll), so a malformed request or store error is logged
 /// and the next request is served rather than aborting the loop.
-async fn serve_queries(server: &Server<ipc::Service, [u8], (), [u8], ()>, store: &Arc<SqliteStateStore>) {
+async fn serve_queries(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    store: &Arc<SqliteStateStore>,
+) {
     loop {
         let active = match server.receive() {
             Ok(Some(active)) => active,

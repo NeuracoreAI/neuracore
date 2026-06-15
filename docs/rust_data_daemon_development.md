@@ -18,6 +18,72 @@ Shared workspace dependencies and the Rust edition (`2021`) are pinned in [rust/
 
 ---
 
+## Architecture
+
+The producer is a *thin shipper*: it publishes source/sensor/timestamp-tagged
+data and fire-and-forget lifecycle events, and the daemon owns all recording
+identity and routing. Pixel data never travels the IPC bus — the producer spools
+NUT chunks to disk and only announces them.
+
+```mermaid
+flowchart LR
+    subgraph SDK["Python SDK"]
+      LOG["log_joints / log_json / log_frame<br/>start / stop / cancel_recording"]
+    end
+    subgraph PROD["data_daemon_producer (PyO3 cdylib)"]
+      LOG -->|GIL released| PUBT["publisher thread"]
+      LOG -->|RGB frames| WRT["writer thread → NUT spool on disk"]
+    end
+    PUBT -->|postcard envelopes| BUS[("iceoryx2 commands")]
+    WRT -. VideoChunkReady .-> PUBT
+    BUS --> LIS["ipc::listener (adaptive poll)"]
+    LIS --> DISP["dispatcher<br/>single task · holdback · publish-clock routing"]
+    DISP --> ACT["per-trace actors"]
+    ACT -->|fire-and-forget| TW["trace_writer<br/>batched DB write-behind"]
+    ACT -->|fire-and-forget| JW["json_writer (IO thread)"]
+    ACT -->|spawn_blocking| FF["ffmpeg chunk encode"]
+    TW --> DB[("SQLite WAL")]
+    LIS -->|recording-id queries| DB
+    subgraph CLOUD["cloud coordinators"]
+      REG["registration"] --> UP["uploader"] --> STA["status"]
+      PR["progress"]
+      NOT["start / stop / cancel notifiers"]
+      RP["reaper"]
+    end
+    DB --> CLOUD
+    UP -->|PUT chunks| GCS[("GCS / backend")]
+```
+
+A recording's lifecycle — the daemon assigns the local `recording_index`
+immediately and the cloud `recording_id` is backfilled asynchronously:
+
+```mermaid
+sequenceDiagram
+    participant SDK
+    participant Producer
+    participant Dispatcher
+    participant Store as SQLite
+    participant StartN as start-notifier
+    participant Backend
+
+    SDK->>Producer: start_recording(source)
+    Producer->>Dispatcher: StartRecording envelope
+    Dispatcher->>Store: insert recording (recording_index)
+    Dispatcher-->>StartN: RecordingStarted (event bus)
+    StartN->>Backend: POST /recording/start
+    Backend-->>StartN: cloud recording_id
+    StartN->>Store: persist recording_id
+    SDK->>Producer: log_* (data / frames)
+    Producer->>Dispatcher: Data / VideoChunkReady (routed by publish ts)
+    SDK->>Producer: stop_recording
+    Producer->>Dispatcher: StopRecording envelope
+    Dispatcher->>Store: mark stopped
+    Note over StartN,Backend: stop-notifier POSTs /recording/stop
+    Note over StartN,Backend: uploader PUTs traces, reaper reclaims once fully uploaded
+```
+
+---
+
 ## Prerequisites
 
 ### Rust toolchain

@@ -1,8 +1,10 @@
 //! Periodic progress reporter.
 //!
-//! Every [`PROGRESS_REPORT_INTERVAL`] ticks the reporter walks the
-//! recordings table and, for every stopped recording whose traces have all
-//! finished *writing* (and whose `progress_reported` is still `Pending`),
+//! Every [`FAST_PROGRESS_TICK`] the reporter sweeps the recordings still
+//! pending a report ([`StateStore::recordings_pending_progress`] — a
+//! server-side filter, so fully-settled recordings drop out of the scan) and,
+//! for every stopped recording whose traces have all finished *writing* (and
+//! whose `progress_reported` is still `Pending`),
 //! POSTs `/org/{org}/recording/{rec}/traces-metadata` with the per-trace
 //! `total_bytes` snapshot. This establishes the recording's upload
 //! denominators on the backend up front — before uploads finish — so the
@@ -25,12 +27,11 @@ use crate::state::{
     ProgressReportStatus, RecordingRow, SqliteStateStore, StateStore, TraceRecord, TraceWriteStatus,
 };
 
-/// Interval between progress-report sweeps.
-pub const PROGRESS_REPORT_INTERVAL: Duration = Duration::from_secs(30);
-
-/// Faster heartbeat used by tests / first-run so that a newly-uploaded
-/// recording doesn't sit for 30 s before reporting. The tick advances the
-/// scheduler but every actual flush is guarded by the upload-complete check.
+/// Interval between progress-report sweeps. Kept short so a newly-uploaded
+/// recording doesn't sit before reporting; the sweep is cheap because
+/// [`StateStore::recordings_pending_progress`] filters settled recordings out
+/// server-side and every actual flush is still guarded by the
+/// upload-complete check.
 const FAST_PROGRESS_TICK: Duration = Duration::from_secs(2);
 
 /// Handle returned by [`spawn_progress_reporter`].
@@ -76,24 +77,20 @@ pub fn spawn_progress_reporter(
 }
 
 async fn sweep_once(store: &Arc<SqliteStateStore>, client: &Arc<ApiClient>, org_rx: &OrgIdRx) {
-    let recordings = match store.list_recordings().await {
+    // Server-side filter to stopped, non-cancelled, cloud-id-assigned
+    // recordings that still have reporting work outstanding, so fully-settled
+    // recordings drop out of the sweep instead of being re-scanned (and their
+    // traces re-fetched) on every tick. The cancelled/stopped/cloud-id guards
+    // below are kept as belt-and-braces against a row racing the query.
+    let recordings = match store.recordings_pending_progress().await {
         Ok(rows) => rows,
         Err(error) => {
-            tracing::warn!(%error, "progress reporter could not list recordings");
+            tracing::warn!(%error, "progress reporter could not query pending recordings");
             return;
         }
     };
     for recording in recordings {
-        if recording.stopped_at.is_none() {
-            continue;
-        }
-        // Cancelled recordings are dropped on the daemon side and never
-        // reported to the backend — `cancel_recording` already stamped
-        // `progress_reported = 'reported'` so the post-flush check would
-        // short-circuit, but the expected-trace-count PUT runs *before* that
-        // check and would otherwise leak a count for a recording the backend
-        // doesn't expect.
-        if recording.cancelled_at.is_some() {
+        if recording.stopped_at.is_none() || recording.cancelled_at.is_some() {
             continue;
         }
         let Some(org_id) = org_rx.borrow().clone() else {

@@ -42,7 +42,6 @@ sqlx = { version = "0.8", default-features = false, features = [
     "migrate",
     "macros",
 ] }
-tempfile = "3"
 thiserror = "1"
 tokio = { version = "1", features = [
     "rt-multi-thread",
@@ -58,4 +57,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-wiremock = "0.6"
+
+# Dev-only deps are declared directly in each crate's [dev-dependencies] (not
+# here) so a test-only crate like the wiremock HTTP *server* can never slip into
+# a prod [dependencies] table by inheriting `.workspace = true`.
+
+[profile.release]
+# Strip symbols from the shipped daemon binary / producer cdylib (~3 MB off the
+# 16 MB debug-symbol binary); the wheel ships only the stripped artefacts.
+strip = true
