@@ -1,6 +1,7 @@
 """Tests for Dataset class."""
 
 import copy
+import logging
 import pickle
 import re
 import threading
@@ -237,6 +238,7 @@ def test_nc_clone_dataset_from_dataset_object(
     reset_neuracore,
     dataset_response,
     mocked_org_id,
+    caplog,
 ):
     """Test cloning from a Dataset object via the public API."""
     nc.login("test_api_key")
@@ -257,7 +259,9 @@ def test_nc_clone_dataset_from_dataset_object(
         status_code=200,
     )
 
-    cloned = nc.clone_dataset("clone", source_dataset=source)
+    caplog.set_level(logging.WARNING, logger="neuracore.api.datasets")
+
+    cloned = nc.clone_dataset("clone", source_dataset=source, wait=False)
 
     assert cloned.id == "cloned_dataset"
     assert cloned.name == "clone"
@@ -266,6 +270,7 @@ def test_nc_clone_dataset_from_dataset_object(
         "name": "clone",
         "sourceDatasetId": "source_dataset",
     }
+    assert "recordings may not be available immediately" in caplog.text
 
 
 def test_nc_clone_dataset_from_dataset_id(
@@ -285,7 +290,7 @@ def test_nc_clone_dataset_from_dataset_id(
         status_code=200,
     )
 
-    cloned = nc.clone_dataset("clone", dataset_id="source_dataset")
+    cloned = nc.clone_dataset("clone", dataset_id="source_dataset", wait=False)
 
     assert cloned.id == "cloned_dataset"
     assert mock_data_requests.last_request.json()["sourceDatasetId"] == "source_dataset"
@@ -313,7 +318,9 @@ def test_nc_clone_dataset_from_dataset_name(
         status_code=200,
     )
 
-    cloned = nc.clone_dataset(dataset_name="source_name", new_dataset_name="clone")
+    cloned = nc.clone_dataset(
+        dataset_name="source_name", new_dataset_name="clone", wait=False
+    )
 
     assert cloned.id == "cloned_dataset"
     assert mock_data_requests.last_request.json()["sourceDatasetId"] == "dataset_123"

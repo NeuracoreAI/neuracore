@@ -4,7 +4,11 @@ This module provides functions for creating and retrieving datasets
 for robot demonstrations.
 """
 
+import logging
+import time
+
 from neuracore_types import Dataset as DatasetModel
+from tqdm import tqdm
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.auth import get_auth
@@ -14,6 +18,10 @@ from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
+
+CLONE_PROGRESS_POLL_INTERVAL_S = 1.0
+
+logger = logging.getLogger(__name__)
 
 
 def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
@@ -97,6 +105,7 @@ def clone_dataset(
     source_dataset: Dataset | None = None,
     dataset_name: str | None = None,
     dataset_id: str | None = None,
+    wait: bool = True,
 ) -> Dataset:
     """Clone a dataset and all of its recordings.
 
@@ -107,6 +116,7 @@ def clone_dataset(
         new_dataset_name: Name for the cloned dataset.
         dataset_name: Explicit source dataset name.
         dataset_id: Explicit source dataset ID.
+        wait: Whether to wait for the cloning operation to complete before returning.
 
     Returns:
         Dataset: The newly cloned dataset.
@@ -154,6 +164,39 @@ def clone_dataset(
         description=dataset_model.description,
         data_types=list(dataset_model.all_data_types.keys()),
     )
+
+    if not wait:
+        logger.warning(
+            "Dataset cloning is running in the background; recordings may not be "
+            "available immediately."
+        )
+        GlobalSingleton()._active_dataset_id = cloned.id
+        return cloned
+
+    # resolve for source_dataset if not provided, to get the total number of recordings
+    if source_dataset is None:
+        if dataset_id is None:
+            raise DatasetError("Source dataset ID is required to wait for cloning.")
+        source_dataset = Dataset.get_by_id(dataset_id)
+    if source_dataset is None:
+        raise DatasetError("Source dataset could not be found.")
+
+    total_recordings = len(source_dataset)
+    cloned_recordings = min(len(cloned), total_recordings)
+    if cloned_recordings < total_recordings:
+        pbar = tqdm(total=total_recordings, desc="Cloning dataset", unit="recording")
+        pbar.n = cloned_recordings
+        pbar.refresh()
+        try:
+            while cloned_recordings < total_recordings:
+                time.sleep(CLONE_PROGRESS_POLL_INTERVAL_S)
+                cloned._num_recordings = None
+                new_cloned_recordings = min(len(cloned), total_recordings)
+                if new_cloned_recordings > cloned_recordings:
+                    pbar.update(new_cloned_recordings - cloned_recordings)
+                    cloned_recordings = new_cloned_recordings
+        finally:
+            pbar.close()
 
     GlobalSingleton()._active_dataset_id = cloned.id
     return cloned
