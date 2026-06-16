@@ -139,7 +139,9 @@ cleanup_state() {
 
 # Staging API endpoint and Rust-daemon selection per the task brief.
 export NEURACORE_API_URL="https://staging.api.neuracore.com/api"
-export NCD_RUST_DAEMON=1
+# Default to the Rust daemon, but honour a caller-provided value so the same
+# script can also exercise the Python daemon (NCD_RUST_DAEMON=0) on repeat runs.
+export NCD_RUST_DAEMON="${NCD_RUST_DAEMON:-1}"
 
 # Quiet the SSE consumer + WebRTC producer loops for the duration of the
 # integration suite.
@@ -147,7 +149,8 @@ export NEURACORE_CONSUME_LIVE_DATA=no
 export NEURACORE_PROVIDE_LIVE_DATA=no
 
 # Highest level of logging across the Python and Rust surfaces.
-export NDD_DEBUG=true
+# Honour a caller-provided value so a harness can disable debug logging.
+export NDD_DEBUG="${NDD_DEBUG:-true}"
 export PYTHONUNBUFFERED=1
 # Rust tracing — see https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html
 export RUST_LOG="${RUST_LOG:-trace}"

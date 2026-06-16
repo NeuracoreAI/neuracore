@@ -232,6 +232,18 @@ pub trait StateStore: Send + Sync {
     /// (an O(recordings × traces) N+1 scan after each completed upload).
     async fn traces_ready_for_upload(&self) -> Result<Vec<String>, StateStoreError>;
 
+    /// Promote every trace that is now both `registered` and `written` (and not
+    /// already queued/uploading/uploaded) to `upload_status = queued`, returning
+    /// the `(trace_id, recording_index)` of each one this call transitioned.
+    ///
+    /// Idempotent (each trace promotes at most once) and meant to be run on
+    /// every registration drain: with pre-registration, registration can land
+    /// before the trace's bytes are written, and `TraceWritten` is published
+    /// before the write-behind batcher commits `write_status = written`. Running
+    /// this on the periodic tick is the safety net that promotes such a trace
+    /// once the write finally commits.
+    async fn promote_ready_traces_to_queued(&self) -> Result<Vec<(String, i64)>, StateStoreError>;
+
     /// List recordings the progress reporter still has work for: stopped, not
     /// cancelled, with a cloud id, and not yet fully reported (either the
     /// progress report or the expected-trace-count PUT is still outstanding).
@@ -962,12 +974,15 @@ impl StateStore for SqliteStateStore {
 
         // Count ready traces first so the size-vs-age policy stays explicit.
         // SQLite's transactional snapshot means this count is stable across the
-        // subsequent claim.
+        // subsequent claim. A trace is eligible for registration as soon as its
+        // row exists (any write_status except `failed`) — registration only
+        // needs the trace's identity, not its bytes, so it can run while the
+        // recording is still writing (see the module docs on pre-registration).
         let ready_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM traces \
-              WHERE write_status = ?1 AND registration_status = ?2",
+              WHERE write_status != ?1 AND registration_status = ?2",
         )
-        .bind(TraceWriteStatus::Written.as_str())
+        .bind(TraceWriteStatus::Failed.as_str())
         .bind(TraceRegistrationStatus::Pending.as_str())
         .fetch_one(&mut *tx)
         .await?;
@@ -987,14 +1002,14 @@ impl StateStore for SqliteStateStore {
                 "UPDATE traces SET registration_status = ?1, last_updated = ?2 \
                   WHERE trace_id IN ( \
                       SELECT trace_id FROM traces \
-                       WHERE write_status = ?3 AND registration_status = ?4 \
+                       WHERE write_status != ?3 AND registration_status = ?4 \
                     ORDER BY last_updated ASC LIMIT ?5 \
                   ) \
                 RETURNING *",
             )
             .bind(TraceRegistrationStatus::Registering.as_str())
             .bind(now)
-            .bind(TraceWriteStatus::Written.as_str())
+            .bind(TraceWriteStatus::Failed.as_str())
             .bind(TraceRegistrationStatus::Pending.as_str())
             .bind(limit_i64)
             .fetch_all(&mut *tx)
@@ -1007,7 +1022,7 @@ impl StateStore for SqliteStateStore {
                 "UPDATE traces SET registration_status = ?1, last_updated = ?2 \
                   WHERE trace_id IN ( \
                       SELECT trace_id FROM traces \
-                       WHERE write_status = ?3 AND registration_status = ?4 \
+                       WHERE write_status != ?3 AND registration_status = ?4 \
                          AND last_updated <= ?5 \
                     ORDER BY last_updated ASC LIMIT ?6 \
                   ) \
@@ -1015,7 +1030,7 @@ impl StateStore for SqliteStateStore {
             )
             .bind(TraceRegistrationStatus::Registering.as_str())
             .bind(now)
-            .bind(TraceWriteStatus::Written.as_str())
+            .bind(TraceWriteStatus::Failed.as_str())
             .bind(TraceRegistrationStatus::Pending.as_str())
             .bind(cutoff)
             .bind(limit_i64)
@@ -1076,6 +1091,28 @@ impl StateStore for SqliteStateStore {
         .fetch_all(&self.read_pool)
         .await?;
         Ok(ids)
+    }
+
+    async fn promote_ready_traces_to_queued(&self) -> Result<Vec<(String, i64)>, StateStoreError> {
+        // The `upload_status NOT IN (...)` guard makes each promotion fire at
+        // most once. This is the ONLY path that lets a trace reach the uploader,
+        // so it must require BOTH a session URI (registered) and finalised bytes
+        // (written) — `traces_ready_for_upload` only checks `upload_status`.
+        let now = Utc::now().naive_utc();
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "UPDATE traces SET upload_status = ?1, last_updated = ?2 \
+              WHERE registration_status = ?3 \
+                AND write_status = ?4 \
+                AND upload_status NOT IN ('queued', 'uploading', 'uploaded') \
+            RETURNING trace_id, recording_index",
+        )
+        .bind(TraceUploadStatus::Queued.as_str())
+        .bind(now)
+        .bind(TraceRegistrationStatus::Registered.as_str())
+        .bind(TraceWriteStatus::Written.as_str())
+        .fetch_all(&self.write_pool)
+        .await?;
+        Ok(rows)
     }
 
     async fn recordings_pending_progress(&self) -> Result<Vec<RecordingRow>, StateStoreError> {
@@ -1502,6 +1539,67 @@ mod tests {
             .await
             .expect("create_recording")
             .recording_index
+    }
+
+    #[tokio::test]
+    async fn promote_ready_traces_to_queued_gates_on_registered_and_written() {
+        let (store, _tempdir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
+        store
+            .create_trace(recording_index, "t1", None, None)
+            .await
+            .expect("create_trace");
+
+        // Freshly created (initializing, unregistered) -> nothing promoted.
+        assert!(store
+            .promote_ready_traces_to_queued()
+            .await
+            .expect("sweep")
+            .is_empty());
+
+        // Pre-registered while the bytes are still being written -> still not
+        // promoted, and crucially NOT queued (the uploader would otherwise PUT
+        // an unwritten file).
+        store
+            .update_trace(
+                "t1",
+                TraceUpdate {
+                    registration_status: Some(TraceRegistrationStatus::Registered),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .expect("update_trace");
+        assert!(store
+            .promote_ready_traces_to_queued()
+            .await
+            .expect("sweep")
+            .is_empty());
+        let trace = store.get_trace("t1").await.expect("get").expect("exists");
+        assert_ne!(trace.upload_status, TraceUploadStatus::Queued);
+
+        // Bytes commit -> promoted exactly once, carrying its recording_index.
+        store
+            .update_trace(
+                "t1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .expect("update_trace");
+        let promoted = store.promote_ready_traces_to_queued().await.expect("sweep");
+        assert_eq!(promoted, vec![("t1".to_string(), recording_index)]);
+        let trace = store.get_trace("t1").await.expect("get").expect("exists");
+        assert_eq!(trace.upload_status, TraceUploadStatus::Queued);
+
+        // Idempotent: a subsequent sweep promotes nothing.
+        assert!(store
+            .promote_ready_traces_to_queued()
+            .await
+            .expect("sweep")
+            .is_empty());
     }
 
     #[tokio::test]

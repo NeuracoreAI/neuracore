@@ -1,10 +1,19 @@
 //! Batch registration coordinator.
 //!
-//! Subscribes to [`DaemonEvent::TraceWritten`], buffers up to
-//! `BATCH_SIZE` traces (or up to `MAX_WAIT`) and POSTs them to
-//! `/org/{org}/recording/traces/batch-register`. Successful registrations
-//! persist the returned resumable session URIs on the trace row and emit
-//! `ReadyForUpload`; failures roll the registration status back to `Pending`
+//! Claims traces whose row exists (any write_status except `failed`) — not just
+//! fully-written ones — buffers up to `BATCH_SIZE` (or `MAX_WAIT`) and POSTs
+//! them to `/org/{org}/recording/traces/batch-register`. Registration only
+//! needs the trace's *identity* (recording id, trace id, data type, cloud
+//! files), all known at `/recording/start`, so it runs **while the recording is
+//! still writing** — overlapping the round trip with the recording instead of
+//! adding it to the post-stop tail ("pre-registration").
+//!
+//! Because registration and the on-disk write can now finish in either order,
+//! `ReadyForUpload` is gated on BOTH: every drain runs [`publish_ready_traces`],
+//! which atomically promotes traces that are now registered *and* written to
+//! `queued` and emits the event. Running it on the periodic tick is the safety
+//! net for the lag between the `TraceWritten` event and the write-behind commit
+//! of `write_status`. Registration failures roll the status back to `Pending`
 //! so the next tick re-claims them.
 
 use std::collections::HashMap;
@@ -23,7 +32,6 @@ use crate::lifecycle::signals::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
     DaemonEvent, EventBus, SqliteStateStore, StateStore, TraceRecord, TraceRegistrationStatus,
-    TraceUploadStatus,
 };
 
 /// Maximum traces to register in a single call. Matches the
@@ -118,6 +126,12 @@ async fn drain_once(
     max_wait: Duration,
     registration_attempts: &mut HashMap<String, u32>,
 ) {
+    // Safety net: promote any traces that became (registered + written) since
+    // the last drain. This runs even when there is nothing new to register, so
+    // the periodic tick eventually promotes a pre-registered trace once its
+    // write-behind `write_status = written` commit lands.
+    publish_ready_traces(store, bus).await;
+
     let claimed = match store
         .claim_traces_for_registration(BATCH_SIZE, max_wait.as_secs_f64())
         .await
@@ -133,6 +147,7 @@ async fn drain_once(
     }
     tracing::debug!(count = claimed.len(), "claimed traces for registration");
     submit_batch(store, bus, client, org_rx, claimed, registration_attempts).await;
+    publish_ready_traces(store, bus).await;
 }
 
 async fn submit_batch(
@@ -235,7 +250,6 @@ async fn submit_batch(
                         let update = TraceUpdate {
                             registration_status: Some(TraceRegistrationStatus::Registered),
                             upload_session_uris: Some(serialised),
-                            upload_status: Some(TraceUploadStatus::Queued),
                             ..TraceUpdate::default()
                         };
                         if let Err(error) = store.update_trace(&trace.trace_id, update).await {
@@ -245,10 +259,6 @@ async fn submit_batch(
                         // Registered — clear any accumulated retry budget.
                         registration_attempts.remove(&trace.trace_id);
                         bus.publish(DaemonEvent::TraceRegistered {
-                            trace_id: trace.trace_id.clone(),
-                            recording_index,
-                        });
-                        bus.publish(DaemonEvent::ReadyForUpload {
                             trace_id: trace.trace_id.clone(),
                             recording_index,
                         });
@@ -309,6 +319,29 @@ async fn submit_batch(
     }
 }
 
+/// Promote any traces that are now both registered and written to `queued` and
+/// emit `ReadyForUpload` for each.
+///
+/// Run on every drain (including the periodic tick) so it doubles as the safety
+/// net for the lag between the `TraceWritten` event and the write-behind commit
+/// of `write_status`: a pre-registered trace is promoted on whichever drain
+/// first sees both states committed, rather than depending on a single event.
+async fn publish_ready_traces(store: &Arc<SqliteStateStore>, bus: &EventBus) {
+    match store.promote_ready_traces_to_queued().await {
+        Ok(ready) => {
+            for (trace_id, recording_index) in ready {
+                bus.publish(DaemonEvent::ReadyForUpload {
+                    trace_id,
+                    recording_index,
+                });
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to promote ready traces for upload");
+        }
+    }
+}
+
 async fn rollback_to_pending(store: &Arc<SqliteStateStore>, traces: &[TraceRecord]) {
     for trace in traces {
         rollback_single_to_pending(store, &trace.trace_id).await;
@@ -331,7 +364,7 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
     use crate::state::store::TraceUpdate;
-    use crate::state::{NewRecording, TraceWriteStatus};
+    use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
     use std::time::Duration;
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
@@ -432,13 +465,15 @@ mod tests {
         let api = client(&server);
 
         // Drive a single drain directly so the test does not depend on the
-        // ticker firing.
+        // ticker firing: register the batch, then run the promotion sweep that
+        // emits ReadyForUpload once a trace is both registered and written.
+        let store_arc = Arc::new(store.clone());
         let claimed = store
             .claim_traces_for_registration(BATCH_SIZE, 0.0)
             .await
             .unwrap();
         submit_batch(
-            &Arc::new(store.clone()),
+            &store_arc,
             &bus,
             &api,
             &org_rx(Some("org-1")),
@@ -446,6 +481,7 @@ mod tests {
             &mut HashMap::new(),
         )
         .await;
+        publish_ready_traces(&store_arc, &bus).await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(

@@ -53,7 +53,7 @@ pub(crate) fn log_path_for(runtime_env: &RuntimeEnv) -> PathBuf {
 /// writes to stderr. `try_init` is used to tolerate test harnesses that have
 /// already installed a global subscriber.
 pub(crate) fn init_tracing(debug: bool, log_file: Option<&Path>) -> Result<()> {
-    let default_level = if debug { "debug" } else { "info" };
+    let default_level = if debug { "debug" } else { "warn" };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
 

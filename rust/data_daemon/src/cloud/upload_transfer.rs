@@ -2,7 +2,7 @@
 //!
 //! The per-file and per-chunk PUT machinery the upload coordinator
 //! ([`super::uploader`]) drives: [`upload_one_file`] streams a single on-disk
-//! artefact as 4 MiB chunks to the GCS resumable session URI, handling the
+//! artefact as 16 MiB chunks to the GCS resumable session URI, handling the
 //! 308-continue, 410-session-expired, and 401-auth-refresh transitions, and
 //! verifies the server-side MD5 on completion.
 
@@ -27,22 +27,22 @@ use crate::state::{DaemonEvent, EventBus, TraceRecord, TraceWriteHandle};
 /// Chunk size used for resumable uploads.
 ///
 /// Must be a multiple of 256 KiB (the GCS resumable-upload requirement for
-/// every non-final chunk); 4 MiB = 16 × 256 KiB. Smaller chunks trade a
-/// little peak throughput on fast links (more sequential PUTs) for finer
-/// upload-progress granularity, lower per-upload memory, and tolerance of
-/// slow links: a chunk must transfer within `CHUNK_UPLOAD_TIMEOUT` (200 s), so
-/// the minimum sustained speed is `CHUNK_SIZE / CHUNK_UPLOAD_TIMEOUT`
-/// (4 MiB / 200 s ≈ 0.17 Mbit/s).
-pub const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+/// every non-final chunk); 16 MiB = 64 × 256 KiB. Larger chunks raise peak
+/// throughput on fast links (fewer sequential PUTs) at the cost of coarser
+/// upload-progress granularity, higher per-upload memory, and a higher minimum
+/// sustained speed: a chunk must transfer within `CHUNK_UPLOAD_TIMEOUT` (200 s),
+/// so the minimum sustained speed is `CHUNK_SIZE / CHUNK_UPLOAD_TIMEOUT`
+/// (16 MiB / 200 s ≈ 0.67 Mbit/s).
+pub const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// Persist `bytes_uploaded` to SQLite only every Nth chunk (plus once when the
 /// file finishes), instead of every chunk. The per-chunk write took the store's
-/// single `write_guard` once per 4 MiB and, at `MAX_CONCURRENT_UPLOADS`
+/// single `write_guard` once per 16 MiB and, at `MAX_CONCURRENT_UPLOADS`
 /// in-flight files, serialised all uploads against each other and against the
 /// notifiers/progress reporter — eroding the stop-recording SLA. Resume
 /// correctness does not depend on this value: the 308-continue path
 /// (`parse_resume_offset`) re-derives the committed offset from the server on
 /// restart, so a stale DB offset only costs re-sending at most this many chunks.
-const PROGRESS_PERSIST_EVERY_CHUNKS: u32 = 16;
+const PROGRESS_PERSIST_EVERY_CHUNKS: u32 = 4;
 /// Cap on the exponential backoff for transient upload failures.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Maximum retries for a single chunk.

@@ -201,7 +201,7 @@ cargo run -p data-daemon -- launch
 
 ### Debug logging
 
-`--debug` (or `NDD_DEBUG=1`) bumps the default tracing level from `info` to `debug`. `RUST_LOG` overrides both — for example:
+The daemon defaults to the `warn` tracing level. `--debug` (or `NDD_DEBUG=1`) bumps it to `debug`. `RUST_LOG` overrides both — for example:
 
 ```bash
 RUST_LOG=data_daemon=trace,iceoryx2=warn cargo run -p data-daemon -- launch

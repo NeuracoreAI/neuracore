@@ -2,7 +2,7 @@
 //!
 //! Subscribes to [`DaemonEvent::ReadyForUpload`] (and re-scans the
 //! state store on startup for any traces already in the registered/queued
-//! state). For each on-disk artefact the coordinator PUTs `CHUNK_SIZE` (4 MiB)
+//! state). For each on-disk artefact the coordinator PUTs `CHUNK_SIZE` (16 MiB)
 //! chunks to the GCS resumable session URI persisted by the registration coordinator,
 //! handling 308-continue, 410-session-expired, and 401-auth-refresh
 //! transitions. On completion the trace is marked `Uploaded` and the upload
