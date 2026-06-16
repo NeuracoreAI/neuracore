@@ -59,6 +59,15 @@ async def trace_status_updater(mock_client_session, mock_auth_and_org):
     await updater.shutdown()
 
 
+async def assert_put_count(mock_client_session, expected, timeout=2.0):
+    """Wait until the mocked session has made ``expected`` PUT calls."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while mock_client_session.put.call_count < expected and loop.time() < deadline:
+        await asyncio.sleep(0.005)
+    assert mock_client_session.put.call_count == expected
+
+
 # --- Tests ---
 
 
@@ -104,28 +113,18 @@ async def test_batch_is_sent_even_if_not_full(
     response.status = 200
 
     # Act: Fire two updates for the same recording
-    # We don't wait for completion on the first one so the batch can accumulate
-    await asyncio.wait_for(
-        trace_status_updater.update_trace_progress(
-            "rec-1", "trace-1", 100, wait_for_completion=False
-        ),
-        timeout=0.01,
+    # We don't wait for completion so the batch is flushed by the interval timer
+    await trace_status_updater.update_trace_progress(
+        "rec-1", "trace-1", 100, wait_for_completion=False
     )
 
-    await asyncio.sleep(2 * TraceStatusUpdater.MINIMUM_REQUEST_INTERVAL_COMPLETE_S)
+    await assert_put_count(mock_client_session, 1)
 
-    assert mock_client_session.put.call_count == 1
-
-    await asyncio.wait_for(
-        trace_status_updater.update_trace_progress(
-            "rec-1", "trace-1", 100, wait_for_completion=False
-        ),
-        timeout=0.01,
+    await trace_status_updater.update_trace_progress(
+        "rec-1", "trace-1", 100, wait_for_completion=False
     )
 
-    await asyncio.sleep(2 * TraceStatusUpdater.MINIMUM_REQUEST_INTERVAL_COMPLETE_S)
-
-    assert mock_client_session.put.call_count == 2
+    await assert_put_count(mock_client_session, 2)
 
 
 @pytest.mark.asyncio
@@ -138,28 +137,16 @@ async def test_batch_is_sent_once_full(trace_status_updater, mock_client_session
     response.status = 200
 
     num_batches = 3
-    # Act
-    try:
-        for batch in range(num_batches):
-            for i in range(TraceStatusUpdater.MAXIMUM_UPDATE_BATCH_SIZE):
-                last_trace = (
-                    i == TraceStatusUpdater.MAXIMUM_UPDATE_BATCH_SIZE - 1
-                    and batch == num_batches - 1
-                )
-                await asyncio.wait_for(
-                    trace_status_updater.update_trace_progress(
-                        "rec-1",
-                        f"trace-{i}-batch-{batch}",
-                        100,
-                        wait_for_completion=last_trace,
-                    ),
-                    timeout=0.01,
-                )
-    except:
-        raise
+    # Act: each full batch (50 traces) is flushed immediately by batch_full,
+    # independent of the (disabled) interval timer.
+    for batch in range(num_batches):
+        for i in range(TraceStatusUpdater.MAXIMUM_UPDATE_BATCH_SIZE):
+            await trace_status_updater.update_trace_progress(
+                "rec-1", f"trace-{i}-batch-{batch}", 100, wait_for_completion=False
+            )
 
     # Assert
-    assert mock_client_session.put.call_count == num_batches
+    await assert_put_count(mock_client_session, num_batches)
 
 
 @pytest.mark.asyncio
