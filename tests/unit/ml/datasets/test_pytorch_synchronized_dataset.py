@@ -27,8 +27,8 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
     _cacheable_cross_embodiment_description,
 )
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
-from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 
 DATA_ITEMS = 3
 

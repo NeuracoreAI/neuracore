@@ -6,7 +6,7 @@ import pytest
 from neuracore_types import DataType
 from omegaconf import OmegaConf
 
-from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
+from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
 
 
 def _make_config(size: list[int]) -> object:
@@ -40,3 +40,26 @@ def test_resolve_preprocessing_config_to_dict_is_json_serializable():
     # before the fix.
     serialized = json.dumps(method.to_dict())
     assert '"size"' in serialized
+
+
+def test_preprocessing_configuration_str_is_human_readable():
+    pytest.importorskip("hydra")
+    pytest.importorskip("torch")
+    cfg = OmegaConf.create({
+        "RGB_IMAGES": [{
+            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
+            "size": [224, 224],
+        }],
+        "DEPTH_IMAGES": [{
+            "_target_": "neuracore.ml.preprocessing.methods.resize_pad.ResizePad",
+            "size": [224, 224],
+        }],
+    })
+    resolved = resolve_preprocessing_config(cfg)
+
+    assert str(resolved) == (
+        "PreprocessingConfiguration({\n"
+        "  DEPTH_IMAGES: [ResizePad(size=[224, 224])]\n"
+        "  RGB_IMAGES: [ResizePad(size=[224, 224])]\n"
+        "})"
+    )

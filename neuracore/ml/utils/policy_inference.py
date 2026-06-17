@@ -23,10 +23,10 @@ from neuracore.core.utils.embodiment_description_utils import (
 )
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml import BatchedInferenceInputs
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
+from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
     validate_preprocessing_configuration,
 )

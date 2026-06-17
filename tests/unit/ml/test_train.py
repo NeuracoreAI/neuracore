@@ -44,7 +44,7 @@ from neuracore.ml.train import (
     setup_logging,
 )
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
-from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
+from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
 from neuracore.ml.utils.training_config import (
     _RESOLVED_TRAINING_RUN_NAMES,
     _resolve_algorithm_name_and_supported_data_types,
