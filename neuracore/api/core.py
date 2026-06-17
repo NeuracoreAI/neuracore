@@ -20,6 +20,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
@@ -103,6 +104,7 @@ def logout() -> None:
     get_auth().logout()
     GlobalSingleton()._active_robot = None
     GlobalSingleton()._active_dataset_id = None
+    GlobalSingleton()._active_dataset = None
     GlobalSingleton()._has_validated_version = False
 
 
@@ -245,7 +247,11 @@ def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
     return robot.is_recording()
 
 
-def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
+def start_recording(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
     """Start recording data for a specific robot.
 
     Begins a new recording session for the specified robot, capturing all
@@ -256,6 +262,9 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
+        timestamp: Optional capture time (Unix seconds) for the recording's
+            start, matching the ``log_*`` methods. When omitted, the current
+            time is captured.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided,
@@ -266,10 +275,12 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
         raise RobotError("No active dataset. Call create_dataset() first.")
-    try:
-        active_dataset = Dataset.get_by_id(active_dataset_id)
-    except DatasetError:
-        active_dataset = None
+    active_dataset = GlobalSingleton()._active_dataset
+    if active_dataset is None or active_dataset.id != active_dataset_id:
+        try:
+            active_dataset = Dataset.get_by_id(active_dataset_id)
+        except DatasetError:
+            active_dataset = None
     if active_dataset is not None:
         if robot.shared and not active_dataset.is_shared:
             raise RobotError(
@@ -286,11 +297,14 @@ def start_recording(robot_name: str | None = None, instance: int = 0) -> None:
                 "shared robot, ensure connect_robot(shared=True) succeeded. "
                 f"Active dataset: '{active_dataset.name}' ({active_dataset.id})."
             )
-    robot.start_recording(active_dataset_id)
+    robot.start_recording(active_dataset_id, timestamp=timestamp)
 
 
 def stop_recording(
-    robot_name: str | None = None, instance: int = 0, wait: bool = False
+    robot_name: str | None = None,
+    instance: int = 0,
+    wait: bool = False,
+    timestamp: float | None = None,
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -303,6 +317,9 @@ def stop_recording(
         instance: Instance number of the robot for multi-instance scenarios.
         wait: Whether to block until all data streams have finished uploading
             to the backend storage.
+        timestamp: Optional capture time (Unix seconds) for the recording's
+            stop, matching the ``log_*`` methods. When omitted, the current
+            time is captured.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
@@ -317,10 +334,20 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
-    robot.stop_recording(recording_id, wait_for_producer_drain=wait)
-
-    if not wait:
-        return
+    if rust_daemon_enabled():
+        cloud_recording_id = robot.get_cloud_recording_id() if wait else None
+        robot.stop_recording(
+            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
+        )
+        if not wait or not cloud_recording_id:
+            return
+        recording_id = cloud_recording_id
+    else:
+        robot.stop_recording(
+            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
+        )
+        if not wait:
+            return
 
     # TODO: We need to instead check that the specific recording is complete
     is_traces_registered = False
@@ -331,6 +358,34 @@ def stop_recording(
         elif len(data_traces) == 0 and is_traces_registered:
             break
         time.sleep(0.2)
+
+
+def get_cloud_recording_id(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp_ns: int | None = None,
+    timeout_s: float = 30.0,
+) -> str | None:
+    """Resolve the daemon-owned cloud recording id for a robot's recording.
+
+    Under the Rust daemon the cloud recording id is assigned asynchronously by
+    the daemon. This asks the daemon (it may block up to ``timeout_s``) for the
+    id of the recording whose window brackets ``timestamp_ns`` for this source
+    (defaulting to the most recently started recording). For
+    non-performance-critical use only (tests, ``stop_recording(wait=True)``).
+
+    Args:
+        robot_name: Robot identifier. Defaults to the active robot.
+        instance: Robot instance number.
+        timestamp_ns: A wall-clock instant inside the target recording window;
+            defaults to the most recent recording for the source.
+        timeout_s: Maximum time to wait for the daemon to mint the id.
+
+    Returns:
+        The cloud recording id, or ``None`` on timeout / legacy daemon.
+    """
+    robot = _get_robot(robot_name, instance)
+    return robot.get_cloud_recording_id(timestamp_ns=timestamp_ns, timeout_s=timeout_s)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
@@ -355,12 +410,19 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
     StreamManagerOrchestrator().remove_manager(robot.id, robot.instance)
 
 
-def cancel_recording(robot_name: str | None = None, instance: int = 0) -> None:
+def cancel_recording(
+    robot_name: str | None = None,
+    instance: int = 0,
+    timestamp: float | None = None,
+) -> None:
     """Cancel the current recording for a specific robot without saving any data.
 
     Args:
         robot_name: Robot identifier.
         instance: Instance number of the robot for multi-instance scenarios.
+        timestamp: Optional capture time (Unix seconds) for the cancel,
+            mirroring ``stop_recording``. When omitted, the current time is
+            captured.
 
     """
     robot = _get_robot(robot_name, instance)
@@ -369,4 +431,4 @@ def cancel_recording(robot_name: str | None = None, instance: int = 0) -> None:
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         return
-    robot.cancel_recording(recording_id)
+    robot.cancel_recording(recording_id, timestamp=timestamp)

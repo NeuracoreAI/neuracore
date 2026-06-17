@@ -122,6 +122,7 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     fake_daemon.stop_recording.assert_called_once_with(
         recording_id="rec-abc",
         producer_stop_sequence_numbers={"active-channel": 42},
+        timestamp=None,
     )
 
 
