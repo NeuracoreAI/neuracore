@@ -1,0 +1,708 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Intro to the Rust Data Daemon</title>
+  <!-- cSpell: words codetag codehd codecap keycap mpsc pyproject ICRA -->
+  <!--
+    Reveal.js is loaded from a CDN. If you need to present OFFLINE, vendor
+    reveal.js locally (npm i reveal.js, or download the dist/) and point the
+    <link>/<script> tags below at the local copies.
+  -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/theme/black.css" id="theme">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/monokai.css">
+
+  <style>
+    :root {
+      --nc-bg-0: #0a0e1a;
+      --nc-bg-1: #111827;
+      --nc-ink: #e8edf6;
+      --nc-muted: #9aa7bd;
+      --nc-cyan: #38bdf8;
+      --nc-teal: #2dd4bf;
+      --nc-amber: #fbbf24;
+      --nc-green: #34d399;
+      --nc-red: #f87171;
+      --nc-py: #f472b6;   /* python pink */
+      --nc-rust: #fb923c; /* rust orange */
+      --nc-line: rgba(148,163,184,.28);
+    }
+
+    .reveal {
+      font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--nc-ink);
+      font-size: 30px;
+    }
+    .reveal .slides { text-align: left; }
+    .reveal section { line-height: 1.45; }
+
+    /* Background */
+    .reveal .backgrounds { background:
+      radial-gradient(1200px 700px at 80% -10%, rgba(56,189,248,.10), transparent 60%),
+      radial-gradient(900px 600px at 0% 110%, rgba(45,212,191,.08), transparent 60%),
+      linear-gradient(160deg, var(--nc-bg-0), var(--nc-bg-1)); }
+
+    .reveal h1, .reveal h2, .reveal h3 { color: #fff; text-transform: none; letter-spacing: -.01em; font-weight: 800; }
+    .reveal h1 { font-size: 2.0em; line-height: 1.1; }
+    .reveal h2 { font-size: 1.35em; margin-bottom: .35em; }
+    .reveal h3 { font-size: 1.0em; }
+    .reveal strong { color: #fff; }
+    .reveal em { color: var(--nc-amber); font-style: normal; }
+    .reveal a { color: var(--nc-cyan); }
+
+    .accent { color: var(--nc-cyan); }
+    .muted  { color: var(--nc-muted); }
+    .small  { font-size: .72em; }
+    .tiny   { font-size: .6em; }
+    .center { text-align: center; }
+
+    /* Kicker / section eyebrow */
+    .kicker {
+      display:inline-block; font-size:.5em; letter-spacing:.22em; text-transform:uppercase;
+      color: var(--nc-teal); border:1px solid var(--nc-line); border-radius:999px;
+      padding:.35em .9em; margin-bottom:.6em; font-weight:700;
+    }
+
+    /* Bullet styling */
+    .reveal ul { list-style: none; margin-left: 0; }
+    .reveal ul li { position: relative; padding-left: 1.3em; margin: .42em 0; }
+    .reveal ul li::before {
+      content: "›"; position: absolute; left: 0; top: -.02em;
+      color: var(--nc-cyan); font-weight: 800;
+    }
+    .reveal li .lead { color:#fff; font-weight:700; }
+
+    /* Cards */
+    .cards { display:grid; gap:.7em; }
+    .cols-2 { grid-template-columns: 1fr 1fr; }
+    .cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+    .card {
+      background: rgba(255,255,255,.035); border:1px solid var(--nc-line);
+      border-radius: 14px; padding: .7em .85em;
+    }
+    .card h3 { margin:.1em 0 .25em; font-size:.86em; }
+    .card p { margin:.15em 0; font-size:.7em; color: var(--nc-muted); }
+    .card.good { border-color: rgba(52,211,153,.45); }
+    .card.drop { border-color: rgba(248,113,113,.40); }
+
+    /* Language chips (Why Rust) */
+    .langs { display:grid; grid-template-columns:repeat(2,1fr); gap:.6em; margin-top:.3em; }
+    .lang {
+      display:flex; align-items:center; gap:.7em;
+      border:1px solid var(--nc-line); border-radius:12px; padding:.55em .7em;
+      background: rgba(255,255,255,.03);
+    }
+    .lang .badge {
+      flex:0 0 auto; width:2.1em; height:2.1em; border-radius:9px;
+      display:flex; align-items:center; justify-content:center;
+      font-weight:800; font-size:.7em; color:#0a0e1a;
+    }
+    .lang .txt { font-size:.66em; line-height:1.25; }
+    .lang .txt b { color:#fff; }
+    .lang.win { border-color: rgba(251,146,60,.6); background: rgba(251,146,60,.08); }
+
+    /* ===== Architecture diagram ===== */
+    .diagram { font-size:.62em; }
+    .proc {
+      border:1px solid var(--nc-line); border-radius:14px; padding:.55em .7em .7em;
+      background: rgba(255,255,255,.025); position:relative;
+    }
+    .proc.py  { border-color: rgba(244,114,182,.45); }
+    .proc.rust{ border-color: rgba(251,146,60,.5); }
+    .proc-label {
+      position:absolute; top:-.8em; left:.9em; font-size:.66em; letter-spacing:.12em;
+      text-transform:uppercase; font-weight:800; padding:0 .5em; border-radius:6px;
+      background: var(--nc-bg-1);
+    }
+    .proc.py  .proc-label { color: var(--nc-py); }
+    .proc.rust .proc-label{ color: var(--nc-rust); }
+
+    .row { display:flex; gap:.55em; align-items:stretch; }
+    .unit {
+      flex:1; border:1px solid var(--nc-line); border-radius:10px; padding:.45em .55em;
+      background: rgba(255,255,255,.04);
+    }
+    .unit .t { color:#fff; font-weight:700; display:block; font-size:.95em; }
+    .unit .s { color: var(--nc-muted); font-size:.82em; }
+    .unit.accent { border-color: rgba(56,189,248,.5); }
+    .unit.crate  { border-color: rgba(45,212,191,.5); }
+
+    .vlink { text-align:center; color: var(--nc-teal); font-weight:800; font-size:.9em; margin:.18em 0; }
+    .vlink .pipe { color: var(--nc-muted); font-weight:500; font-size:.82em; }
+
+    .sidekick { display:flex; gap:.5em; justify-content:center; margin-top:.45em; }
+    .pill {
+      border:1px dashed var(--nc-line); border-radius:999px; padding:.2em .7em;
+      font-size:.8em; color: var(--nc-muted);
+    }
+
+    /* ===== Hot path ===== */
+    .hot { font-size:.6em; }
+    .lane { display:grid; grid-template-columns: 5.2em 1fr; align-items:center; gap:.5em; margin:.3em 0; }
+    .lane .who {
+      font-weight:800; text-align:right; padding-right:.2em; font-size:.95em;
+    }
+    .lane.rgb .who { color: var(--nc-cyan); }
+    .lane.joint .who { color: var(--nc-amber); }
+    .flow { display:flex; align-items:center; gap:.28em; flex-wrap:wrap; }
+    .step {
+      border:1px solid var(--nc-line); border-radius:9px; padding:.32em .5em;
+      background: rgba(255,255,255,.045); white-space:nowrap;
+    }
+    .step b { color:#fff; }
+    .step.disk { border-color: rgba(52,211,153,.5); background: rgba(52,211,153,.08); }
+    .step.ipc  { border-color: rgba(56,189,248,.5); background: rgba(56,189,248,.08); }
+    .step.dmn  { border-color: rgba(251,146,60,.45); }
+    .to { color: var(--nc-teal); font-weight:800; }
+    .seam {
+      text-align:center; color:var(--nc-muted); font-size:.78em; letter-spacing:.05em;
+      border-top:1px dashed var(--nc-line); margin:.5em 0 .3em; padding-top:.3em;
+    }
+
+    /* ===== Rollout timeline ===== */
+    .timeline { list-style:none; margin:0; padding:0; }
+    .timeline li { position:relative; padding:.35em 0 .55em 2.4em; margin:0; }
+    .timeline li::before {
+      content: attr(data-step); position:absolute; left:0; top:.2em;
+      width:1.7em; height:1.7em; border-radius:50%; display:flex; align-items:center; justify-content:center;
+      font-weight:800; font-size:.62em; color:#0a0e1a; background: var(--nc-cyan);
+    }
+    .timeline li::after {
+      content:""; position:absolute; left:.8em; top:1.9em; bottom:-.2em; width:2px; background: var(--nc-line);
+    }
+    .timeline li:last-child::after { display:none; }
+    .timeline li.now::before  { background: var(--nc-amber); }
+    .timeline li.fin::before  { background: var(--nc-green); }
+    .timeline .tt { color:#fff; font-weight:700; font-size:.82em; }
+    .timeline .td { color: var(--nc-muted); font-size:.66em; display:block; }
+
+    /* Footer / progress */
+    .reveal .slide-number { background: transparent; color: var(--nc-muted); font-size:.7em; top:14px; right:18px; bottom:auto; left:auto; }
+    .corner-brand {
+      position: fixed; left: 18px; bottom: 14px; font-size: 13px; letter-spacing:.14em;
+      text-transform: uppercase; color: var(--nc-muted); z-index: 30; opacity:.7;
+    }
+    .reveal .progress { color: var(--nc-cyan); height:4px; }
+
+    .reveal .controls { color: var(--nc-cyan); }
+
+    .quote {
+      border-left:3px solid var(--nc-teal); padding:.2em 0 .2em .8em; color: var(--nc-muted);
+      font-size:.72em; font-style:italic;
+    }
+    .keycap {
+      font-family: ui-monospace, Menlo, Consolas, monospace; font-size:.62em;
+      background: rgba(255,255,255,.07); border:1px solid var(--nc-line);
+      border-radius:6px; padding:.08em .45em; color: var(--nc-cyan);
+    }
+
+    /* ===== Code deep-dive (nested) slides ===== */
+    .reveal pre { width: 100%; margin: .2em auto 0; box-shadow: none; font-size: .455em; line-height: 1.42; }
+    .reveal pre code {
+      padding: 1em 1.15em; border-radius: 12px; max-height: 600px;
+      background: #0d111b; border: 1px solid var(--nc-line);
+    }
+    .codetag { font-size:.5em; letter-spacing:.18em; text-transform:uppercase; color:var(--nc-teal); font-weight:800; margin:0 0 .15em; }
+    .codehd  { font-size:1.0em; color:#fff; margin:.05em 0 .2em; }
+    .codecap { font-size:.62em; color: var(--nc-muted); margin-top:.55em; text-align:center; }
+    .codecap code, .codetag code { color: var(--nc-cyan); }
+  </style>
+</head>
+<body>
+<div class="corner-brand">Neuracore · Data Daemon</div>
+<div class="reveal">
+  <div class="slides">
+
+    <!-- 1. TITLE -->
+    <section data-auto-animate>
+      <span class="kicker">Engineering · Internal</span>
+      <h1>Intro to the <span class="accent">Rust</span> Data Daemon</h1>
+      <p class="muted" style="margin-top:.4em">The successor to our Python recording daemon:<br>why we're building it, how it works, and how we roll it out.</p>
+      <p class="small muted" style="margin-top:1.2em">Press <span class="keycap">S</span> for speaker notes · <span class="keycap">→</span> to advance · <span class="keycap">ESC</span> for overview</p>
+      <aside class="notes">
+        One-liner: this is the daemon that takes data you log from a robot, spools it, encodes the video,
+        and uploads it to the cloud. We've rewritten it in Rust. Today: <b>why</b>, <b>how at a high level</b>, and the <b>rollout</b>.
+        Reassure people up front: from a user's point of view nothing changes, same CLI and same API.
+      </aside>
+    </section>
+
+    <!-- 2. OUTLINE -->
+    <section>
+      <span class="kicker">Roadmap</span>
+      <h2>What we'll cover</h2>
+      <div class="cards cols-2" style="margin-top:.4em">
+        <div class="card"><h3>1 · Background</h3><p>Why a rewrite makes sense now.</p></div>
+        <div class="card"><h3>2 · Why Rust</h3><p>What the POC told us, and why not Go / Zig / C.</p></div>
+        <div class="card"><h3>3 · What's changed</h3><p>The overall architecture, plus the data hot path.</p></div>
+        <div class="card"><h3>4 · Rollout</h3><p>From flag-gated opt-in to default to Python removal.</p></div>
+        <div class="card" style="grid-column:1 / -1; border-color: rgba(45,212,191,.45)"><h3>5 · Q&amp;A</h3><p>We'll close with time for your questions.</p></div>
+      </div>
+      <p class="small muted center" style="margin-top:.8em">Headline: <em>mostly the same system, with the bottlenecks rebuilt.</em></p>
+      <aside class="notes">
+        Set expectations on length and that there's a Q&amp;A at the end. Emphasise the headline:
+        this is not a from-scratch reinvention of the product; it's a surgical rebuild of the recording
+        path that has caused us the most pain.
+      </aside>
+    </section>
+
+    <!-- 3. SECTION: BACKGROUND -->
+    <section data-background-color="#0b1220">
+      <span class="kicker">Part 1</span>
+      <h1>Background</h1>
+      <p class="muted">Why does a rewrite make sense?</p>
+      <aside class="notes">Transition slide. Keep it short; we're about to justify spending the effort.</aside>
+    </section>
+
+    <!-- 4. BACKGROUND CONTENT -->
+    <section>
+      <h2>The Python daemon has had a <span class="accent">storied</span> development</h2>
+      <ul style="font-size:.86em">
+        <li>It grew organically as the product did: multiple transports, process models, and recording strategies layered over time.</li>
+        <li>It <span class="lead">works</span>, and it taught us what the problem actually is.</li>
+        <li>But a lot of it is now <em>legacy bloat</em>: state and machinery we kept for reasons that no longer apply.</li>
+      </ul>
+      <div class="cards cols-2" style="margin-top:.7em">
+        <div class="card good"><h3>✓ Keep the learnings</h3><p>Recording lifecycle, the API/CLI contract, cloud upload semantics, hard-won edge cases.</p></div>
+        <div class="card drop"><h3>✗ Leave behind the bloat</h3><p>Redundant buffering &amp; double-handling, scattered producer state, fighting the interpreter.</p></div>
+      </div>
+      <p class="small muted center" style="margin-top:.6em">A rewrite lets us <em>carry the knowledge forward without carrying the cruft</em>.</p>
+      <aside class="notes">
+        The key rhetorical move: a rewrite is not "we got it wrong." The Python daemon is how we
+        learned what good looks like. We now know the right shape, so we can build it clean instead of
+        retrofitting it onto years of accumulated layers. Give a concrete example of bloat if asked:
+        the producer used to hold a lot of per-stream state and we double-handled data through multiple buffers.
+      </aside>
+    </section>
+
+    <!-- 5. SECTION: WHY RUST -->
+    <section data-background-color="#0b1220">
+      <span class="kicker">Part 2</span>
+      <h1>Why <span style="color:var(--nc-rust)">Rust</span>?</h1>
+      <p class="muted">If the daemon is mostly I/O bound… why a systems language at all?</p>
+      <aside class="notes">Pose it as a genuine question; it sets up the punchline that it's not about raw speed.</aside>
+    </section>
+
+    <!-- 6. WHY RUST - reversing an earlier decision -->
+    <section>
+      <h2>We're reversing an earlier call</h2>
+      <ul style="font-size:.8em">
+        <li>The POC showed <span class="lead">no substantial throughput difference</span> between Python and Rust. The daemon is I/O bound: <em>network and disk</em>, not CPU.</li>
+        <li>So we built the daemon out in <span class="lead">Python, for simplicity</span>. A reasonable call at the time.</li>
+        <li>In practice it took <em>more complexity</em> to reach similar performance, and it still ends up <em>slightly slower and more resource hungry</em>.</li>
+      </ul>
+      <div class="card" style="border-color:rgba(251,146,60,.55); margin:.45em 0">
+        <h3 style="color:var(--nc-rust)">This rewrite reverses that decision.</h3>
+        <p style="font-size:.72em; color:var(--nc-ink)">Same lessons, rebuilt in Rust. As a bonus we gain consistency: no interpreter and no GC pauses mean steadier tail latency, which is exactly where recording integrity lives or dies.</p>
+      </div>
+      <aside class="notes">
+        The honest history: the POC didn't show a throughput win for Rust (the daemon is bottlenecked by
+        disk and network, not CPU), so we picked Python for simplicity. That was a defensible decision.
+        What we learned since: matching the performance in Python took more complexity than expected, and
+        the Python daemon is still a bit slower and heavier on resources. So we're reversing the call, not
+        admitting the POC was wrong. The bonus on top is tail-latency consistency: no GC or interpreter
+        pauses to stall the pipeline at the worst moment. If pushed on raw speed, it's a bonus, not the headline.
+      </aside>
+    </section>
+
+    <!-- 7. WHY RUST - why not others -->
+    <section>
+      <h2>Why not another language?</h2>
+      <p class="small muted">A balance of <em>memory safety</em>, <em>maturity</em>, and <em>complexity</em>.</p>
+      <div class="langs">
+        <div class="lang"><span class="badge" style="background:#00ADD8;color:#fff">Go</span>
+          <span class="txt"><b>Go:</b> great ergonomics, but it's <em>garbage-collected</em>. The same tail-latency risk we're trying to escape.</span></div>
+        <div class="lang"><span class="badge" style="background:#F7A41D">Zig</span>
+          <span class="txt"><b>Zig:</b> promising and fast, but <em>too immature</em> for a production data path today.</span></div>
+        <div class="lang"><span class="badge" style="background:#555;color:#fff">C</span>
+          <span class="txt"><b>C:</b> no GC, but no memory-safety net. Unacceptable risk for long-running data integrity.</span></div>
+        <div class="lang"><span class="badge" style="background:#9C033A;color:#fff">C++</span>
+          <span class="txt"><b>C++:</b> capable, but high <em>complexity</em> and footgun surface for the team to maintain.</span></div>
+      </div>
+      <div class="lang win" style="margin-top:.6em">
+        <span class="badge" style="background:var(--nc-rust)">Rs</span>
+        <span class="txt"><b>Rust:</b> <em>memory-safe without a GC</em>, mature tooling and ecosystem, and the compiler keeps a concurrent data pipeline honest. The combination is the win.</span>
+      </div>
+      <aside class="notes">
+        Frame it as a 2-axis trade-off: memory-safety vs. predictability vs. team maintainability.
+        Go fails on GC. Zig fails on maturity (we'd be early adopters on a critical path). C/C++ give up
+        memory safety or pile on complexity. Rust is the only one that's safe, GC-free, mature, and keeps
+        our concurrency correct at compile time. Show the logos casually; don't dwell.
+      </aside>
+    </section>
+
+    <!-- 8. SECTION: WHAT'S CHANGED -->
+    <section data-background-color="#0b1220">
+      <span class="kicker">Part 3</span>
+      <h1>What's changed</h1>
+      <p class="muted">Spoiler: less than you'd think.</p>
+      <aside class="notes">Two slides: the architecture map, then the hot path. Keep reassuring; most of the system is untouched.</aside>
+    </section>
+
+    <!-- 9. ARCHITECTURE DIAGRAM — parent stack (press down for the IPC contract) -->
+    <section>
+    <section>
+      <h2 style="font-size:1.1em">The overall architecture <span class="muted small" style="font-weight:600">· three Rust crates + the existing Python</span></h2>
+      <div class="diagram">
+        <!-- Python process -->
+        <div class="proc py">
+          <span class="proc-label">Python process · unchanged API + CLI</span>
+          <div class="row">
+            <div class="unit"><span class="t">neuracore SDK</span><span class="s">log_joints · log_frame · start/stop · same public API</span></div>
+            <div class="unit crate"><span class="t">crate ① data_daemon_producer</span><span class="s">PyO3 <code>.so</code> linked in-process · batch · spool · publish</span></div>
+          </div>
+        </div>
+
+        <div class="vlink">▼ &nbsp;<span class="pipe">crate ② <b>data_daemon_ipc</b> · shared envelope/contract · over iceoryx2 shared memory</span>&nbsp; ▼</div>
+
+        <!-- Daemon process -->
+        <div class="proc rust">
+          <span class="proc-label">crate ③ data_daemon · the daemon binary</span>
+          <div class="row" style="margin-bottom:.45em">
+            <div class="unit accent"><span class="t">IPC listener</span><span class="s">drain shared mem</span></div>
+            <div class="unit accent"><span class="t">Dispatcher</span><span class="s">windows · integer recording id</span></div>
+            <div class="unit accent"><span class="t">Trace actors</span><span class="s">one per stream</span></div>
+          </div>
+          <div class="row">
+            <div class="unit"><span class="t">Encoding</span><span class="s">chunked video · metadata</span></div>
+            <div class="unit"><span class="t">State store</span><span class="s">single DB writer</span></div>
+            <div class="unit"><span class="t">Cloud</span><span class="s">register · resumable upload</span></div>
+          </div>
+        </div>
+
+        <div class="sidekick">
+          <span class="pill">💾 local disk spool + SQLite</span>
+          <span class="pill">🎞 ffmpeg encode</span>
+          <span class="pill">☁️ Cloud / GCS upload</span>
+        </div>
+      </div>
+      <p class="small muted center" style="margin-top:.45em"><em>It's mostly the same:</em> the old daemon is unchanged in most places; in a few spots it now <span class="lead">calls into the Rust daemon</span>. To the end user the CLI and API are identical.</p>
+      <aside class="notes">
+        Walk it top to bottom. Crate ① the <b>producer</b> is a small Rust library compiled to a .so and
+        loaded right inside the Python process, so the SDK calls it directly: no rewrite of user code.
+        Crate ② <b>ipc</b> is just the shared contract: the envelope types both sides agree on, carried over
+        iceoryx2 shared memory (zero-copy, no sockets). Crate ③ is the actual <b>daemon</b>: it listens, routes
+        data into recording windows, runs a per-stream actor, encodes, writes one DB, and uploads.
+        The punchline on this slide: the Python side is almost entirely unchanged; it just calls into Rust at
+        a few seams, gated by a flag. Same CLI, same API.
+      </aside>
+    </section>
+
+      <!-- 9.1 nested · the IPC contract -->
+      <section>
+        <p class="codetag">crate ② · data_daemon_ipc</p>
+        <h3 class="codehd">The whole contract is one enum</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// data_daemon_ipc/src/lib.rs: linked by BOTH the producer and the daemon
+pub enum Envelope {
+    // lifecycle: fire-and-forget, tagged only by its source
+    StartRecording  { robot_id: String, robot_instance: i64, started_at_ns: i64, /* … */ },
+    StopRecording   { robot_id: String, robot_instance: i64, stopped_at_ns: i64 },
+    CancelRecording { robot_id: String, robot_instance: i64 },
+
+    // data: opaque payload, no trace identity on the wire
+    Data            { data_type: String, timestamp_ns: i64, payload: Vec&lt;u8&gt;, /* … */ },
+    BatchedData     { items: Vec&lt;BatchedDataItem&gt;, timestamp_ns: i64, /* … */ }, // N joints → 1 msg
+    VideoChunkReady { byte_count: u64, frame_count: u32, /* … */ },              // pixels are on disk
+}
+
+pub fn encode(&amp;self) -&gt; Result&lt;Vec&lt;u8&gt;, _&gt; { postcard::to_allocvec(self) }
+pub fn decode(b: &amp;[u8]) -&gt; Result&lt;Self, _&gt; { postcard::from_bytes(b) }</code></pre>
+        <p class="codecap">No <code>recording_id</code> or <code>trace_id</code> on the wire, only the source: the daemon owns recording identity. Encoded with postcard, so <code>f64</code> values round-trip bit-exact.</p>
+        <aside class="notes">
+          This is essentially all of crate ②. Both the producer and the daemon depend on it, so they can
+          never disagree on the wire format. The headline: an envelope carries only source, sensor, and
+          timestamp, never a recording or trace id. That is the thin-shipper model; the producer knows
+          nothing about recordings, and the daemon assigns identity after it routes.
+        </aside>
+      </section>
+
+    </section>
+
+    <!-- 10. HOT PATH — parent stack (press down for code) -->
+    <section>
+    <section>
+      <h2 style="font-size:1.05em">The hot path <span class="muted small">· logged → spooled → encoded → uploaded</span></h2>
+      <div class="hot">
+        <div class="lane rgb">
+          <div class="who">RGB</div>
+          <div class="flow">
+            <span class="step"><b>log_frame()</b></span><span class="to">→</span>
+            <span class="step">batch</span><span class="to">→</span>
+            <span class="step disk">spool pixels → <b>.nut chunk</b> 💾</span>
+            <span class="to">⋯</span><span class="step ipc">"chunk ready" · IPC</span>
+          </div>
+        </div>
+        <div class="lane joint">
+          <div class="who">Joints</div>
+          <div class="flow">
+            <span class="step"><b>log_joints()</b></span><span class="to">→</span>
+            <span class="step">batch N joints</span><span class="to">→</span>
+            <span class="step ipc">one <b>BatchedData</b> envelope · IPC</span>
+          </div>
+        </div>
+
+        <div class="seam">iceoryx2 shared memory · only lightweight envelopes cross the boundary</div>
+
+        <div class="lane">
+          <div class="who" style="color:var(--nc-rust)">Daemon</div>
+          <div class="flow">
+            <span class="step dmn">IPC listener</span><span class="to">→</span>
+            <span class="step dmn">dispatcher <span class="muted">(window · int id)</span></span><span class="to">→</span>
+            <span class="step dmn">trace actor</span><span class="to">→</span>
+            <span class="step dmn">🎞 chunked encode <span class="muted">(lossy+lossless)</span></span><span class="to">→</span>
+            <span class="step dmn">concat</span><span class="to">→</span>
+            <span class="step disk">single DB writer</span><span class="to">→</span>
+            <span class="step ipc">register + upload ☁️</span>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="margin-top:.7em; font-size:.92em">What actually changed</h3>
+      <ul class="small" style="font-size:.74em">
+        <li class="fragment"><span class="lead">Spooling is more efficient</span>: no double-handling, so pixels hit the disk once and stay there.</li>
+        <li class="fragment"><span class="lead">The producer is nearly stateless</span>: just light batching before it sends.</li>
+        <li class="fragment"><span class="lead">Recordings are identified by an integer locally</span>; the cloud id is resolved separately.</li>
+        <li class="fragment"><span class="lead">Encoding is chunked</span>: it balances CPU against disk, then concatenates into the full video.</li>
+        <li class="fragment"><span class="lead">A single database writer</span>: no write contention.</li>
+      </ul>
+      <aside class="notes">
+        The crucial insight is the split: <b>bulk data (pixels) is spooled straight to disk once</b> and never
+        copied again; only a tiny "chunk ready" envelope crosses IPC. Joints are tiny, so we batch many into one
+        envelope. That's where "no double handling" comes from. On the daemon side, the dispatcher decides which
+        recording window a chunk belongs to and tags it with a local <b>integer</b> id (cheap, no round-trip to the
+        cloud just to start recording). Encoding in chunks means we don't hold one giant ffmpeg job; we transcode
+        each chunk and stitch them (concat, no re-encode) at the end, so the tail finishes fast and CPU/disk stay balanced.
+        Finally a single DB writer removes the lock contention the Python side suffered. Reveal the five bullets one at a time.
+      </aside>
+    </section>
+
+      <!-- 10.1 nested · stateless producer -->
+      <section>
+        <p class="codetag">crate ① · data_daemon_producer</p>
+        <h3 class="codehd">Stateless producer: N joints → one message</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// data_daemon_producer/src/lib.rs: runs INSIDE the Python process
+#[pyfunction]
+fn log_joints(py, robot_id, robot_instance, data_type,
+              items: Vec&lt;(String, f64)&gt;, timestamp_ns, timestamp_s) -&gt; PyResult&lt;()&gt; {
+    py.allow_threads(|| {
+        let mut batch_items = Vec::with_capacity(items.len());
+        for (name, value) in items {
+            let payload = serde_json::to_vec(&amp;ScalarFrameEntry { timestamp, value })?;
+            batch_items.push(BatchedDataItem { data_type, sensor_name: Some(name), payload });
+        }
+        // one envelope for every joint captured at this instant
+        publish(&amp;Envelope::BatchedData {
+            robot_id, robot_instance,
+            publish_timestamp_ns: now_ns(), timestamp_ns, timestamp_s,
+            items: batch_items,
+        })
+    })
+}</code></pre>
+        <p class="codecap">No per-stream state to manage: pack the batch and publish. One IPC message carries every joint for the timestep.</p>
+        <aside class="notes">
+          This is the "nearly stateless producer" point. The old Python producer held a lot of per-stream
+          state; here the function just packs the joints it was handed into one envelope and publishes.
+          Note <code>allow_threads</code>: it drops the GIL so other Python threads run while we serialise.
+        </aside>
+      </section>
+
+      <!-- 10.2 nested · pixels to disk -->
+      <section>
+        <p class="codetag">crate ① · data_daemon_producer</p>
+        <h3 class="codehd">Pixels go to disk, not over IPC</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// data_daemon_producer/src/lib.rs: log_frame()
+// SAFETY: hold the GIL and pass a zero-copy view from numpy into the NUT
+// writer; releasing it would force a multi-MiB memcpy per frame.
+let payload_slice: &amp;[u8] =
+    unsafe { std::slice::from_raw_parts(payload.buf_ptr() as *const u8, actual_bytes) };
+
+// …append straight to the (source, sensor) on-disk NUT chunk.
+// Pixels NEVER touch the IPC bus. When the chunk fills, announce only metadata:
+publish(&amp;Envelope::VideoChunkReady {
+    byte_count, frame_count, frame_timestamps_ns, /* … */
+})?;</code></pre>
+        <p class="codecap">No double-handling: the bulk data is written once. Only the chunk's metadata crosses the bus.</p>
+        <aside class="notes">
+          This is "spooling is more efficient / no double-handling". The frame is a raw numpy buffer; we
+          keep the GIL and hand a zero-copy slice straight to the NUT writer on disk. The IPC bus only ever
+          sees a small <code>VideoChunkReady</code> announcement once a chunk fills, never the pixels.
+        </aside>
+      </section>
+
+      <!-- 10.3 nested · integer recording id -->
+      <section>
+        <p class="codetag">crate ③ · data_daemon · dispatcher</p>
+        <h3 class="codehd">The daemon mints the local integer id</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// pipeline/dispatcher.rs: StartRecording handler (one tokio task owns this)
+let recording_index = match self.store.create_recording(new).await {
+    Ok(row)    =&gt; row.recording_index,     // ← local integer id, assigned here
+    Err(error) =&gt; { tracing::warn!(%error, "failed to create recording row"); return; }
+};
+
+// open the source's active window; data is bucketed by capture time
+entry.live = Some(ActiveWindow {
+    recording_index,
+    started_at_ns,
+    stopped_at_ns: None,        // set on StopRecording
+    traces: HashMap::new(),
+});</code></pre>
+        <p class="codecap">Recordings are identified by a local integer; the dispatcher buckets each datum into the matching window. The cloud id is resolved separately.</p>
+        <aside class="notes">
+          The integer-id point. <code>StartRecording</code> allocates a local <code>recording_index</code>
+          and opens a window keyed by <code>[started_at_ns, stopped_at_ns)</code>. Subsequent data is routed
+          by capture time into the right window. No cloud round-trip is needed just to start recording.
+        </aside>
+      </section>
+
+      <!-- 10.4 nested · chunked encode -->
+      <section>
+        <p class="codetag">crate ③ · data_daemon · encoding</p>
+        <h3 class="codehd">Chunked encode, then stream-copy concat</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// encoding/video_encoder.rs: encode_chunk() turns one NUT chunk into two mp4s
+Command::new(ffmpeg)
+    .args(["-i", raw_nut, "-map", "0:v"])
+    .args(["-c:v", "libx264", "-pix_fmt", "yuv420p",     "-preset", "ultrafast", "-qp", "23"])
+    .arg(lossy_out)        // chunk_NNNN_lossy.mp4
+    .args(["-map", "0:v"])
+    .args(["-c:v", "libx264", "-pix_fmt", "yuv444p10le", "-preset", "ultrafast", "-qp", "0"])
+    .arg(lossless_out);    // chunk_NNNN_lossless.mp4  (mathematically lossless)
+
+// on EndTrace: concat_segments() stream-copies the chunks into the final
+// lossy.mp4 / lossless.mp4, with no second decode/encode pass.</code></pre>
+        <p class="codecap">Transcode each chunk as it lands (balancing CPU against disk); stitch the segments at the end with a cheap stream-copy, no re-encode.</p>
+        <aside class="notes">
+          The chunked-encoding point. Each NUT chunk is transcoded to a lossy and a lossless mp4 segment as
+          it arrives, so we never hold one giant ffmpeg job. On trace end we concatenate by stream-copy,
+          which skips a second decode/encode pass and finishes the tail quickly.
+        </aside>
+      </section>
+
+      <!-- 10.5 nested · single DB writer -->
+      <section>
+        <p class="codetag">crate ③ · data_daemon · state</p>
+        <h3 class="codehd">One writer task: batched and coalesced</h3>
+        <pre><code class="language-rust" data-trim data-line-numbers>// state/trace_writer.rs: ONE tokio task owns every DB write
+pub fn spawn(store: Arc&lt;SqliteStateStore&gt;) -&gt; (TraceWriteHandle, TraceWriter) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let join = tokio::spawn(run(store, rx));     // ← the one and only writer
+    (TraceWriteHandle { tx: tx.clone() }, TraceWriter { tx, join })
+}
+
+async fn run(store: Arc&lt;SqliteStateStore&gt;, mut rx: Receiver&lt;Message&gt;) {
+    let mut pending: HashMap&lt;String, CoalescedTraceWrite&gt; = HashMap::new();
+    loop {
+        tokio::select! {
+            Some(Message::Write(w)) = rx.recv() =&gt; merge(&amp;mut pending, w),       // last-writer-wins
+            _ = ticker.tick()                   =&gt; flush(&amp;store, &amp;mut pending).await, // 1 batched txn
+        }
+    }
+}</code></pre>
+        <p class="codecap">Every actor sends writes to one task: no write contention, and per-frame updates coalesce into batched transactions.</p>
+        <aside class="notes">
+          The single-writer point. Actors never touch SQLite directly; they send messages to one task that
+          owns all writes. It coalesces per-column updates last-writer-wins and flushes them in one batched
+          transaction, which removed the write contention the Python side suffered.
+        </aside>
+      </section>
+
+    </section>
+
+    <!-- 11. SECTION: ROLLOUT -->
+    <section data-background-color="#0b1220">
+      <span class="kicker">Part 4</span>
+      <h1>The rollout plan</h1>
+      <p class="muted">Opt-in → bundled → default → Python removed.</p>
+      <aside class="notes">Reassure: every step is reversible until the very end. We never flip everyone at once.</aside>
+    </section>
+
+    <!-- 12. ROLLOUT TIMELINE -->
+    <section>
+      <h2 style="font-size:1.05em">A staged, reversible path</h2>
+      <ul class="timeline">
+        <li class="now" data-step="0">
+          <span class="tt">Now: introduce, behind a flag</span>
+          <span class="td">Initial PRs land the Rust daemon. Built &amp; enabled explicitly via <span class="keycap">NCD_RUST_DAEMON</span>.</span>
+        </li>
+        <li data-step="1">
+          <span class="tt">Bundle in Linux wheels</span>
+          <span class="td">Move to <code>pyproject.toml</code> and ship the daemon in our Linux wheels with <em>maturin</em>.</span>
+        </li>
+        <li data-step="2">
+          <span class="tt">Default on Linux (opt-out)</span>
+          <span class="td">Rust daemon becomes the default for Linux users; Python is still there to fall back to.</span>
+        </li>
+        <li data-step="3">
+          <span class="tt">macOS &amp; Windows support</span>
+          <span class="td">Extend the daemon beyond Linux.</span>
+        </li>
+        <li data-step="4">
+          <span class="tt">Opt-out on all platforms</span>
+          <span class="td">Rust becomes the default everywhere.</span>
+        </li>
+        <li class="fin" data-step="5">
+          <span class="tt">Remove the Python daemon</span>
+          <span class="td">Once we're confident across platforms, delete the legacy code.</span>
+        </li>
+      </ul>
+      <aside class="notes">
+        Stress the shape of the curve: we only ever increase exposure when the previous step has earned trust.
+        Today it's pure opt-in for the brave. Bundling removes the "you must build it yourself" friction.
+        "Default but opt-out" is the big trust gate: Python is still one env var away. Cross-platform comes next.
+        Only at the very end, after everyone's been on Rust by default across platforms, do we delete Python.
+        Note for the audience: the draft numbered these 0,1,4,2,5,6; I've put them in chronological order.
+      </aside>
+    </section>
+
+    <!-- 13. STEP 0 DETAIL -->
+    <section>
+      <span class="kicker">Step 0 · today</span>
+      <h2>Where we are right now</h2>
+      <div class="cards cols-2">
+        <div class="card"><h3 class="accent">Flag-gated</h3><p>The daemon must be built and enabled with <span class="keycap">NCD_RUST_DAEMON</span> before it does anything.</p></div>
+        <div class="card"><h3 class="accent">Build tooling</h3><p>You'll need <em>cargo</em> and <em>clang</em> to build the daemon locally.</p></div>
+        <div class="card"><h3 class="accent">Linux only, not in wheels</h3><p>Binaries aren't built into our wheels yet, but you can start trying it out today.</p></div>
+        <div class="card good"><h3 style="color:var(--nc-green)">Early signal</h3><p>We had initial success and good feedback using it at <em>ICRA</em>.</p></div>
+      </div>
+      <p class="small muted center" style="margin-top:.7em">Low risk to try: it does nothing unless you opt in, and the Python daemon is untouched.</p>
+      <aside class="notes">
+        Make the ask concrete: if you're on Linux and curious, build it (cargo + clang), set the flag, and
+        record something. It's completely inert otherwise. ICRA is our proof it survives contact with reality:
+        we ran it in the field and got encouraging feedback. Invite people to be early testers and file issues.
+      </aside>
+    </section>
+
+    <!-- 14. QUESTIONS -->
+    <section data-background-color="#0b1220" data-auto-animate>
+      <h1 class="center" style="font-size:2.4em; margin-top:.5em">Thanks for listening</h1>
+      <p class="muted center" style="font-size:1.2em">Any questions?</p>
+      <aside class="notes">
+        Park likely questions: performance numbers, what happens on non-Linux today (nothing: it falls back to Python),
+        how we guarantee parity (same API/CLI plus integration tests), and the timeline for "default".
+        Thank them and point to the dev guide: docs/rust_data_daemon_development.md.
+      </aside>
+    </section>
+
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/dist/reveal.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/notes/notes.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js@5.1.0/plugin/highlight/highlight.js"></script>
+<script>
+  Reveal.initialize({
+    hash: true,
+    slideNumber: 'c/t',
+    transition: 'slide',
+    transitionSpeed: 'fast',
+    backgroundTransition: 'fade',
+    controls: true,
+    progress: true,
+    width: 1280,
+    height: 760,
+    margin: 0.06,
+    plugins: [ RevealNotes, RevealHighlight ],
+  });
+</script>
+</body>
+</html>

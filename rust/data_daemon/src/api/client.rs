@@ -1,0 +1,704 @@
+//! Shared HTTP client used by every cloud coordinator.
+//!
+//! Centralises the auth header, retry policy, timeouts, and base URL so each
+//! coordinator (registration, uploader, status updater, progress reporter)
+//! talks to the backend through a single configured instance. The retry
+//! policy is max 3 attempts on `{408, 425, 429, 500..504}`, with exponential
+//! backoff capped at 30 s.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
+use reqwest::{Client, Method, Request, Response, StatusCode};
+use serde::Serialize;
+use thiserror::Error;
+use tokio::time::sleep;
+
+use crate::api::auth::{AuthError, AuthProvider};
+use crate::api::models::{
+    BatchRegisterResponse, RecordingStartResponse, RegisterTraceRequest,
+    ResumableUploadUrlResponse, TraceStatusUpdate,
+};
+
+/// Retry policy constants — match `const.py::BACKEND_API_*`.
+pub const BACKEND_API_MAX_RETRIES: u32 = 3;
+/// Cap for exponential backoff between retries (seconds).
+pub const BACKEND_API_MAX_BACKOFF_SECONDS: u64 = 30;
+/// Status codes the client retries on automatically.
+pub const RETRYABLE_STATUS_CODES: &[u16] = &[408, 425, 429, 500, 502, 503, 504];
+
+/// Construction-time configuration for [`ApiClient`].
+#[derive(Debug, Clone)]
+pub struct ApiClientOptions {
+    /// Base URL, e.g. `https://api.neuracore.app/api`.
+    pub base_url: String,
+    /// Per-request timeout. Defaults to 30 seconds.
+    pub timeout: Duration,
+    /// Retry budget on retryable status codes.
+    pub max_retries: u32,
+    /// Cap on the exponential backoff between retries.
+    pub max_backoff: Duration,
+}
+
+impl ApiClientOptions {
+    /// Build options for the given backend base URL with the policy defaults.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+            timeout: Duration::from_secs(30),
+            max_retries: BACKEND_API_MAX_RETRIES,
+            max_backoff: Duration::from_secs(BACKEND_API_MAX_BACKOFF_SECONDS),
+        }
+    }
+}
+
+/// Errors raised by the API client.
+#[derive(Debug, Error)]
+pub enum ApiClientError {
+    /// Underlying transport failure (DNS, timeout, TLS, etc.).
+    #[error(transparent)]
+    Transport(#[from] reqwest::Error),
+    /// Auth provider failed to supply a token (file missing, malformed, etc.).
+    #[error(transparent)]
+    Auth(#[from] AuthError),
+    /// Non-retryable response status.
+    #[error("backend responded with HTTP {status}: {body}")]
+    Status {
+        /// HTTP status code returned by the backend.
+        status: StatusCode,
+        /// Response body (truncated to a few KiB for the log line).
+        body: String,
+    },
+    /// Response body did not deserialise.
+    #[error("failed to decode backend response: {0}")]
+    Decode(#[source] serde_json::Error),
+    /// Response was missing a header the client expected.
+    #[error("response missing required header {0}")]
+    MissingHeader(&'static str),
+}
+
+impl ApiClientError {
+    /// True when the backend responded `404 Not Found`.
+    ///
+    /// The recording notifiers use this to treat "the recording is already not
+    /// open on the backend" as the desired post-condition rather than a
+    /// failure: a cancel/stop POST that 404s means another path already closed
+    /// the recording (a benign race between the cancel-notifier sweep and the
+    /// start-notifier's `resolve_prior_pending`), so there is nothing left to do.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
+    }
+}
+
+/// Idle GCS upload connections to retain per host for reuse. Matches the
+/// uploader's `MAX_CONCURRENT_UPLOADS` so a full burst of parallel per-file PUTs
+/// can each keep its connection warm for the next file rather than being
+/// evicted between files.
+const UPLOAD_POOL_MAX_IDLE_PER_HOST: usize = 128;
+/// How long an idle upload connection is kept before eviction — long enough to
+/// stay warm across the gap between consecutive recordings, so the next burst
+/// reuses the pool instead of re-handshaking TLS.
+const UPLOAD_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// TCP keepalive on upload sockets, so a warm-but-idle connection holds the path
+/// open (and a dead one is detected) rather than silently going half-open.
+const UPLOAD_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+
+/// Build the dedicated client the uploader PUTs file chunks through.
+///
+/// Pinned to **HTTP/1.1** so the uploader's concurrent per-file PUTs open
+/// *parallel* TCP connections (each with its own congestion window) instead of
+/// multiplexing onto a single HTTP/2 connection. A single h2 connection shares
+/// one slow-start congestion window across every upload, so a burst of small
+/// files finishes before the window ramps and never reaches link speed; N
+/// parallel h1 connections fill the bandwidth-delay product immediately. The
+/// generous idle pool + TCP keepalive keep those connections warm so files
+/// 2..N (and the next recording's burst) reuse them instead of re-handshaking.
+///
+/// Deliberately sets **no client-level `timeout`**: a streaming chunk PUT is
+/// bounded by `upload_transfer::CHUNK_UPLOAD_TIMEOUT` (a per-chunk tokio
+/// timeout), which tolerates a full 16 MiB chunk on a slow link. The API
+/// client's short overall timeout would cap that sustained-throughput floor.
+fn build_upload_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .http1_only()
+        .pool_max_idle_per_host(UPLOAD_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Some(UPLOAD_POOL_IDLE_TIMEOUT))
+        .tcp_keepalive(Some(UPLOAD_TCP_KEEPALIVE))
+        .build()
+}
+
+/// Generic HTTP client wrapping a [`reqwest::Client`] with auth + retry.
+pub struct ApiClient {
+    /// Control-plane client for the Neuracore API (registration, lifecycle,
+    /// status). HTTP/2-capable: many small request/response calls benefit from
+    /// multiplexing over one connection.
+    inner: Client,
+    /// Data-plane client for direct-to-GCS chunk PUTs. HTTP/1.1 with a warm
+    /// connection pool — see [`build_upload_client`].
+    upload_inner: Client,
+    options: ApiClientOptions,
+    auth: Arc<dyn AuthProvider>,
+}
+
+impl ApiClient {
+    /// Build a client with the given options and auth provider.
+    pub fn new(
+        options: ApiClientOptions,
+        auth: Arc<dyn AuthProvider>,
+    ) -> Result<Self, ApiClientError> {
+        let inner = Client::builder()
+            .timeout(options.timeout)
+            .http2_adaptive_window(true)
+            .pool_max_idle_per_host(128)
+            .build()?;
+        let upload_inner = build_upload_client()?;
+        Ok(Self {
+            inner,
+            upload_inner,
+            options,
+            auth,
+        })
+    }
+
+    /// Borrow the dedicated upload client — exposed for the uploader, which PUTs
+    /// chunks straight to GCS-issued URLs that are not relative to the configured
+    /// `base_url`. This is the HTTP/1.1, warm-pool client (see
+    /// [`build_upload_client`]), kept separate from the control-plane `inner`
+    /// client so concurrent file PUTs fan out across parallel connections.
+    pub fn raw_client(&self) -> &Client {
+        &self.upload_inner
+    }
+
+    /// Borrow the configured auth provider.
+    pub fn auth(&self) -> &Arc<dyn AuthProvider> {
+        &self.auth
+    }
+
+    /// Borrow the configured options.
+    pub fn options(&self) -> &ApiClientOptions {
+        &self.options
+    }
+
+    /// Build a URL beneath the configured `base_url`. The `path` is appended
+    /// verbatim (and may start with `/`).
+    pub fn url(&self, path: &str) -> String {
+        if path.starts_with("http://") || path.starts_with("https://") {
+            return path.to_string();
+        }
+        let base = self.options.base_url.trim_end_matches('/');
+        if let Some(stripped) = path.strip_prefix('/') {
+            format!("{base}/{stripped}")
+        } else {
+            format!("{base}/{path}")
+        }
+    }
+
+    /// `HEAD /status/health` — used by the connection monitor.
+    ///
+    /// Returns `true` when the backend reports any non-5xx status.
+    pub async fn health_check(&self) -> Result<bool, ApiClientError> {
+        let request = self.inner.head(self.url("/status/health")).build()?;
+        let response = self.inner.execute(request).await?;
+        Ok(response.status().as_u16() < 500)
+    }
+
+    /// `POST /org/{org}/recording/traces/batch-register`.
+    pub async fn batch_register(
+        &self,
+        org_id: &str,
+        traces: &[RegisterTraceRequest],
+    ) -> Result<BatchRegisterResponse, ApiClientError> {
+        let path = format!("/org/{org_id}/recording/traces/batch-register");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            traces: &'a [RegisterTraceRequest],
+        }
+        let body = Body { traces };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        let bytes = response.bytes().await?;
+        serde_json::from_slice::<BatchRegisterResponse>(&bytes).map_err(ApiClientError::Decode)
+    }
+
+    /// `GET /org/{org}/recording/{rec}/resumable_upload_url`.
+    pub async fn fetch_resumable_upload_url(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        filepath: &str,
+        content_type: &str,
+    ) -> Result<String, ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{recording_id}/resumable_upload_url");
+        let query = [("filepath", filepath), ("content_type", content_type)];
+        let response = self
+            .send_with_retry(Method::GET, &path, |builder| builder.query(&query))
+            .await?;
+        let bytes = response.bytes().await?;
+        let parsed: ResumableUploadUrlResponse =
+            serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)?;
+        Ok(parsed.url)
+    }
+
+    /// `PUT /org/{org}/recording/{rec}/traces/batch-update`.
+    pub async fn batch_update_traces(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        updates: &HashMap<String, TraceStatusUpdate>,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{recording_id}/traces/batch-update");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            updates: &'a HashMap<String, TraceStatusUpdate>,
+        }
+        let body = Body { updates };
+        let _ = self
+            .send_with_retry(Method::PUT, &path, |builder| builder.json(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /org/{org}/recording/{rec}/traces-metadata`.
+    pub async fn report_progress(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        traces: &HashMap<String, i64>,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{recording_id}/traces-metadata");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            traces: &'a HashMap<String, i64>,
+        }
+        let body = Body { traces };
+        let _ = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /org/{org}/recording/stop` with a JSON body carrying
+    /// `recording_id` and the producer-captured `end_time` (Unix seconds).
+    ///
+    /// `end_time` is the recording window's real upper bound captured by the
+    /// producer, so the backend reports the true duration even for recordings
+    /// notified late (e.g. after reconnecting).
+    pub async fn recording_stop(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        end_time: f64,
+    ) -> Result<(), ApiClientError> {
+        self.recording_lifecycle_post(org_id, "stop", recording_id, end_time)
+            .await
+    }
+
+    /// Shared body/send for the byte-identical `/recording/stop` and
+    /// `/recording/cancel` POSTs — they differ only in the trailing URL segment
+    /// (`action`) and both carry `{recording_id, end_time}`.
+    async fn recording_lifecycle_post(
+        &self,
+        org_id: &str,
+        action: &str,
+        recording_id: &str,
+        end_time: f64,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{action}");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            recording_id: &'a str,
+            end_time: f64,
+        }
+        let body = Body {
+            recording_id,
+            end_time,
+        };
+        let _ = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// `POST /org/{org}/recording/cancel` with a JSON body carrying
+    /// `recording_id` and `end_time` (the cancel time, Unix seconds) — the same
+    /// body shape the backend now requires for `/recording/stop`.
+    ///
+    /// Cancels the recording server-side, which also clears it as the robot
+    /// instance's *pending* recording so the next `/recording/start` mints a
+    /// fresh id instead of reusing this one. The daemon's cancel notifier makes
+    /// this call best-effort once it knows the cloud `recording_id`; the SDK
+    /// no longer calls it inline.
+    pub async fn recording_cancel(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        end_time: f64,
+    ) -> Result<(), ApiClientError> {
+        self.recording_lifecycle_post(org_id, "cancel", recording_id, end_time)
+            .await
+    }
+
+    /// `POST /org/{org}/recording/start`.
+    ///
+    /// Opens a recording server-side and returns the backend-minted cloud
+    /// `recording_id`. Mirrors [`recording_stop`](Self::recording_stop): the
+    /// SDK no longer makes this call inline — the daemon's recording-start
+    /// notifier POSTs it in the background once the local recording row
+    /// exists, absorbing staging POST tail latency off the SDK's hot path.
+    /// The body carries the source identity plus the client-captured
+    /// `start_time` (Unix seconds) the backend requires; the response is
+    /// `{"id": "..."}`.
+    pub async fn recording_start(
+        &self,
+        org_id: &str,
+        robot_id: &str,
+        instance: i64,
+        dataset_id: &str,
+        start_time: f64,
+    ) -> Result<String, ApiClientError> {
+        let path = format!("/org/{org_id}/recording/start");
+        #[derive(Serialize)]
+        struct Body<'a> {
+            robot_id: &'a str,
+            instance: i64,
+            dataset_id: &'a str,
+            start_time: f64,
+        }
+        let body = Body {
+            robot_id,
+            instance,
+            dataset_id,
+            start_time,
+        };
+        let response = self
+            .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
+            .await?;
+        let bytes = response.bytes().await?;
+        let parsed: RecordingStartResponse =
+            serde_json::from_slice(&bytes).map_err(ApiClientError::Decode)?;
+        Ok(parsed.id)
+    }
+
+    /// `PUT /org/{org}/recording/{rec}/expected-trace-count`.
+    ///
+    /// Tells the backend how many traces to expect for this recording so it
+    /// can promote the recording into its parent dataset once all traces are
+    /// uploaded. Without this the recording stays hidden from
+    /// `nc.get_dataset(...)` indefinitely even after every trace is uploaded.
+    pub async fn put_expected_trace_count(
+        &self,
+        org_id: &str,
+        recording_id: &str,
+        expected_trace_count: i64,
+    ) -> Result<(), ApiClientError> {
+        let path = format!("/org/{org_id}/recording/{recording_id}/expected-trace-count");
+        #[derive(Serialize)]
+        struct Body {
+            expected_trace_count: i64,
+        }
+        let body = Body {
+            expected_trace_count,
+        };
+        let _ = self
+            .send_with_retry(Method::PUT, &path, |builder| builder.json(&body))
+            .await?;
+        Ok(())
+    }
+
+    /// Send a request with the daemon's standard retry policy.
+    ///
+    /// `build` is invoked on a fresh `RequestBuilder` so the body / query
+    /// closure is *re-evaluated* on every retry (`reqwest::RequestBuilder`
+    /// captures the body up front; sharing one across retries would
+    /// re-transmit the same buffer, which is what we want here).
+    async fn send_with_retry<F>(
+        &self,
+        method: Method,
+        path: &str,
+        build: F,
+    ) -> Result<Response, ApiClientError>
+    where
+        F: Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    {
+        let url = self.url(path);
+        let mut refreshed_auth = false;
+        let mut attempt: u32 = 0;
+        loop {
+            let headers = self.authorised_headers().await?;
+            let builder = self
+                .inner
+                .request(method.clone(), &url)
+                .headers(headers.clone());
+            let builder = build(builder);
+            let request: Request = builder.build()?;
+            let response = match self.inner.execute(request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    // Transport-level failures — connection resets, DNS blips,
+                    // TLS errors, and request timeouts — are the common failure
+                    // on a flaky robot link and would otherwise bypass the
+                    // status-code retry below entirely. Retry them within the
+                    // same attempt budget; a non-transient error (or an
+                    // exhausted budget) propagates.
+                    if (error.is_timeout() || error.is_connect())
+                        && attempt + 1 < self.options.max_retries
+                    {
+                        attempt += 1;
+                        let backoff = self.backoff(attempt);
+                        tracing::warn!(%url, %error, attempt, "retrying after transport error");
+                        sleep(backoff).await;
+                        continue;
+                    }
+                    return Err(error.into());
+                }
+            };
+
+            let status = response.status();
+            if status == StatusCode::UNAUTHORIZED && !refreshed_auth {
+                tracing::debug!(%url, "received 401, reloading auth token");
+                self.auth.reload().await?;
+                refreshed_auth = true;
+                continue;
+            }
+
+            if status.is_success() {
+                return Ok(response);
+            }
+
+            if RETRYABLE_STATUS_CODES.contains(&status.as_u16())
+                && attempt + 1 < self.options.max_retries
+            {
+                attempt += 1;
+                let backoff = self.backoff(attempt);
+                tracing::warn!(
+                    %url,
+                    %status,
+                    attempt,
+                    "retrying after retryable status"
+                );
+                sleep(backoff).await;
+                continue;
+            }
+
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiClientError::Status { status, body });
+        }
+    }
+
+    async fn authorised_headers(&self) -> Result<HeaderMap, ApiClientError> {
+        let token = self.auth.bearer_token().await?;
+        let mut headers = HeaderMap::new();
+        let value = HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+            // The token came from user-controlled JSON, but a value that
+            // cannot fit in a header byte string would mean the file is
+            // corrupt — surface it as a Decode error so it shows up in the
+            // tracing log alongside other parse failures.
+            ApiClientError::Decode(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "bearer token contains invalid header characters",
+            )))
+        })?;
+        headers.insert(AUTHORIZATION, value);
+        // Only the Authorization header is shared across methods. The bodied
+        // POST/PUT calls set `Content-Type: application/json` themselves via
+        // `.json(..)`, so the bodyless GET (and HEAD) don't advertise a JSON body.
+        Ok(headers)
+    }
+
+    fn backoff(&self, attempt: u32) -> Duration {
+        let secs = 2u64.saturating_pow(attempt.saturating_sub(1));
+        let capped = secs.min(self.options.max_backoff.as_secs().max(1));
+        // Equal jitter: a fixed half plus a random half in `[0, base/2]`. Pure
+        // `2^n` backoff makes every client that backed off together retry on the
+        // same tick, stampeding the backend the instant it recovers; spreading
+        // each client's wake over a window decorrelates them. (Mean wait is also
+        // ≤ the old fixed value.)
+        let base_ms = capped.saturating_mul(1000);
+        let half = base_ms / 2;
+        let jitter = if half > 0 { jitter_below(half) } else { 0 };
+        Duration::from_millis(half + jitter)
+    }
+}
+
+/// A pseudo-random value in `[0, upper]`, seeded from the wall clock's
+/// nanosecond component. Good enough to decorrelate retry delays across
+/// clients without pulling in a `rand` dependency for a non-cryptographic use.
+fn jitter_below(upper: u64) -> u64 {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
+    (nanos % (u128::from(upper) + 1)) as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::auth::StaticAuthProvider;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn options(base_url: String) -> ApiClientOptions {
+        ApiClientOptions {
+            base_url,
+            timeout: Duration::from_secs(5),
+            max_retries: 3,
+            // Tighten the backoff cap so retry-tests run inside their own
+            // tokio time advance window without waiting real seconds.
+            max_backoff: Duration::from_secs(1),
+        }
+    }
+
+    fn client(server: &MockServer) -> ApiClient {
+        let auth = Arc::new(StaticAuthProvider::new("test-token"));
+        ApiClient::new(options(server.uri()), auth).expect("client")
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_true_on_2xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/status/health"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        assert!(client.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn health_check_returns_false_on_5xx() {
+        let server = MockServer::start().await;
+        Mock::given(method("HEAD"))
+            .and(path("/status/health"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        assert!(!client.health_check().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn batch_register_round_trips_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [{
+                    "trace_id": "trace-1",
+                    "upload_session_uris": {"rgb/cam_0/lossy.mp4": "https://upload.example/1"}
+                }],
+                "failed_traces": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = client(&server);
+
+        let traces = vec![RegisterTraceRequest {
+            recording_id: "rec-1".to_string(),
+            data_type: "RGB_IMAGES".to_string(),
+            trace_id: "trace-1".to_string(),
+            cloud_files: vec![],
+        }];
+        let outcome = client.batch_register("org-1", &traces).await.unwrap();
+        assert_eq!(outcome.registered_traces.len(), 1);
+        assert_eq!(outcome.registered_traces[0].trace_id, "trace-1");
+    }
+
+    #[tokio::test]
+    async fn retry_on_5xx_until_success() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [], "failed_traces": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let result = client.batch_register("org-1", &[]).await.unwrap();
+        assert!(result.registered_traces.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reloads_auth_on_401() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "url": "https://upload.example/abc"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct CountingProvider {
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AuthProvider for CountingProvider {
+            async fn bearer_token(&self) -> Result<String, AuthError> {
+                Ok("token".to_string())
+            }
+            async fn reload(&self) -> Result<(), AuthError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let auth = Arc::new(CountingProvider {
+            calls: Arc::clone(&calls),
+        });
+        let client = ApiClient::new(options(server.uri()), auth).unwrap();
+        let url = client
+            .fetch_resumable_upload_url("org-1", "rec-1", "path", "application/json")
+            .await
+            .unwrap();
+        assert_eq!(url, "https://upload.example/abc");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn non_retryable_status_surfaces_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let error = client.batch_register("org-1", &[]).await.unwrap_err();
+        match error {
+            ApiClientError::Status { status, body } => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(body.contains("bad request"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+}

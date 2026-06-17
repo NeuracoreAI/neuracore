@@ -1,0 +1,17 @@
+[package]
+name = "data_daemon_ipc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared IPC envelope, payload, and service-name definitions for the Neuracore data daemon."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Shared recordings-root resolution (`paths`) needs the user's home directory so
+# the daemon and the producer compute the same default root.
+dirs.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true

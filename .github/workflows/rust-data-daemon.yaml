@@ -1,0 +1,81 @@
+name: Rust Data Daemon
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-data-daemon.yaml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'rust/**'
+      - '.github/workflows/rust-data-daemon.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # PyO3 builds need a discoverable Python interpreter; the runner's default
+      # /usr/bin/python is fine, but actions/setup-python pins the version we
+      # test the cdylib against.
+      - name: Set up Python
+        id: setup-python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with clippy (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The video-encoder tests early-return when ffmpeg is absent, so without
+      # this the encode/preflight path (and the ffmpeg-4.4.2 `-vsync` vs
+      # `-fps_mode` compatibility the daemon defends against) is never exercised
+      # in CI. ubuntu-22.04 ships ffmpeg 4.4.x, matching the target host.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Test (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo test --workspace --verbose
+
+      - name: Build release (workspace)
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo build --release --workspace --verbose
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: cargo doc --no-deps --document-private-items
