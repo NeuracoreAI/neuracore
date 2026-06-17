@@ -48,6 +48,7 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     if _active_dataset is None:
         raise ValueError(f"No Dataset found with the given name: {name} or ID: {id}")
     GlobalSingleton()._active_dataset_id = _active_dataset.id
+    GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset
 
 
@@ -96,6 +97,7 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
         data_types=list(dataset_model.all_data_types.keys()),
     )
     GlobalSingleton()._active_dataset_id = merged.id
+    GlobalSingleton()._active_dataset = merged
     return merged
 
 
@@ -171,6 +173,7 @@ def clone_dataset(
             "available immediately."
         )
         GlobalSingleton()._active_dataset_id = cloned.id
+        GlobalSingleton()._active_dataset = cloned
         return cloned
 
     # resolve for source_dataset if not provided, to get the total number of recordings
@@ -199,6 +202,7 @@ def clone_dataset(
             pbar.close()
 
     GlobalSingleton()._active_dataset_id = cloned.id
+    GlobalSingleton()._active_dataset = cloned
     return cloned
 
 
@@ -226,4 +230,5 @@ def create_dataset(
     """
     _active_dataset = Dataset.create(name, description, tags, shared)
     GlobalSingleton()._active_dataset_id = _active_dataset.id
+    GlobalSingleton()._active_dataset = _active_dataset
     return _active_dataset

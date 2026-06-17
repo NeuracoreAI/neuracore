@@ -127,3 +127,14 @@ DebugOption = Annotated[
         is_flag=True,
     ),
 ]
+
+AssumeYesOption = Annotated[
+    bool,
+    typer.Option(
+        "--yes",
+        "-y",
+        "--force",
+        help="Skip the confirmation prompt — required for non-interactive use.",
+        is_flag=True,
+    ),
+]

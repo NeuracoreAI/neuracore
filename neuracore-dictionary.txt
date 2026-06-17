@@ -110,6 +110,7 @@ elementwise
 embs
 Emika
 ENOENT
+enoexec
 EPERM
 EPIPE
 erfinv
