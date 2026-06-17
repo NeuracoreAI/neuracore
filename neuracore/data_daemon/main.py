@@ -8,6 +8,7 @@ from neuracore.data_daemon.config_manager.args_handler import (
     profile_app,
     run_install,
     run_launch,
+    run_reset,
     run_status,
     run_stop,
     run_uninstall,
@@ -20,6 +21,7 @@ app = typer.Typer(
 
 app.command("launch")(run_launch)
 app.command("stop")(run_stop)
+app.command("reset")(run_reset)
 app.command("status")(run_status)
 app.command("install")(run_install)
 app.command("uninstall")(run_uninstall)

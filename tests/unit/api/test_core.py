@@ -180,6 +180,7 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
             recording_id: str,
             *,
             wait_for_producer_drain: bool = True,
+            timestamp: float | None = None,
         ) -> None:
             calls.append((recording_id, wait_for_producer_drain))
 

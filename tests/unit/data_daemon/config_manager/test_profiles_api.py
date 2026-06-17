@@ -122,6 +122,7 @@ def test_get_profile_parses_unit_suffixed_byte_fields(
     stored_content: dict[str, Any] = {
         "storage_limit": "2gb",
         "bandwidth_limit": "300m",
+        "spool_limit": "1gb",
     }
 
     with profile_path.open("w") as profile_file:
@@ -131,6 +132,7 @@ def test_get_profile_parses_unit_suffixed_byte_fields(
 
     assert loaded_config.storage_limit == 2 * 1024**3
     assert loaded_config.bandwidth_limit == 300 * 1024**2
+    assert loaded_config.spool_limit == 1024**3
 
 
 def test_get_profile_raises_when_missing(
@@ -244,6 +246,7 @@ def test_resolve_effective_config_env_supports_unit_suffixed_values(
 
     monkeypatch.setenv("NCD_STORAGE_LIMIT", "2gb")
     monkeypatch.setenv("NCD_BANDWIDTH_LIMIT", "300m")
+    monkeypatch.setenv("NCD_SPOOL_LIMIT", "1gb")
 
     config_manager = ConfigManager(
         profile_manager=profile_manager, profile=profile_name
@@ -252,6 +255,7 @@ def test_resolve_effective_config_env_supports_unit_suffixed_values(
 
     assert effective_config.storage_limit == 2 * 1024**3
     assert effective_config.bandwidth_limit == 300 * 1024**2
+    assert effective_config.spool_limit == 1024**3
 
 
 def test_resolve_effective_config_env_boolean_values_are_case_insensitive(

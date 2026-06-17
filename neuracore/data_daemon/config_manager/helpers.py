@@ -9,6 +9,7 @@ from neuracore.data_daemon.const import (
     BYTES_PER_MIB,
     DEFAULT_MAX_BANDWIDTH_MIB_S,
     DEFAULT_MIN_BANDWIDTH_MIB_S,
+    DEFAULT_SPOOL_LIMIT_BYTES,
     DEFAULT_STORAGE_FREE_FRACTION,
     DEFAULT_TARGET_DRAIN_HOURS,
     SECONDS_PER_HOUR,
@@ -81,6 +82,7 @@ def collect_config_updates(
     *,
     storage_limit: int | None,
     bandwidth_limit: int | None,
+    spool_limit: int | None,
     path_to_store_record: str | None,
     num_threads: int | None,
     keep_wakelock_while_upload: bool | None,
@@ -92,6 +94,7 @@ def collect_config_updates(
     raw_config_values = {
         "storage_limit": storage_limit,
         "bandwidth_limit": bandwidth_limit,
+        "spool_limit": spool_limit,
         "path_to_store_record": path_to_store_record,
         "num_threads": num_threads,
         "keep_wakelock_while_upload": keep_wakelock_while_upload,
@@ -147,6 +150,7 @@ def build_default_daemon_config(
     return DaemonConfig(
         storage_limit=storage_limit,
         bandwidth_limit=bandwidth_limit,
+        spool_limit=DEFAULT_SPOOL_LIMIT_BYTES,
         path_to_store_record=str(record_dir),
         num_threads=num_threads,
         keep_wakelock_while_upload=False,

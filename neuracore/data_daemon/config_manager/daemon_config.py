@@ -9,6 +9,8 @@ class DaemonConfig(BaseModel):
     Attributes:
         storage_limit: maximum storage the daemon may use locally, in bytes.
         bandwidth_limit: maximum upload bandwidth, in bytes per second.
+        spool_limit: cap on the producer's on-disk video spool backlog, in
+            bytes. 0 disables the bound.
         path_to_store_record: directory where the daemon writes recording files.
         num_threads: number of worker threads used by the daemon.
         keep_wakelock_while_upload: whether to keep a wakelock while uploading data.
@@ -19,6 +21,7 @@ class DaemonConfig(BaseModel):
 
     storage_limit: int | None = None
     bandwidth_limit: int | None = None
+    spool_limit: int | None = None
     path_to_store_record: str | None = None
     num_threads: int | None = None
     keep_wakelock_while_upload: bool | None = None

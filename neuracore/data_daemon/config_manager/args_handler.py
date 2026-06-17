@@ -10,6 +10,7 @@ import typer
 from neuracore.core.exceptions import AuthenticationError
 from neuracore.data_daemon.config_manager.cli_options import (
     ApiKeyOption,
+    AssumeYesOption,
     BackgroundOption,
     BandwidthLimitOption,
     CurrentOrgIdOption,
@@ -22,6 +23,7 @@ from neuracore.data_daemon.config_manager.cli_options import (
     ProfileNameDeleteArgument,
     ProfileNameGetArgument,
     ProfileNameUpdateArgument,
+    SpoolLimitOption,
     StorageLimitOption,
     StoragePathOption,
 )
@@ -41,6 +43,7 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
     launch_new_daemon_subprocess,
     pid_is_running,
     read_pid_from_file,
+    reset_daemon_state,
     terminate_pid,
     wait_for_exit,
 )
@@ -56,6 +59,7 @@ def _update_profile(
     create_if_missing: bool,
     storage_limit: int | None,
     bandwidth_limit: int | None,
+    spool_limit: int | None,
     path_to_store_record: str | None,
     num_threads: int | None,
     keep_wakelock_while_upload: bool | None,
@@ -66,6 +70,7 @@ def _update_profile(
     updates = collect_config_updates(
         storage_limit=storage_limit,
         bandwidth_limit=bandwidth_limit,
+        spool_limit=spool_limit,
         path_to_store_record=path_to_store_record,
         num_threads=num_threads,
         keep_wakelock_while_upload=keep_wakelock_while_upload,
@@ -113,6 +118,7 @@ def run_profile_update(
     name: ProfileNameUpdateArgument = None,
     storage_limit: StorageLimitOption = None,
     bandwidth_limit: BandwidthLimitOption = None,
+    spool_limit: SpoolLimitOption = None,
     path_to_store_record: StoragePathOption = None,
     num_threads: NumThreadsOption = None,
     keep_wakelock_while_upload: KeepWakelockOption = None,
@@ -129,6 +135,7 @@ def run_profile_update(
         create_if_missing=False,
         storage_limit=storage_limit,
         bandwidth_limit=bandwidth_limit,
+        spool_limit=spool_limit,
         path_to_store_record=path_to_store_record,
         num_threads=num_threads,
         keep_wakelock_while_upload=keep_wakelock_while_upload,
@@ -292,6 +299,23 @@ def run_stop() -> None:
 
     typer.echo(f"Failed to stop daemon (pid={pid_value}).", err=True)
     raise typer.Exit(code=1)
+
+
+def run_reset(yes: AssumeYesOption = False) -> None:
+    """Remove all daemon state: recordings, database, and IPC artefacts."""
+    pid_path = get_daemon_pid_path()
+    db_path = get_daemon_db_path()
+
+    try:
+        exit_code = reset_daemon_state(
+            pid_path=pid_path, db_path=db_path, assume_yes=yes
+        )
+    except DaemonLifecycleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
+
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
 
 
 def run_status() -> None:
