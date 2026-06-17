@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.const import API_URL
@@ -102,6 +103,89 @@ def test_log_joint_velocities_and_torques(
     nc.log_joint_torques({"joint1": 1.5, "joint2": 2.3})
     nc.log_joint_velocity(name="joint1", velocity=0.5)
     nc.log_joint_torque(name="joint2", torque=2.3)
+
+
+def test_log_joint_group_cache_reuse_and_rebuild(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """A stable joint set reuses the resolved group; a changed set rebuilds it."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # Two frames with the same joints reuse the same cached group object — the
+    # steady-state hot path does no per-joint re-resolution.
+    nc.log_joint_positions({"joint1": 0.5, "joint2": -0.3})
+    first_group = robot._joint_group_cache[DataType.JOINT_POSITIONS]
+    nc.log_joint_positions({"joint1": 0.6, "joint2": -0.4})
+    assert robot._joint_group_cache[DataType.JOINT_POSITIONS] is first_group
+
+    # A changed joint set is rebuilt — the caller may change which joints they
+    # log and we must honour the live set, never a stale cached one.
+    nc.log_joint_positions({"joint1": 0.6, "joint2": -0.4, "joint3": 0.1})
+    rebuilt_group = robot._joint_group_cache[DataType.JOINT_POSITIONS]
+    assert rebuilt_group is not first_group
+    assert len(rebuilt_group.bindings) == 3
+
+
+def test_log_joint_group_rebuilds_on_middle_joint_change(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """A changed *middle* joint rebuilds the group even with stable boundaries.
+
+    The group cache key is the exact joint-name tuple, not a sampled one, so a
+    rename far from either end — which a boundary-only check would miss — is
+    still detected and the data is logged against the correct joints.
+    """
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    # 20 joints — wider than the value-validation sample on each end, so the
+    # changed joint below sits in the unsampled middle.
+    frame = {f"joint{index}": float(index) for index in range(20)}
+    nc.log_joint_positions(frame)
+    first_group = robot._joint_group_cache[DataType.JOINT_POSITIONS]
+
+    # Rebuild preserving order so only the middle entry differs; the first and
+    # last entries (the only ones a boundary check would inspect) are unchanged.
+    changed = {
+        ("renamed_middle" if name == "joint10" else name): value
+        for name, value in frame.items()
+    }
+    nc.log_joint_positions(changed)
+    rebuilt_group = robot._joint_group_cache[DataType.JOINT_POSITIONS]
+
+    assert rebuilt_group is not first_group
+    assert "renamed_middle" in rebuilt_group.joint_names
+    assert "joint10" not in rebuilt_group.joint_names
+
+
+def test_log_joints_large_frame(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """A frame larger than the smoke sample logs every joint without error."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    positions = {f"joint{index}": float(index) for index in range(100)}
+    nc.log_joint_positions(positions)
+    sync_point = nc.get_latest_sync_point(include_remote=False)
+    logged = sync_point.data[DataType.JOINT_POSITIONS]
+    assert len(logged) == 100
 
 
 def test_log_visual_joint_positions(

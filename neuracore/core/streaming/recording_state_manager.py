@@ -9,6 +9,7 @@ state and remote recording triggers.
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import Future
 
@@ -31,9 +32,36 @@ from neuracore.core.streaming.base_sse_consumer import (
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
+from neuracore.data_daemon.communications_management.shared_transport import (
+    recording_context as _recording_context,
+)
 from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
+
+
+def _notify_native_producer_of_expiry(robot_id: str, instance: int) -> None:
+    """Tell the Rust producer a source's recording has been locally auto-expired.
+
+    Calls the native ``stop_recording`` for the source so the producer flushes
+    any in-progress NUT chunk and publishes ``StopRecording``. The daemon is
+    idempotent, so a later explicit ``nc.stop_recording`` that races this is a
+    no-op. The stop boundary is wall-clock here (the expiry path has no access
+    to the recording context's tracked data-clock timestamp) — acceptable for a
+    forced 5-minute timeout. Failures are logged and swallowed: the local
+    expiry must always succeed.
+    """
+    try:
+        _recording_context._load_native().stop_recording(
+            robot_id, instance, time.time_ns()
+        )
+    except Exception:
+        logger.exception(
+            "Failed to notify native producer of recording expiry for %s:%s",
+            robot_id,
+            instance,
+        )
 
 
 class RecordingStateManager(BaseSSEConsumer):
@@ -134,8 +162,11 @@ class RecordingStateManager(BaseSSEConsumer):
     ) -> None:
         """Handle recording start for a robot instance.
 
-        Updates internal state. If the robot was already recording with a different
-        ID, stops the previous recording first.
+        Updates internal state. If the robot was already recording under a
+        different id (e.g. the local handle being replaced by the backend cloud
+        id), the handle is replaced in place and the previous recording's timers
+        are retired — the instance is never transiently cleared, so a concurrent
+        ``log_*`` cannot observe a ``None`` recording id and drop a frame.
 
         Args:
             robot_id: Robot ID
@@ -149,8 +180,6 @@ class RecordingStateManager(BaseSSEConsumer):
 
         if previous_recording_id == recording_id:
             return
-        if previous_recording_id is not None:
-            self.recording_stopped(robot_id, instance, previous_recording_id)
 
         try:
             ensure_daemon_running()
@@ -159,6 +188,8 @@ class RecordingStateManager(BaseSSEConsumer):
             return
 
         self.recording_robot_instances[instance_key] = recording_id
+        if previous_recording_id is not None:
+            self._cancel_recording_timers(previous_recording_id)
         self._schedule_recording_timers(
             robot_id=robot_id,
             instance=instance,
@@ -192,6 +223,8 @@ class RecordingStateManager(BaseSSEConsumer):
                 )
                 self._expired_recording_ids.add(recording_id)
                 self.recording_stopped(robot_id, instance, recording_id)
+                if rust_daemon_enabled():
+                    _notify_native_producer_of_expiry(robot_id, instance)
 
         loop = get_running_loop()
 
@@ -220,7 +253,7 @@ class RecordingStateManager(BaseSSEConsumer):
         loop.call_soon_threadsafe(_cancel)
 
     def recording_stopped(
-        self, robot_id: str, instance: int, recording_id: str
+        self, robot_id: str, instance: int, recording_id: str | None
     ) -> None:
         """Handle recording stop for a robot instance.
 
@@ -239,7 +272,12 @@ class RecordingStateManager(BaseSSEConsumer):
         if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
-        self._cancel_recording_timers(recording_id)
+        # Note: the native producer stop is driven by the recording context
+        # (normal/remote stop) or the expiry timer — NOT here — so the daemon
+        # receives exactly one StopRecording carrying the correct data-clock
+        # boundary.
+        if recording_id is not None:
+            self._cancel_recording_timers(recording_id)
 
     def updated_recording_state(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
@@ -298,6 +336,16 @@ class RecordingStateManager(BaseSSEConsumer):
             instance_key = RobotInstanceIdentifier(
                 robot_id=robot_id, robot_instance=instance
             )
+            # A STOP only applies to the recording currently active for this
+            # instance. A stale STOP for an already-superseded recording — e.g.
+            # the prior recording in a back-to-back sequence whose SSE lands
+            # after the next recording has already started on the same source —
+            # must not drain it: the drain callback issues a timestamp-less
+            # producer stop, so the daemon would close the now-live window at
+            # wall-clock now and collapse its reported duration. This mirrors the
+            # identity guard in recording_stopped, which fires below.
+            if previous_recording_id != recording_id:
+                return
             callback = self._drain_callbacks.get(instance_key)
             if callback and was_recording:
                 threading.Thread(
