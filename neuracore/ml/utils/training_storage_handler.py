@@ -13,8 +13,8 @@ from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.nc_archive import create_nc_archive
-from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 from neuracore.ml.utils.upload_storage_mixin import UploadStorageMixin
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,12 @@ class TrainingStorageHandler(UploadStorageMixin):
         algorithm_config: dict = {},
         input_cross_embodiment_description: dict[str, Any] = {},
         output_cross_embodiment_description: dict[str, Any] = {},
-        input_preprocessing_config: PreprocessingConfiguration = {},
-        output_preprocessing_config: PreprocessingConfiguration = {},
+        input_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration()
+        ),
+        output_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration()
+        ),
     ) -> None:
         """Initialize the storage handler.
 

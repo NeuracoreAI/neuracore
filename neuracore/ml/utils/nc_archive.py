@@ -18,13 +18,11 @@ from neuracore_types import CrossEmbodimentDescription, ModelInitDescription
 from omegaconf import OmegaConf
 
 from neuracore.ml.core.neuracore_model import NeuracoreModel
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.json_serialization import to_json_serializable
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
-    resolve_preprocessing_config,
-)
+from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
 
 logger = logging.getLogger(__name__)
 
@@ -387,7 +385,9 @@ def load_model_from_nc_archive(
                 _archive_path(extracted_files, "output_cross_embodiment_description")
             ) as f:
                 output_cross_embodiment_description = json.load(f)
-        input_preprocessing_config: PreprocessingConfiguration = {}
+        input_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration()
+        )
         if "input_preprocessing_config" in extracted_files:
             with open(
                 _archive_path(extracted_files, "input_preprocessing_config")
@@ -401,7 +401,9 @@ def load_model_from_nc_archive(
                     logger.warning(
                         "Input preprocessing config in model archive is empty"
                     )
-        output_preprocessing_config: PreprocessingConfiguration = {}
+        output_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration()
+        )
         if "output_preprocessing_config" in extracted_files:
             with open(
                 _archive_path(extracted_files, "output_preprocessing_config")
