@@ -75,7 +75,6 @@ def offline_daemon_running() -> Generator[None, None, None]:
     """
     with scoped_daemon_storage_env(), scoped_offline_profile():
         try:
-            stop_daemon()
             assert_daemon_cleanup()
             ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
             with Timer(MAX_TIME_TO_START_S, label="nc.login", always_log=True):
