@@ -3,11 +3,9 @@ absolutising
 acked
 acks
 adarms
-ADARMS
 addfinalizer
 addinivalue
 agentview
-agilex
 aiolimiter
 aiortc
 allclose
@@ -63,10 +61,8 @@ cmap
 cmaps
 cmeel
 cnnmlp
-CNNMLP
 CNNMLPP
 colab
-Colab
 colcon
 Colormaps
 colorspace
@@ -78,9 +74,7 @@ condim
 condvar
 connectionstatechange
 conq
-Conq
 contype
-Conv
 convnet
 CREAT
 ctrllimited
@@ -94,7 +88,6 @@ dataconfig
 dataformats
 dataid
 ddim
-DDIM
 ddpm
 DDPM
 debouncer
@@ -122,7 +115,6 @@ dtype
 EADDRINUSE
 eigenpy
 elementwise
-elems
 embs
 Emika
 ENOENT
@@ -141,7 +133,6 @@ expanduser
 extr
 extractall
 extrinsics
-Extrinsics
 faceadr
 facecolor
 facenum
@@ -167,7 +158,6 @@ fovy
 FRACT
 framecode
 FRANKA
-freqs
 frictionloss
 fromarray
 frombuffer
@@ -183,7 +173,6 @@ genpts
 geomadr
 geomid
 geomnum
-getbuffer
 getpgid
 getpid
 gettid
@@ -195,7 +184,6 @@ Groot
 hdlc
 hookwrapper
 hparams
-hstack
 huggingface
 hyperparameters
 iceoryx
@@ -204,10 +192,8 @@ iend
 ihdr
 iiwa
 imageio
-imagenet
 imgmsg
 imgs
-imread
 imshow
 inertiafromgeom
 inertiagrouprange
@@ -217,9 +203,6 @@ ipython
 iquat
 Irqfx
 itemsize
-jaco
-jdata
-jname
 jntadr
 jntid
 jntnum
@@ -251,7 +234,6 @@ libx
 linalg
 listconfig
 llava
-Llava
 logdir
 loglevel
 loglik
@@ -260,11 +242,7 @@ logvar
 makereport
 maxpool
 maxs
-mcap
-MCAP
 meanpooling
-memfd
-meshgrid
 metadatas
 metafunc
 metas
@@ -283,7 +261,6 @@ mpsc
 Mujoco
 mujocoinclude
 multihead
-Multihead
 multinode
 multirun
 muxer
@@ -300,7 +277,6 @@ ndarray
 neginf
 neuraco
 neuracore
-newbyteorder
 nhead
 nheads
 njoints
@@ -319,11 +295,11 @@ oneshot
 openarm
 openarm_description
 opencv
+oneshot
+openarm
 openpi
-OPENPI
 optim
 osmesa
-outc
 outut
 packb
 paligemma
@@ -340,10 +316,8 @@ pidfile
 Pieb
 pinnochio
 PJRT
-plotly
 pointcloud
 POLLIN
-pooler
 popleft
 posinf
 precheck
@@ -373,11 +347,8 @@ quadprog
 qvel
 Qwen
 randn
-randperm
 rawvideo
 rclpy
-RCVTIMEO
-RDEM
 RDWR
 reannounce
 rels
@@ -388,6 +359,7 @@ reraises
 restartability
 resumably
 RETRYABLE
+resumably
 rgba
 rgbd
 rgbs
@@ -395,7 +367,6 @@ rlds
 rlib
 Robotiq
 rosdep
-rotvec
 roundoff
 rowwise
 rposition
@@ -421,8 +392,6 @@ setsid
 setuptools
 shadowsize
 siglip
-Siglip
-SIGLIP
 silu
 softmax
 solimp
@@ -446,7 +415,6 @@ temb
 tensorboard
 testsrc
 tfds
-TFDS
 tfrecord
 thiserror
 thres
@@ -458,9 +426,6 @@ tmpfs
 tobytes
 tolist
 torchdynamo
-torchserve
-torq
-tqdm
 traj
 triu
 truecolour
@@ -471,7 +436,6 @@ typer
 UFACTORY
 ultrawide
 unet
-Unet
 Unet's
 unflushed
 uninit
@@ -497,19 +461,16 @@ vencode
 vertadr
 vertnum
 VIPERX
-viser
 vlln
 Vsqo
 vsync
 waitpid
 wakelock
-WAKELOCK
 widowx
 worldbody
 writeback
 WRONLY
 wxyz
-XARM
 xdata
 xlabel
 xmat
@@ -519,6 +480,5 @@ xquat
 xyzrgb
 xyzw
 ylabel
-yourdfpy
 ZBWs
 znear
