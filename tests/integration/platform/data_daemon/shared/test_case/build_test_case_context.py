@@ -47,10 +47,13 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
     SCHEDULER_TOLERANCE_S,
-    STOCHASTIC_JITTER_S,
+    STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+    STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
+    STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
+    stochastic_jitter_window,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,7 +105,7 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
 class RecordingExpectedTimestamps:
     """Expected timestamps per trace for one recording, keyed by semantic trace name.
 
-    Produced during the recording loop (once the recording ID is known) and
+    Produced during the recording loop (once the recording key is known) and
     consumed by :func:`~disk_helpers.assert_disk_recording_properties`
     to verify on-disk trace.json files match the manually-supplied timestamps
     that were logged.
@@ -111,9 +114,13 @@ class RecordingExpectedTimestamps:
         by_trace: Maps semantic trace key (e.g. ``"JOINT_POSITIONS"``,
             ``"camera_0"``) to the ordered list of expected timestamps for
             that trace within this recording.
+        by_trace_fps: Maps the same semantic trace key to the producer fps for
+            that trace, so the stochastic assertion can size its jitter window
+            from the case's frame rate.
     """
 
     by_trace: dict[str, list[float]]
+    by_trace_fps: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +128,10 @@ class ContextExpectedTimestamps:
     """Expected timestamps for all recordings produced by one context worker.
 
     Attributes:
-        by_recording: Maps recording ID to its :class:`RecordingExpectedTimestamps`.
+        by_recording: Maps the on-disk recording directory name to its
+            :class:`RecordingExpectedTimestamps`. The directory name is the
+            integer ``recording_index`` (as a string) under the Rust daemon, or
+            the cloud ``recording_id`` under the legacy daemon.
     """
 
     by_recording: dict[str, RecordingExpectedTimestamps]
@@ -140,6 +150,41 @@ class ContextCaseSpec:
     wait: bool
     timestamp_mode: str
 
+    @property
+    def stop_recording_sla_s(self) -> float:
+        """Seconds allowed for the ``nc.stop_recording`` call.
+
+        ``wait=False`` is fire-and-forget — the call never blocks on the
+        upload pipeline — so it gets a flat constant. ``wait=True`` blocks
+        until every trace has uploaded, so its budget is the sum of the
+        joint-data and video-data upload costs: total joint samples
+        (``duration_sec * joint_count * joint_fps``) and total video pixels
+        (``duration_sec * video_fps * video_count * image_width *
+        image_height``), each times an observed per-unit upload cost. The
+        budget is floored at the duration-based overhead so short or
+        low-volume recordings keep a sane minimum.
+        """
+        if not self.wait:
+            return STOP_RECORDING_NO_WAIT_SLA_S
+        duration_floor = self.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC
+        joint_budget = (
+            self.duration_sec
+            * self.joint_count
+            * self.joint_fps
+            * STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S
+        )
+        video_budget = 0.0
+        if self.video_count and self.image_width and self.image_height:
+            video_budget = (
+                self.duration_sec
+                * self.video_fps
+                * self.video_count
+                * self.image_width
+                * self.image_height
+                * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
+            )
+        return max(duration_floor, joint_budget + video_budget)
+
 
 @dataclass(frozen=True, slots=True)
 class ContextResult:
@@ -147,6 +192,26 @@ class ContextResult:
 
     Produced by :func:`context_worker` and consumed by assertion helpers
     and verification functions throughout the test suite.
+
+    A recording is addressed by:
+
+    - ``recording_ids`` — the cloud ``recording_id`` (TEXT) for each recording.
+      These are what cloud verification (``verify_cloud_results``) matches
+      against the dataset's ``recording.id``. Under the legacy daemon
+      ``nc.start_recording()`` returns this directly. Under the Rust daemon the
+      daemon mints it asynchronously, so an entry may be an empty string until
+      the test resolves it (via ``resolve_cloud_recording_ids``) once online.
+
+    The remaining fields apply only under the Rust daemon (the daemon owns
+    recording identity); they are left empty under the legacy daemon, which uses
+    ``recording_ids`` for every correlation:
+
+    - ``recording_indexes`` — the daemon-assigned local INTEGER
+      ``recording_index`` for each recording, resolved from the source DB.
+      These are the on-disk directory names and the daemon-DB join key.
+    - ``source`` is the ``(robot_id, robot_instance)`` identity used to correlate
+      a worker's recordings to daemon-minted ``recording_index`` values without
+      relying on the local handle.
     """
 
     dataset_name: str
@@ -169,6 +234,8 @@ class ContextResult:
     timestamp_mode: str
     expected_timestamps: ContextExpectedTimestamps | None = None
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
+    recording_indexes: list[int] = field(default_factory=list)
+    source: tuple[str, int] = ("", 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,11 +346,10 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
-def get_jitter(use_stochastic_timestamps: bool) -> float:
+def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
     if use_stochastic_timestamps:
-        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(
-            -STOCHASTIC_JITTER_S, STOCHASTIC_JITTER_S
-        )
+        window = stochastic_jitter_window(fps)
+        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
     return 0.0
 
 
@@ -320,7 +386,12 @@ def log_synchronous_frames(
     ):
         joint_due = joint_index < joint_frame_count
         video_due = camera_name_list and video_index < video_frame_count
-        jitter = get_jitter(use_stochastic_timestamps)
+        # One jitter is shared by both deadlines/timestamps this iteration, so
+        # size it to the tighter (higher-fps) window to stay within both.
+        jitter = get_jitter(
+            use_stochastic_timestamps,
+            max(joint_fps, video_fps) if camera_name_list else joint_fps,
+        )
 
         joint_deadline = (
             recording_wall_start + (joint_index / joint_fps) + jitter
@@ -477,7 +548,7 @@ def run_threaded_logging(
             fps = video_fps if is_rgb else joint_fps
             thread_wall_start = time.time()
             for frame_index in range(frame_count):
-                jitter = get_jitter(use_stochastic_timestamps)
+                jitter = get_jitter(use_stochastic_timestamps, fps)
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
                 remaining = frame_deadline - time.time()
                 if remaining > 0:
@@ -680,12 +751,19 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
 
 def context_worker(spec: ContextSpec) -> ContextResult:
     """Execute recordings for a single parallel context."""
+    from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        wait_for_recording_index_for_source,
+    )
+
+    use_rust = rust_daemon_enabled()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
     marker_names: list[str] = []
     recording_ids: list[str] = []
+    recording_indexes: list[int] = []
     robot = None
 
     if spec.start_delay_s > 0.0:
@@ -699,13 +777,21 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
+        source: tuple[str, int] = (str(robot.id), int(robot.instance))
+
         expected_by_recording: dict[str, RecordingExpectedTimestamps] | None = (
             {} if not use_real_timestamps else None
         )
 
-        for recording_index in range(spec.recordings_per_context):
+        for recording_ordinal in range(spec.recordings_per_context):
             recording_timestamp_start_s = (
-                spec.timestamp_start_s + recording_index * case.duration_sec
+                spec.timestamp_start_s + recording_ordinal * case.duration_sec
+            )
+            recording_capture_start_s = None if use_real_timestamps else time.time()
+            recording_capture_stop_s = (
+                None
+                if recording_capture_start_s is None
+                else recording_capture_start_s + case.duration_sec
             )
 
             with Timer(
@@ -714,16 +800,36 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 always_log=True,
                 assert_deadline=spec.assert_deadline,
             ):
-                nc.start_recording(robot_name=spec.robot_name)
+                nc.start_recording(
+                    robot_name=spec.robot_name, timestamp=recording_capture_start_s
+                )
             if wall_started_at is None:
                 wall_started_at = time.time()
-            recording_id = str(robot.get_current_recording_id() or "")
-            recording_ids.append(recording_id)
 
-            # Build per-recording expected timestamps once the recording ID is known.
-            # Keys use "data_type/data_type_name" to match the semantic keys resolved
-            # from the DB in daemon_disk_helpers. data_type_name is the storage name
-            # produced by validate_safe_name (e.g. "vx300s_left\waist" for joint names).
+            if use_rust:
+                previous_index = recording_indexes[-1] if recording_indexes else 0
+                daemon_recording_index = wait_for_recording_index_for_source(
+                    source[0],
+                    source[1],
+                    after_index=previous_index,
+                    timeout_s=MAX_TIME_TO_START_S,
+                )
+                recording_indexes.append(daemon_recording_index)
+
+                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                recording_ids.append(str(cloud_recording_id or ""))
+
+                disk_recording_key = str(daemon_recording_index)
+            else:
+                recording_id = str(robot.get_current_recording_id() or "")
+                recording_ids.append(recording_id)
+                disk_recording_key = recording_id
+
+            # Build per-recording expected timestamps once the recording key is
+            # known. Trace keys use "data_type/data_type_name" to match the
+            # semantic keys resolved from the DB in disk_helpers. data_type_name is
+            # the storage name produced by validate_safe_name (e.g.
+            # "vx300s_left\waist" for joint names).
             if expected_by_recording is not None:
                 from neuracore_types.utils import validate_safe_name
 
@@ -760,31 +866,44 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 else:
                     safe_marker = validate_safe_name("marker_synchronous")
                     by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                expected_by_recording[recording_id] = RecordingExpectedTimestamps(
-                    by_trace=by_trace
+                by_trace_fps = {
+                    trace_key: (
+                        case.video_fps if timestamps is video_ts else case.joint_fps
+                    )
+                    for trace_key, timestamps in by_trace.items()
+                }
+                expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
+                    by_trace=by_trace,
+                    by_trace_fps=by_trace_fps,
                 )
 
             current_marker_names = log_frames(
                 spec,
-                recording_index=recording_index,
+                recording_index=recording_ordinal,
                 marker_name="marker_synchronous",
             )
             if not marker_names:
                 marker_names = current_marker_names
 
             with Timer(
-                case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
+                case.stop_recording_sla_s,
                 label="nc.stop_recording",
                 always_log=True,
                 assert_deadline=spec.assert_deadline,
             ):
-                nc.stop_recording(robot_name=spec.robot_name, wait=case.wait)
+                nc.stop_recording(
+                    robot_name=spec.robot_name,
+                    wait=case.wait,
+                    timestamp=recording_capture_stop_s,
+                )
             wall_stopped_at = time.time()
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
             dataset_name=spec.dataset_name,
             recording_ids=recording_ids,
+            recording_indexes=recording_indexes,
+            source=source,
             robot_name=spec.robot_name,
             joint_names=joint_name_list,
             camera_names=camera_name_list,

@@ -10,10 +10,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    STOCHASTIC_JITTER_S,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
+    stochastic_jitter_window,
 )
 
 if TYPE_CHECKING:
@@ -72,7 +73,13 @@ VIDEO_TRACE_FILENAMES = {TRACE_JSON_NAME, "lossy.mp4", "lossless.mp4"}
 
 
 def list_recording_ids_on_disk() -> set[str]:
-    """Return recording IDs that exist as subdirectories under the recordings root."""
+    """Return cloud recording IDs that exist as subdirectories on disk.
+
+    Legacy Python daemon: the on-disk layout is
+    ``{recordings_root}/{recording_id}/...`` — the top directory segment is the
+    cloud ``recording_id``. Under the Rust daemon use
+    :func:`list_recording_indexes_on_disk` instead.
+    """
     recordings_root = get_daemon_recordings_root_path()
     if not recordings_root.exists():
         return set()
@@ -82,12 +89,64 @@ def list_recording_ids_on_disk() -> set[str]:
 def normalize_recording_ids(
     expected_recording_ids: Iterable[str] | None,
 ) -> set[str]:
-    """Return a clean set of non-empty recording ID strings."""
+    """Return a clean set of non-empty cloud recording ID strings."""
     if expected_recording_ids is None:
         return set()
     return {
         str(recording_id) for recording_id in expected_recording_ids if recording_id
     }
+
+
+def list_recording_indexes_on_disk() -> set[int]:
+    """Return ``recording_index`` values that exist under the recordings root.
+
+    Thin-shipper rewrite: the on-disk layout is now
+    ``{recordings_root}/{recording_index}/{data_type}/{trace_id}/`` — the top
+    directory segment is the daemon-assigned INTEGER ``recording_index``, not a
+    cloud recording id. Only integer-named directories are recording roots.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    if not recordings_root.exists():
+        return set()
+    indexes: set[int] = set()
+    for child in recordings_root.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            indexes.add(int(child.name))
+        except ValueError:
+            continue
+    return indexes
+
+
+def normalize_recording_indexes(
+    expected_recording_indexes: Iterable[int | str] | None,
+) -> set[int]:
+    """Return a clean set of integer ``recording_index`` values."""
+    if expected_recording_indexes is None:
+        return set()
+    normalized: set[int] = set()
+    for recording_index in expected_recording_indexes:
+        if recording_index is None or recording_index == "":
+            continue
+        normalized.add(int(recording_index))
+    return normalized
+
+
+def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]:
+    """Yield ``(disk_dir_name, db_correlation_key)`` per recording in *result*.
+
+    Rust daemon: the on-disk directory and traces join key are both the integer
+    ``recording_index``. Legacy Python daemon: both are the cloud ``recording_id``
+    string. Keeping these two values together lets the assertion body stay
+    identical across modes.
+    """
+    if rust_daemon_enabled():
+        return [
+            (str(recording_index), recording_index)
+            for recording_index in result.recording_indexes
+        ]
+    return [(recording_id, recording_id) for recording_id in result.recording_ids]
 
 
 def _collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
@@ -300,13 +359,15 @@ def _assert_stochastic_timestamps(
     expected_timestamps: list[float],
     failures: list[TraceFailure],
     durations: dict[str, float],
+    fps: int,
 ) -> None:
-    """Assert every timestamp is within STOCHASTIC_JITTER_S of its intended value.
+    """Assert every timestamp is within the fps-derived jitter window.
 
     The intended timestamps are the pre-jitter values (``start + i / fps``).
-    Each actual timestamp must satisfy
-    ``|actual - intended| <= STOCHASTIC_JITTER_S``.
+    Each actual timestamp must satisfy ``|actual - intended| <= window``, where
+    ``window`` is :func:`stochastic_jitter_window` of the trace's ``fps``.
     """
+    window = stochastic_jitter_window(fps)
     if len(timestamps) != len(expected_timestamps):
         failures.append(
             TraceFailure(
@@ -322,7 +383,7 @@ def _assert_stochastic_timestamps(
     out_of_window = [
         (i, actual, intended)
         for i, (actual, intended) in enumerate(zip(timestamps, expected_timestamps))
-        if abs(actual - intended) > STOCHASTIC_JITTER_S
+        if abs(actual - intended) > window
     ]
     if out_of_window:
         examples = "; ".join(
@@ -332,7 +393,7 @@ def _assert_stochastic_timestamps(
         )
         body = (
             f"{len(out_of_window)}/{len(timestamps)} timestamp(s) outside"
-            f" ±{STOCHASTIC_JITTER_S}s jitter window — {examples}"
+            f" ±{window}s jitter window — {examples}"
             + (f" (+ {len(out_of_window) - 3} more)" if len(out_of_window) > 3 else "")
         )
         failures.append(TraceFailure(trace_key=trace_key, body=body))
@@ -386,12 +447,12 @@ def assert_disk_recording_properties(
     for result in results:
         use_real = result.timestamp_mode == TIMESTAMP_MODE_REAL
         use_stochastic = result.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
-        for recording_id in result.recording_ids:
-            recording_dir = recordings_root / recording_id
+        for recording_key, fetch_key in _result_recording_keys(result):
+            recording_dir = recordings_root / recording_key
             if not recording_dir.exists():
                 all_failures.append(
                     RecordingFailures(
-                        recording_id=recording_id,
+                        recording_id=recording_key,
                         recording_error=(
                             f"directory not found on disk ({recording_dir})"
                         ),
@@ -404,7 +465,7 @@ def assert_disk_recording_properties(
             if not trace_timestamps:
                 all_failures.append(
                     RecordingFailures(
-                        recording_id=recording_id,
+                        recording_id=recording_key,
                         recording_error=(
                             f"no timestamps found in any trace.json"
                             f" under {recording_dir}"
@@ -419,7 +480,7 @@ def assert_disk_recording_properties(
             # "JOINT_POSITIONS/vx300s_left\waist", "RGB_IMAGES/camera_0",
             # "CUSTOM_1D/marker".
             trace_rows = fetch_all_traces(
-                recording_id,
+                fetch_key,
                 columns=["trace_id", "data_type", "data_type_name"],
             )
             uuid_to_semantic: dict[str, str] = {}
@@ -450,7 +511,7 @@ def assert_disk_recording_properties(
                     else _assert_manual_timestamps
                 )
                 per_recording = (
-                    result.expected_timestamps.by_recording.get(recording_id)
+                    result.expected_timestamps.by_recording.get(recording_key)
                     if result.expected_timestamps is not None
                     else None
                 )
@@ -462,10 +523,10 @@ def assert_disk_recording_properties(
                     )
                     all_failures.append(
                         RecordingFailures(
-                            recording_id=recording_id,
+                            recording_id=recording_key,
                             recording_error=(
                                 f"no expected timestamps —"
-                                f" known recording IDs: {known}"
+                                f" known recording_index keys: {known}"
                             ),
                             trace_failures=[],
                         )
@@ -476,7 +537,7 @@ def assert_disk_recording_properties(
             for trace_key, timestamps in mapped_trace_timestamps.items():
                 if use_real:
                     _assert_real_timestamps(
-                        recording_id=recording_id,
+                        recording_id=recording_key,
                         trace_key=trace_key,
                         timestamps=timestamps,
                         wall_started_at=result.wall_started_at,
@@ -499,19 +560,27 @@ def assert_disk_recording_properties(
                             )
                         )
                         continue
+                    # The stochastic assertion sizes its tolerance from the
+                    # trace's fps; the manual assertion takes no tolerance.
+                    extra = (
+                        {"fps": per_recording.by_trace_fps[trace_key]}
+                        if use_stochastic
+                        else {}
+                    )
                     assert_ts(
-                        recording_id=recording_id,
+                        recording_id=recording_key,
                         trace_key=trace_key,
                         timestamps=timestamps,
                         expected_timestamps=expected[trace_key],
                         failures=trace_failures,
                         durations=durations,
+                        **extra,
                     )
 
             if trace_failures:
                 all_failures.append(
                     RecordingFailures(
-                        recording_id=recording_id,
+                        recording_id=recording_key,
                         recording_error=None,
                         trace_failures=trace_failures,
                     )

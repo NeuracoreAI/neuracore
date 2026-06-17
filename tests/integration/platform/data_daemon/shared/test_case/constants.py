@@ -1,6 +1,26 @@
 """Shared constants for data-daemon test configuration."""
 
+import time
+from pathlib import Path
 from typing import Literal
+
+# ---------------------------------------------------------------------------
+# Test-state directories and path constants
+# ---------------------------------------------------------------------------
+
+DATA_DAEMON_TEST_STATE_ROOT = Path(".data_daemon_test_state")
+"""Root directory for all test-local daemon state (DB, recordings, artifacts)."""
+
+DATA_DAEMON_TEST_ARTIFACTS_DIR = (
+    DATA_DAEMON_TEST_STATE_ROOT / "artifacts" / time.strftime("%Y%m%d_%H%M%S")
+)
+"""Timestamped directory where per-test artifact copies are stored."""
+
+OFFLINE_RECORDINGS_ROOT = DATA_DAEMON_TEST_STATE_ROOT / "recordings"
+"""Directory used as the offline daemon's recordings root in tests."""
+
+OFFLINE_DB_PATH = DATA_DAEMON_TEST_STATE_ROOT / "state.db"
+"""Path used for the offline daemon's SQLite state DB in tests."""
 
 # ---------------------------------------------------------------------------
 # Environment variable values
@@ -9,6 +29,7 @@ from typing import Literal
 # stop_method
 STOP_METHOD_CLI = "cli"
 STOP_METHOD_SIGTERM = "sigterm"
+STOP_METHOD_SIGINT = "sigint"
 STOP_METHOD_SIGKILL = "sigkill"
 
 # storage_state_action (governs both the SQLite DB and the recordings folder)
@@ -34,9 +55,21 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
 TIMESTAMP_MODE_STOCHASTIC = "stochastic"
-STOCHASTIC_JITTER_S = 0.05
+# Jitter amplitude as a proportion of half the inter-frame interval, so the
+# window scales with the case's fps instead of being pinned to one frame rate.
+STOCHASTIC_JITTER_FACTOR = 0.5
 # OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
 SCHEDULER_TOLERANCE_S = 0.05
+
+
+def stochastic_jitter_window(fps: int) -> float:
+    """Max jitter amplitude (seconds) for a stream running at ``fps``.
+
+    A fraction (:data:`STOCHASTIC_JITTER_FACTOR`) of half the inter-frame
+    interval, keeping jitter comfortably below the gap between frames.
+    """
+    return 1 / fps / 2 * STOCHASTIC_JITTER_FACTOR
+
 
 # ---------------------------------------------------------------------------
 # Value sets (tuples for static validation)
@@ -67,6 +100,10 @@ TimestampMode = Literal["manual", "real", "stochastic"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
+STOP_RECORDING_NO_WAIT_SLA_S = 1.0
+STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
+STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
+
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
 DATASET_POLL_INTERVAL_S = 0.25

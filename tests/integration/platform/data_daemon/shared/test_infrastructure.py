@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 import sys
-import time
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,18 +19,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
-from neuracore.data_daemon.helpers import (
-    get_daemon_db_path,
-    get_daemon_recordings_root_path,
-)
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
+    harness_db_path,
+    harness_recordings_root,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     case_id,
     log_run_analysis,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DATA_DAEMON_TEST_ARTIFACTS_DIR,
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
 )
@@ -50,24 +49,6 @@ sys.path.append(str(THIS_DIR.parent.parent.parent.parent.parent / "examples"))
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Test-state directories and path constants
-# ---------------------------------------------------------------------------
-
-DATA_DAEMON_TEST_STATE_ROOT = Path(".data_daemon_test_state")
-"""Root directory for all test-local daemon state (DB, recordings, artifacts)."""
-
-DATA_DAEMON_TEST_ARTIFACTS_DIR = (
-    DATA_DAEMON_TEST_STATE_ROOT / "artifacts" / time.strftime("%Y%m%d_%H%M%S")
-)
-"""Timestamped directory where per-test artifact copies are stored."""
-
-OFFLINE_RECORDINGS_ROOT = DATA_DAEMON_TEST_STATE_ROOT / "recordings"
-"""Directory used as the offline daemon's recordings root in tests."""
-
-OFFLINE_DB_PATH = DATA_DAEMON_TEST_STATE_ROOT / "state.db"
-"""Path used for the offline daemon's SQLite state DB in tests."""
 
 # ---------------------------------------------------------------------------
 # Shared mutable test state
@@ -162,26 +143,22 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     """
     import shutil
 
-    db_path = get_daemon_db_path()
-    recordings_root = get_daemon_recordings_root_path()
+    db_path = harness_db_path()
+    recordings_root = harness_recordings_root()
 
     if storage_state_action == STORAGE_STATE_EMPTY:
-        db_state_paths = (
-            db_path,
-            Path(str(db_path) + "-wal"),
-            Path(str(db_path) + "-shm"),
-        )
-
-        for db_state_path in db_state_paths:
+        if db_path.exists():
+            connection = sqlite3.connect(str(db_path))
             try:
-                db_state_path.unlink(missing_ok=True)
-            except OSError:
-                logger.warning(
-                    "Failed to remove daemon DB state file during test cleanup: %s",
-                    db_state_path,
-                    exc_info=True,
-                )
-
+                for table in ("traces", "recordings"):
+                    try:
+                        connection.execute(f"DELETE FROM {table}")
+                    except sqlite3.OperationalError:
+                        pass
+                connection.commit()
+                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            finally:
+                connection.close()
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)
         recordings_root.mkdir(parents=True, exist_ok=True)
