@@ -92,9 +92,52 @@ impl ApiClientError {
     }
 }
 
+/// Idle GCS upload connections to retain per host for reuse. Matches the
+/// uploader's `MAX_CONCURRENT_UPLOADS` so a full burst of parallel per-file PUTs
+/// can each keep its connection warm for the next file rather than being
+/// evicted between files.
+const UPLOAD_POOL_MAX_IDLE_PER_HOST: usize = 128;
+/// How long an idle upload connection is kept before eviction — long enough to
+/// stay warm across the gap between consecutive recordings, so the next burst
+/// reuses the pool instead of re-handshaking TLS.
+const UPLOAD_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// TCP keepalive on upload sockets, so a warm-but-idle connection holds the path
+/// open (and a dead one is detected) rather than silently going half-open.
+const UPLOAD_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
+
+/// Build the dedicated client the uploader PUTs file chunks through.
+///
+/// Pinned to **HTTP/1.1** so the uploader's concurrent per-file PUTs open
+/// *parallel* TCP connections (each with its own congestion window) instead of
+/// multiplexing onto a single HTTP/2 connection. A single h2 connection shares
+/// one slow-start congestion window across every upload, so a burst of small
+/// files finishes before the window ramps and never reaches link speed; N
+/// parallel h1 connections fill the bandwidth-delay product immediately. The
+/// generous idle pool + TCP keepalive keep those connections warm so files
+/// 2..N (and the next recording's burst) reuse them instead of re-handshaking.
+///
+/// Deliberately sets **no client-level `timeout`**: a streaming chunk PUT is
+/// bounded by `upload_transfer::CHUNK_UPLOAD_TIMEOUT` (a per-chunk tokio
+/// timeout), which tolerates a full 16 MiB chunk on a slow link. The API
+/// client's short overall timeout would cap that sustained-throughput floor.
+fn build_upload_client() -> Result<Client, reqwest::Error> {
+    Client::builder()
+        .http1_only()
+        .pool_max_idle_per_host(UPLOAD_POOL_MAX_IDLE_PER_HOST)
+        .pool_idle_timeout(Some(UPLOAD_POOL_IDLE_TIMEOUT))
+        .tcp_keepalive(Some(UPLOAD_TCP_KEEPALIVE))
+        .build()
+}
+
 /// Generic HTTP client wrapping a [`reqwest::Client`] with auth + retry.
 pub struct ApiClient {
+    /// Control-plane client for the Neuracore API (registration, lifecycle,
+    /// status). HTTP/2-capable: many small request/response calls benefit from
+    /// multiplexing over one connection.
     inner: Client,
+    /// Data-plane client for direct-to-GCS chunk PUTs. HTTP/1.1 with a warm
+    /// connection pool — see [`build_upload_client`].
+    upload_inner: Client,
     options: ApiClientOptions,
     auth: Arc<dyn AuthProvider>,
 }
@@ -110,8 +153,10 @@ impl ApiClient {
             .http2_adaptive_window(true)
             .pool_max_idle_per_host(128)
             .build()?;
+        let upload_inner = build_upload_client()?;
         Ok(Self {
             inner,
+            upload_inner,
             options,
             auth,
         })
@@ -124,18 +169,24 @@ impl ApiClient {
         options: ApiClientOptions,
         auth: Arc<dyn AuthProvider>,
     ) -> Self {
+        // Tests attach a single wiremock-backed client; route uploads through it
+        // too (reqwest::Client is an Arc handle, so the clone is cheap).
+        let upload_inner = inner.clone();
         Self {
             inner,
+            upload_inner,
             options,
             auth,
         }
     }
 
-    /// Borrow the underlying reqwest client — exposed for the uploader, which
-    /// PUTs chunks straight to GCS-issued URLs that are not relative to the
-    /// configured `base_url`.
+    /// Borrow the dedicated upload client — exposed for the uploader, which PUTs
+    /// chunks straight to GCS-issued URLs that are not relative to the configured
+    /// `base_url`. This is the HTTP/1.1, warm-pool client (see
+    /// [`build_upload_client`]), kept separate from the control-plane `inner`
+    /// client so concurrent file PUTs fan out across parallel connections.
     pub fn raw_client(&self) -> &Client {
-        &self.inner
+        &self.upload_inner
     }
 
     /// Borrow the configured auth provider.

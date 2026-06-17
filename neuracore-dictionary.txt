@@ -184,6 +184,7 @@ jntnum
 jobname
 jointbody
 jsons
+keepalive
 keepdim
 kernelspec
 keypoints
