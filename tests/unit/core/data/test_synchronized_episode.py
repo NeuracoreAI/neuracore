@@ -428,3 +428,51 @@ class TestSynchronizedRecording:
         synced_recording._delete_decoding_lock(lock_file)
 
         assert not lock_file.exists()
+
+    def test_decode_failure_does_not_publish_partial_cache(
+        self, synced_recording, mock_wget_download, dataset_mock
+    ):
+        """A decode that fails mid-way must not leave a partial frames dir.
+
+        Readers treat an existing frames dir as complete, so a partially written
+        dir would later surface as a missing-frame FileNotFoundError. The frames
+        dir must appear only once decoding has fully succeeded.
+        """
+        final_dir = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
+
+        def partial_then_fail(video_location, frames_dir):
+            # Simulate the decoder writing some frames, then crashing.
+            Image.fromarray(np.zeros((4, 4, 3), dtype=np.uint8)).save(
+                frames_dir / "0.png"
+            )
+            raise RuntimeError("decode crashed")
+
+        with patch.object(
+            synced_recording, "_decode_video", side_effect=partial_then_fail
+        ):
+            with pytest.raises(RuntimeError, match="decode crashed"):
+                synced_recording._download_video_and_cache_frames_to_disk(
+                    DataType.RGB_IMAGES, "cam1", final_dir
+                )
+
+        assert not final_dir.exists()  # nothing published on failure
+
+    def test_successful_decode_publishes_complete_dir_without_leftovers(
+        self, synced_recording, mock_wget_download, dataset_mock
+    ):
+        """A successful decode publishes the complete frames dir and cleans up.
+
+        No decoding lock and no staging temp directory should remain afterwards.
+        """
+        final_dir = dataset_mock.cache_dir / "rec1" / DataType.RGB_IMAGES.value / "cam1"
+
+        synced_recording._download_video_and_cache_frames_to_disk(
+            DataType.RGB_IMAGES, "cam1", final_dir
+        )
+
+        assert final_dir.exists()
+        assert len(list(final_dir.glob("*.png"))) == 10  # mock video has 10 frames
+        # No decoding lock and no staging temp dirs left behind.
+        assert not any(final_dir.parent.rglob("*recording.lock"))
+        leftovers = [p for p in final_dir.parent.iterdir() if p != final_dir]
+        assert leftovers == []

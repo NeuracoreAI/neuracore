@@ -92,6 +92,12 @@ class SynchronizedDataset:
         Args:
             max_prefetch_workers: Number of threads to use for prefetching synced data.
         """
+        # Indexing the last recording pages in all metadata up front, so the
+        # threaded prefetch below just reads cache instead of paging concurrently.
+        num_recordings = len(self.dataset)
+        if num_recordings > 0:
+            self.dataset[num_recordings - 1]
+
         desc = "Prefetching synced data"
         if self._prefetch_videos_needed:
             desc += " and videos"

@@ -30,6 +30,9 @@ from ..exceptions import AuthenticationError, DatasetError
 from ..utils.http_errors import extract_error_detail
 from ..utils.http_session import thread_local_session
 
+# Cursor pagination is inherently sequential (each page needs the previous
+# page's cursor), so a larger page size would mean fewer serial round-trips
+# The backend clamps `limit` to MAX_PAGE_SIZE (30) in the backend.
 PAGE_SIZE = 30
 SYNC_PROGRESS_POLL_INTERVAL_S = 5.0
 
@@ -159,14 +162,25 @@ class Dataset:
             logger.error(f"Failed to fetch recording count for Dataset {self.id}: {e}")
             self._num_recordings = 0
 
-    def _fetch_next_page(self) -> list[Recording]:
+    def _fetch_next_page(self, required_len: int | None = None) -> list[Recording]:
         """Fetch the next page of recordings and append to cache (lazy).
 
         Thread-safe: concurrent callers are serialized so each page is
         fetched exactly once. A caller that waited on the lock re-checks the
         cache size and may find its data already fetched by another thread.
+
+        Args:
+            required_len: If given, the caller only needs the cache to reach
+                this length. A caller that waited on the lock and finds the
+                cache already long enough returns immediately instead of
+                firing a redundant page fetch (avoids a thundering-herd of
+                over-fetches when many threads block on the lock at once).
         """
         with self._page_lock:
+            # Another thread may have loaded what we need while we waited.
+            if required_len is not None and len(self._recordings_cache) >= required_len:
+                return []
+
             if (
                 self._num_recordings is not None
                 and len(self._recordings_cache) >= self._num_recordings
@@ -651,7 +665,7 @@ class Dataset:
 
             # Load pages until index is available in cache
             while index >= len(self._recordings_cache):
-                fetched = self._fetch_next_page()
+                fetched = self._fetch_next_page(required_len=index + 1)
                 # An empty fetch can mean another thread loaded our page
                 # while we waited on the lock, so re-check the cache.
                 if not fetched and index >= len(self._recordings_cache):

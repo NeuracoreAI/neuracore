@@ -1,6 +1,7 @@
 """Synchronized recording iterator."""
 
 import logging
+import os
 import shutil
 import subprocess
 import sys
@@ -217,23 +218,42 @@ class SynchronizedRecording:
             camera_id: Unique identifier for the camera.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        lock_file = video_frame_cache_path / ".recording.lock"
+        # The lock lives beside the frames directory (not inside it) so that the
+        # frames directory can be published atomically with os.replace.
+        video_frame_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        # The lock is a sibling of the frames directory (not inside it) so the
+        # frames directory can be published atomically once decoding completes.
+        lock_file = (
+            video_frame_cache_path.parent
+            / f"{video_frame_cache_path.name}.recording.lock"
+        )
         lock_acquired = self._create_decoding_lock(lock_file, camera_id)
 
         try:
-            # Create a temporary video file path
+            # Another process may have published this cache while we waited for
+            # the lock; nothing left to do.
+            if video_frame_cache_path.exists():
+                return
+
             self.cache_manager.ensure_space_available()
 
-            with tempfile.TemporaryDirectory() as temp_dir:
-                # Download video to temporary directory
+            # Stage the download+decode in a temp dir on the same filesystem, then
+            # publish atomically. A reader sees either a complete frames directory
+            # or none at all -- never a partially decoded one.
+            with tempfile.TemporaryDirectory(
+                dir=video_frame_cache_path.parent
+            ) as temp_dir:
+                staging_dir = Path(temp_dir) / "frames"
+                staging_dir.mkdir()
                 video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
                 wget.download(
                     self._get_video_url(camera_type, camera_id),
                     str(video_location),
                     bar=None if self._suppress_wget_progress else wget.bar_thermometer,
                 )
-                # Decode video to frames and cache them to disk
-                self._decode_video(video_location, video_frame_cache_path)
+                # Decode into staging, then atomically move into place.
+                self._decode_video(video_location, staging_dir)
+                os.replace(staging_dir, video_frame_cache_path)
         finally:
             if lock_acquired:
                 self._delete_decoding_lock(lock_file)
@@ -317,12 +337,17 @@ class SynchronizedRecording:
         result = {}
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
-            lock_file = cam_id_rgb_root / ".recording.lock"
+            # The lock is a sibling of the frames directory (not inside it) so
+            # the frames directory can be published atomically once decoding
+            # completes.
+            lock_file = (
+                cam_id_rgb_root.parent / f"{cam_id_rgb_root.name}.recording.lock"
+            )
             self._wait_for_lock_release(lock_file, cam_id_rgb_root)
 
             if not cam_id_rgb_root.exists():
-                # Not in cache, download video and cache frames to disk
-                cam_id_rgb_root.mkdir(parents=True, exist_ok=True)
+                # Not in cache: download and decode. The frames directory is
+                # published atomically, so its existence means it is complete.
                 self._download_video_and_cache_frames_to_disk(
                     camera_type, cam_id, cam_id_rgb_root
                 )
