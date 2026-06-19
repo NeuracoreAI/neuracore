@@ -18,6 +18,7 @@ def test_login_with_api_key(temp_config_dir, monkeypatch):
             json={"access_token": "test_token"},
             status_code=200,
         )
+        m.get(f"{API_URL}/auth/verify-version", status_code=200)
 
         # Perform login
         nc.login("test_api_key")
@@ -74,6 +75,7 @@ def test_auth_headers(temp_config_dir, monkeypatch):
             json={"access_token": "test_token"},
             status_code=200,
         )
+        m.get(f"{API_URL}/auth/verify-version", status_code=200)
 
         # Perform login
         nc.login("test_api_key")
