@@ -9,6 +9,11 @@
 #   2. The data_daemon_producer cdylib -> neuracore/data_daemon/_native_producer.so
 #      Renamed from libdata_daemon_producer.so so PyO3's PyInit__native_producer
 #      is discoverable by the Python import machinery.
+#   3. The neuracore_webrtc cdylib ->
+#      neuracore/core/streaming/p2p/_native_webrtc.so
+#      Renamed from libneuracore_webrtc.so so PyO3's PyInit__native_webrtc is
+#      discoverable. Gated at runtime by NCD_RUST_WEBRTC (see
+#      neuracore/core/streaming/p2p/webrtc_selection.py).
 #
 # See docs/rust_data_daemon_development.md#packaging-the-wheel for the rationale.
 
@@ -21,6 +26,8 @@ repo_root="$(cd "$workspace_root/.." && pwd)"
 package_dir="$repo_root/neuracore/data_daemon"
 bin_dst="$package_dir/bin/data-daemon"
 cdylib_dst="$package_dir/_native_producer.so"
+
+webrtc_dst="$repo_root/neuracore/core/streaming/p2p/_native_webrtc.so"
 
 # PyO3's build-config probes (in order) PYO3_PYTHON, VIRTUAL_ENV/bin/python,
 # CONDA_PREFIX/bin/python, then /usr/bin/python. On minimal Debian/Ubuntu
@@ -60,6 +67,15 @@ cargo build --release --manifest-path "$workspace_root/Cargo.toml" -p data-daemo
 echo "==> cargo build --release -p data_daemon_producer"
 cargo build --release --manifest-path "$workspace_root/Cargo.toml" -p data_daemon_producer
 
+# Patch the libdatachannel that datachannel-sys builds to cap its DTLS retransmit
+# timer (otherwise every WebRTC connection eats OpenSSL's 1s loopback retransmit;
+# see reports/PR2-data-path.md). Idempotent and only forces a rebuild on change.
+echo "==> patch libdatachannel (DTLS retransmit timer)"
+bash "$script_dir/patch_libdatachannel.sh"
+
+echo "==> cargo build --release -p neuracore_webrtc"
+cargo build --release --manifest-path "$workspace_root/Cargo.toml" -p neuracore_webrtc
+
 mkdir -p "$(dirname "$bin_dst")"
 install -m 0755 "$workspace_root/target/release/data-daemon" "$bin_dst"
 echo "    wrote $bin_dst"
@@ -74,3 +90,12 @@ if [[ ! -f "$cdylib_src" ]]; then
 fi
 install -m 0755 "$cdylib_src" "$cdylib_dst"
 echo "    wrote $cdylib_dst"
+
+webrtc_src="$workspace_root/target/release/libneuracore_webrtc.so"
+if [[ ! -f "$webrtc_src" ]]; then
+  echo "error: cdylib not found at $webrtc_src" >&2
+  echo "       (data-daemon-rewrite.md is Linux-first; macOS/Windows are not supported)" >&2
+  exit 1
+fi
+install -m 0755 "$webrtc_src" "$webrtc_dst"
+echo "    wrote $webrtc_dst"
