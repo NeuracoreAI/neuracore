@@ -1,0 +1,37 @@
+[package]
+name = "neuracore_webrtc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Rust WebRTC streaming core for Neuracore, exposed to Python via PyO3. PR0 scaffolding: a Rust-owned tokio runtime, the bounded frame / drainable event queues, and the stubbed synchronous Producer/Consumer API surface. The real transport (the `datachannel` crate, `media` feature, over libdatachannel) is wired in PR2."
+
+[lib]
+# `cdylib` produces the `.so` Python imports as
+# `neuracore.core.streaming.p2p._native_webrtc`.
+# `rlib` lets Rust integration tests still link against the library.
+name = "neuracore_webrtc"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+# The real transport: datachannel-rs over libdatachannel.
+#   * `media`    builds libdatachannel with media support so PR4 can add video
+#                tracks on the same PeerConnection; PR2 only uses the data plane.
+#   * `vendored` static-links libdatachannel *and* OpenSSL into our cdylib, so
+#                the shipped `.so` is self-contained: no runtime libdatachannel.so
+#                to locate and no system OpenSSL needed (built from source via
+#                openssl-src). Build prerequisites are cmake, libclang, a C/C++
+#                compiler and perl — all present in this image. See
+#                reports/PR2-data-path.md "Build prerequisites".
+datachannel = { version = "0.16", features = ["media", "vendored"] }
+# The raw libdatachannel C bindings, pulled directly (same 0.23 build datachannel
+# already links) so PR4 can reach two symbols datachannel-rs 0.16 never surfaces:
+#   * `rtcSetTrackCallback` — the consumer's only way to adopt an inbound media
+#     track (the high-level `PeerConnectionHandler` has no `on_track`).
+#   * `rtcSetMessageCallback` on that inbound track id — to receive its RTP.
+# See reports/PR4-encode-and-decode.md "Consumer inbound-track adoption".
+datachannel-sys = "0.23"
+once_cell.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true
+tokio.workspace = true

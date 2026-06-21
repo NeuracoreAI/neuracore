@@ -128,3 +128,4 @@ examples/test_streaming/
 # See docs/rust_data_daemon_development.md#packaging-the-wheel.
 neuracore/data_daemon/bin/
 neuracore/data_daemon/_native_producer*.so
+neuracore/core/streaming/p2p/_native_webrtc*.so

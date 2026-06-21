@@ -1,5 +1,10 @@
 [workspace]
-members = ["data_daemon", "data_daemon_shared", "data_daemon_producer"]
+members = [
+    "data_daemon",
+    "data_daemon_shared",
+    "data_daemon_producer",
+    "neuracore_webrtc",
+]
 resolver = "2"
 
 [workspace.package]
