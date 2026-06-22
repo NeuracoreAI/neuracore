@@ -2,10 +2,12 @@ import hashlib
 import json
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_NC_DATA_CLASS,
+    TARGET_OUTPUT_DATA_TYPES,
     CrossEmbodimentDescription,
     DataItemStats,
     DataType,
@@ -65,6 +67,167 @@ def _default_preprocessing_config() -> PreprocessingConfiguration:
         DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
         DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
     }
+
+
+NON_TARGET_OUTPUT_DATA_TYPES = tuple(
+    data_type for data_type in DataType if data_type not in TARGET_OUTPUT_DATA_TYPES
+)
+
+
+def _timestep_marker(data_type: DataType, timestep: int, item_index: int = 0) -> float:
+    base = (list(DataType).index(data_type) + 1) * 10.0
+    return base + float(timestep) + float(item_index)
+
+
+def _create_nc_data_at_timestep(
+    data_type: DataType, timestep: int, item_index: int = 0
+):
+    marker = _timestep_marker(data_type, timestep, item_index)
+    if data_type in {
+        DataType.JOINT_POSITIONS,
+        DataType.JOINT_VELOCITIES,
+        DataType.JOINT_TORQUES,
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.VISUAL_JOINT_POSITIONS,
+    }:
+        from neuracore_types.nc_data.joint_data import JointData
+
+        return JointData(value=marker)
+    if data_type in {
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+    }:
+        from neuracore_types.nc_data.parallel_gripper_open_amount_data import (
+            ParallelGripperOpenAmountData,
+        )
+
+        return ParallelGripperOpenAmountData(open_amount=marker)
+    if data_type == DataType.END_EFFECTOR_POSES:
+        from neuracore_types.nc_data.end_effector_pose_data import EndEffectorPoseData
+
+        return EndEffectorPoseData(
+            pose=np.array([marker, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        )
+    if data_type == DataType.POSES:
+        from neuracore_types.nc_data.pose_data import PoseData
+
+        return PoseData(
+            pose=np.array([marker, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+        )
+    if data_type == DataType.RGB_IMAGES:
+        from neuracore_types.nc_data.camera_data import RGBCameraData
+
+        channel_value = int(marker) % 256
+        return RGBCameraData(
+            extrinsics=np.eye(4, dtype=np.float16),
+            intrinsics=np.eye(3, dtype=np.float16),
+            frame=np.full((2, 2, 3), channel_value, dtype=np.uint8),
+        )
+    if data_type == DataType.DEPTH_IMAGES:
+        from neuracore_types.nc_data.camera_data import DepthCameraData
+
+        return DepthCameraData(
+            extrinsics=np.eye(4, dtype=np.float32),
+            intrinsics=np.eye(3, dtype=np.float32),
+            frame=np.full((2, 2), marker, dtype=np.float32),
+        )
+    if data_type == DataType.POINT_CLOUDS:
+        from neuracore_types.nc_data.point_cloud_data import PointCloudData
+
+        return PointCloudData(
+            points=np.array([[marker, 0.0, 0.0]], dtype=np.float16),
+            rgb_points=np.zeros((1, 3), dtype=np.uint8),
+            extrinsics=np.eye(4, dtype=np.float16),
+            intrinsics=np.eye(3, dtype=np.float16),
+        )
+    if data_type == DataType.LANGUAGE:
+        from neuracore_types.nc_data.language_data import LanguageData
+
+        return LanguageData(text=str(marker))
+    if data_type == DataType.CUSTOM_1D:
+        from neuracore_types.nc_data.custom_1d_data import Custom1DData
+
+        return Custom1DData(data=np.array([marker], dtype=np.float32))
+    raise ValueError(f"Unhandled data type: {data_type}")
+
+
+def _timestep_full_embodiment_description() -> dict[DataType, dict[int, str]]:
+    return {data_type: _indexed_names(data_type, DATA_ITEMS) for data_type in DataType}
+
+
+def _dataset_statistics_for_output_type(
+    output_data_type: DataType,
+) -> dict[str, dict[DataType, list[NCDataStats]]]:
+    input_stats = [
+        _create_nc_data_at_timestep(
+            DataType.JOINT_POSITIONS, 0, i
+        ).calculate_statistics()
+        for i in range(DATA_ITEMS)
+    ]
+    output_stats = [
+        _create_nc_data_at_timestep(output_data_type, 0, i).calculate_statistics()
+        for i in range(DATA_ITEMS)
+    ]
+    for stats_list in (input_stats, output_stats):
+        for stat in stats_list:
+            for attr_value in vars(stat).values():
+                if isinstance(attr_value, DataItemStats) and attr_value.count.size > 0:
+                    attr_value.count[0] = NUM_EPISODES * NUM_OBSERVATIONS_PER_EPISODE
+    return {
+        "input": {DataType.JOINT_POSITIONS: input_stats},
+        "output": {output_data_type: output_stats},
+    }
+
+
+def _extract_output_marker(batched_nc_data, data_type: DataType) -> float:
+    if data_type in {
+        DataType.JOINT_POSITIONS,
+        DataType.JOINT_VELOCITIES,
+        DataType.JOINT_TORQUES,
+        DataType.JOINT_TARGET_POSITIONS,
+        DataType.VISUAL_JOINT_POSITIONS,
+    }:
+        return float(batched_nc_data.value[0, 0, 0])
+    if data_type in {
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+    }:
+        return float(batched_nc_data.open_amount[0, 0, 0])
+    if data_type in {DataType.END_EFFECTOR_POSES, DataType.POSES}:
+        return float(batched_nc_data.pose[0, 0, 0])
+    if data_type == DataType.RGB_IMAGES:
+        return float(batched_nc_data.frame[0, 0, 0, 0, 0])
+    if data_type == DataType.DEPTH_IMAGES:
+        return float(batched_nc_data.frame[0, 0, 0, 0, 0])
+    if data_type == DataType.POINT_CLOUDS:
+        return float(batched_nc_data.points[0, 0, 0, 0])
+    if data_type == DataType.CUSTOM_1D:
+        return float(batched_nc_data.data[0, 0, 0])
+    raise ValueError(f"Cannot extract scalar marker for data type: {data_type}")
+
+
+def _assert_output_matches_timestep(
+    sample, output_data_type: DataType, expected_timestep: int
+) -> None:
+    batched_nc_data = sample.outputs[output_data_type][0]
+    if output_data_type == DataType.LANGUAGE:
+        from neuracore_types.batched_nc_data.batched_language_data import (
+            BatchedLanguageData,
+        )
+
+        expected_nc_data = _create_nc_data_at_timestep(
+            output_data_type, expected_timestep, 0
+        )
+        expected_batched = BatchedLanguageData.from_nc_data(expected_nc_data)
+        assert torch.equal(batched_nc_data.input_ids, expected_batched.input_ids)
+        assert torch.equal(
+            batched_nc_data.attention_mask, expected_batched.attention_mask
+        )
+        return
+
+    marker = _extract_output_marker(batched_nc_data, output_data_type)
+    expected_marker = _timestep_marker(output_data_type, expected_timestep, 0)
+    assert marker == pytest.approx(expected_marker)
 
 
 @pytest.fixture
@@ -930,6 +1093,199 @@ class TestDataTypeProcessing:
         assert isinstance(sample.outputs, dict)
         assert DataType.JOINT_TARGET_POSITIONS in sample.outputs
         assert isinstance(sample.outputs[DataType.JOINT_TARGET_POSITIONS], list)
+
+
+class TestOutputTimestepAlignment:
+    """Test per-output-type input/output timestep alignment."""
+
+    @staticmethod
+    def _sync_point_at_timestep(timestep: int) -> SynchronizedPoint:
+        return SynchronizedPoint(
+            robot_id=ROBOT_ID,
+            timestamp=float(timestep),
+            data={
+                data_type: {
+                    f"{data_type.value}_{i}": _create_nc_data_at_timestep(
+                        data_type, timestep, i
+                    )
+                    for i in range(DATA_ITEMS)
+                }
+                for data_type in DataType
+            },
+        )
+
+    @staticmethod
+    def _recording_with_timestep_values(
+        num_timesteps: int,
+    ) -> SynchronizedRecording:
+        sync_points = [
+            TestOutputTimestepAlignment._sync_point_at_timestep(t)
+            for t in range(num_timesteps)
+        ]
+
+        class TimestepRecording(SynchronizedRecording):
+            def __init__(self) -> None:
+                self.sync_points = sync_points
+                self.robot_id = ROBOT_ID
+                self.name = "timestep_recording"
+
+            def __len__(self) -> int:
+                return len(self.sync_points)
+
+            def __getitem__(self, idx):
+                if isinstance(idx, int):
+                    return self.sync_points[idx]
+                if isinstance(idx, slice):
+                    start = idx.start or 0
+                    stop = idx.stop or len(self.sync_points)
+                    step = idx.step or 1
+                    return self.sync_points[start:stop:step]
+                raise TypeError(f"Invalid index type: {type(idx)}")
+
+        return TimestepRecording()
+
+    @staticmethod
+    def _dataset_with_recording(
+        recording: SynchronizedRecording,
+        dataset_statistics: dict[str, dict[DataType, list[NCDataStats]]],
+    ) -> SynchronizedDataset:
+        class TimestepSynchronizedDataset(SynchronizedDataset):
+            def __init__(self) -> None:
+                self.id = "timestep_dataset"
+                self.dataset = MagicMock()
+                self.dataset.data_types = list(DataType)
+                self.dataset.get_full_embodiment_description.side_effect = (
+                    lambda robot_id: (
+                        _timestep_full_embodiment_description()
+                        if robot_id == ROBOT_ID
+                        else (_ for _ in ()).throw(
+                            ValueError(f"Input robot IDs [{robot_id}] not found")
+                        )
+                    )
+                )
+
+            def calculate_statistics(
+                self,
+                input_cross_embodiment_description: CrossEmbodimentDescription,
+                output_cross_embodiment_description: CrossEmbodimentDescription,
+            ) -> SynchronizedDatasetStatistics:
+                return SynchronizedDatasetStatistics(
+                    synchronized_dataset_id=self.id,
+                    input_cross_embodiment_description=(
+                        input_cross_embodiment_description
+                    ),
+                    output_cross_embodiment_description=(
+                        output_cross_embodiment_description
+                    ),
+                    dataset_statistics=dataset_statistics,
+                )
+
+            def __len__(self) -> int:
+                return 1
+
+            def __getitem__(self, idx: int) -> SynchronizedRecording:
+                return recording
+
+        return TimestepSynchronizedDataset()
+
+    def _load_sample_for_output_type(
+        self, output_data_type: DataType, timestep: int = 4
+    ):
+        recording = self._recording_with_timestep_values(NUM_OBSERVATIONS_PER_EPISODE)
+        synchronized_dataset = self._dataset_with_recording(
+            recording, _dataset_statistics_for_output_type(output_data_type)
+        )
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {output_data_type: _indexed_names(output_data_type, 3)}
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=1,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config={},
+        )
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            return dataset.load_sample(episode_idx=0, timestep=timestep)
+
+    @patch("neuracore.login")
+    @pytest.mark.parametrize(
+        "output_data_type",
+        sorted(TARGET_OUTPUT_DATA_TYPES, key=lambda data_type: data_type.value),
+    )
+    def test_target_output_uses_same_timestep(
+        self, mock_login, output_data_type: DataType
+    ) -> None:
+        """Target output types align with the input timestep."""
+        timestep = 4
+        sample = self._load_sample_for_output_type(output_data_type, timestep=timestep)
+        _assert_output_matches_timestep(sample, output_data_type, timestep)
+
+    @patch("neuracore.login")
+    @pytest.mark.parametrize(
+        "output_data_type",
+        sorted(NON_TARGET_OUTPUT_DATA_TYPES, key=lambda data_type: data_type.value),
+    )
+    def test_non_target_output_uses_next_timestep(
+        self, mock_login, output_data_type: DataType
+    ) -> None:
+        """Non-target outputs use next-step action-chunking alignment."""
+        timestep = 4
+        sample = self._load_sample_for_output_type(output_data_type, timestep=timestep)
+        _assert_output_matches_timestep(sample, output_data_type, timestep + 1)
+
+    @patch("neuracore.login")
+    def test_mixed_outputs_use_per_type_alignment(self, mock_login) -> None:
+        """Target and non-target outputs can use different alignments in one sample."""
+        recording = self._recording_with_timestep_values(NUM_OBSERVATIONS_PER_EPISODE)
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                ),
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+            }
+        }
+        dataset_statistics = _dataset_statistics_for_output_type(
+            DataType.JOINT_TARGET_POSITIONS
+        )
+        dataset_statistics["output"][DataType.JOINT_POSITIONS] = dataset_statistics[
+            "input"
+        ][DataType.JOINT_POSITIONS]
+        synchronized_dataset = self._dataset_with_recording(
+            recording, dataset_statistics
+        )
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=1,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config={},
+        )
+
+        timestep = 4
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            sample = dataset.load_sample(episode_idx=0, timestep=timestep)
+
+        _assert_output_matches_timestep(
+            sample, DataType.JOINT_TARGET_POSITIONS, timestep
+        )
+        _assert_output_matches_timestep(sample, DataType.JOINT_POSITIONS, timestep + 1)
 
 
 class TestDatasetIntegration:
