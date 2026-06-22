@@ -37,6 +37,17 @@ ACTION_SCALE_POS = 0.25  # stored_action * this = delta EE pos in decimeters
 ACTION_SCALE_ROT = 40.0  # stored_action[3] * this = delta joint7 in degrees
 EE_FRAME = "link_eef"
 GRIPPER_NAME = "gripper"
+SHARED = True
+# Initial joint seed for the first IK solve of each episode (radians).
+INITIAL_JOINT_POSITIONS = {
+    "joint1": 0.0,
+    "joint2": 0.0,
+    "joint3": 0.0,
+    "joint4": 0.0,
+    "joint5": 0.0,
+    "joint6": 0.0,
+    "joint7": 0.0,
+}
 GRIPPER_OPEN_RAD = 0.0  # drive_joint lower limit = open
 GRIPPER_CLOSED_RAD = 0.85  # drive_joint upper limit = closed
 GRIPPER_JOINT_NAMES = {
@@ -184,7 +195,7 @@ def main():
         robot_name="Ufactory xArm 7",
         urdf_path=str(URDF_PATH),
         overwrite=True,
-        shared=True,
+        shared=SHARED,
     )
 
     from neuracore.core.data.dataset import Dataset
@@ -210,7 +221,7 @@ def main():
             "From 'Watch and Match: Supercharging Imitation with Regularized "
             "Optimal Transport' (Haldar et al., 2023)."
         ),
-        shared=True,
+        shared=SHARED,
     )
 
     episodes = list(collect_episodes(robotgym_dir))
@@ -249,11 +260,12 @@ def main():
         nc.start_recording()
         t = time.time()
         dt = 1.0 / FPS
-        prev_ik: dict[str, float] | None = None
-        prev_target_ik: dict[str, float] | None = None
+        prev_ik: dict[str, float] | None = dict(INITIAL_JOINT_POSITIONS)
+        prev_target_ik: dict[str, float] | None = dict(INITIAL_JOINT_POSITIONS)
 
         for step in range(n_steps):
             pos_m = states[step, :3] / 10.0  # decimeters → meters
+            pos_m[0] += 0.1
             joint_pos: dict[str, float] | None = None
 
             # IK for current EE pose. Keep prev_ik as a {joint_name: angle} dict:
