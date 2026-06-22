@@ -366,15 +366,42 @@ def test_nc_clone_dataset_api_error(
     )
     mock_data_requests.post(
         f"{API_URL}/org/{mocked_org_id}/datasets/clone",
-        json={"detail": {"error": "Dataset already exists"}},
+        json={"detail": {"error": "Failed to clone dataset: Dataset already exists"}},
         status_code=409,
     )
 
     with pytest.raises(
         DatasetError,
-        match="Failed to clone dataset: Dataset already exists",
+        match=r"^Failed to clone dataset: Dataset already exists$",
     ):
         nc.clone_dataset("clone", source_dataset=source)
+
+
+def test_nc_merge_dataset_api_error(
+    temp_config_dir,
+    mock_data_requests,
+    reset_neuracore,
+    dataset_response,
+    mocked_org_id,
+):
+    """Test that merge API errors include the backend detail."""
+    nc.login("test_api_key")
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+    mock_data_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/datasets/merge",
+        json={"detail": {"error": "Failed to merge datasets: Dataset not found."}},
+        status_code=404,
+    )
+
+    with pytest.raises(
+        DatasetError,
+        match=r"^Failed to merge datasets: Dataset not found\.$",
+    ):
+        nc.merge_datasets("merged", ["source_a", "source_b"])
 
 
 class TestDatasetInitialization:
