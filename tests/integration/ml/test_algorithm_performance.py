@@ -41,6 +41,7 @@ from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
+from tests.integration.ml.shared.training import wait_for_training
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
@@ -228,23 +229,11 @@ class TestAlgorithmPerformance:
         nc.login()
 
         # Training should already be complete; poll briefly as a safety buffer.
-        training_job_status = nc.get_training_job_status(training_job_id)
-        training_wait_start = time.time()
-        while training_job_status in ["PREPARING_DATA", "PENDING", "RUNNING"]:
-            logger.info(
-                f"[{algorithm_name}] Waiting for training: "
-                f"status={training_job_status}"
-            )
-            time.sleep(60)
-            training_job_status = nc.get_training_job_status(training_job_id)
-            elapsed_minutes = (time.time() - training_wait_start) / 60
-            if elapsed_minutes > TRAINING_WAIT_TIMEOUT_MINUTES:
-                raise TimeoutError(
-                    f"[{algorithm_name}] Training still not complete after "
-                    f"{TRAINING_WAIT_TIMEOUT_MINUTES} minutes in Phase 2 — "
-                    "training may have overrun its scheduled window"
-                )
-
+        training_job_status = wait_for_training(
+            job_id=training_job_id,
+            timeout_minutes=TRAINING_WAIT_TIMEOUT_MINUTES,
+            poll_seconds=60,
+        )
         if training_job_status != "COMPLETED":
             raise ValueError(
                 f"[{algorithm_name}] Training job did not complete, "
