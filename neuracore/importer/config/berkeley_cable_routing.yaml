@@ -1,0 +1,110 @@
+# Berkeley Cable Routing dataset sources:
+# TFDS: https://www.tensorflow.org/datasets/catalog/berkeley_cable_routing
+# Paper: https://arxiv.org/abs/2307.08927
+
+input_dataset_name: berkeley_cable_routing
+dataset_type: RLDS
+
+output_dataset:
+    name: Berkeley Cable Routing
+    tags: [widowx, berkeley, cable-routing, manipulation]
+    description: "WidowX robot routing cable into clamps on a table top, with natural language instructions and multiple camera views (front, top, wrist 225°, wrist 45°)."
+
+robot:
+    name: widowx
+    urdf_path: "wx250s.urdf"
+    overwrite_existing: true
+
+# 5 Hz matches the standard WidowX control frequency used across Berkeley RLDS datasets.
+frequency: 5.0
+
+data_import_config:
+    # TODO: natural_language_embedding (512-d), terminate_episode, reward,
+    # is_first, is_last and is_terminal are not imported.
+
+    RGB_IMAGES:
+        source: observation
+        format:
+            image_convention: CHANNELS_LAST
+            order_of_channels: RGB
+        mapping:
+            - name: image          # Front-facing scene camera.
+              source_name: image
+            - name: top_image      # Overhead camera for cable state.
+              source_name: top_image
+            - name: wrist225_image # Wrist camera at 225° rotation.
+              source_name: wrist225_image
+            - name: wrist45_image  # Wrist camera at 45° rotation.
+              source_name: wrist45_image
+
+    END_EFFECTOR_POSES:
+        # robot_state encodes EEF pose as [x, y, z, qw, qx, qy, qz] in world frame.
+        # align_frame_x shifts to robot base frame (base at x=0.108m in world frame).
+        # Base offset estimated from dataset EEF position distribution.
+        source: observation.robot_state
+        format:
+            pose_type: POSITION_ORIENTATION
+            orientation:
+                type: QUATERNION
+                quaternion_order: WXYZ
+                angle_units: RADIANS
+                align_frame_x: 0.108
+        mapping:
+            - name: ee_gripper_link
+              index_range:
+                  start: 0
+                  end: 7
+
+    # Joint positions inferred via IK from the observed EEF pose.
+    # Populates curr_joint_positions (required for JOINT_TARGET_POSITIONS logging)
+    # and seeds prev_ik_solution for subsequent IK calls.
+    JOINT_POSITIONS:
+        source: observation.robot_state
+        format:
+            joint_position_input_type: END_EFFECTOR
+            pose_type: POSITION_ORIENTATION
+            orientation:
+                type: QUATERNION
+                quaternion_order: WXYZ
+                align_frame_x: 0.108
+        mapping:
+            - name: ee_gripper_link
+              source_name: ee_gripper_link
+              index_range:
+                  start: 0
+                  end: 7
+
+    LANGUAGE:
+        source: observation
+        format:
+            language_type: BYTES
+        mapping:
+            - name: instruction
+              source_name: natural_language_instruction
+
+    # No gripper state or action in this dataset — gripper stays closed throughout.
+
+    # world_vector and rotation_delta are deltas in world frame. Robot base is a pure
+    # x-translation offset (no rotation), so delta_in_world_frame corrects the
+    # composition: next_pos = curr_pos + delta, next_R = R_delta @ R_curr.
+    JOINT_TARGET_POSITIONS:
+        source: action
+        format:
+            joint_position_input_type: END_EFFECTOR
+            action_type: RELATIVE
+            action_space: END_EFFECTOR
+            pose_type: POSITION_ORIENTATION
+            delta_in_world_frame: true
+            orientation:
+                type: AXIS_ANGLE
+                angle_units: RADIANS
+        mapping:
+            - name: ee_gripper_link
+              pose_position_source_name: world_vector
+              pose_orientation_source_name: rotation_delta
+              pose_position_index_range:
+                  start: 0
+                  end: 3
+              pose_orientation_index_range:
+                  start: 0
+                  end: 3
