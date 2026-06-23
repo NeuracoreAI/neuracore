@@ -118,24 +118,27 @@ class RecordingContext:
         self,
         data_type: str,
         timestamp: float,
-        items: list[tuple[str, float]],
+        joined_names: str,
+        values: list[float],
     ) -> None:
-        """Forward a batch of ``(joint_name, value)`` samples to the daemon.
+        r"""Forward a batch of joint scalar samples to the daemon.
 
-        The daemon lazily creates a trace per sensor and routes the whole batch
-        into the source's active recording window by ``timestamp``.
+        Args:
+            data_type:  Type of joint data e.g. DataType.JOINT_POSITIONS.
+            timestamp: the Unix timestamp of the sample.
+            joined_names: a single ``\0``-joined string of joint names.
+            values: a flat list of joint values.
         """
-        if not items:
+        if not values:
             return
         robot_id = self._require_source("log_joints")
         timestamp_ns = int(timestamp * 1_000_000_000)
-        names, values = zip(*items)
         _load_native().log_joints(
             robot_id,
             self._robot_instance,
             data_type,
-            "\0".join(names),
-            list(values),
+            joined_names,
+            values,
             timestamp_ns,
             timestamp,
         )
@@ -151,11 +154,13 @@ class RecordingContext:
     ) -> None:
         """Forward one video frame to the daemon.
 
-        ``payload`` may be either a ``bytes`` object or a flat ``memoryview``
-        (e.g. ``memoryview(numpy_array).cast("B")``); the native side reads
-        the buffer via the Python buffer protocol and copies straight into
-        the NUT writer's destination, so there's no benefit to materialising
-        a ``bytes`` first.
+        Args:
+            data_type: Type of video data e.g. DataType.RGB_IMAGES.
+            name: the camera/sensor name e.g. left_wrist_camera.
+            width: Video frame width.
+            height: Video frame height.
+            payload: Raw video frame bytes.
+            timestamp: the Unix timestamp of the sample.
         """
         robot_id = self._require_source("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)

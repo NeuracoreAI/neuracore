@@ -29,7 +29,7 @@
 //!   sensor `(data_type, sensor_name)` and capture `timestamp_ns`.
 //! - [`log_frame`] spools raw RGB into per-`(source, sensor)` NUT chunk files
 //!   under a recording-independent inbox and announces each finished chunk
-//!   with [`VideoChunkReady`](data_daemon_ipc::Envelope::VideoChunkReady); the
+//!   with [`VideoChunkReady`](data_daemon_shared::Envelope::VideoChunkReady); the
 //!   daemon buckets the chunk into a recording by its frame timestamps,
 //!   relinks the NUT under that recording, and transcodes it.
 //!
@@ -54,7 +54,7 @@ mod publisher;
 mod query;
 mod writer;
 
-use data_daemon_ipc::{Envelope, RecordingIdQuery};
+use data_daemon_shared::{Envelope, RecordingIdQuery};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -236,9 +236,17 @@ fn log_frame(
     };
 
     // Hand off to the writer with the GIL released: enqueuing only blocks under
-    // sustained overload (the byte cap), and blocking there while holding the
-    // GIL would stall every Python thread in the process.
-    py.allow_threads(move || writer_queue().push(WriterMsg::Frame(job)));
+    // sustained overload (the byte caps), and blocking there while holding the
+    // GIL would stall every Python thread in the process. A frame that cannot be
+    // admitted before the spool-stall window elapses surfaces as an error rather
+    // than being silently dropped, so the caller learns the daemon has stalled.
+    py.allow_threads(move || writer_queue().push(WriterMsg::Frame(job)))
+        .map_err(|_| {
+            PyRuntimeError::new_err(
+                "video logging stalled: the data daemon is not draining the spool \
+                 backlog (frame rejected after 1s of backpressure)",
+            )
+        })?;
     Ok(())
 }
 
@@ -325,7 +333,8 @@ fn stop_recording(
         // durably spooled + announced, so a process exit right after
         // `stop_recording` can't lose them.
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        writer_queue().push(WriterMsg::FlushSource {
+        // Control messages bypass the frame caps, so this never blocks or stalls.
+        let _ = writer_queue().push(WriterMsg::FlushSource {
             robot_id: robot_id.clone(),
             robot_instance,
             ack: ack_tx,
@@ -374,7 +383,8 @@ fn cancel_recording(
         // it, then acks. Block until acked so the cancel is ordered after those
         // frames and no late chunk for this recording is announced.
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
-        writer_queue().push(WriterMsg::DropSource {
+        // Control messages bypass the frame caps, so this never blocks or stalls.
+        let _ = writer_queue().push(WriterMsg::DropSource {
             robot_id: robot_id.clone(),
             robot_instance,
             ack: ack_tx,

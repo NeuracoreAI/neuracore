@@ -41,7 +41,9 @@ use tokio::task::{self, JoinSet};
 
 use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
-use crate::encoding::video_encoder::{ChunkEncodeRequest, VideoEncodeError, VideoEncoder};
+use crate::encoding::video_encoder::{
+    ChunkEncodeRequest, VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
+};
 use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::TraceWriteHandle;
 use crate::storage::budget::StorageBudget;
@@ -82,16 +84,24 @@ pub struct TraceIdentity {
 /// A finalise always issues a fresh UPDATE so the terminal row is exact.
 const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 
-/// Cap on concurrent ffmpeg transcodes. Each ffmpeg child happily saturates a
-/// CPU core; without a cap N simultaneous per-chunk encode invocations
-/// starve the rest of the daemon. Scales with the host's available
-/// parallelism so 2-vCPU runners aren't 4× oversubscribed while bigger
-/// hosts can still transcode multi-camera 8-context workloads in parallel.
+/// Cap on concurrent ffmpeg transcodes.
+///
+/// Each per-chunk encode bounds its libx264 thread pool to
+/// [`ENCODE_THREADS_PER_OUTPUT`] per output stream, so to keep the encode fleet
+/// near — not far past — the host's core count we run roughly
+/// `cores / threads_per_output` invocations at once. Letting the permit count
+/// *and* each child's thread pool both scale with the core count (as an earlier
+/// revision did, with libx264 defaulting to one frame-thread per core)
+/// oversubscribed a 14-core host to ~200 encode threads, which thrashed the
+/// scheduler and stole cycles from the latency-critical `nc.log_*` threads.
+/// Dividing here holds the total encode-thread count near the core count while
+/// still letting bigger hosts transcode multi-camera 8-context workloads in
+/// parallel.
 ///
 /// Floor at 2 so single-core hosts still get a useful permit pool.
 pub(crate) fn default_ffmpeg_concurrency() -> usize {
     std::thread::available_parallelism()
-        .map(|n| n.get().max(2))
+        .map(|n| (n.get() / ENCODE_THREADS_PER_OUTPUT).max(2))
         .unwrap_or(2)
 }
 

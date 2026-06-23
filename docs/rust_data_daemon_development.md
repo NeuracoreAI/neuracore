@@ -11,7 +11,7 @@ The [rust/](../rust/) directory is a Cargo workspace with three members declared
 | Crate | Path | What it is |
 |---|---|---|
 | `data-daemon` | [rust/data_daemon/](../rust/data_daemon/) | The daemon binary — CLI, lifecycle, SQLite state, IPC listener, per-trace pipeline, encoding. |
-| `data_daemon_ipc` | [rust/data_daemon_ipc/](../rust/data_daemon_ipc/) | Shared library — IPC envelope types, service-name constants, payload structs. Linked by both the daemon and the producer crate. |
+| `data_daemon_shared` | [rust/data_daemon_shared/](../rust/data_daemon_shared/) | Shared library — IPC envelope types and service-name constants, plus the daemon configuration model and filesystem-path resolution the two processes must compute identically. Linked by both the daemon and the producer crate. |
 | `data_daemon_producer` | [rust/data_daemon_producer/](../rust/data_daemon_producer/) | PyO3 `cdylib` — producer-side IPC client exposed to Python as `neuracore.data_daemon._native_producer`. |
 
 Shared workspace dependencies and the Rust edition (`2021`) are pinned in [rust/Cargo.toml](../rust/Cargo.toml); individual crates inherit them via `.workspace = true`.
@@ -140,7 +140,7 @@ cargo test --workspace
 
 # A specific crate
 cargo test -p data-daemon
-cargo test -p data_daemon_ipc
+cargo test -p data_daemon_shared
 
 # A specific module or test name (partial match)
 cargo test -p data-daemon pipeline::dispatcher

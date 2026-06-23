@@ -14,7 +14,7 @@ use std::sync::LazyLock;
 const SPOOL_DIRNAME: &str = ".rgb_spool";
 
 /// Recordings root, resolved once per process via the shared resolver
-/// ([`data_daemon_ipc::paths::recordings_root`]) so the producer and daemon
+/// ([`data_daemon_shared::paths::recordings_root`]) so the producer and daemon
 /// always compute the same root from the same inputs.
 ///
 /// The `Err` case — no `$HOME` and no `NEURACORE_DAEMON_RECORDINGS_ROOT`
@@ -22,8 +22,9 @@ const SPOOL_DIRNAME: &str = ".rgb_spool";
 /// (see [`recordings_root`]). It is never allowed to panic across the FFI
 /// boundary, nor to silently fall back to a scratch dir the daemon would never
 /// read (which would lose the user's video).
-static RECORDINGS_ROOT: LazyLock<Result<PathBuf, String>> =
-    LazyLock::new(|| data_daemon_ipc::paths::recordings_root().map_err(|error| error.to_string()));
+static RECORDINGS_ROOT: LazyLock<Result<PathBuf, String>> = LazyLock::new(|| {
+    data_daemon_shared::paths::recordings_root().map_err(|error| error.to_string())
+});
 
 /// The resolved recordings root, or the resolution error message. The
 /// `log_frame` pyfunction checks this on the GIL before enqueueing a frame, so
@@ -86,6 +87,14 @@ pub(crate) fn spool_dir(
             .join(data_type)
             .join(sensor_name)
     })
+}
+
+/// The video spool inbox root (`{recordings_root}/.rgb_spool`). The producer's
+/// entire on-disk video backlog lives under here; the writer thread sums it to
+/// enforce the spool-backlog cap. `None` when the recordings root is unresolved
+/// (the same condition `log_frame` already rejects on the GIL).
+pub(crate) fn spool_root() -> Option<PathBuf> {
+    recordings_root().ok().map(|root| root.join(SPOOL_DIRNAME))
 }
 
 /// Spool chunk filename — must match `storage::paths::spool_chunk_filename`.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["data_daemon", "data_daemon_ipc", "data_daemon_producer"]
+members = ["data_daemon", "data_daemon_shared", "data_daemon_producer"]
 resolver = "2"
 
 [workspace.package]

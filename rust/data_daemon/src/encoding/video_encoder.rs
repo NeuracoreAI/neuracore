@@ -6,10 +6,15 @@
 //! ffmpeg to produce two MP4 segments:
 //!
 //! - `chunk_NNNN_lossy.mp4` — `libx264` `-pix_fmt yuv420p -preset ultrafast
-//!   -qp 23` for fast playback.
-//! - `chunk_NNNN_lossless.mp4` — `libx264` `-pix_fmt yuv444p10le -preset
-//!   ultrafast -qp 0` for mathematically-lossless archival. `ffv1` would be
-//!   the natural codec for this but is incompatible with the `.mp4`
+//!   -qp 23` for fast playback, downscaled to a preview resolution (see
+//!   [`LOSSY_PREVIEW_MAX_HEIGHT`]) since it is only a derivable proxy and the
+//!   full-resolution encode is the transcoder's dominant cost.
+//! - `chunk_NNNN_lossless.mp4` — `libx264rgb` `-pix_fmt rgb24 -preset
+//!   ultrafast -qp 0` for mathematically-lossless archival. Encoding the
+//!   captured rgb24 frames directly (rather than converting to a YUV format)
+//!   keeps the output bit-exact to the captured pixels, encodes ~2.5× faster
+//!   than a `yuv444p10le` pass, and matches the Python reference encoder.
+//!   `ffv1` would also be lossless but is incompatible with the `.mp4`
 //!   container the on-disk layout contract requires.
 //!
 //! On `EndTrace` the per-trace actor calls [`VideoEncoder::concat_segments`]
@@ -42,6 +47,40 @@ pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 /// descheduled. Renicing the encoder lets the kernel scheduler favour the
 /// foreground logging threads while ffmpeg still consumes otherwise-idle CPU.
 const ENCODER_NICENESS: libc::c_int = 10;
+
+/// libx264 frame-thread cap applied to *each* encode output stream.
+///
+/// libx264 defaults to roughly one frame-thread per core. With the transcode
+/// concurrency permit pool also scaling with the core count, the two multiply:
+/// a 14-core host ran ~14 ffmpeg children each spawning ~14 threads, ~200
+/// encode threads fighting over 14 cores. That thrashes the scheduler and
+/// steals cycles from the latency-critical `nc.log_*` threads — the exact
+/// path the renice above tries to protect. Capping each output's thread pool
+/// keeps the total encode-thread count near the core count instead. Measured
+/// sweet spot on a 14-core host: ~`cores / 2` concurrent children at 2 threads
+/// per output beat the uncapped default on both aggregate throughput and
+/// logging-thread jitter, so [`default_ffmpeg_concurrency`] divides by this.
+///
+/// [`default_ffmpeg_concurrency`]: crate::pipeline::trace_actor::default_ffmpeg_concurrency
+pub const ENCODE_THREADS_PER_OUTPUT: usize = 2;
+
+/// Height (in lines) the lossy *preview* proxy is downscaled to.
+///
+/// At 8-context 1080p60 the transcoder is CPU-bound, and the full-resolution
+/// lossy pass is the long pole (~38% of the per-chunk encode work) — yet the
+/// lossy output is only a fast-playback proxy, derivable from the lossless
+/// archival copy. Encoding it at preview resolution instead cuts that pass'
+/// cost roughly with the pixel-count reduction: measured ~+21% aggregate
+/// transcode throughput at 8×1080p60, which is what buys the spool real-time
+/// headroom without touching the bit-exact lossless output (which stays at
+/// native resolution).
+///
+/// The downscale (see [`preview_scale_filter`]) caps *height* at this many
+/// lines while preserving aspect ratio, never upscales a smaller source, and
+/// rounds both dimensions to even (an H.264 `yuv420p` requirement) — so it is
+/// correct for any input resolution or aspect ratio. 480 lines is ample for a
+/// scrub/preview proxy.
+const LOSSY_PREVIEW_MAX_HEIGHT: u32 = 480;
 
 /// Inputs to one per-chunk transcode invocation.
 #[derive(Debug, Clone)]
@@ -139,8 +178,9 @@ pub enum FfmpegPreflightError {
     #[error(
         "ffmpeg at `{}` (version {version}) is incompatible: a required capability was \
          rejected. The daemon needs `-vsync passthrough` (drop-free, frame-accurate \
-         encoding — note `-fps_mode passthrough` is ffmpeg >= 5.1 only) and the libx264 \
-         encoder. Install a compatible ffmpeg (>= 4.0 with libx264). ffmpeg reported:\n{stderr_tail}",
+         encoding — note `-fps_mode passthrough` is ffmpeg >= 5.1 only) and the libx264 / \
+         libx264rgb encoders. Install a compatible ffmpeg (>= 4.0 with libx264). ffmpeg \
+         reported:\n{stderr_tail}",
         binary.to_string_lossy()
     )]
     Incompatible {
@@ -217,10 +257,10 @@ impl VideoEncoder {
 
     /// Encode one synthetic frame to the null muxer through **both** output
     /// configurations the real [`encode_chunk`](Self::encode_chunk) uses — the
-    /// `yuv420p` lossy pass *and* the `yuv444p10le -qp 0` lossless pass. A
-    /// non-zero exit means the local ffmpeg lacks a capability the encoder
-    /// needs. The lossless 10-bit 4:4:4 path is the one that actually varies
-    /// between builds, so probing only the lossy pass (as before) let the
+    /// `yuv420p libx264` lossy pass *and* the `rgb24 libx264rgb -qp 0` lossless
+    /// pass. A non-zero exit means the local ffmpeg lacks a capability the
+    /// encoder needs. The lossless `libx264rgb` path is the one that actually
+    /// varies between builds, so probing only the lossy pass (as before) let the
     /// "fail fast at startup" check pass while every real lossless encode failed
     /// at recording time.
     fn probe_passthrough_encode(&self, version: &str) -> Result<(), FfmpegPreflightError> {
@@ -228,7 +268,7 @@ impl VideoEncoder {
         // bytes) fed via the rawvideo demuxer on stdin — no lavfi/input-file
         // dependency, so the probe works even on a minimal build. ffmpeg parses
         // (and would reject) the options before reading stdin, so an unsupported
-        // `-vsync passthrough` or `yuv444p10le` encode fails immediately rather
+        // `-vsync passthrough` or `libx264rgb` encode fails immediately rather
         // than on a healthy input. The two `-map 0:v -c:v …` blocks exercise the
         // same codec and pixel formats as `encode_chunk` (the build-dependent
         // parts); the real lossy encode adds options the probe omits (e.g.
@@ -263,15 +303,15 @@ impl VideoEncoder {
             .arg("null")
             .arg("-")
             // Lossless pass (matches encode_chunk's second output) — the
-            // build-dependent 10-bit 4:4:4 capability the encoder relies on.
+            // build-dependent `libx264rgb` rgb24 capability the encoder relies on.
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
             .arg("-c:v")
-            .arg("libx264")
+            .arg("libx264rgb")
             .arg("-pix_fmt")
-            .arg("yuv444p10le")
+            .arg("rgb24")
             .arg("-qp")
             .arg("0")
             .arg("-preset")
@@ -353,6 +393,13 @@ impl VideoEncoder {
         // the encode with "Unrecognized option 'fps_mode'". `-vsync` is accepted
         // on both (only deprecated, not removed, on 5.1+). Two `-map 0:v -c:v ...`
         // blocks emit both outputs from a single demux pass.
+        // Bound each output's libx264 thread pool (see
+        // `ENCODE_THREADS_PER_OUTPUT`) so the transcode fleet doesn't
+        // oversubscribe the cores the logging threads need.
+        let encode_threads = ENCODE_THREADS_PER_OUTPUT.to_string();
+        // Downscale the lossy preview proxy (only) to keep the dominant pass
+        // cheap at high resolution. The lossless output stays native.
+        let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -368,8 +415,16 @@ impl VideoEncoder {
             .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
+            // Lossy preview proxy only: cap to preview resolution (see
+            // `preview_scale_filter`). vsync passthrough still emits every
+            // input frame, so the lossy frame count matches the lossless
+            // output and the per-frame timestamp sidecar.
+            .arg("-vf")
+            .arg(&preview_filter)
             .arg("-c:v")
             .arg("libx264")
+            .arg("-threads")
+            .arg(&encode_threads)
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-preset")
@@ -381,10 +436,15 @@ impl VideoEncoder {
             .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
+            // libx264rgb encodes the rgb24 frames directly: bit-exact to the
+            // captured pixels, ~2.5× faster than a yuv444p10le pass, and the
+            // format the Python reference encoder writes.
             .arg("-c:v")
-            .arg("libx264")
+            .arg("libx264rgb")
+            .arg("-threads")
+            .arg(&encode_threads)
             .arg("-pix_fmt")
-            .arg("yuv444p10le")
+            .arg("rgb24")
             .arg("-preset")
             .arg("ultrafast")
             .arg("-qp")
@@ -504,6 +564,20 @@ impl VideoEncoder {
         let bytes = non_empty_file_size(out)?;
         Ok(ConcatOutcome { bytes })
     }
+}
+
+/// Build the ffmpeg `-vf` value that downscales the lossy preview proxy to at
+/// most `max_height` lines.
+///
+/// The scale factor `s = min(1, max_height/ih)` is applied to both axes, so it
+/// preserves aspect ratio and **never upscales** (a source already at or below
+/// the cap passes through untouched). `trunc(.../2)*2` rounds each axis to an
+/// even number of pixels — H.264 `yuv420p` rejects odd dimensions. The comma in
+/// `min(1, …)` is escaped (`\,`) because ffmpeg's filtergraph parser otherwise
+/// reads it as a filter separator. Works for any resolution or aspect ratio
+/// (landscape, portrait, ultrawide); guarded by [`tests::preview_scale_filter_*`].
+fn preview_scale_filter(max_height: u32) -> String {
+    format!("scale=trunc(iw*min(1\\,{max_height}/ih)/2)*2:trunc(ih*min(1\\,{max_height}/ih)/2)*2")
 }
 
 /// Build the path to the temporary concat list file used by
@@ -649,6 +723,18 @@ mod tests {
     /// NUT writer. `frame_count` frames at the configured rate land in a
     /// NUT-container raw-rgb24 stream that `encode_chunk` can demux.
     fn write_synthetic_nut(ffmpeg: &Path, path: &Path, frame_count: u64) {
+        write_synthetic_nut_sized(ffmpeg, path, frame_count, 16, 16);
+    }
+
+    /// As [`write_synthetic_nut`] but with an explicit frame geometry, so the
+    /// preview-downscale test can feed a source larger than the preview cap.
+    fn write_synthetic_nut_sized(
+        ffmpeg: &Path,
+        path: &Path,
+        frame_count: u64,
+        width: u32,
+        height: u32,
+    ) {
         let duration = format!("{}", frame_count); // 1 fps testsrc → frame_count seconds
         let status = StdCommand::new(ffmpeg)
             .args([
@@ -660,7 +746,9 @@ mod tests {
                 "lavfi",
                 "-i",
             ])
-            .arg(format!("testsrc=duration={duration}:size=16x16:rate=1"))
+            .arg(format!(
+                "testsrc=duration={duration}:size={width}x{height}:rate=1"
+            ))
             .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
             .arg(path)
             .status()
@@ -695,6 +783,20 @@ mod tests {
         let bytes = vec![b'x'; 16 * 1024];
         let tail = tail_stderr(&bytes);
         assert_eq!(tail.len(), 4 * 1024);
+    }
+
+    #[test]
+    fn preview_scale_filter_builds_expected_expression() {
+        // The comma inside `min(1, …)` MUST stay escaped (`\,`) — an unescaped
+        // comma would be parsed as a filter separator and ffmpeg would reject
+        // the graph. Both axes scale by the same `min(1, H/ih)` factor (AR
+        // preserved, no upscale) and round to even (`trunc(/2)*2`).
+        assert_eq!(
+            preview_scale_filter(480),
+            "scale=trunc(iw*min(1\\,480/ih)/2)*2:trunc(ih*min(1\\,480/ih)/2)*2"
+        );
+        // The cap is interpolated, so a different target reshapes the filter.
+        assert!(preview_scale_filter(720).contains("720/ih"));
     }
 
     #[test]
@@ -854,9 +956,92 @@ mod tests {
                 path.display()
             );
             assert_eq!(streams[0]["codec_type"], "video");
+            // 16x16 is far below the preview cap, so the lossy downscale is a
+            // no-op here — both outputs keep the source geometry (no upscale).
             assert_eq!(streams[0]["width"], 16);
             assert_eq!(streams[0]["height"], 16);
         }
+    }
+
+    #[tokio::test]
+    async fn encode_chunk_downscales_lossy_preview_keeps_lossless_native() {
+        let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping preview-downscale test.");
+            return;
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("chunk_0000.nut");
+        let lossy = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0000_lossless.mp4");
+
+        // A 1280x720 source: above the 480-line preview cap, 16:9 aspect.
+        write_synthetic_nut_sized(&ffmpeg, &raw, 6, 1280, 720);
+
+        let encoder = VideoEncoder::new();
+        encoder
+            .encode_chunk(&ChunkEncodeRequest {
+                raw_nut: raw,
+                lossy_out: lossy.clone(),
+                lossless_out: lossless.clone(),
+            })
+            .await
+            .expect("transcode");
+
+        let dims = |path: &Path| -> (u64, u64, u64) {
+            let out = StdCommand::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=width,height,nb_read_frames",
+                    "-of",
+                    "json",
+                ])
+                .arg(path)
+                .output()
+                .expect("spawn ffprobe");
+            let parsed: serde_json::Value =
+                serde_json::from_slice(&out.stdout).expect("ffprobe JSON");
+            let stream = &parsed["streams"][0];
+            let field = |key: &str| -> u64 {
+                let value = &stream[key];
+                value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                    .unwrap_or_else(|| panic!("missing {key}: {stream}"))
+            };
+            (field("width"), field("height"), field("nb_read_frames"))
+        };
+
+        let (lossy_w, lossy_h, lossy_frames) = dims(&lossy);
+        let (lossless_w, lossless_h, lossless_frames) = dims(&lossless);
+
+        // Lossy is capped to 480 lines, aspect ratio preserved (1280x720 ->
+        // 852x480), and both axes are even (yuv420p requirement).
+        assert_eq!(
+            (lossy_w, lossy_h),
+            (852, 480),
+            "lossy should be 480p preview"
+        );
+        assert_eq!(lossy_w % 2, 0, "lossy width must be even");
+        // Lossless keeps the native geometry — it is the archival copy.
+        assert_eq!(
+            (lossless_w, lossless_h),
+            (1280, 720),
+            "lossless must stay native resolution"
+        );
+        // Both outputs carry every source frame, so the per-frame timestamp
+        // sidecar stays aligned with each video.
+        assert_eq!(
+            lossy_frames, lossless_frames,
+            "lossy and lossless must hold the same frame count"
+        );
+        assert_eq!(lossy_frames, 6, "all source frames must be encoded");
     }
 
     #[tokio::test]

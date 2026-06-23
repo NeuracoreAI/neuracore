@@ -35,12 +35,12 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{LazyLock, Mutex, Once};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use data_daemon_ipc::service_name::{
+use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
     MAX_PUBLISHERS_PER_SERVICE, MAX_QUERY_CLIENTS_PER_SERVICE, MAX_QUERY_SERVERS_PER_SERVICE,
     MAX_SUBSCRIBERS_PER_SERVICE, QUERIES, QUERIES_MAX_PAYLOAD_BYTES,
 };
-use data_daemon_ipc::{BatchedDataItem, Envelope};
+use data_daemon_shared::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::client::Client;
 use iceoryx2::port::publisher::Publisher;
@@ -71,7 +71,7 @@ pub(crate) enum ProducerError {
     Send(String),
     /// Failed to encode the envelope.
     #[error(transparent)]
-    Encode(#[from] data_daemon_ipc::EnvelopeCodecError),
+    Encode(#[from] data_daemon_shared::EnvelopeCodecError),
     /// Payload too large for the configured iceoryx2 max slice length.
     #[error("envelope payload {actual} bytes exceeds limit {limit} bytes")]
     PayloadTooLarge {

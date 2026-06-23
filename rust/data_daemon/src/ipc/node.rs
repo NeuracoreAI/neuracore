@@ -8,9 +8,9 @@
 //! spooled to disk by the producer, so the IPC bus only ever carries
 //! metadata-sized payloads.
 //!
-//! [`Envelope::VideoChunkReady`]: data_daemon_ipc::Envelope::VideoChunkReady
+//! [`Envelope::VideoChunkReady`]: data_daemon_shared::Envelope::VideoChunkReady
 
-use data_daemon_ipc::service_name::{
+use data_daemon_shared::service_name::{
     COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_QUERY_CLIENTS_PER_SERVICE, MAX_QUERY_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
     QUERIES, QUERIES_MAX_PAYLOAD_BYTES,

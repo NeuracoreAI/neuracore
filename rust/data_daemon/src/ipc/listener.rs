@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use data_daemon_ipc::{Envelope, RecordingIdQuery, RecordingIdReply};
+use data_daemon_shared::{Envelope, RecordingIdQuery, RecordingIdReply};
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
@@ -70,8 +70,8 @@ pub async fn run(
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
-        commands = data_daemon_ipc::service_name::COMMANDS,
-        queries = data_daemon_ipc::service_name::QUERIES,
+        commands = data_daemon_shared::service_name::COMMANDS,
+        queries = data_daemon_shared::service_name::QUERIES,
         "ipc listener started"
     );
 

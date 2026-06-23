@@ -100,7 +100,7 @@ pub fn spool_root(recordings_root: &Path) -> PathBuf {
 /// published its [`Envelope::VideoChunkReady`], which happens after the NUT
 /// writer has been finished and flushed.
 ///
-/// [`Envelope::VideoChunkReady`]: data_daemon_ipc::Envelope::VideoChunkReady
+/// [`Envelope::VideoChunkReady`]: data_daemon_shared::Envelope::VideoChunkReady
 pub fn chunk_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}.nut")
 }
@@ -191,39 +191,11 @@ impl TracePath {
     }
 }
 
-/// Sum the byte count of every regular file beneath `root`.
-///
-/// Returns 0 when `root` does not exist, which is the expected state before
-/// the recordings tree has been created. Unreadable entries are silently
-/// skipped — the budget tracker treats them as zero.
-pub fn directory_bytes(root: &Path) -> u64 {
-    let mut total: u64 = 0;
-    walk(root, &mut |entry| {
-        if let Ok(metadata) = entry.metadata() {
-            if metadata.is_file() {
-                total = total.saturating_add(metadata.len());
-            }
-        }
-    });
-    total
-}
-
-fn walk(root: &Path, visit: &mut dyn FnMut(&std::fs::DirEntry)) {
-    let read_dir = match std::fs::read_dir(root) {
-        Ok(iterator) => iterator,
-        Err(_) => return,
-    };
-    for entry in read_dir.flatten() {
-        visit(&entry);
-        let file_type = match entry.file_type() {
-            Ok(file_type) => file_type,
-            Err(_) => continue,
-        };
-        if file_type.is_dir() {
-            walk(&entry.path(), visit);
-        }
-    }
-}
+/// Sum the byte count of every regular file beneath `root`, used here by the
+/// storage budget. The implementation lives in `data_daemon_shared` so the
+/// producer's spool-backlog cap sums its inbox with byte-for-byte identical
+/// semantics.
+pub use data_daemon_shared::paths::directory_bytes;
 
 #[cfg(test)]
 mod tests {

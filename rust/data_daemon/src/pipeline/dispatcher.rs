@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use data_daemon_ipc::{BatchedDataItem, Envelope};
+use data_daemon_shared::{BatchedDataItem, Envelope};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;

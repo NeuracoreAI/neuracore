@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 path = "src/lib.rs"
 
 [dependencies]
-data_daemon_ipc = { path = "../data_daemon_ipc" }
+data_daemon_shared = { path = "../data_daemon_shared" }
 iceoryx2.workspace = true
 libc.workspace = true
 pyo3.workspace = true

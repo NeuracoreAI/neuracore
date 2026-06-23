@@ -23,6 +23,7 @@ pub fn run(command: ProfileCommand) {
             name,
             storage_limit,
             bandwidth_limit,
+            spool_limit,
             storage_path,
             num_threads,
             wakelock,
@@ -35,6 +36,7 @@ pub fn run(command: ProfileCommand) {
             let updates = DaemonConfig {
                 storage_limit,
                 bandwidth_limit,
+                spool_limit,
                 path_to_store_record: storage_path,
                 num_threads,
                 keep_wakelock_while_upload: tristate(wakelock, no_wakelock),

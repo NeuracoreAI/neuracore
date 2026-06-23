@@ -1,9 +1,9 @@
 [package]
-name = "data_daemon_ipc"
+name = "data_daemon_shared"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Shared IPC envelope, payload, and service-name definitions for the Neuracore data daemon."
+description = "Shared definitions for the Neuracore data daemon: IPC envelope/service-name wire format, configuration model, and filesystem-path resolution."
 
 [lib]
 path = "src/lib.rs"
@@ -15,3 +15,10 @@ dirs.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+nix.workspace = true
+serde_yaml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"

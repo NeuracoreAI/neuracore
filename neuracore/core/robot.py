@@ -39,7 +39,7 @@ from .exceptions import RobotError, ValidationError
 from .utils.http_errors import extract_error_detail
 
 if TYPE_CHECKING:
-    from neuracore.api.logging import JointStreamBinding
+    from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
 
 logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
@@ -119,9 +119,10 @@ class Robot:
         self._temp_dir = None
         self._data_streams: dict[str, DataStream] = dict()
         self._data_stream_counts: dict[DataType, int] = defaultdict(int)
-        self._joint_stream_bindings: (
-            "dict[tuple[DataType, str], JointStreamBinding]"
-        ) = dict()
+        self._joint_stream_bindings: "dict[DataType, dict[str, JointStreamBinding]]" = (
+            dict()
+        )
+        self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
 
         self.org_id = org_id or get_current_org()

@@ -83,9 +83,58 @@ pub fn recordings_root() -> Result<PathBuf, HomeDirUnavailable> {
         .join("recordings"))
 }
 
+/// Sum the byte count of every regular file beneath `root`, recursively.
+///
+/// Returns 0 when `root` does not exist (the expected state before the
+/// recordings tree is created) and silently skips entries it cannot `stat`.
+/// Symlinks are neither followed nor counted, so the walk cannot cycle.
+///
+/// Shared because two callers need the same number from the same tree: the
+/// daemon's storage budget sums the recordings root, and the producer's writer
+/// sums its spool inbox to enforce the backlog cap.
+pub fn directory_bytes(root: &Path) -> u64 {
+    let mut total: u64 = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => stack.push(entry.path()),
+                Ok(file_type) if file_type.is_file() => {
+                    if let Ok(metadata) = entry.metadata() {
+                        total = total.saturating_add(metadata.len());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn directory_bytes_sums_nested_files_and_ignores_missing_roots() {
+        let tempdir = TempDir::new().unwrap();
+        let root = tempdir.path().join("recordings");
+
+        // Missing root: zero, no error.
+        assert_eq!(directory_bytes(&root), 0);
+
+        let nested = root.join("source").join("sensor");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("chunk.nut"), vec![0u8; 1024]).unwrap();
+        std::fs::write(root.join("top.bin"), vec![0u8; 32]).unwrap();
+
+        assert_eq!(directory_bytes(&root), 1024 + 32);
+    }
 
     // These tests mutate process-wide env vars, so they must not run
     // concurrently with each other; a single test drives the whole matrix.

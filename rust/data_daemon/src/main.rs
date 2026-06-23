@@ -14,7 +14,7 @@ mod api;
 mod cli;
 #[allow(dead_code)]
 mod cloud;
-mod config;
+pub use data_daemon_shared::config;
 #[allow(dead_code)]
 mod connection;
 mod encoding;

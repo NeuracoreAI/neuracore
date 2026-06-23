@@ -2,10 +2,10 @@
 //!
 //! - [`node`]: creates the per-daemon iceoryx2 [`Node`](iceoryx2::node::Node)
 //!   and opens the `commands` and `queries` services defined in
-//!   [`data_daemon_ipc::service_name`].
+//!   [`data_daemon_shared::service_name`].
 //! - [`listener`]: a tokio task that drains the single `commands` subscriber
 //!   and answers `queries` requests, forwarding decoded
-//!   [`Envelope`](data_daemon_ipc::Envelope)s to the per-trace dispatcher via
+//!   [`Envelope`](data_daemon_shared::Envelope)s to the per-trace dispatcher via
 //!   an `mpsc::Sender`.
 //!
 //! iceoryx2 0.8 does not ship a `tokio::sync::Notify` adaptor, so the listener

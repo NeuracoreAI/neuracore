@@ -49,6 +49,16 @@ BandwidthLimitOption = Annotated[
     ),
 ]
 
+SpoolLimitOption = Annotated[
+    int | None,
+    typer.Option(
+        "--spool-limit",
+        "--spool_limit",
+        parser=parse_bytes,
+        help="Producer video spool-backlog cap in bytes (0 disables the bound).",
+    ),
+]
+
 StoragePathOption = Annotated[
     str | None,
     typer.Option(

@@ -7,7 +7,7 @@
 
 use std::time::{Duration, Instant};
 
-use data_daemon_ipc::RecordingIdReply;
+use data_daemon_shared::RecordingIdReply;
 
 use crate::publisher::{with_producer, ProducerError, ProducerState};
 

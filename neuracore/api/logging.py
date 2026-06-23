@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from itertools import islice
 from warnings import filterwarnings, warn
 
 import numpy as np
@@ -83,6 +84,97 @@ class LoggedJointData:
     binding: JointStreamBinding
     data: JointData
     trace_id: str | None
+
+
+_JOINT_SAMPLE_SIZE = 8
+
+
+def _smoke_validate_joint_values(joint_data: dict[str, float]) -> None:
+    """Smoke-test that a sample of joint values are floats.
+
+    Args:
+        joint_data: The joint frame being logged (non-empty).
+
+    Raises:
+        ValueError: If a sampled value is not a float.
+    """
+    head = list(islice(joint_data.items(), _JOINT_SAMPLE_SIZE))
+    tail = list(islice(reversed(joint_data.items()), _JOINT_SAMPLE_SIZE))
+    for joint_name, joint_value in head:
+        if not isinstance(joint_value, float):
+            raise ValueError(f"Joint data must be floats. {joint_name} is not a float.")
+    for joint_name, joint_value in tail:
+        if not isinstance(joint_value, float):
+            raise ValueError(f"Joint data must be floats. {joint_name} is not a float.")
+
+
+@dataclass(frozen=True)
+class ResolvedJointGroup:
+    r"""Per-(robot, data_type) resolution of a joint frame, reused across frames.
+
+    Attributes:
+        joint_names: The frame's joint names in order (``tuple(joint_data)``).
+        bindings: The frame's bindings in order (``list(JointStreamBinding)``).
+        joined_names: ``\0``-joined storage names for the batched rust
+            ``log_joints`` call.
+        started_recording_id: The recording the bindings' streams were started
+            for (``None`` when not recording).
+    """
+
+    joint_names: tuple[str, ...]
+    bindings: list[JointStreamBinding]
+    joined_names: str
+    started_recording_id: str | None
+
+
+def _resolve_joint_group(
+    robot: Robot,
+    data_type: DataType,
+    joint_names: tuple[str, ...],
+    bindings_for_type: dict[str, JointStreamBinding],
+    current_recording_id: str | None,
+) -> ResolvedJointGroup:
+    """Return the cached resolution for ``joint_names``, rebuilding if it changed.
+
+    Args:
+        robot: Robot instance.
+        data_type: Joint data type being logged.
+        joint_names: The frame's joint names in order (``tuple(joint_data)``).
+        bindings_for_type: The robot's per-joint binding cache for this type.
+        current_recording_id: The active recording id, or ``None``.
+
+    Returns:
+        The resolved, cached group for this frame.
+    """
+    cached = robot._joint_group_cache.get(data_type)
+    if (
+        cached is not None
+        and cached.started_recording_id == current_recording_id
+        and cached.joint_names == joint_names
+    ):
+        return cached
+
+    record_context: DataRecordingContext | None = None
+    bindings: list[JointStreamBinding] = []
+    for joint_name in joint_names:
+        binding = bindings_for_type.get(joint_name)
+        if binding is None:
+            binding = _get_or_create_joint_stream(data_type, joint_name, robot)
+            bindings_for_type[joint_name] = binding
+        if current_recording_id is not None and not binding.stream.is_recording():
+            if record_context is None:
+                record_context = _build_recording_context(robot, current_recording_id)
+            binding.stream.start_recording(record_context)
+        bindings.append(binding)
+
+    group = ResolvedJointGroup(
+        joint_names=joint_names,
+        bindings=bindings,
+        joined_names="\0".join(binding.storage_name for binding in bindings),
+        started_recording_id=current_recording_id,
+    )
+    robot._joint_group_cache[data_type] = group
+    return group
 
 
 def _publish_json_to_p2p(
@@ -186,6 +278,44 @@ def _publish_video_to_p2p(
     )
 
 
+def _build_recording_context(robot: Robot, recording_id: str) -> DataRecordingContext:
+    """Build the recording context a robot's streams start with for one recording.
+
+    Every field is invariant across the streams logged in a single call (they
+    share one recording, robot, and dataset), so this can be resolved once and
+    reused — see :func:`_log_group_of_joint_data`, which hoists it out of the
+    per-joint loop rather than rebuilding it (and re-querying the dataset id) for
+    each of a robot's joints on a recording's first frame.
+
+    Args:
+        robot: Robot instance.
+        recording_id: The active recording id the streams are being started for.
+
+    Returns:
+        The shared :class:`DataRecordingContext` for the streams to start with.
+    """
+    instance_key = RobotInstanceIdentifier(
+        robot_id=robot.id,
+        robot_instance=robot.instance,
+    )
+    dataset_id = get_recording_state_manager().active_dataset_ids.get(instance_key)
+    if dataset_id is None:
+        dataset_id = GlobalSingleton()._active_dataset_id
+        logger.debug(
+            "start_stream: falling back to global dataset_id=%s recording_id=%s",
+            dataset_id,
+            recording_id,
+        )
+    return DataRecordingContext(
+        recording_id=recording_id,
+        robot_id=robot.id,
+        robot_name=robot.name,
+        robot_instance=robot.instance,
+        dataset_id=dataset_id,
+        dataset_name=None,
+    )
+
+
 def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """Start recording on a data stream if robot is currently recording.
 
@@ -195,27 +325,7 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """
     current_recording = robot.get_current_recording_id()
     if current_recording is not None and not data_stream.is_recording():
-        instance_key = RobotInstanceIdentifier(
-            robot_id=robot.id,
-            robot_instance=robot.instance,
-        )
-        dataset_id = get_recording_state_manager().active_dataset_ids.get(instance_key)
-        if dataset_id is None:
-            dataset_id = GlobalSingleton()._active_dataset_id
-            logger.debug(
-                "start_stream: falling back to global dataset_id=%s recording_id=%s",
-                dataset_id,
-                current_recording,
-            )
-        context = DataRecordingContext(
-            recording_id=current_recording,
-            robot_id=robot.id,
-            robot_name=robot.name,
-            robot_instance=robot.instance,
-            dataset_id=dataset_id,
-            dataset_name=None,
-        )
-        data_stream.start_recording(context)
+        data_stream.start_recording(_build_recording_context(robot, current_recording))
 
 
 def _log_single_joint_data(
@@ -337,17 +447,24 @@ def _log_group_of_joint_data(
         timestamp = time.time()
     if not isinstance(joint_data, dict):
         raise ValueError("Joint data must be a dictionary of floats")
-    for key, value in joint_data.items():
-        if not isinstance(value, float):
-            raise ValueError(f"Joint data must be floats. {key} is not a float.")
-
     if dry_run:
+        for key, value in joint_data.items():
+            if not isinstance(value, float):
+                raise ValueError(f"Joint data must be floats. {key} is not a float.")
         return
+    if not joint_data:
+        return
+
+    _smoke_validate_joint_values(joint_data)
 
     robot = _get_robot(robot_name, instance)
     rust_mode = rust_daemon_enabled()
 
     binding_cache = robot._joint_stream_bindings
+    bindings_for_type = binding_cache.get(data_type)
+    if bindings_for_type is None:
+        bindings_for_type = {}
+        binding_cache[data_type] = bindings_for_type
     current_recording_id = robot.get_current_recording_id()
     live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
     robot_id = robot.id
@@ -356,21 +473,30 @@ def _log_group_of_joint_data(
         None if live_data_disabled or robot_id is None else StreamManagerOrchestrator()
     )
 
-    native_items: list[tuple[str, float]] = []
+    group = _resolve_joint_group(
+        robot,
+        data_type,
+        tuple(joint_data),
+        bindings_for_type,
+        current_recording_id,
+    )
+
+    if rust_mode and live_data_orchestrator is None:
+        native_values = list(joint_data.values())
+        for binding, joint_value in zip(group.bindings, native_values):
+            binding.stream.record_scalar(timestamp, joint_value)
+        if current_recording_id is not None:
+            robot._get_daemon_recording_context().log_joints(
+                data_type.value, timestamp, group.joined_names, native_values
+            )
+        return
+
+    native_values = []
     batched_items: list[BatchedJointDataItemPayload] = []
     batch_transport_stream: JsonDataStream | None = None
 
-    for joint_name, joint_value in joint_data.items():
-        cache_key = (data_type, joint_name)
-        binding = binding_cache.get(cache_key)
-        if binding is None:
-            binding = _get_or_create_joint_stream(data_type, joint_name, robot)
-            binding_cache[cache_key] = binding
-
+    for (joint_name, joint_value), binding in zip(joint_data.items(), group.bindings):
         joint_stream = binding.stream
-        if current_recording_id is not None and not joint_stream.is_recording():
-            start_stream(robot, joint_stream)
-
         if live_data_orchestrator is not None and robot_id is not None:
             # A live consumer needs the materialised sample now, so build it and
             # publish it; the stream keeps it as its latest data.
@@ -391,7 +517,7 @@ def _log_group_of_joint_data(
 
         if rust_mode:
             if current_recording_id is not None:
-                native_items.append((binding.storage_name, joint_value))
+                native_values.append(joint_value)
             continue
 
         producer_channel = joint_stream.get_producer_channel()
@@ -411,9 +537,9 @@ def _log_group_of_joint_data(
         )
 
     if rust_mode:
-        if native_items:
+        if native_values:
             robot._get_daemon_recording_context().log_joints(
-                data_type.value, timestamp, native_items
+                data_type.value, timestamp, group.joined_names, native_values
             )
         return
 

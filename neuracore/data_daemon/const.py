@@ -71,6 +71,7 @@ DEFAULT_STORAGE_FREE_FRACTION = 0.5  # Use 50% of free disk space for local stor
 DEFAULT_TARGET_DRAIN_HOURS = 12.0  # Aim to drain stored data within ~12 hours
 DEFAULT_MIN_BANDWIDTH_MIB_S = 1.0  # Avoid too-slow uploads even on large disks
 DEFAULT_MAX_BANDWIDTH_MIB_S = 20.0  # Cap upload bandwidth to avoid saturating links
+DEFAULT_SPOOL_LIMIT_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 
 # Backend API retry configuration
 BACKEND_API_MAX_RETRIES = 3

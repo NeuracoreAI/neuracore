@@ -1,12 +1,19 @@
-//! Shared IPC wire format for the Neuracore data daemon.
+//! Shared definitions for the Neuracore data daemon.
 //!
 //! Both the daemon binary and the PyO3 producer crate
-//! (`data_daemon_producer`) depend on this crate so they agree on:
+//! (`data_daemon_producer`) depend on this crate so they agree on everything
+//! that crosses the process boundary:
 //!
 //! - the iceoryx2 service-name conventions ([`service_name`]),
 //! - the [`Envelope`] enum carried over the `commands` service, and
 //! - the helpers to (de)serialize that envelope to/from the byte slice payload
 //!   iceoryx2 transports.
+//!
+//! It also owns the resolution the two processes must compute identically off
+//! the same inputs: the daemon configuration model ([`config`]) and the
+//! filesystem layout ([`paths`]). Keeping these here is what stops the daemon
+//! and producer from drifting on, say, the spool-backlog cap or the recordings
+//! root.
 //!
 //! Envelopes are encoded with [`postcard`], a compact length-prefixed binary
 //! format. Payload bytes travel raw (length-prefix + bytes — no base64 or
@@ -38,6 +45,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod config;
 pub mod paths;
 
 /// iceoryx2 service-name conventions shared by daemon and producer.

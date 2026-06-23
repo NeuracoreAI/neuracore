@@ -133,6 +133,7 @@ feedforward
 fflags
 ffprobe
 figsize
+filtergraph
 finetune
 finetuning
 finfo
@@ -376,9 +377,11 @@ tolist
 torchdynamo
 traj
 triu
+trunc
 tryfirst
 TTYNTK
 typer
+ultrawide
 unet
 Unet's
 unflushed

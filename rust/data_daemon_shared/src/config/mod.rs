@@ -1,5 +1,11 @@
 //! Daemon configuration: the `DaemonConfig` model, profile storage, and the
 //! profile + environment + CLI override merge.
+//!
+//! This module lives in the shared `data_daemon_shared` crate (rather than the
+//! daemon binary) so the daemon **and** the PyO3 producer resolve the same
+//! effective settings from the same profile/env inputs. The producer needs the
+//! spool-backlog cap ([`resolve_spool_limit_bytes`]); resolving it here means
+//! the two processes never drift on what the active profile says.
 
 pub mod env;
 pub mod profile;
@@ -21,6 +27,17 @@ const DEFAULT_MAX_BANDWIDTH_MIB_S: f64 = 20.0;
 const SECONDS_PER_HOUR: f64 = 60.0 * 60.0;
 const BYTES_PER_MIB: f64 = 1024.0 * 1024.0;
 
+/// Default cap on the producer's on-disk video spool backlog, in bytes.
+///
+/// The producer spools raw-RGB NUT chunks to disk and the daemon transcodes
+/// them; when the daemon can't keep up (small-CPU host, sustained 1080p video)
+/// the un-encoded chunks would otherwise pile up unbounded — tens of GB — and
+/// saturate a constrained disk, stalling `stop_recording`'s tail-chunk flush
+/// for seconds. Bounding the spool backlog keeps the disk pressure flat. 2 GiB
+/// is several 256 MiB chunks of headroom: large enough to absorb a transient
+/// transcode stall without ever blocking the common case.
+pub const DEFAULT_SPOOL_LIMIT_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+
 /// Configuration options for a Neuracore data daemon instance.
 ///
 /// Every field is optional so partial profiles (e.g. a YAML file containing
@@ -34,6 +51,12 @@ pub struct DaemonConfig {
     /// Maximum upload bandwidth, in bytes per second.
     #[serde(default, deserialize_with = "env::deserialize_optional_bytes")]
     pub bandwidth_limit: Option<i64>,
+    /// Cap on the producer's on-disk video spool backlog, in bytes. When the
+    /// un-encoded NUT backlog reaches this size the producer applies
+    /// backpressure to video frame logging rather than letting the spool grow
+    /// unbounded and fill the disk. See [`DEFAULT_SPOOL_LIMIT_BYTES`].
+    #[serde(default, deserialize_with = "env::deserialize_optional_bytes")]
+    pub spool_limit: Option<i64>,
     /// Directory where the daemon writes recording files.
     pub path_to_store_record: Option<String>,
     /// Number of worker threads used by the daemon.
@@ -59,6 +82,9 @@ impl DaemonConfig {
         }
         if other.bandwidth_limit.is_some() {
             self.bandwidth_limit = other.bandwidth_limit;
+        }
+        if other.spool_limit.is_some() {
+            self.spool_limit = other.spool_limit;
         }
         if other.path_to_store_record.is_some() {
             self.path_to_store_record = other.path_to_store_record.clone();
@@ -102,6 +128,7 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
     Ok(DaemonConfig {
         storage_limit: Some(storage_limit),
         bandwidth_limit: Some(bandwidth_limit),
+        spool_limit: Some(DEFAULT_SPOOL_LIMIT_BYTES),
         path_to_store_record: Some(record_dir.to_string_lossy().into_owned()),
         num_threads: Some(1),
         keep_wakelock_while_upload: Some(false),
@@ -140,6 +167,31 @@ pub fn resolve_effective_config(
     Ok(config)
 }
 
+/// Resolve the effective spool-backlog cap (in bytes) for the **producer**,
+/// which has no CLI args and must not trigger the directory-creating side
+/// effects of the default-config build.
+///
+/// Precedence mirrors [`resolve_effective_config`] minus the CLI layer: the
+/// `NCD_SPOOL_LIMIT` env override wins, then the active named profile's
+/// `spool_limit` (`NEURACORE_DAEMON_PROFILE`), then [`DEFAULT_SPOOL_LIMIT_BYTES`].
+/// A configured value of `0` is honoured verbatim and disables the bound. The
+/// unnamed/default profile is deliberately *not* materialised here (that path
+/// runs `build_default_daemon_config`, which creates the recordings dir and
+/// stats the filesystem) — an unset profile simply falls through to the default.
+pub fn resolve_spool_limit_bytes() -> i64 {
+    if let Some(value) = env::env_config_overrides().spool_limit {
+        return value;
+    }
+    if let Some(name) = env::active_profile_name() {
+        if let Ok(config) = ProfileManager::new().get_profile(Some(&name)) {
+            if let Some(value) = config.spool_limit {
+                return value;
+            }
+        }
+    }
+    DEFAULT_SPOOL_LIMIT_BYTES
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,10 +221,24 @@ mod tests {
     }
 
     #[test]
+    fn overlay_sets_spool_limit_when_provided() {
+        let mut base = DaemonConfig::default();
+        base.overlay(&DaemonConfig {
+            spool_limit: Some(1024),
+            ..DaemonConfig::default()
+        });
+        assert_eq!(base.spool_limit, Some(1024));
+        // A subsequent overlay without the field leaves it untouched.
+        base.overlay(&DaemonConfig::default());
+        assert_eq!(base.spool_limit, Some(1024));
+    }
+
+    #[test]
     fn json_output_keeps_python_field_order() {
         let config = DaemonConfig {
             storage_limit: Some(1),
             bandwidth_limit: Some(2),
+            spool_limit: Some(3),
             path_to_store_record: Some("/tmp/x".to_string()),
             num_threads: Some(1),
             keep_wakelock_while_upload: Some(false),
@@ -191,6 +257,7 @@ mod tests {
             [
                 "storage_limit",
                 "bandwidth_limit",
+                "spool_limit",
                 "path_to_store_record",
                 "num_threads",
                 "keep_wakelock_while_upload",

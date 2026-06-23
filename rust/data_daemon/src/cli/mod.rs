@@ -91,6 +91,9 @@ enum ProfileCommand {
         /// Bandwidth limit in bytes per second.
         #[arg(long = "bandwidth-limit", visible_alias = "bandwidth_limit", value_parser = parse_bytes)]
         bandwidth_limit: Option<i64>,
+        /// Producer video spool-backlog cap in bytes (0 disables the bound).
+        #[arg(long = "spool-limit", visible_alias = "spool_limit", value_parser = parse_bytes)]
+        spool_limit: Option<i64>,
         /// Path where records should be stored.
         #[arg(
             long = "storage-path",

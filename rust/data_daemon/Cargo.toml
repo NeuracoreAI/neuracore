@@ -18,7 +18,7 @@ chrono.workspace = true
 clap.workspace = true
 crc32c.workspace = true
 dashmap.workspace = true
-data_daemon_ipc = { path = "../data_daemon_ipc" }
+data_daemon_shared = { path = "../data_daemon_shared" }
 dirs.workspace = true
 iceoryx2.workspace = true
 libc.workspace = true

@@ -39,9 +39,10 @@ use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
+use std::time::{Duration, Instant};
 
-use data_daemon_ipc::service_name::MAX_VIDEO_CHUNK_FRAMES;
-use data_daemon_ipc::Envelope;
+use data_daemon_shared::service_name::MAX_VIDEO_CHUNK_FRAMES;
+use data_daemon_shared::Envelope;
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
 use crate::paths::{source_prefix, split_stream_key, spool_chunk_filename, spool_dir, stream_key};
@@ -69,6 +70,50 @@ const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 /// propagates backpressure to the caller. 64 MiB holds ~a second of a
 /// multi-camera 256×256@30 workload while staying small next to a worker's RSS.
 const WRITER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+/// How often the writer rescans its spool inbox to refresh the on-disk backlog
+/// estimate and release frame-admission backpressure. Also bounds how long a
+/// producer stays blocked after the daemon drains a chunk (≤ this interval).
+const SPOOL_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// How long a video frame may wait for spool-backlog headroom before
+/// `log_frame` gives up and raises. The spool drains only as the *daemon*
+/// transcodes chunks, so a dead or wedged daemon must surface as a logging
+/// error rather than block the caller's thread forever. One second is far
+/// longer than any healthy transcode stall, yet short enough that the caller
+/// learns promptly instead of silently losing frames.
+const FRAME_ADMISSION_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Resolve the producer's spool-backlog cap (bytes) from the daemon profile
+/// config (`spool_limit`: `NCD_SPOOL_LIMIT` → active profile → default).
+fn resolved_spool_max_bytes() -> u64 {
+    floor_spool_max(data_daemon_shared::config::resolve_spool_limit_bytes())
+}
+
+/// Apply the cap's safety floor. A configured value of `0` (or any non-positive)
+/// disables the bound; any positive value is floored to two chunk sizes so there
+/// is always room for the in-progress chunk plus a sealed one — a cap below the
+/// chunk size would wedge the writer (the open chunk alone exceeds it, so every
+/// frame blocks and the chunk never seals).
+fn floor_spool_max(configured: i64) -> u64 {
+    if configured <= 0 {
+        return 0;
+    }
+    (configured as u64).max(2 * CHUNK_FLUSH_BYTES)
+}
+
+/// Rescan the spool inbox and publish the fresh backlog estimate to `queue`,
+/// releasing any producer blocked on the spool cap. No-op when the bound is
+/// disabled, so a disabled bound never pays for a directory walk.
+fn refresh_spool_backlog(queue: &FrameQueue) {
+    if queue.spool_max == 0 {
+        return;
+    }
+    let scanned = crate::paths::spool_root()
+        .map(|root| data_daemon_shared::paths::directory_bytes(&root))
+        .unwrap_or(0);
+    queue.set_spool_bytes(scanned);
+}
 
 /// In-progress video chunk state for one `(source, sensor)` stream.
 ///
@@ -189,60 +234,214 @@ impl WriterMsg {
     }
 }
 
+/// Returned by [`FrameQueue::push`] when a video frame cannot be admitted
+/// within [`FRAME_ADMISSION_TIMEOUT`] because the on-disk spool backlog is stuck
+/// at its cap. The producer maps this to a Python exception so a stalled daemon
+/// surfaces as a logging error instead of a silently dropped frame.
+#[derive(Debug)]
+pub(crate) struct LoggingStalled;
+
 /// Byte-bounded MPSC queue between the logging threads and the writer thread.
+///
+/// Two independent backpressure limits gate *frame* admission (control
+/// messages always pass so a stop/cancel can drain even a full queue):
+///
+/// - [`WRITER_QUEUE_MAX_BYTES`] caps the in-memory frames awaiting a disk write.
+/// - `spool_max` caps the producer's on-disk NUT backlog: when the daemon can't
+///   transcode spooled chunks fast enough the inbox would otherwise grow
+///   unbounded and fill the disk, stalling `stop_recording`'s tail-chunk flush
+///   for seconds. The writer thread refreshes `spool_bytes` from a periodic
+///   directory scan ([`refresh_spool_backlog`]).
 pub(crate) struct FrameQueue {
     inner: Mutex<FrameQueueInner>,
     not_full: Condvar,
     not_empty: Condvar,
+    /// In-memory frame-buffer cap. Drained by the local writer thread, which
+    /// always makes progress, so a frame blocked on it waits unbounded.
+    /// [`WRITER_QUEUE_MAX_BYTES`] in production; tests shrink it to exercise the
+    /// path with small frames.
+    memory_max: usize,
+    /// On-disk spool-backlog cap. Drained only as the daemon transcodes chunks,
+    /// so a frame blocked on it is time-limited (see `block_timeout`). `0`
+    /// disables the bound.
+    spool_max: u64,
+    /// How long a frame may wait on the **spool** cap before [`push`] rejects it
+    /// with [`LoggingStalled`]. Does not apply to the in-memory cap. Always
+    /// [`FRAME_ADMISSION_TIMEOUT`] in production; tests shorten it.
+    ///
+    /// [`push`]: FrameQueue::push
+    block_timeout: Duration,
 }
 
 struct FrameQueueInner {
     msgs: VecDeque<WriterMsg>,
     bytes: usize,
+    spool_bytes: u64,
 }
 
 impl FrameQueue {
     fn new() -> Self {
+        Self::build(
+            WRITER_QUEUE_MAX_BYTES,
+            resolved_spool_max_bytes(),
+            FRAME_ADMISSION_TIMEOUT,
+        )
+    }
+
+    /// Assemble a queue from explicit caps — the one place the fields are
+    /// initialised, so the production and test constructors can't drift.
+    fn build(memory_max: usize, spool_max: u64, block_timeout: Duration) -> Self {
         FrameQueue {
             inner: Mutex::new(FrameQueueInner {
                 msgs: VecDeque::new(),
                 bytes: 0,
+                spool_bytes: 0,
             }),
             not_full: Condvar::new(),
             not_empty: Condvar::new(),
+            memory_max,
+            spool_max,
+            block_timeout,
         }
     }
 
-    /// Enqueue a message, blocking the caller only while a *frame* would push
-    /// the buffered bytes over the cap (control messages never block). A lone
-    /// frame larger than the cap is still admitted once the queue is empty, so
-    /// forward progress is always possible.
-    pub(crate) fn push(&self, msg: WriterMsg) {
+    /// Build a queue with an explicit spool cap and stall timeout (keeping the
+    /// production in-memory cap), bypassing the profile/env config read so
+    /// backpressure can be tested deterministically.
+    #[cfg(test)]
+    fn with_caps(spool_max: u64, block_timeout: Duration) -> Self {
+        Self::build(WRITER_QUEUE_MAX_BYTES, spool_max, block_timeout)
+    }
+
+    /// Build a queue with an explicit in-memory cap too, so the in-memory
+    /// backpressure path can be exercised with small frames.
+    #[cfg(test)]
+    fn with_memory_cap(memory_max: usize, spool_max: u64, block_timeout: Duration) -> Self {
+        Self::build(memory_max, spool_max, block_timeout)
+    }
+
+    /// Enqueue a message, blocking the caller only while a *frame* would exceed
+    /// the in-memory cap **or** the on-disk spool backlog is at its cap (control
+    /// messages never block, so a stop/cancel drains even a full queue). A lone
+    /// frame larger than the in-memory cap is still admitted once the queue is
+    /// empty, so forward progress is always possible.
+    ///
+    /// The two caps wait differently because they drain differently:
+    ///
+    /// - The in-memory cap drains as the local writer thread writes frames to
+    ///   disk, which always makes progress, so a frame blocked *only* on it
+    ///   waits unbounded — exactly as before the spool cap existed.
+    /// - The spool cap drains only as the daemon transcodes chunks, so a frame
+    ///   blocked on it gives up after [`FRAME_ADMISSION_TIMEOUT`] and returns
+    ///   [`LoggingStalled`] rather than block a logging thread forever behind a
+    ///   dead daemon.
+    pub(crate) fn push(&self, msg: WriterMsg) -> Result<(), LoggingStalled> {
         let add = msg.queue_bytes();
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if add > 0 {
-            while inner.bytes > 0 && inner.bytes + add > WRITER_QUEUE_MAX_BYTES {
-                inner = self.not_full.wait(inner).unwrap_or_else(|p| p.into_inner());
+            // `spool_deadline` tracks *continuous* time the frame has spent
+            // blocked on the spool cap. It is armed when the spool is the
+            // blocker and cleared whenever the spool falls back below its cap, so
+            // a slow-but-draining daemon (which keeps dipping under the cap)
+            // never trips the timeout — only a daemon that is wedged at the cap
+            // does. A frame blocked solely on the in-memory cap waits unbounded.
+            let mut spool_deadline: Option<Instant> = None;
+            loop {
+                let over_spool = self.over_spool_cap(&inner);
+                if !over_spool && !self.over_memory_cap(&inner, add) {
+                    break;
+                }
+                inner = if over_spool {
+                    let deadline =
+                        *spool_deadline.get_or_insert_with(|| Instant::now() + self.block_timeout);
+                    let remaining = match deadline.checked_duration_since(Instant::now()) {
+                        Some(remaining) if !remaining.is_zero() => remaining,
+                        _ => return Err(LoggingStalled),
+                    };
+                    self.not_full
+                        .wait_timeout(inner, remaining)
+                        .unwrap_or_else(|p| p.into_inner())
+                        .0
+                } else {
+                    spool_deadline = None;
+                    self.not_full.wait(inner).unwrap_or_else(|p| p.into_inner())
+                };
             }
         }
         inner.bytes += add;
         inner.msgs.push_back(msg);
         self.not_empty.notify_one();
+        Ok(())
     }
 
-    /// Block until a message is available, then pop it (FIFO).
+    /// Whether admitting an `add`-byte frame would breach the in-memory cap.
+    /// Yields once the queue is empty, so an oversized lone frame still makes
+    /// progress. The local writer thread always drains this, so a frame blocked
+    /// here waits unbounded.
+    fn over_memory_cap(&self, inner: &FrameQueueInner, add: usize) -> bool {
+        inner.bytes > 0 && inner.bytes + add > self.memory_max
+    }
+
+    /// Whether the on-disk spool backlog is at its cap. Disabled when
+    /// `spool_max == 0`. This clears only when the daemon drains the inbox, so a
+    /// frame blocked here is bounded by [`FRAME_ADMISSION_TIMEOUT`].
+    fn over_spool_cap(&self, inner: &FrameQueueInner) -> bool {
+        self.spool_max > 0 && inner.spool_bytes >= self.spool_max
+    }
+
+    /// Publish the latest scanned spool-backlog size and wake every producer
+    /// blocked on the spool cap so they re-evaluate admission.
+    fn set_spool_bytes(&self, scanned: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.spool_bytes = scanned;
+        self.not_full.notify_all();
+    }
+
+    /// Block indefinitely until a message is available, then pop it (FIFO).
+    /// Used when the spool cap is disabled, where the writer has no reason to
+    /// wake on a timer.
     fn pop(&self) -> WriterMsg {
+        self.pop_inner(None)
+            .expect("an unbounded wait never times out")
+    }
+
+    /// Pop the next message (FIFO), blocking up to `timeout`; `None` on timeout.
+    ///
+    /// The timeout lets the writer thread wake to rescan the spool even when
+    /// frame admission is fully blocked (no new frames arriving) — that rescan
+    /// is what releases the backpressure as the daemon drains the inbox, so the
+    /// spool bound can never deadlock.
+    fn pop_timeout(&self, timeout: Duration) -> Option<WriterMsg> {
+        self.pop_inner(Some(timeout))
+    }
+
+    /// Shared pop body: a `None` timeout waits forever, `Some` bounds each wait.
+    fn pop_inner(&self, timeout: Option<Duration>) -> Option<WriterMsg> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             if let Some(msg) = inner.msgs.pop_front() {
                 inner.bytes -= msg.queue_bytes();
                 self.not_full.notify_one();
-                return msg;
+                return Some(msg);
             }
-            inner = self
-                .not_empty
-                .wait(inner)
-                .unwrap_or_else(|p| p.into_inner());
+            match timeout {
+                None => {
+                    inner = self
+                        .not_empty
+                        .wait(inner)
+                        .unwrap_or_else(|p| p.into_inner());
+                }
+                Some(timeout) => {
+                    let (guard, result) = self
+                        .not_empty
+                        .wait_timeout(inner, timeout)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    inner = guard;
+                    if result.timed_out() && inner.msgs.is_empty() {
+                        return None;
+                    }
+                }
+            }
         }
     }
 }
@@ -346,9 +545,22 @@ extern "C" fn clear_queue_cache() {
 /// The writer thread's run loop. Sole accessor of the in-progress chunk state
 /// and sole publisher of video chunk + stop/cancel envelopes for this process.
 fn writer_loop(queue: &FrameQueue) {
+    // With the spool cap disabled there is nothing to scan, so block on each
+    // message indefinitely rather than waking on a timer.
+    let bounded = queue.spool_max > 0;
+    if bounded {
+        // Prime the backlog estimate so the first frames see a real spool size.
+        refresh_spool_backlog(queue);
+    }
+    let mut last_scan = Instant::now();
     loop {
-        match queue.pop() {
-            WriterMsg::Frame(job) => {
+        let next = if bounded {
+            queue.pop_timeout(SPOOL_SCAN_INTERVAL)
+        } else {
+            Some(queue.pop())
+        };
+        match next {
+            Some(WriterMsg::Frame(job)) => {
                 if let Err(error) = record_video_frame(
                     &job.robot_id,
                     job.robot_instance,
@@ -363,27 +575,35 @@ fn writer_loop(queue: &FrameQueue) {
                     tracing::warn!(%error, sensor_name = job.sensor_name, "failed to spool video frame");
                 }
             }
-            WriterMsg::FlushSource {
+            Some(WriterMsg::FlushSource {
                 robot_id,
                 robot_instance,
                 ack,
-            } => {
+            }) => {
                 if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
                     tracing::warn!(%error, "failed to flush tail video chunks on stop");
                 }
                 let _ = ack.send(());
             }
-            WriterMsg::DropSource {
+            Some(WriterMsg::DropSource {
                 robot_id,
                 robot_instance,
                 ack,
-            } => {
+            }) => {
                 let prefix = source_prefix(&robot_id, robot_instance);
                 with_video_chunks(|streams| {
                     streams.retain(|key, _| !key.starts_with(&prefix));
                 });
                 let _ = ack.send(());
             }
+            // pop_timeout elapsed with no message: fall through to the rescan.
+            None => {}
+        }
+        // Refresh the backlog estimate on a coarse cadence so frame-admission
+        // backpressure tracks the daemon draining the spool inbox.
+        if bounded && last_scan.elapsed() >= SPOOL_SCAN_INTERVAL {
+            refresh_spool_backlog(queue);
+            last_scan = Instant::now();
         }
     }
 }
@@ -836,5 +1056,128 @@ mod tests {
             "a fresh chunk is reopened at the new geometry"
         );
         assert_eq!(state.frame_count, 1, "the new chunk holds the 4x4 frame");
+    }
+
+    /// A minimal video-frame message carrying `bytes` of payload.
+    fn frame_msg(bytes: usize) -> WriterMsg {
+        WriterMsg::Frame(FrameJob {
+            robot_id: "robot".to_string(),
+            robot_instance: 0,
+            data_type: "RGB_IMAGES".to_string(),
+            sensor_name: "camera".to_string(),
+            width: 0,
+            height: 0,
+            timestamp_ns: 0,
+            timestamp_s: 0.0,
+            data: vec![0u8; bytes],
+        })
+    }
+
+    #[test]
+    fn floor_spool_max_disables_on_non_positive() {
+        assert_eq!(floor_spool_max(0), 0);
+        assert_eq!(floor_spool_max(-1), 0);
+    }
+
+    #[test]
+    fn floor_spool_max_raises_sub_chunk_caps_to_two_chunks() {
+        // A sub-chunk cap would wedge the writer, so it is floored.
+        assert_eq!(floor_spool_max(1), 2 * CHUNK_FLUSH_BYTES);
+        // A comfortably large cap is honoured verbatim.
+        let large = 8 * CHUNK_FLUSH_BYTES as i64;
+        assert_eq!(floor_spool_max(large), large as u64);
+    }
+
+    #[test]
+    fn frame_admitted_when_spool_below_cap() {
+        let queue = FrameQueue::with_caps(4 * CHUNK_FLUSH_BYTES, FRAME_ADMISSION_TIMEOUT);
+        assert!(queue.push(frame_msg(1024)).is_ok());
+    }
+
+    #[test]
+    fn frame_rejected_when_spool_stuck_at_cap() {
+        let queue = FrameQueue::with_caps(CHUNK_FLUSH_BYTES, Duration::from_millis(50));
+        // At the cap with nothing draining: a frame must time out and reject
+        // rather than block the caller forever.
+        queue.set_spool_bytes(CHUNK_FLUSH_BYTES);
+        let started = Instant::now();
+        assert!(matches!(queue.push(frame_msg(1024)), Err(LoggingStalled)));
+        assert!(
+            started.elapsed() >= Duration::from_millis(50),
+            "it should wait out the stall window before rejecting"
+        );
+    }
+
+    #[test]
+    fn control_messages_bypass_a_full_spool() {
+        let queue = FrameQueue::with_caps(CHUNK_FLUSH_BYTES, Duration::from_millis(50));
+        queue.set_spool_bytes(CHUNK_FLUSH_BYTES);
+        let (ack_tx, _ack_rx) = std::sync::mpsc::channel();
+        // A flush/cancel must enqueue immediately even while frames are blocked.
+        assert!(queue
+            .push(WriterMsg::FlushSource {
+                robot_id: "robot".to_string(),
+                robot_instance: 0,
+                ack: ack_tx,
+            })
+            .is_ok());
+    }
+
+    #[test]
+    fn disabled_cap_never_applies_spool_backpressure() {
+        let queue = FrameQueue::with_caps(0, Duration::from_millis(50));
+        // Even a huge reported backlog cannot block when the bound is disabled.
+        queue.set_spool_bytes(u64::MAX);
+        assert!(queue.push(frame_msg(1024)).is_ok());
+    }
+
+    #[test]
+    fn draining_the_spool_unblocks_a_waiting_frame() {
+        // A long stall window so only the drain — not a timeout — can release it.
+        let queue = Arc::new(FrameQueue::with_caps(
+            CHUNK_FLUSH_BYTES,
+            Duration::from_secs(10),
+        ));
+        queue.set_spool_bytes(CHUNK_FLUSH_BYTES);
+        let pusher = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.push(frame_msg(1024)))
+        };
+        // Let the pusher reach its wait, then report the spool as drained.
+        std::thread::sleep(Duration::from_millis(50));
+        queue.set_spool_bytes(0);
+        assert!(pusher.join().unwrap().is_ok());
+    }
+
+    #[test]
+    fn in_memory_backpressure_is_never_time_limited() {
+        // The stall timeout guards against a wedged *daemon* (the spool cap). A
+        // frame blocked purely on the in-memory cap — with the spool well below
+        // its cap — must wait for the local writer to drain it, never reject like
+        // a spool stall, even long past the (short) stall window.
+        let queue = Arc::new(FrameQueue::with_memory_cap(
+            1024,
+            4 * CHUNK_FLUSH_BYTES,
+            Duration::from_millis(50),
+        ));
+        // First frame is admitted despite exceeding the cap (queue was empty),
+        // leaving the buffer full so the next frame must block.
+        assert!(queue.push(frame_msg(2048)).is_ok());
+
+        let pusher = {
+            let queue = Arc::clone(&queue);
+            std::thread::spawn(move || queue.push(frame_msg(2048)))
+        };
+        // Well beyond the stall window: a spool stall would have rejected by now,
+        // but the in-memory wait must still be blocking.
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !pusher.is_finished(),
+            "in-memory backpressure must not be subject to the spool stall timeout"
+        );
+
+        // Draining one frame frees headroom and admits the waiter.
+        assert!(matches!(queue.pop(), WriterMsg::Frame(_)));
+        assert!(pusher.join().unwrap().is_ok());
     }
 }

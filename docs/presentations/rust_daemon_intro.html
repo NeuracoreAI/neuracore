@@ -354,7 +354,7 @@
           </div>
         </div>
 
-        <div class="vlink">▼ &nbsp;<span class="pipe">crate ② <b>data_daemon_ipc</b> · shared envelope/contract · over iceoryx2 shared memory</span>&nbsp; ▼</div>
+        <div class="vlink">▼ &nbsp;<span class="pipe">crate ② <b>data_daemon_shared</b> · shared envelope/contract · over iceoryx2 shared memory</span>&nbsp; ▼</div>
 
         <!-- Daemon process -->
         <div class="proc rust">
@@ -391,9 +391,9 @@
 
       <!-- 9.1 nested · the IPC contract -->
       <section>
-        <p class="codetag">crate ② · data_daemon_ipc</p>
+        <p class="codetag">crate ② · data_daemon_shared</p>
         <h3 class="codehd">The whole contract is one enum</h3>
-        <pre><code class="language-rust" data-trim data-line-numbers>// data_daemon_ipc/src/lib.rs: linked by BOTH the producer and the daemon
+        <pre><code class="language-rust" data-trim data-line-numbers>// data_daemon_shared/src/lib.rs: linked by BOTH the producer and the daemon
 pub enum Envelope {
     // lifecycle: fire-and-forget, tagged only by its source
     StartRecording  { robot_id: String, robot_instance: i64, started_at_ns: i64, /* … */ },

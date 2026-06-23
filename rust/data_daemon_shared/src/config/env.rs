@@ -22,7 +22,7 @@ const DEFAULT_API_URL: &str = "https://api.neuracore.app/api";
 /// Mirrors `config_manager/helpers.py::parse_bytes`. Supported units
 /// (case-insensitive): `b`, `k`, `kb`, `m`, `mb`, `g`, `gb`. Also usable
 /// directly as a `clap` value parser for the `--storage-limit` /
-/// `--bandwidth-limit` options.
+/// `--bandwidth-limit` / `--spool-limit` options.
 pub fn parse_bytes(value: &str) -> Result<i64, String> {
     let normalized = value.trim().to_lowercase();
 
@@ -63,9 +63,9 @@ pub fn parse_bytes(value: &str) -> Result<i64, String> {
 /// Serde deserializer for byte-valued config fields that accepts either a
 /// plain integer or a unit-suffixed string (e.g. `1G`).
 ///
-/// Applies to byte-valued profile fields such as `storage_limit` and
-/// `bandwidth_limit`. A malformed unit-suffixed string surfaces the parse
-/// failure directly as a deserialization error.
+/// Applies to byte-valued profile fields such as `storage_limit`,
+/// `bandwidth_limit`, and `spool_limit`. A malformed unit-suffixed string
+/// surfaces the parse failure directly as a deserialization error.
 pub fn deserialize_optional_bytes<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
@@ -120,6 +120,11 @@ pub fn env_config_overrides() -> DaemonConfig {
             config.bandwidth_limit = Some(parsed);
         }
     }
+    if let Some(value) = env_var("NCD_SPOOL_LIMIT") {
+        if let Ok(parsed) = parse_bytes(&value) {
+            config.spool_limit = Some(parsed);
+        }
+    }
     if let Some(value) = env_var("NCD_PATH_TO_STORE_RECORD") {
         config.path_to_store_record = Some(value);
     }
@@ -142,6 +147,13 @@ pub fn env_config_overrides() -> DaemonConfig {
     }
 
     config
+}
+
+/// The active daemon profile name (`NEURACORE_DAEMON_PROFILE`), or `None` when
+/// unset. The producer uses this to resolve profile-scoped settings (the spool
+/// cap) without materialising the computed default profile.
+pub fn active_profile_name() -> Option<String> {
+    env_var("NEURACORE_DAEMON_PROFILE")
 }
 
 /// Home directory, used as the root for `~/.neuracore` paths.
@@ -169,14 +181,12 @@ pub fn pid_path() -> PathBuf {
 /// daemon binary (it exits at startup before writing anything); the producer
 /// surfaces the same condition as a Python error.
 pub fn db_path() -> PathBuf {
-    data_daemon_ipc::paths::db_path()
-        .expect("home directory required to resolve the daemon database path")
+    crate::paths::db_path().expect("home directory required to resolve the daemon database path")
 }
 
 /// Resolve the recordings root via the shared resolver (see [`db_path`]).
 pub fn recordings_root_path() -> PathBuf {
-    data_daemon_ipc::paths::recordings_root()
-        .expect("home directory required to resolve the recordings root")
+    crate::paths::recordings_root().expect("home directory required to resolve the recordings root")
 }
 
 /// Resolved runtime environment: paths and flags read from
@@ -207,7 +217,7 @@ impl RuntimeEnv {
             pid_path: pid_path(),
             db_path: db_path(),
             recordings_root: recordings_root_path(),
-            profile: env_var("NEURACORE_DAEMON_PROFILE"),
+            profile: active_profile_name(),
             // Mirrors `helpers.py::is_debug_mode`.
             debug: env_var("NDD_DEBUG")
                 .map(|value| value.to_lowercase() == "true")
