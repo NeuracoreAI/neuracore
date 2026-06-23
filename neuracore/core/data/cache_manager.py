@@ -1,7 +1,6 @@
 """Cache manager to handle disk space usage for cache files."""
 
 import logging
-import random
 import shutil
 from pathlib import Path
 
@@ -59,41 +58,36 @@ class CacheManager:
         return total_size
 
     def cleanup_cache(self, percent_to_remove: float = 20.0) -> None:
-        """Remove random cache files to free up space.
+        """Evict whole cached recordings to free space.
+
+        Recordings are evicted as complete units, never partially: a reader treats
+        a present recording directory as fully decoded, so deleting individual
+        frame files would leave undetectable holes that surface later as
+        ``FileNotFoundError``. Recordings with an active decoding lock are skipped
+        so an in-progress decode is not destroyed; an evicted recording is simply
+        re-decoded the next time it is needed.
 
         Args:
-            percent_to_remove: Percentage of cache files to remove
+            percent_to_remove: Percentage of eligible recordings to remove.
         """
-        # Get all cache files
-        cache_files = []
-        for entry in self.cache_dir.glob("**/*"):
-            if entry.is_file():
-                cache_files.append(entry)
-
-        if not cache_files:
+        candidates = [
+            d
+            for d in self.cache_dir.iterdir()
+            if d.is_dir() and not self._is_recording_locked(d)
+        ]
+        if not candidates:
             return
 
-        # Calculate how many files to remove
-        num_files_to_remove = max(1, int(len(cache_files) * percent_to_remove / 100))
+        num_to_remove = max(1, int(len(candidates) * percent_to_remove / 100))
+        for recording_dir in candidates[:num_to_remove]:
+            shutil.rmtree(recording_dir, ignore_errors=True)
 
-        # Randomly select files to remove
-        files_to_remove = random.sample(cache_files, num_files_to_remove)
+        logger.info(f"Cache cleanup: evicted {num_to_remove} recording(s)")
 
-        # Delete selected files
-        bytes_removed = 0
-        for file_path in files_to_remove:
-            try:
-                file_size = file_path.stat().st_size
-                file_path.unlink()
-                bytes_removed += file_size
-                logger.debug(f"Removed cache file: {file_path}")
-            except Exception:
-                logger.error(f"Error removing cache file {file_path}.", exc_info=True)
-
-        logger.info(
-            f"Cache cleanup: removed {num_files_to_remove} "
-            f"files ({bytes_removed / (1024*1024):.2f} MB)"
-        )
+    @staticmethod
+    def _is_recording_locked(recording_dir: Path) -> bool:
+        """Return True if a decoding lock exists anywhere under the recording."""
+        return any(recording_dir.rglob("*recording.lock"))
 
     def ensure_space_available(self, force_check: bool = False) -> bool:
         """Check if cache is using too much space and clean up if necessary.
