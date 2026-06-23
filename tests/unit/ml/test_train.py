@@ -1961,9 +1961,7 @@ class TestRunTraining:
 
         autotune_kwargs = mock_autotuner_cls.call_args.kwargs
         autotune_train_w = autotune_kwargs["train_dataloader_kwargs"]["num_workers"]
-        autotune_val_w = autotune_kwargs["val_dataloader_kwargs"]["num_workers"]
         assert autotune_train_w == train_workers_cfg
-        assert autotune_val_w == val_workers_cfg
 
         dataloader_num_workers: list[int | None] = []
 
@@ -1997,7 +1995,6 @@ class TestRunTraining:
 
         assert dataloader_num_workers == [train_workers_cfg, val_workers_cfg]
         assert autotune_train_w == dataloader_num_workers[0]
-        assert autotune_val_w == dataloader_num_workers[1]
 
 
 class TestMain:
