@@ -82,9 +82,8 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
         json={"name": name, "sourceDatasetIds": source_ids},
     )
     if not response.ok:
-        raise DatasetError(
-            f"Failed to merge datasets: {response.status_code} {response.text}"
-        )
+        detail = extract_error_detail(response)
+        raise DatasetError(detail or f"{response.status_code} {response.reason}")
     dataset_model = DatasetModel.model_validate(response.json())
     merged = Dataset(
         id=dataset_model.id,
@@ -150,8 +149,7 @@ def clone_dataset(
     )
     if not response.ok:
         detail = extract_error_detail(response)
-        error_message = detail or f"{response.status_code} {response.reason}"
-        raise DatasetError(f"Failed to clone dataset: {error_message}")
+        raise DatasetError(detail or f"{response.status_code} {response.reason}")
 
     dataset_model = DatasetModel.model_validate(response.json())
     cloned = Dataset(
