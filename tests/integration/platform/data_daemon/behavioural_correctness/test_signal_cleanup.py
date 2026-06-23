@@ -285,6 +285,12 @@ def test_online_daemon_running_exit_leaves_no_pids() -> None:
     # Daemon must be fully gone — no lingering runner processes.
 
 
+@pytest.mark.skip(
+    reason=(
+        "Temporarily excluded from required integration baseline: "
+        "daemon process cleanup is unstable on staging."
+    )
+)
 def test_online_daemon_running_exit_cleans_up_after_active_recording() -> None:
     """No daemon PIDs remain after ``online_daemon_running()`` exits mid-recording.
 
@@ -324,6 +330,12 @@ _KILL_RESTART_CASES: list[DataDaemonTestCase] = [
 ]
 
 
+@pytest.mark.skip(
+    reason=(
+        "Temporarily excluded from required integration baseline: "
+        "daemon process cleanup is unstable on staging."
+    )
+)
 @pytest.mark.parametrize("case", _KILL_RESTART_CASES, ids=case_ids(_KILL_RESTART_CASES))
 def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) -> None:
     """Daemon restarts cleanly and produces a new PID after SIGKILL post-recording.

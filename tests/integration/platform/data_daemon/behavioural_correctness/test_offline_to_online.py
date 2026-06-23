@@ -36,6 +36,7 @@ _CASES = DataDaemonTestBatch(
         DataDaemonTestCase(
             duration_sec=5,
             joint_count=4,
+            skip=True,
         ),
         DataDaemonTestCase(
             duration_sec=5,

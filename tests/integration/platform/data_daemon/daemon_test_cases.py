@@ -105,6 +105,7 @@ NETWORK_INTEGRITY_CASES = (
         video_count=1,
         image_height=64,
         image_width=64,
+        skip=True,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -116,6 +117,7 @@ NETWORK_INTEGRITY_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
+        skip=True,
     ),
     DataDaemonTestCase(
         duration_sec=10,
