@@ -192,6 +192,21 @@ class CloudTrainingLogger(TrainingLogger):
             self._stop_sync.set()
             self._sync_thread.join(timeout=30)
 
-        # Final sync if in cloud mode
+        # Final sync if in cloud mode. Telemetry must never fail the training
+        # job, so sync errors here are retried briefly then swallowed rather
+        # than raised. Metrics are retained on failure (store clears only on a
+        # successful sync), so each attempt resends the full pending set.
         if self.training_id is not None:
-            self._sync_to_cloud()
+            for attempt in range(3):
+                try:
+                    self._sync_to_cloud()
+                    break
+                except Exception:
+                    if attempt == 2:
+                        logger.warning(
+                            "Final cloud metric sync failed; some metrics may"
+                            " be missing.",
+                            exc_info=True,
+                        )
+                    else:
+                        time.sleep(0.5 * (attempt + 1))
