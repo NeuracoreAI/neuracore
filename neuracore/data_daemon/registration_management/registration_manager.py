@@ -15,6 +15,7 @@ from typing import Protocol
 
 import aiohttp
 from neuracore_types import DataType
+from neuracore_types.nc_data.point_cloud_data import POINT_CLOUD_TRACE_BIN_FILENAME
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -57,6 +58,11 @@ def get_cloud_file_list(
         files.append(
             {"filepath": f"{prefix}/{LOSSLESS_VIDEO_NAME}", "content_type": "video/mp4"}
         )
+    elif get_content_type(data_type) == "POINT_CLOUD":
+        files.append({
+            "filepath": f"{prefix}/{POINT_CLOUD_TRACE_BIN_FILENAME}",
+            "content_type": "application/octet-stream",
+        })
     files.append(
         {"filepath": f"{prefix}/{TRACE_FILE}", "content_type": "application/json"}
     )
