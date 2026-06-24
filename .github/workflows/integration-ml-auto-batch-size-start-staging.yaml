@@ -42,6 +42,9 @@ jobs:
   start-training:
     needs: [discover-algorithms]
     runs-on: ubuntu-24.04
+    # Allow for up to 5 attempts with 30-minute waits between GPU-capacity
+    # retries, plus the training run itself.
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -79,32 +82,89 @@ jobs:
         print(f"Installed neuracore version: {neuracore.__version__}")
         EOF
 
-    - name: Start training job
-      id: start-training
+    - name: Start training and wait for terminal status (retry if no GPU)
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+        TEST_CASE: ${{ matrix.algorithm }}_${{ matrix.gpu_type }}
+        MAX_ATTEMPTS: "5"
+        RETRY_WAIT_SECONDS: "1800"  # 30 minutes
       run: |
-        pytest \
-          -o log_cli=true \
-          --log-cli-level=INFO \
-          --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
-          --log-cli-date-format="%H:%M:%S" \
-          -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_start_training[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
+        set -uo pipefail
+        set +e
 
-    - name: Wait for training terminal status
-      env:
-        NEURACORE_API_URL: https://staging.api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-        TRAINING_JOB_ID: ${{ steps.start-training.outputs.training_job_id }}
-      run: |
-        pytest \
-          -o log_cli=true \
-          --log-cli-level=INFO \
-          --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
-          --log-cli-date-format="%H:%M:%S" \
-          -v \
-          "$TEST_HARNESS_PATH::TestAutoBatchSize::test_wait_for_training_terminal_status[${{ matrix.algorithm }}_${{ matrix.gpu_type }}]"
+        wait_log="$RUNNER_TEMP/wait.log"
+        start_output="$RUNNER_TEMP/start_output.txt"
+        gpu_unavailable_pattern='No GPUs? available'
+        export GITHUB_OUTPUT="$start_output"
+
+        run_phase() {
+          pytest \
+            -o log_cli=true \
+            --log-cli-level=INFO \
+            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
+            --log-cli-date-format="%H:%M:%S" \
+            -vv \
+            "$TEST_HARNESS_PATH::TestAutoBatchSize::${1}[${TEST_CASE}]"
+        }
+
+        attempt=1
+        while [ "$attempt" -le "$MAX_ATTEMPTS" ]; do
+          echo "::group::[$TEST_CASE] Attempt $attempt of $MAX_ATTEMPTS"
+          rm -f "$wait_log" "$start_output"
+
+          run_phase test_start_training
+          start_rc=$?
+          if [ "$start_rc" -ne 0 ]; then
+            echo "::endgroup::"
+            echo "::error::[$TEST_CASE] Failed to start training job (exit $start_rc)."
+            exit "$start_rc"
+          fi
+
+          training_job_id="$(sed -n 's/^training_job_id=//p' "$start_output" | tail -n1)"
+          if [ -z "$training_job_id" ]; then
+            echo "::endgroup::"
+            echo "::error::[$TEST_CASE] Could not determine training_job_id."
+            exit 1
+          fi
+          echo "[$TEST_CASE] Started training job $training_job_id"
+
+          export TRAINING_JOB_ID="$training_job_id"
+          run_phase test_wait_for_training_terminal_status 2>&1 | tee "$wait_log"
+          wait_rc=$?
+          unset TRAINING_JOB_ID
+          echo "::endgroup::"
+
+          if [ "$wait_rc" -eq 0 ]; then
+            echo "[$TEST_CASE] Training completed successfully on attempt $attempt."
+            exit 0
+          fi
+
+          # Classify the failure: only "no GPU available" is retryable.
+          if grep -qiE "$gpu_unavailable_pattern" "$wait_log"; then
+            echo "[$TEST_CASE] Attempt $attempt failed: no GPU available."
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then
+              echo "[$TEST_CASE] Waiting ${RETRY_WAIT_SECONDS}s before retrying..."
+              sleep "$RETRY_WAIT_SECONDS"
+            fi
+            attempt=$((attempt + 1))
+            continue
+          fi
+
+          # Anything else is a genuine failure: stop now and surface why, so a
+          # misclassified failure is visible in the log instead of an opaque exit.
+          echo "::error::[$TEST_CASE] Training failed for a non-GPU reason (exit $wait_rc)."
+          echo "[$TEST_CASE] ----- last 40 lines of wait output -----"
+          tail -n 40 "$wait_log" || true
+          exit "$wait_rc"
+        done
+
+        echo "::error::[$TEST_CASE] gpu not available"
+        {
+          echo "### ❌ ${TEST_CASE}: gpu not available"
+          echo ""
+          echo "No GPU was available after ${MAX_ATTEMPTS} attempts, "
+          echo "waiting ${RETRY_WAIT_SECONDS}s between attempts."
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit 1
