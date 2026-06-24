@@ -38,6 +38,7 @@ REGISTRATION_RETRYABLE_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 
 LOSSY_VIDEO_NAME = "lossy.mp4"
 LOSSLESS_VIDEO_NAME = "lossless.mp4"
+POINT_CLOUD_TRACE_BIN_NAME = "trace.bin"
 TRACE_FILE = "trace.json"
 
 # Backend contract for batch registration response.
@@ -74,6 +75,11 @@ def get_cloud_file_list(
                 "filepath": f"{prefix}/{LOSSLESS_VIDEO_NAME}",
                 "content_type": "video/mp4",
             })
+    elif get_content_type(data_type) == "POINT_CLOUD":
+        files.append({
+            "filepath": f"{prefix}/{POINT_CLOUD_TRACE_BIN_NAME}",
+            "content_type": "application/octet-stream",
+        })
     files.append(
         {"filepath": f"{prefix}/{TRACE_FILE}", "content_type": "application/json"}
     )

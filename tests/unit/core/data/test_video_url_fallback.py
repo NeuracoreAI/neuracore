@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -18,9 +18,8 @@ def _response(status_code: int, url: str | None = None) -> MagicMock:
     response = MagicMock()
     response.status_code = status_code
     if status_code >= 400:
-        response.raise_for_status.side_effect = requests.HTTPError(
-            f"HTTP {status_code}"
-        )
+        error = requests.HTTPError(f"HTTP {status_code}", response=response)
+        response.raise_for_status.side_effect = error
     else:
         response.raise_for_status.return_value = None
         response.json.return_value = {"url": url}
@@ -31,6 +30,9 @@ def _call_get_video_url(
     session: MagicMock, camera_type: DataType = DataType.RGB_IMAGES
 ) -> str:
     fake_self = SimpleNamespace(id="rec-1", dataset=SimpleNamespace(org_id="org-1"))
+    fake_self._get_recording_file_url = MethodType(
+        SynchronizedRecording._get_recording_file_url, fake_self
+    )
     auth = MagicMock()
     auth.get_headers = MagicMock(return_value={})
     with (

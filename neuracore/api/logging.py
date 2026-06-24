@@ -39,6 +39,7 @@ from neuracore.core.streaming.data_stream import (
     DepthDataStream,
     JointDataStream,
     JsonDataStream,
+    PointCloudDataStream,
     RGBDataStream,
     VideoDataStream,
 )
@@ -1614,13 +1615,11 @@ def log_point_cloud(
     str_id = f"{DataType.POINT_CLOUDS.value}:{name}"
     stream = robot.get_data_stream(str_id)
     if stream is None:
-        stream = JsonDataStream(
-            data_type=DataType.POINT_CLOUDS, data_type_name=storage_name
-        )
+        stream = PointCloudDataStream(data_type_name=storage_name)
         robot.add_data_stream(str_id, stream)
     assert isinstance(
-        stream, JsonDataStream
-    ), "Expected stream to be instance of JSONDataStream"
+        stream, PointCloudDataStream
+    ), "Expected stream to be instance of PointCloudDataStream"
     start_stream(robot, stream)
     point_data = PointCloudData(
         timestamp=timestamp,

@@ -116,6 +116,17 @@ class TestGetCloudFileList:
             "RGB_IMAGES/cam_front/trace.json",
         }
 
+    def test_point_cloud_type_returns_bin_and_index(self) -> None:
+        files = get_cloud_file_list(DataType.POINT_CLOUDS, "lidar")
+        paths = {f["filepath"] for f in files}
+        assert paths == {
+            "POINT_CLOUDS/lidar/trace.bin",
+            "POINT_CLOUDS/lidar/trace.json",
+        }
+        by_path = {f["filepath"]: f["content_type"] for f in files}
+        assert by_path["POINT_CLOUDS/lidar/trace.bin"] == "application/octet-stream"
+        assert by_path["POINT_CLOUDS/lidar/trace.json"] == "application/json"
+
 
 class TestBatchRegistration:
     """Tests for the batch registration HTTP call and outcome handling."""
