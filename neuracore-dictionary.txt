@@ -12,6 +12,7 @@ allclose
 altclip
 asarray
 ascontiguousarray
+assimp
 attns
 autocast
 Autoencoders
@@ -31,7 +32,6 @@ blowaway
 Brawner
 broadcastable
 buildtool
-restartability
 byteswap
 calcsize
 caplog
@@ -50,6 +50,7 @@ CLOEXEC
 closedness
 cmap
 cmaps
+cmeel
 cnnmlp
 CNNMLP
 CNNMLPP
@@ -78,6 +79,7 @@ ddim
 DDIM
 ddpm
 DDPM
+delenv
 denoise
 denoised
 denoising
@@ -88,6 +90,7 @@ distilbert
 docstrings
 dtype
 EADDRINUSE
+eigenpy
 elementwise
 elems
 embs
@@ -137,6 +140,7 @@ gptj
 GPTJ
 groot
 Groot
+hookwrapper
 hparams
 hstack
 huggingface
@@ -190,6 +194,7 @@ logdir
 loglik
 logsigmoid
 logvar
+makereport
 maxpool
 maxs
 mcap
@@ -231,15 +236,17 @@ neuracore
 newbyteorder
 nhead
 nheads
+njoints
 nprocs
 numpy
+octomap
 offsamples
 oieb
 Oieb
 OIEB
-opencv
 openarm
 openarm_description
+opencv
 openpi
 OPENPI
 optim
@@ -296,6 +303,7 @@ RDWR
 reannounce
 rels
 reraises
+restartability
 RETRYABLE
 rgba
 rgbd
@@ -331,14 +339,15 @@ synchronizable
 targetbody
 TDVB
 teleop
-tensorboard
 temb
+tensorboard
 tfds
 TFDS
 tfrecord
 thres
 timestep
 timesteps
+tinyxml
 tmpfs
 tobytes
 tolist
@@ -348,9 +357,9 @@ torq
 tqdm
 traj
 triu
+tryfirst
 TTYNTK
 UFACTORY
-njoints
 unet
 Unet
 Unet's
@@ -390,13 +399,3 @@ ylabel
 yourdfpy
 ZBWs
 znear
-eigenpy
-cmeel
-urdfdom
-tinyxml
-assimp
-octomap
-delenv
-hookwrapper
-makereport
-tryfirst

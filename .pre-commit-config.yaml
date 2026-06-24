@@ -5,6 +5,15 @@ default_language_version:
   node: "20.18.0"  # cspell requires >=20.18; full version needed for nodeenv prebuilt download
 
 repos:
+  - repo: local
+    hooks:
+      - id: sort-dictionary
+        name: sort cspell dictionary (case-insensitive, exact dedup)
+        entry: >-
+          python -c "import sys; [open(f,'w',encoding='utf-8').write('\n'.join(sorted(dict.fromkeys(l.strip() for l in src if l.strip()),key=str.casefold))+'\n') for f in sys.argv[1:] for src in [open(f,encoding='utf-8').read().splitlines()]]"
+        language: python
+        files: ^neuracore-dictionary\.txt$
+
   - repo: https://github.com/asottile/pyupgrade
     rev: v3.15.0 
     hooks:
