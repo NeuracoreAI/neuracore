@@ -138,6 +138,42 @@ cleanup_state() {
   shopt -u nullglob
 }
 
+# pytest's prepend import mode resolves `import neuracore` to the in-tree
+# package (shadowing site-packages), so the compiled extension and daemon
+# binary must physically live under ./neuracore/data_daemon/. `maturin develop`
+# and build_wheel_artefacts.sh put them elsewhere, so build both and copy them
+# into place.
+materialize_artefacts() {
+  log "building data bridge extension (cargo build -p data_daemon_bridge --release)"
+  cargo build --release \
+    --manifest-path "$workspace_root/Cargo.toml" \
+    -p data_daemon_bridge 2>&1 | tee -a "$log_file"
+
+  local cdylib_src="$workspace_root/target/release/libdata_daemon_bridge.so"
+  if [[ ! -f "$cdylib_src" ]]; then
+    log "error: bridge cdylib not found at $cdylib_src"
+    exit 1
+  fi
+
+  # Name the extension with the interpreter's ABI suffix (matching maturin) and
+  # drop stale builds so a Python-minor switch can't leave an ABI-incompatible
+  # module behind.
+  local ext_suffix
+  ext_suffix="$(python3 -c 'import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])')"
+  local dd_dir="$repo_root/neuracore/data_daemon"
+  rm -f "$dd_dir"/_data_bridge*.so
+  install -m 0644 "$cdylib_src" "$dd_dir/_data_bridge${ext_suffix}"
+  log "    wrote $dd_dir/_data_bridge${ext_suffix}"
+
+  log "building data-daemon binary (build_wheel_artefacts.sh)"
+  bash "$script_dir/build_wheel_artefacts.sh" 2>&1 | tee -a "$log_file"
+  if [[ ! -f "$dd_dir/bin/data-daemon" ]]; then
+    log "error: data-daemon binary not found at $dd_dir/bin/data-daemon"
+    exit 1
+  fi
+  log "    have $dd_dir/bin/data-daemon"
+}
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -261,6 +297,7 @@ main() {
   log "==== integration test run starting ===="
   stop_daemon
   cleanup_state
+  materialize_artefacts
 
   set +e
   run_tests

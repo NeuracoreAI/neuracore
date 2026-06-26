@@ -14,7 +14,7 @@ from neuracore.data_daemon.helpers import (
     get_daemon_db_path,
     get_daemon_recordings_root_path,
 )
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
@@ -32,7 +32,7 @@ def harness_db_path() -> Path:
     target the wrong folder. When the Rust daemon is active and the env var is
     unset, resolve the real shared test-state path the daemon actually used.
     """
-    if rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_DB_PATH"):
+    if is_rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_DB_PATH"):
         return OFFLINE_DB_PATH
     return get_daemon_db_path()
 
@@ -42,7 +42,7 @@ def harness_recordings_root() -> Path:
 
     See :func:`harness_db_path` for why the Rust daemon needs special handling.
     """
-    if rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_RECORDINGS_ROOT"):
+    if is_rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_RECORDINGS_ROOT"):
         return OFFLINE_RECORDINGS_ROOT
     return get_daemon_recordings_root_path()
 

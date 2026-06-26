@@ -102,7 +102,7 @@ def scoped_storage_state(
     case: DataDaemonTestCase,
     *,
     dataset_name: str | None = None,
-) -> Generator[None, None, None]:
+) -> Generator[None]:
     """Apply storage cleanup before and after the block.
 
     ``"delete"`` removes the DB file, recordings folder, and the cloud dataset

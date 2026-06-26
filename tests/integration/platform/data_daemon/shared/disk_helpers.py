@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
@@ -141,7 +141,7 @@ def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]
     string. Keeping these two values together lets the assertion body stay
     identical across modes.
     """
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         return [
             (str(recording_index), recording_index)
             for recording_index in result.recording_indexes

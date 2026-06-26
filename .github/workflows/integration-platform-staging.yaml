@@ -25,16 +25,31 @@ jobs:
 
   test:
     needs: pre-commit
-    runs-on: ubuntu-24.04
+    # Exercise the bundled Rust daemon on each shipped OS in parallel (Linux
+    # x86_64, macOS arm64); each leg builds and tests its own native bundle.
+    # Mirrors build-wheels.yaml's per-OS legs.
+    runs-on: ${{ matrix.platform.runner }}
+    env:
+      DAEMON_TARGET: ${{ matrix.platform.target }}
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform.macos-deployment-target }}
+      NCD_RUST_DAEMON: "1"
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
-        python-version: ['3.11']
-        ffmpeg: [true, false]
+        python-version: ['3.10', '3.14']
+        platform:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            macos-deployment-target: '11.0'
 
     steps:
+    # Linux runners ship near-full; the native cargo build + ffmpeg need room.
+    # No-op on macOS (action is Ubuntu-only), so gate it to the Linux leg.
     - name: Free Disk Space (Ubuntu)
+      if: runner.os == 'Linux'
       uses: jlumbroso/free-disk-space@main
       with:
         tool-cache: false
@@ -69,22 +84,63 @@ jobs:
         ref: ${{ steps.harness-ref.outputs.harness_ref }}
         fetch-depth: 0
 
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ env.DAEMON_TARGET }}
+
+    - name: Cache cargo build
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v4
       with:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
 
-    - name: Install FFmpeg
-      if: matrix.ffmpeg == 'true'
+    # ffmpeg for the suite (both OSes). The daemon binary is built differently
+    # per OS: Linux builds it INSIDE the manylinux container (below) so its glibc
+    # matches the wheel; macOS has no container, so it builds + ad-hoc-signs the
+    # binary natively here and exports LIBCLANG_PATH (iceoryx2's bindgen) through
+    # $GITHUB_ENV for the maturin extension build that follows.
+    - name: Install FFmpeg (Linux)
+      if: runner.os == 'Linux'
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
 
+    - name: Install deps and build daemon binary (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install ffmpeg llvm
+        echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+        bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target "$DAEMON_TARGET"
+
+    - name: Build merged neuracore wheel
+      uses: PyO3/maturin-action@v1
+      with:
+        target: ${{ env.DAEMON_TARGET }}
+        # manylinux_2_28 for bindgen's libclang >= 5.0 requirement (see
+        # build-wheels.yaml); ignored on macOS.
+        manylinux: ${{ runner.os == 'Linux' && '2_28' || 'auto' }}
+        # Linux only: build the daemon in the manylinux container (glibc match)
+        # with clang/libclang; macOS did the equivalent natively above.
+        before-script-linux: |
+          (command -v yum && yum install -y clang) || (command -v dnf && dnf install -y clang) || true
+          bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target x86_64-unknown-linux-gnu
+        args: >-
+          --release
+          --out dist
+          --interpreter python${{ matrix.python-version }}
+
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir ".[dev,ml,examples]"
+        # Install the locally-built merged wheel with test extras so the suite
+        # runs against this leg's exact bundle, never a PyPI release.
+        pip install --no-cache-dir "$(ls dist/neuracore-*.whl)[dev,ml,examples]"
 
     - name: Resolve test harness
       run: |
@@ -94,26 +150,45 @@ jobs:
         echo "Test harness paths:"
         echo "  tests/integration/platform/test_runtime_data_flow.py"
         echo "  tests/integration/platform/test_consume_stream.py"
+        cd "$RUNNER_TEMP"
         python - << 'EOF'
+        import os
+
         import neuracore
+        from neuracore.data_daemon.rust_selection import (
+            is_rust_daemon_enabled,
+            rust_daemon_binary_path,
+        )
 
         print(f"Installed neuracore version: {neuracore.__version__}")
-        EOF
+        print(f"NCD_RUST_DAEMON enabled: {is_rust_daemon_enabled()}")
 
-    - name: Run Consume Stream Integration Test
-      env:
-        NEURACORE_API_URL: https://staging.api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-      continue-on-error: true
-      run: |
-        if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_consume_stream.py; then
-          echo "::warning::test_consume_stream.py failed, but this is non-blocking."
-        fi
+        # Fail fast if the daemon bundle didn't install — otherwise the SDK
+        # silently falls back to the Python daemon.
+        binary = rust_daemon_binary_path()
+        assert binary is not None, (
+            "bundled Rust data-daemon binary not found; the "
+            "merged neuracore wheel did not install it"
+        )
+        assert os.access(binary, os.X_OK), f"daemon binary not executable: {binary}"
+        print(f"Bundled data-daemon binary: {binary}")
+        EOF
 
     - name: Run Data Daemon Integration Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/data_daemon/
+        NCD_RUST_DAEMON: "1"
+      # --import-mode=importlib keeps the repo root off sys.path
+      run: pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/data_daemon/
+
+    - name: Run Consume Stream Integration Test
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+      run: |
+        if ! pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/test_consume_stream.py; then
+          echo "::warning::test_consume_stream.py failed, but this is non-blocking."
+        fi

@@ -15,7 +15,7 @@ repos:
         files: ^neuracore-dictionary\.txt$
 
   - repo: https://github.com/asottile/pyupgrade
-    rev: v3.15.0 
+    rev: v3.21.2
     hooks:
       - id: pyupgrade
         args: [--py310-plus] 

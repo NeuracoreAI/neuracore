@@ -117,9 +117,12 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     )
     importer._record_step = MagicMock(side_effect=[ValueError("bad step"), None])
 
-    with patch("neuracore.importer.lerobot_importer.nc.start_recording"), patch(
-        "neuracore.importer.lerobot_importer.nc.stop_recording"
-    ) as stop_recording:
+    with (
+        patch("neuracore.importer.lerobot_importer.nc.start_recording"),
+        patch(
+            "neuracore.importer.lerobot_importer.nc.stop_recording"
+        ) as stop_recording,
+    ):
         importer.import_item(ImportItem(index=0))
 
     assert importer._record_step.call_count == 2
@@ -160,8 +163,9 @@ def test_lerobot_import_item_non_step_mode_re_raises():
     importer._iter_episode_steps = MagicMock(return_value=(iter([{"v": 1}]), 1))
     importer._record_step = MagicMock(side_effect=RuntimeError("explode"))
 
-    with patch("neuracore.importer.lerobot_importer.nc.start_recording"), patch(
-        "neuracore.importer.lerobot_importer.nc.stop_recording"
+    with (
+        patch("neuracore.importer.lerobot_importer.nc.start_recording"),
+        patch("neuracore.importer.lerobot_importer.nc.stop_recording"),
     ):
         with pytest.raises(RuntimeError, match="explode"):
             importer.import_item(ImportItem(index=0))

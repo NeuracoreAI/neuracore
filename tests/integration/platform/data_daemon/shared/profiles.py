@@ -28,7 +28,7 @@ def cleanup_test_profiles() -> None:
 
 
 @contextmanager
-def scoped_offline_profile() -> Generator[None, None, None]:
+def scoped_offline_profile() -> Generator[None]:
     """Activate a temporary offline daemon profile for the duration of the block.
 
     Creates a uniquely-named YAML profile under
@@ -63,7 +63,7 @@ def scoped_offline_profile() -> Generator[None, None, None]:
 
 
 @contextmanager
-def scoped_online_mode() -> Generator[None, None, None]:
+def scoped_online_mode() -> Generator[None]:
     """Force online daemon config for the block.
 
     Sets ``NCD_OFFLINE=0`` and clears ``NEURACORE_DAEMON_PROFILE`` so callers

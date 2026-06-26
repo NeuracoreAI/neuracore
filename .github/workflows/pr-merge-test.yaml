@@ -10,7 +10,8 @@ on:
       - 'tests/unit/ml/**'
       - 'tests/unit/conftest.py'
       - 'neuracore/__init__.py'
-      - 'setup.py'
+      - 'pyproject.toml'
+      - 'rust/**'
       - '.github/workflows/pr-merge-test.yaml'
 
 concurrency:
@@ -25,16 +26,24 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.14"]
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
@@ -43,4 +52,4 @@ jobs:
       - name: Run slow ML unit tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run pytest tests/unit/ml -m "slow"
+        run: uv run --no-project pytest tests/unit/ml -m "slow"
