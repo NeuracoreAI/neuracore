@@ -1,0 +1,46 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+# Linux-only companion distribution for `neuracore`. Ships the Rust data daemon:
+# the `_data_bridge` PyO3 extension (built by maturin from the workspace at
+# ../../rust) and the standalone `data-daemon` binary (built separately by
+# ../../rust/scripts/build_wheel_artefacts.sh and bundled via `include`).
+# `neuracore` pulls this in automatically on Linux (base dependency).
+#
+# It contributes the extension + binary INTO `neuracore/data_daemon/` (the same
+# import path the `neuracore` wheel owns) but ships NO __init__.py for those
+# dirs, so the two wheels share the directory without a file collision: the
+# `neuracore` wheel owns the .py + __init__.py, this wheel owns the .so + binary.
+
+[project]
+name = "neuracore-data-daemon"
+# Bumped in lockstep with neuracore (see /.bumpversion.cfg). neuracore's `daemon`
+# extra pins `neuracore-data-daemon==<this>` so the two always match.
+version = "13.3.0"
+description = "Linux-only Rust data daemon and bridge for neuracore."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Stephen James", email = "support@neuracore.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+[tool.maturin]
+# The package tree (`neuracore/data_daemon/`, deliberately WITHOUT __init__.py)
+# lives next to this file; maturin treats it as a namespace contribution.
+python-source = "."
+# Drops the compiled extension at neuracore/data_daemon/_data_bridge<abi-suffix> —
+# the same import path the `neuracore` wheel owns. Last path component must match
+# the `#[pymodule] fn _data_bridge` in ../../rust/data_daemon_bridge/src/lib.rs.
+module-name = "neuracore.data_daemon._data_bridge"
+# Build the data bridge cdylib from the workspace crate.
+manifest-path = "../../rust/data_daemon_bridge/Cargo.toml"
+# Bundle the standalone data-daemon binary (built into the package tree by
+# build_wheel_artefacts.sh before `maturin build`). `include` only copies; a
+# missing path is a no-op. Linux wheels only — no sdist (the Rust sources live
+# outside this project dir), so we don't ship an sdist for this package.
+include = [{ path = "neuracore/data_daemon/bin/data-daemon", format = "wheel" }]

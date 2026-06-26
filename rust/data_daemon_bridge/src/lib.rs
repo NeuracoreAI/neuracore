@@ -12,7 +12,7 @@
 
 //! PyO3 producer client for the Neuracore data daemon — a *thin shipper*.
 //!
-//! This crate ships as `neuracore.data_daemon._native_producer` inside the
+//! This crate ships as `neuracore.data_daemon._data_bridge` inside the
 //! Python wheel. It knows nothing about recordings: it publishes
 //! source/sensor/timestamp-tagged data and three fire-and-forget lifecycle
 //! events, and the daemon decides which recording (if any) each datum belongs
@@ -433,9 +433,9 @@ fn get_recording_id(
     })
 }
 
-/// Python module entrypoint registered as `neuracore.data_daemon._native_producer`.
+/// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
-fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;

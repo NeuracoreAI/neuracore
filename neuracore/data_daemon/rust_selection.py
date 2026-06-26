@@ -13,19 +13,25 @@ heavyweight runtime modules.
 from __future__ import annotations
 
 import os
-from importlib.resources import files
 from pathlib import Path
 
 _TRUTHY_VALUES = frozenset({"1", "true", "yes", "y"})
 
 
-def rust_daemon_enabled() -> bool:
+def is_rust_daemon_enabled() -> bool:
     """Return True when ``NCD_RUST_DAEMON`` selects the Rust data daemon."""
     return os.environ.get("NCD_RUST_DAEMON", "").strip().lower() in _TRUTHY_VALUES
 
 
 def rust_daemon_binary_path() -> Path | None:
-    """Return the path to the bundled Rust data-daemon binary, if present."""
+    """Return the path to the Rust data-daemon binary, if available.
+
+    The binary is contributed into ``neuracore/data_daemon/bin/`` by the
+    optional, Linux-only ``neuracore-data-daemon`` distribution. Returns
+    ``None`` when that distribution is not installed (the file is simply absent).
+    """
+    from importlib.resources import files
+
     candidate = files("neuracore.data_daemon") / "bin" / "data-daemon"
     path = Path(str(candidate))
     return path if path.is_file() else None

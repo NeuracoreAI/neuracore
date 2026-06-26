@@ -37,7 +37,7 @@ jobs:
               - 'tests/unit/**'
               - '!tests/unit/ml/**'
             deps:
-              - 'setup.py'
+              - 'pyproject.toml'
             ci:
               - '.github/workflows/pr-pre-commit-and-test.yaml'
               - '.pre-commit-config.yaml'
@@ -80,12 +80,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # neuracore is pure-Python — no Rust toolchain needed. The Rust data daemon
+      # ships in the separate Linux-only `neuracore-data-daemon` package, which
+      # unit tests don't install (the daemon path is exercised separately).
       - name: Set up uv
         if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'uv'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
@@ -181,7 +184,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies

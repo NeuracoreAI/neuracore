@@ -128,7 +128,8 @@ daemon implementations and the launcher picks one based on the `NCD_RUST_DAEMON`
 flag (see [rust_data_daemon_development.md](rust_data_daemon_development.md)):
 
 - **Rust daemon** — when `NCD_RUST_DAEMON` is truthy,
-  the launcher `exec`s the bundled native binary shipped in the wheel at
+  the launcher `exec`s the native binary shipped by the optional, Linux-only
+  `neuracore-data-daemon` package (`pip install neuracore[daemon]`) at
   `neuracore/data_daemon/bin/data-daemon`. This is the implementation described
   throughout this guide.
 - **Legacy Python daemon (default)** — when `NCD_RUST_DAEMON` is unset or not

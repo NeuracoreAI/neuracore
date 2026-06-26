@@ -1139,11 +1139,14 @@ class TestBandwidthThrottling:
                 else make_response(200, headers={"x-goog-hash": f"md5={md5_b64}"})
             )
 
-        with patch(
-            "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
-        ) as mock_rfu_auth, patch(
-            "neuracore.data_daemon.upload_management.resumable_file_uploader.get_current_org",
-            return_value="test-org",
+        with (
+            patch(
+                "neuracore.data_daemon.upload_management.resumable_file_uploader.get_auth"
+            ) as mock_rfu_auth,
+            patch(
+                "neuracore.data_daemon.upload_management.resumable_file_uploader.get_current_org",
+                return_value="test-org",
+            ),
         ):
 
             rfu_auth = MagicMock()

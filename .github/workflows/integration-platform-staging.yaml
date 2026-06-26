@@ -31,7 +31,6 @@ jobs:
       max-parallel: 1
       matrix:
         python-version: ['3.11']
-        ffmpeg: [true, false]
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -76,14 +75,61 @@ jobs:
         cache: 'pip'
 
     - name: Install FFmpeg
-      if: matrix.ffmpeg == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg
 
+    # The bundled data daemon (Rust `_data_bridge` extension + the `data-daemon`
+    # binary) ships in the separate Linux-only `neuracore-data-daemon` wheel,
+    # which the base `neuracore` dependency pins from PyPI. PyPI only ever has
+    # the *last released* daemon, so build the wheel from the harness ref under
+    # test instead and install it locally — that satisfies the pin and exercises
+    # this ref's daemon code. Mirrors .github/workflows/build-wheels.yaml.
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-unknown-linux-gnu
+
+    - name: Cache cargo build
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: rust
+
+    - name: Build bundled data daemon wheel
+      uses: PyO3/maturin-action@v1
+      with:
+        working-directory: packaging/neuracore-data-daemon
+        target: x86_64-unknown-linux-gnu
+        # manylinux_2_28 (AlmaLinux 8), NOT auto: iceoryx2's bindgen needs
+        # libclang >= 5.0, but manylinux2014's clang is 3.4. See build-wheels.yaml.
+        manylinux: 2_28
+        # Cache compiled objects (extension + the in-container daemon binary)
+        # across runs via the GHA cache backend — the manylinux container can't
+        # see Swatinem/rust-cache's host-side cache. See build-wheels.yaml.
+        sccache: 'true'
+        args: >-
+          --release
+          --out dist
+          --interpreter python${{ matrix.python-version }}
+        # Build the daemon binary inside the manylinux container so its glibc
+        # matches the wheel, and install clang/libclang for iceoryx2's bindgen.
+        # $GITHUB_WORKSPACE anchors the script path regardless of the build
+        # working-directory.
+        before-script-linux: |
+          (command -v yum && yum install -y clang) || (command -v dnf && dnf install -y clang) || true
+          # maturin-action exports RUSTC_WRAPPER=sccache, but sccache isn't on PATH
+          # yet during before-script, so the daemon binary's cargo build can't exec
+          # it. Unset it here — the extension build still gets sccache.
+          unset RUSTC_WRAPPER
+          bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target x86_64-unknown-linux-gnu
+
     - name: Install Python dependencies
       run: |
         python -m pip install --no-cache-dir --upgrade pip
+        # Install the locally-built daemon wheel first so the
+        # `neuracore-data-daemon==…` pin is already satisfied and the next
+        # install does not pull the released wheel from PyPI.
+        pip install --no-cache-dir packaging/neuracore-data-daemon/dist/*.whl
         pip install --no-cache-dir ".[dev,ml,examples]"
 
     - name: Resolve test harness
@@ -100,20 +146,12 @@ jobs:
         print(f"Installed neuracore version: {neuracore.__version__}")
         EOF
 
-    - name: Run Consume Stream Integration Test
-      env:
-        NEURACORE_API_URL: https://staging.api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-      continue-on-error: true
-      run: |
-        if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_consume_stream.py; then
-          echo "::warning::test_consume_stream.py failed, but this is non-blocking."
-        fi
-
     - name: Run Data Daemon Integration Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/data_daemon/
+        # Exercise the bundled Rust data-daemon binary (installed via the daemon
+        # wheel above) rather than the in-process Python runner.
+        NCD_RUST_DAEMON: "1"
+      run: pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/data_daemon/
