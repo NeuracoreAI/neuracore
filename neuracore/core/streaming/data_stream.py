@@ -17,7 +17,7 @@ import numpy as np
 from neuracore_types import CameraData, DataType, JointData, NCData
 
 from neuracore.data_daemon.communications_management.producer import ProducerChannel
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +71,7 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
-        self._use_native_producer = rust_daemon_enabled()
+        self._use_data_bridge = is_rust_daemon_enabled()
 
     @property
     def data_type(self) -> DataType:
@@ -109,7 +109,7 @@ class DataStream(ABC):
             context: Recording context containing identifiers for
                 the recording session, robot, and dataset.
         """
-        if self._use_native_producer:
+        if self._use_data_bridge:
             return
         if self._producer_channel is None:
             channel_id = f"{self._data_type.value}:\
@@ -141,7 +141,7 @@ class DataStream(ABC):
         """
         producer_channel = self.get_producer_channel()
         if producer_channel is None:
-            if not rust_daemon_enabled():
+            if not is_rust_daemon_enabled():
                 raise MissingProducerChannelError(
                     "stream has no active producer channel"
                 )
@@ -163,7 +163,7 @@ class DataStream(ABC):
         self._producer_channel = None
 
         if producer_channel is None:
-            if not rust_daemon_enabled():
+            if not is_rust_daemon_enabled():
                 # Legacy daemon: a stream with no producer channel is stale —
                 # raise so the caller prunes it.
                 raise MissingProducerChannelError(
@@ -278,7 +278,7 @@ class JsonDataStream(DataStream):
         self._latest_data = data
         if not self.is_recording() or not send_to_daemon:
             return
-        if self._use_native_producer:
+        if self._use_data_bridge:
             # Rust daemon: the logging layer delivers the sample to the daemon
             # via RecordingContext; the stream only keeps `_latest_data`.
             return
@@ -375,7 +375,7 @@ class VideoDataStream(DataStream):
         self._latest_data = metadata
         if not self.is_recording():
             return
-        if self._use_native_producer:
+        if self._use_data_bridge:
             # Rust daemon: the frame is delivered to the daemon by the logging
             # layer (RecordingContext.log_frame); the stream only keeps
             # `_latest_data` for live-data consumers.

@@ -4,7 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     PRE_NETWORK_INTEGRITY_CASES,
 )
@@ -59,7 +59,7 @@ def _assert_online_verification_invariants(
     ``recording_id`` under the legacy daemon.
     """
     for result in results:
-        if rust_daemon_enabled():
+        if is_rust_daemon_enabled():
             for recording_index in result.recording_indexes:
                 wait_for_upload_complete_in_db(
                     recording_index, timeout_s=timeout_seconds

@@ -10,7 +10,7 @@ on:
       - 'tests/unit/ml/**'
       - 'tests/unit/conftest.py'
       - 'neuracore/__init__.py'
-      - 'setup.py'
+      - 'pyproject.toml'
       - '.github/workflows/pr-merge-test.yaml'
 
 concurrency:
@@ -34,7 +34,7 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies

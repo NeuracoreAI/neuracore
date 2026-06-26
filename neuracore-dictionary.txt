@@ -6,8 +6,11 @@ adarms
 addfinalizer
 addinivalue
 agentview
+aiofiles
+aiohttp
 aiolimiter
 aiortc
+aiosqlite
 allclose
 allocvec
 asarray
@@ -33,6 +36,7 @@ blit
 bodyless
 broadcastable
 buildtool
+bumpversion
 byteswap
 calcsize
 caplog
@@ -106,6 +110,7 @@ DONTNEED
 dtype
 EADDRINUSE
 eigenpy
+einops
 elementwise
 embs
 Emika
@@ -130,9 +135,11 @@ fadvise
 falsey
 fcntl
 feedforward
+fastapi
 fflags
 ffprobe
 figsize
+filelock
 filtergraph
 finetune
 finetuning
@@ -214,6 +221,7 @@ loglik
 logsigmoid
 logvar
 makereport
+matplotlib
 maxs
 meanpooling
 metadatas
@@ -258,6 +266,7 @@ nprocs
 numpy
 octomap
 offsamples
+omegaconf
 oneshot
 openarm
 openpi
@@ -278,6 +287,7 @@ pidfile
 Pieb
 pinnochio
 PJRT
+plotly
 pointcloud
 POLLIN
 popleft
@@ -290,15 +300,20 @@ pretraining
 prio
 proprio
 proprios
+psutil
 pthread
 pyav
 pycache
 pydantic
+pyee
 pyfunction
 pygments
+pyinstrument
 pymodule
 pyquaternion
 pytest
+pyyaml
+pyzmq
 Qbcaa
 qpos
 qposadr
@@ -351,6 +366,7 @@ softmax
 solimp
 solref
 splitn
+sqlalchemy
 sqlx
 squaredcos
 startcode
@@ -375,6 +391,8 @@ tmpfs
 tobytes
 tolist
 torchdynamo
+torchvision
+tqdm
 traj
 triu
 trunc
@@ -400,6 +418,7 @@ urdfdom
 usefixtures
 userspace
 utaustin
+uvicorn
 varint
 Vaswani
 vdecode
@@ -418,6 +437,7 @@ writeback
 WRONLY
 wxyz
 xdata
+xdist
 xlabel
 xmat
 xmls

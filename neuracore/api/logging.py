@@ -54,7 +54,7 @@ from neuracore.data_daemon.models import (
     BatchedJointDataItemPayload,
     BatchedJointDataPayload,
 )
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ def _record_json_to_daemon(
         data: Data object to serialize and persist.
         timestamp: Capture timestamp in seconds.
     """
-    if not (rust_daemon_enabled() and robot.get_current_recording_id() is not None):
+    if not (is_rust_daemon_enabled() and robot.get_current_recording_id() is not None):
         return
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
     robot._get_daemon_recording_context().log_json(
@@ -458,7 +458,7 @@ def _log_group_of_joint_data(
     _smoke_validate_joint_values(joint_data)
 
     robot = _get_robot(robot_name, instance)
-    rust_mode = rust_daemon_enabled()
+    rust_mode = is_rust_daemon_enabled()
 
     binding_cache = robot._joint_stream_bindings
     bindings_for_type = binding_cache.get(data_type)
@@ -656,7 +656,7 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
 
-    if rust_daemon_enabled() and robot.get_current_recording_id() is not None:
+    if is_rust_daemon_enabled() and robot.get_current_recording_id() is not None:
         contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
         robot._get_daemon_recording_context().log_frame(
             camera_type.value,

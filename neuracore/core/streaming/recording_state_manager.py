@@ -36,12 +36,12 @@ from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context as _recording_context,
 )
 from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
 
 
-def _notify_native_producer_of_expiry(robot_id: str, instance: int) -> None:
+def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
     """Tell the Rust producer a source's recording has been locally auto-expired.
 
     Calls the native ``stop_recording`` for the source so the producer flushes
@@ -58,7 +58,7 @@ def _notify_native_producer_of_expiry(robot_id: str, instance: int) -> None:
         )
     except Exception:
         logger.exception(
-            "Failed to notify native producer of recording expiry for %s:%s",
+            "Failed to notify data bridge of recording expiry for %s:%s",
             robot_id,
             instance,
         )
@@ -223,8 +223,8 @@ class RecordingStateManager(BaseSSEConsumer):
                 )
                 self._expired_recording_ids.add(recording_id)
                 self.recording_stopped(robot_id, instance, recording_id)
-                if rust_daemon_enabled():
-                    _notify_native_producer_of_expiry(robot_id, instance)
+                if is_rust_daemon_enabled():
+                    _notify_data_bridge_of_expiry(robot_id, instance)
 
         loop = get_running_loop()
 
@@ -272,7 +272,7 @@ class RecordingStateManager(BaseSSEConsumer):
         if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
-        # Note: the native producer stop is driven by the recording context
+        # Note: the data bridge stop is driven by the recording context
         # (normal/remote stop) or the expiry timer — NOT here — so the daemon
         # receives exactly one StopRecording carrying the correct data-clock
         # boundary.

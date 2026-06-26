@@ -31,7 +31,7 @@ from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon.communications_management.shared_transport import (
     recording_context,
 )
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
@@ -300,7 +300,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        if rust_daemon_enabled():
+        if is_rust_daemon_enabled():
             local_handle = str(uuid.uuid4())
             self._get_daemon_recording_context().start_recording(
                 robot_id=self.id,
@@ -389,7 +389,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         end_time = time.time()
-        if rust_daemon_enabled():
+        if is_rust_daemon_enabled():
             active_handle = get_recording_state_manager().get_current_recording_id(
                 self.id, self.instance
             )
@@ -483,7 +483,7 @@ class Robot:
         for stream_id, stream in list(self._data_streams.items()):
             try:
 
-                (producer_channel, stop_cutoff_sequence_number) = (
+                producer_channel, stop_cutoff_sequence_number = (
                     stream.prepare_recording_stopped()
                 )
 
@@ -546,7 +546,7 @@ class Robot:
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        if not rust_daemon_enabled():
+        if not is_rust_daemon_enabled():
             return self.get_current_recording_id()
         return self._get_daemon_recording_context().get_recording_id(
             timestamp_ns=timestamp_ns, timeout_s=timeout_s
@@ -828,7 +828,7 @@ class Robot:
         self._stop_all_streams()
         daemon_context = self._get_daemon_recording_context()
 
-        if rust_daemon_enabled():
+        if is_rust_daemon_enabled():
             daemon_context.cancel_recording(timestamp=timestamp)
             active_handle = get_recording_state_manager().get_current_recording_id(
                 self.id, self.instance

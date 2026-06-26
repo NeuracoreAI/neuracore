@@ -743,12 +743,12 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
 
 def context_worker(spec: ContextSpec) -> ContextResult:
     """Execute recordings for a single parallel context."""
-    from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+    from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         wait_for_recording_index_for_source,
     )
 
-    use_rust = rust_daemon_enabled()
+    use_rust = is_rust_daemon_enabled()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)

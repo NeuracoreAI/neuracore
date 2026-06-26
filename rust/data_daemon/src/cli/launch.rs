@@ -229,11 +229,11 @@ fn run_daemon(
 
     let db_path = runtime_env.db_path.clone();
     let recordings_root = runtime_env.recordings_root.clone();
-    // The recordings root is shared with the producer, which lives in a
+    // The recordings root is shared with the data bridge, which lives in a
     // *separate* process and resolves it from `NEURACORE_DAEMON_RECORDINGS_ROOT`
     // (or the db-dir sibling) — it never reads the daemon profile. So a
     // profile `path_to_store_record` that disagrees with the effective root
-    // cannot be silently honoured here without stranding the producer's spooled
+    // cannot be silently honoured here without stranding the data bridge's spooled
     // video under a path the daemon never scans. Surface the mismatch loudly
     // instead and point the operator at the knob that actually coordinates both
     // processes.
@@ -247,7 +247,7 @@ fn run_daemon(
                 configured,
                 effective = %recordings_root.display(),
                 "profile `path_to_store_record` is ignored; the recordings root is set by \
-                 NEURACORE_DAEMON_RECORDINGS_ROOT (read by both daemon and producer). \
+                 NEURACORE_DAEMON_RECORDINGS_ROOT (read by both daemon and bridge). \
                  Set that env var to relocate recordings."
             );
         }

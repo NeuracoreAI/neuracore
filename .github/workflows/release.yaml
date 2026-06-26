@@ -369,7 +369,7 @@ jobs:
       run: |
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
-        git add .bumpversion.cfg neuracore/__init__.py changelogs/pending-changelog.md
+        git add .bumpversion.cfg pyproject.toml packaging/neuracore-data-daemon/pyproject.toml changelogs/pending-changelog.md
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
 
         TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
@@ -377,14 +377,13 @@ jobs:
 
         echo "Pushed version bump to ${TARGET_BRANCH}"
 
-    - name: Build Python package
-      run: python -m build
-
-    - name: Publish to PyPI
+    - name: Build and publish neuracore (pure Python)
       env:
         TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
         TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-      run: twine upload --skip-existing dist/*
+      run: |
+        python -m build
+        twine upload --skip-existing dist/*
 
     - name: Create git tag
       run: |
@@ -444,8 +443,8 @@ jobs:
           summary += `**Version:** \`${version}\`\n\n`;
           summary += `## Actions Completed\n\n`;
           summary += `- Version bumped and pushed to \`main\`\n`;
-          summary += `- Package published to PyPI\n`;
           summary += `- Git tag \`v${version}\` created\n`;
+          summary += `- Wheels + sdist publishing to PyPI (see publish jobs)\n`;
           summary += `- GitHub Release created\n\n`;
           summary += `### Links\n\n`;
           summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;
@@ -453,6 +452,67 @@ jobs:
           summary += `### Installation\n\n`;
           summary += `\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n`;
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+
+  # Build and publish the Linux-only `neuracore-data-daemon` wheels (the Rust
+  # extension + bundled binary). The pure-Python `neuracore` wheel + sdist are
+  # already built and published by the `release` job above. Runs after the
+  # version bump + tag are pushed and checks out that tag so each wheel carries
+  # the bumped version; twine --skip-existing makes re-running a failed matrix
+  # leg idempotent. Mirrors .github/workflows/build-wheels.yaml.
+  publish-daemon-wheels:
+    needs: release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, python-version: "3.10" }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, python-version: "3.11" }
+    steps:
+      - name: Checkout the tagged release
+        uses: actions/checkout@v6
+        with:
+          ref: v${{ needs.release.outputs.new_version }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build daemon wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packaging/neuracore-data-daemon
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: >-
+            --release
+            --out dist
+            --interpreter python${{ matrix.python-version }}
+          # Build the daemon binary inside the manylinux container (glibc match)
+          # and install clang/libclang for iceoryx2's bindgen. $GITHUB_WORKSPACE
+          # anchors the script path regardless of the build working-directory.
+          before-script-linux: |
+            (command -v yum && yum install -y clang) || (command -v dnf && dnf install -y clang) || true
+            bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target ${{ matrix.target }}
+
+      - name: Publish daemon wheel to PyPI
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          python -m pip install --upgrade twine
+          twine upload --skip-existing packaging/neuracore-data-daemon/dist/*.whl
 
   dry-run-summary:
     needs: [analyze-changes, generate-changelog]

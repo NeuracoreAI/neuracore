@@ -21,8 +21,8 @@ from neuracore.data_daemon.const import (
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.auth_preflight import ensure_daemon_auth_ready
 from neuracore.data_daemon.rust_selection import (
+    is_rust_daemon_enabled,
     rust_daemon_binary_path,
-    rust_daemon_enabled,
 )
 
 # cspell:ignore WNOHANG waitpid
@@ -118,7 +118,7 @@ def _build_daemon_runner_command() -> list[str]:
     foreground so it inherits the same process semantics the Python runner
     relies on (signal handling, parent-side ``Popen.wait``).
     """
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         binary = rust_daemon_binary_path()
         if binary is not None:
             return [str(binary), "launch"]
@@ -146,7 +146,7 @@ def _build_daemon_launch_env(
     environment = os.environ.copy()
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-    if not rust_daemon_enabled():
+    if not is_rust_daemon_enabled():
         environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
     if env_overrides:
         environment.update(env_overrides)
@@ -327,7 +327,7 @@ def launch_daemon_subprocess(
     )
     poll_interval_s = 0.05
     daemon_startup_timeout_s = time.monotonic() + timeout_s
-    rust_mode = rust_daemon_enabled() and rust_daemon_binary_path() is not None
+    rust_mode = is_rust_daemon_enabled() and rust_daemon_binary_path() is not None
 
     def _ready() -> bool:
         if rust_mode:

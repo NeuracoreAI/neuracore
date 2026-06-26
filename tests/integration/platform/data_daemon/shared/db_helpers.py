@@ -40,7 +40,7 @@ if TYPE_CHECKING:
 
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_db_path
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_EXPECTED_TRACE_COUNT,
     COLUMN_EXPECTED_TRACE_COUNT_REPORTED,
@@ -100,7 +100,7 @@ def _recording_correlation_column() -> str:
     daemon: recordings are keyed by the cloud ``recording_id`` (TEXT PK), which
     is also the traces foreign key.
     """
-    return COLUMN_RECORDING_INDEX if rust_daemon_enabled() else COLUMN_RECORDING_ID
+    return COLUMN_RECORDING_INDEX if is_rust_daemon_enabled() else COLUMN_RECORDING_ID
 
 
 class DaemonDbStore:
@@ -364,7 +364,7 @@ def assert_offline_recordings_pending(results: list[ContextResult]) -> None:
     Raises:
         AssertionError: If a recording row is missing or already has a cloud id.
     """
-    if not rust_daemon_enabled():
+    if not is_rust_daemon_enabled():
         return
     for result in results:
         rows_by_index = {
@@ -409,7 +409,7 @@ def resolve_cloud_recording_ids(
     Raises:
         AssertionError: If any recording's cloud id is not populated in time.
     """
-    if not rust_daemon_enabled():
+    if not is_rust_daemon_enabled():
         return results
 
     resolved: list[ContextResult] = []
@@ -833,7 +833,7 @@ def wait_for_offline_db_ready(
         RECORDINGS_TABLE,
         TRACES_TABLE,
     }
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         target_recording_keys: set[int] | set[str] = normalize_recording_indexes(
             expected_recording_keys
         )
@@ -919,7 +919,7 @@ def wait_for_all_traces_written(
     min_poll_interval_s = 0.05
     max_poll_interval_s = 1.0
 
-    use_rust = rust_daemon_enabled()
+    use_rust = is_rust_daemon_enabled()
     correlation_column = COLUMN_RECORDING_INDEX if use_rust else COLUMN_RECORDING_ID
 
     def _raw_keys() -> list:
