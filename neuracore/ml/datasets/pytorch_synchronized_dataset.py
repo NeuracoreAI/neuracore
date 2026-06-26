@@ -9,6 +9,7 @@ import numpy as np
 import torch
 from neuracore_types import (
     DATA_TYPE_TO_BATCHED_NC_DATA_CLASS,
+    TARGET_OUTPUT_DATA_TYPES,
     BatchedNCData,
     CrossEmbodimentDescription,
     DataType,
@@ -336,6 +337,47 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         max_start = max(0, episode_length)
         return np.random.randint(0, max_start - 1)
 
+    def _get_output_sync_points(
+        self,
+        synced_recording: SynchronizedRecording,
+        timestep: int,
+        data_type: DataType,
+        embodiment_description: EmbodimentDescription,
+    ) -> list[SynchronizedPoint]:
+        """Return output sync points for *data_type* at *timestep*.
+
+        Target output types are aligned with the input timestep.
+        Other outputs use the next timestep onward.
+        """
+        if data_type in TARGET_OUTPUT_DATA_TYPES:
+            start = timestep
+        else:
+            start = timestep + 1
+
+        output_sync_points = cast(
+            list[SynchronizedPoint],
+            synced_recording[start : start + self.output_prediction_horizon],
+        )
+        output_sync_points = [
+            self._project_sync_point_to_embodiment_description(
+                sync_point, embodiment_description
+            )
+            for sync_point in output_sync_points
+        ]
+
+        if not output_sync_points:
+            recording_name = getattr(synced_recording, "name", "recording")
+            raise ValueError(
+                f"No output sync points available for data type {data_type.value} "
+                f"at timestep {timestep} in recording '{recording_name}'"
+            )
+
+        # Padding for future sync points
+        for _ in range(self.output_prediction_horizon - len(output_sync_points)):
+            output_sync_points.append(output_sync_points[-1])
+
+        return output_sync_points
+
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
@@ -356,12 +398,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             timestep = self._get_timestep(episode_length)
 
         sync_point = cast(SynchronizedPoint, synced_recording[timestep])
-        future_sync_points = cast(
-            list[SynchronizedPoint],
-            synced_recording[
-                timestep + 1 : timestep + 1 + self.output_prediction_horizon
-            ],
-        )
 
         # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
@@ -375,15 +411,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         sync_point = self._project_sync_point_to_embodiment_description(
             sync_point, robot_merged_embodiment_description
         )
-
-        for i in range(len(future_sync_points)):
-            future_sync_points[i] = self._project_sync_point_to_embodiment_description(
-                future_sync_points[i], robot_merged_embodiment_description
-            )
-
-        # Padding for future sync points
-        for _ in range(self.output_prediction_horizon - len(future_sync_points)):
-            future_sync_points.append(future_sync_points[-1])
 
         # Sort out Inputs
         inputs: dict[DataType, list[BatchedNCData]] = {}
@@ -463,11 +490,18 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         time_steps=self.output_prediction_horizon,
                     )
                 else:
-                    # If the current robot has a name for this index, use it to
-                    # get the data.
+                    output_sync_points = self._get_output_sync_points(
+                        synced_recording=synced_recording,
+                        timestep=timestep,
+                        data_type=data_type,
+                        embodiment_description=robot_merged_embodiment_description,
+                    )
+
+                    # If the current robot has a name for this index,
+                    # use it to get the data.
                     nc_data_list = [
-                        future_sp.data[data_type][name]
-                        for future_sp in future_sync_points
+                        output_sp.data[data_type][name]
+                        for output_sp in output_sync_points
                     ]
                     batched_nc_data = batched_nc_data_class.from_nc_data_list(
                         nc_data_list
