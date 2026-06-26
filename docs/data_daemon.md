@@ -203,6 +203,7 @@ These are the supported settings:
 |---|---|
 | `storage_limit` | Maximum local disk space the daemon should use for recordings (bytes). |
 | `bandwidth_limit` | Maximum upload speed the daemon should use (bytes per second). |
+| `spool_limit` | Cap on the producer's on-disk video spool backlog (bytes). When the un-encoded backlog reaches this size the producer applies backpressure to video logging instead of letting the spool fill the disk. `0` disables the bound. Defaults to 2 GiB. |
 | `path_to_store_record` | Folder where recordings are stored. |
 | `num_threads` | Number of worker threads used by the daemon. |
 | `keep_wakelock_while_upload` | Whether to keep the machine awake during uploads (where supported). |
@@ -253,6 +254,7 @@ Supported environment variables:
 |---|---|
 | `storage_limit` | `NCD_STORAGE_LIMIT` |
 | `bandwidth_limit` | `NCD_BANDWIDTH_LIMIT` |
+| `spool_limit` | `NCD_SPOOL_LIMIT` |
 | `path_to_store_record` | `NCD_PATH_TO_STORE_RECORD` |
 | `num_threads` | `NCD_NUM_THREADS` |
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
@@ -320,13 +322,13 @@ neuracore data-daemon profile create laptop
 Update a named profile:
 
 ```bash
-neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--max-concurrent-uploads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
+neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
 ```
 
 Update the default profile:
 
 ```bash
-neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--max-concurrent-uploads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
+neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
 ```
 
 Example:

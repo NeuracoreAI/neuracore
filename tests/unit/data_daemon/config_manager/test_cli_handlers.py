@@ -48,6 +48,7 @@ def test_run_profile_update_validates_and_updates(
         name="recording",
         storage_limit=None,
         bandwidth_limit=None,
+        spool_limit=2_048,
         path_to_store_record=None,
         num_threads=2,
         keep_wakelock_while_upload=None,
@@ -58,7 +59,8 @@ def test_run_profile_update_validates_and_updates(
     out = capsys.readouterr().out.strip()
 
     assert captured["name"] == "recording"
-    assert captured["updates"] == {"num_threads": 2}
+    # Only the provided fields are forwarded; the `None` arguments are dropped.
+    assert captured["updates"] == {"num_threads": 2, "spool_limit": 2_048}
     assert out == "Updated profile 'recording'."
 
 

@@ -178,3 +178,75 @@ def test_status_prints_running_when_pid_is_running(
 
     ah.run_status()
     assert capsys.readouterr().out.strip() == "Daemon running (pid=456)."
+
+
+def test_reset_delegates_to_binary_and_passes_resolved_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+
+    monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(ah, "get_daemon_db_path", lambda: db_path)
+
+    seen: dict[str, object] = {}
+
+    def fake_reset_daemon_state(
+        *, pid_path: Path, db_path: Path, assume_yes: bool
+    ) -> int:
+        seen["pid_path"] = pid_path
+        seen["db_path"] = db_path
+        seen["assume_yes"] = assume_yes
+        return 0
+
+    monkeypatch.setattr(ah, "reset_daemon_state", fake_reset_daemon_state)
+
+    ah.run_reset(yes=True)
+    assert seen == {"pid_path": pid_path, "db_path": db_path, "assume_yes": True}
+
+
+def test_reset_defaults_to_prompting(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: tmp_path / "daemon.pid")
+    monkeypatch.setattr(ah, "get_daemon_db_path", lambda: tmp_path / "state.db")
+
+    seen: dict[str, object] = {}
+
+    def fake_reset_daemon_state(*, assume_yes: bool, **kwargs: object) -> int:
+        seen["assume_yes"] = assume_yes
+        return 0
+
+    monkeypatch.setattr(ah, "reset_daemon_state", fake_reset_daemon_state)
+
+    ah.run_reset()
+    assert seen == {"assume_yes": False}
+
+
+def test_reset_propagates_nonzero_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: tmp_path / "daemon.pid")
+    monkeypatch.setattr(ah, "get_daemon_db_path", lambda: tmp_path / "state.db")
+    monkeypatch.setattr(ah, "reset_daemon_state", lambda **kwargs: 3)
+
+    with pytest.raises(typer.Exit) as exit_info:
+        ah.run_reset()
+    assert exit_info.value.exit_code == 3
+
+
+def test_reset_reports_missing_binary(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(ah, "get_daemon_pid_path", lambda: tmp_path / "daemon.pid")
+    monkeypatch.setattr(ah, "get_daemon_db_path", lambda: tmp_path / "state.db")
+
+    def fake_reset_daemon_state(**kwargs):
+        raise ah.DaemonLifecycleError("no binary")
+
+    monkeypatch.setattr(ah, "reset_daemon_state", fake_reset_daemon_state)
+
+    with pytest.raises(typer.Exit) as exit_info:
+        ah.run_reset()
+    assert exit_info.value.exit_code == 1
+    assert capsys.readouterr().err.strip() == "no binary"

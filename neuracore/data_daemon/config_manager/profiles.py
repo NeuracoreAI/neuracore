@@ -103,7 +103,7 @@ class ProfileManager:
         except FileNotFoundError as exc:
             raise ProfileNotFound(f"Profile {profile!r} not found.") from exc
 
-        for field_name in ("storage_limit", "bandwidth_limit"):
+        for field_name in ("storage_limit", "bandwidth_limit", "spool_limit"):
             raw_value = profile_data.get(field_name)
             if raw_value is not None:
                 try:

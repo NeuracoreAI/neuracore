@@ -222,3 +222,36 @@ def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
     assert stream.get_recording_context() is None
     assert stream.get_producer_channel() is None
     assert stream.is_recording() is False
+
+
+def test_rgb_stream_owns_no_channel_under_rust_daemon(monkeypatch) -> None:
+    """Under the rust daemon a stream owns no producer channel — the daemon
+    interface lives at the logging layer (RecordingContext), not the stream."""
+    _FakeProducerChannel.instances.clear()
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.ProducerChannel",
+        _FakeProducerChannel,
+    )
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.rust_daemon_enabled",
+        lambda: True,
+    )
+
+    width, height = 4, 3
+    stream = RGBDataStream("front_camera", width=width, height=height)
+    stream.start_recording(_context())
+
+    # No legacy channel is created, yet the stream tracks recording state.
+    assert _FakeProducerChannel.instances == []
+    assert stream.get_producer_channel() is None
+    assert stream.is_recording() is True
+
+    # Logging only updates the local latest-data cache; no channel I/O.
+    frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
+    stream.log(_DummyCameraData(timestamp=1.0), frame)
+    assert stream.get_producer_channel() is None
+
+    # Stop is clean even though there was never a channel to tear down.
+    stream.stop_recording(stop_cutoff_sequence_number=0)
+    assert stream.is_recording() is False
+    assert stream.get_recording_context() is None
