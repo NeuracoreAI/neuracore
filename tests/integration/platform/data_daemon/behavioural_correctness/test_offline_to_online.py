@@ -2,11 +2,14 @@ from collections.abc import Callable
 
 import pytest
 
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    assert_offline_recordings_pending,
+    resolve_cloud_recording_ids,
     wait_for_all_traces_written,
     wait_for_upload_complete_in_db,
 )
@@ -80,14 +83,20 @@ def test_offline_pending_data_recovers_when_online(
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
+                assert_offline_recordings_pending(results)
             # offline_daemon_running() stops the daemon on exit, preserving
             # offline artefacts for the online recovery phase below.
 
             with online_daemon_running():
                 for result in results:
-                    for recording_id in result.recording_ids:
-                        wait_for_upload_complete_in_db(str(recording_id))
+                    if rust_daemon_enabled():
+                        for recording_index in result.recording_indexes:
+                            wait_for_upload_complete_in_db(recording_index)
+                    else:
+                        for recording_id in result.recording_ids:
+                            wait_for_upload_complete_in_db(str(recording_id))
 
+                results = resolve_cloud_recording_ids(results)
                 verify_cloud_results(results=results, case=case)
 
     finally:
