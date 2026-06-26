@@ -1,0 +1,33 @@
+[package]
+name = "data_daemon_bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Producer-side IPC client for the Neuracore data daemon, exposed to Python via PyO3."
+
+[lib]
+# `cdylib` produces the `.so` Python imports as `neuracore.data_daemon._data_bridge`.
+# `rlib` lets Rust integration tests still link against the library.
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+data_daemon_shared = { path = "../data_daemon_shared" }
+iceoryx2.workspace = true
+libc.workspace = true
+miniz_oxide = "0.8"
+pyo3.workspace = true
+# Used by the batched joint-data fast path to format each per-item
+# `{"timestamp":...,"value":...}` payload. We deliberately do NOT hand-format
+# via `write!`: Rust's `Display for f64` strips trailing zeros (1.0 → "1"),
+# which would land integer-valued joint values on disk as JSON integers
+# instead of floats and break the cloud-side data-verification pass.
+# serde_json uses ryu under the hood and always emits at least one fractional
+# digit, matching Python's `json.dumps` shape.
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

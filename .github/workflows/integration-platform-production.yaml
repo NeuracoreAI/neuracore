@@ -31,7 +31,6 @@ jobs:
       max-parallel: 1
       matrix:
         python-version: ['3.11']
-        ffmpeg: [true, false]
 
     steps:
     - name: Free Disk Space (Ubuntu)
@@ -97,7 +96,6 @@ jobs:
         cache: 'pip'
 
     - name: Install FFmpeg
-      if: matrix.ffmpeg == 'true'
       run: |
         sudo apt-get update
         sudo apt-get install -y ffmpeg

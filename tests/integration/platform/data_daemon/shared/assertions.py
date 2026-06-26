@@ -48,7 +48,7 @@ import neuracore as nc
 from neuracore.core.data.recording import Recording
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_pid_path
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
@@ -91,7 +91,7 @@ logger = logging.getLogger(__name__)
 
 def assert_context_mode(case: DataDaemonTestCase, results: list[ContextResult]) -> None:
     """Assert that context timing matches the expected mode."""
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         active_results = [result for result in results if result.recording_indexes]
     else:
         active_results = [result for result in results if result.recording_ids]

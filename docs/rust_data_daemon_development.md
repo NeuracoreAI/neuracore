@@ -12,7 +12,7 @@ The [rust/](../rust/) directory is a Cargo workspace with three members declared
 |---|---|---|
 | `data-daemon` | [rust/data_daemon/](../rust/data_daemon/) | The daemon binary — CLI, lifecycle, SQLite state, IPC listener, per-trace pipeline, encoding. |
 | `data_daemon_shared` | [rust/data_daemon_shared/](../rust/data_daemon_shared/) | Shared library — IPC envelope types and service-name constants, plus the daemon configuration model and filesystem-path resolution the two processes must compute identically. Linked by both the daemon and the producer crate. |
-| `data_daemon_producer` | [rust/data_daemon_producer/](../rust/data_daemon_producer/) | PyO3 `cdylib` — producer-side IPC client exposed to Python as `neuracore.data_daemon._native_producer`. |
+| `data_daemon_bridge` | [rust/data_daemon_bridge/](../rust/data_daemon_bridge/) | PyO3 `cdylib` — producer-side IPC client exposed to Python as `neuracore.data_daemon._data_bridge`. |
 
 Shared workspace dependencies and the Rust edition (`2021`) are pinned in [rust/Cargo.toml](../rust/Cargo.toml); individual crates inherit them via `.workspace = true`.
 
@@ -30,7 +30,7 @@ flowchart LR
     subgraph SDK["Python SDK"]
       LOG["log_joints / log_json / log_frame<br/>start / stop / cancel_recording"]
     end
-    subgraph PROD["data_daemon_producer (PyO3 cdylib)"]
+    subgraph PROD["data_daemon_bridge (PyO3 cdylib)"]
       LOG -->|GIL released| PUBT["publisher thread"]
       LOG -->|RGB frames| WRT["writer thread → NUT spool on disk"]
     end
@@ -105,7 +105,7 @@ CI uses `stable` (via `dtolnay/rust-toolchain@stable`), so any recent stable too
     sudo apt-get update && sudo apt-get install -y ffmpeg
     ```
 
-- **maturin** (only when working on the `data_daemon_producer` PyO3 crate):
+- **maturin** (only when working on the `data_daemon_bridge` PyO3 crate):
 
     ```bash
     pip install maturin
@@ -127,7 +127,7 @@ cargo build --workspace
 cargo build --release -p data-daemon
 
 # Producer cdylib only
-cargo build -p data_daemon_producer
+cargo build -p data_daemon_bridge
 ```
 
 The release binary lands at [rust/target/release/data-daemon](../rust/target/release/data-daemon).
@@ -211,76 +211,119 @@ RUST_LOG=data_daemon=trace,iceoryx2=warn cargo run -p data-daemon -- launch
 
 ## Working on the PyO3 producer
 
-The `data_daemon_producer` crate compiles to a `cdylib` that Python imports as `neuracore.data_daemon._native_producer`. During development, use `maturin develop` from the producer crate directory to build and install it into your active virtualenv in one step:
+The `data_daemon_bridge` crate compiles to a `cdylib` that Python imports as `neuracore.data_daemon._data_bridge` (shipped by the separate `neuracore-data-daemon` package). During development, use `maturin develop` from that package directory — its `pyproject.toml` carries the `module-name` and `manifest-path` that point maturin at the crate:
 
 ```bash
-cd rust/data_daemon_producer
+cd packaging/neuracore-data-daemon
 maturin develop
-python -c "import neuracore.data_daemon._native_producer as p; print(p)"
+python -c "import neuracore.data_daemon._data_bridge as p; print(p)"
 ```
 
-To route the Python SDK through the native producer instead of the legacy zmq one, set the rollout flag:
+To route the Python SDK through the data bridge instead of the legacy zmq one, set the rollout flag:
 
 ```bash
 export NCD_RUST_DAEMON=1
 python your_script.py
 ```
 
-Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. A small shim bridges the native producer to the Python `ProducerChannel` contract.
+Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. A small shim bridges the data bridge to the Python `ProducerChannel` contract.
 
 ---
 
-## Packaging the wheel
+## Packaging: two distributions
 
-The Python wheel ships two Rust artefacts inside the `neuracore.data_daemon` package:
+The Rust daemon is shipped as a **separate PyPI distribution** (prebuilt wheels
+for Linux x86_64 and Apple-Silicon macOS) so that `neuracore` itself stays
+pure-Python and installs on every platform.
 
-| Artefact | Wheel location | Source crate | Imported / executed as |
+| Distribution | Build | Installs on | Ships |
 |---|---|---|---|
-| Daemon binary | `neuracore/data_daemon/bin/data-daemon` | `data-daemon` (bin) | Re-exec'd by [neuracore/data_daemon/__main__.py](../neuracore/data_daemon/__main__.py) when `NCD_RUST_DAEMON` is truthy |
-| Producer cdylib | `neuracore/data_daemon/_native_producer*.so` | `data_daemon_producer` (cdylib) | `import neuracore.data_daemon._native_producer` from the SDK producer shim |
+| `neuracore` | pure-Python (setuptools, [pyproject.toml](../pyproject.toml)) | everywhere (`py3-none-any`) | all the Python SDK + the `daemon` extra |
+| `neuracore-data-daemon` | maturin ([packaging/neuracore-data-daemon/pyproject.toml](../packaging/neuracore-data-daemon/pyproject.toml)) | Linux x86_64 and arm64 macOS | the `_data_bridge` PyO3 extension + the `data-daemon` binary |
 
-Both paths are inside the Python package tree, so vanilla setuptools `package_data` is enough to package them once they're built — there is no `pyproject.toml`/maturin build-backend migration. The trade-off is that each wheel build runs cargo twice (once per crate) before `python -m build` packages the result.
+`neuracore-data-daemon` is a base dependency of `neuracore` carrying the PEP 508
+marker `; sys_platform == 'linux' or (sys_platform == 'darwin' and platform_machine == 'arm64')`,
+so `pip install neuracore` pulls the daemon **automatically on Linux and
+Apple-Silicon macOS** and is a no-op on Windows and Intel Macs (where the SDK
+falls back to the Python daemon). Intel Macs are not supported. The `daemon`
+extra is kept as a backward-compatible explicit alias — `pip install
+neuracore[daemon]` resolves to the same thing.
 
-### One-shot local build
+The two artefacts and how `neuracore` finds them:
 
-Use the helper script to compile both crates in release mode and copy the artefacts into the package tree at the locations the runtime expects:
+| Artefact | Location (in `neuracore-data-daemon`) | Source crate | Reached from `neuracore` via |
+|---|---|---|---|
+| Daemon binary | `neuracore/data_daemon/bin/data-daemon` | `data-daemon` (bin) | `rust_selection.rust_daemon_binary_path()` → `files("neuracore.data_daemon")/"bin"/"data-daemon"` |
+| Producer extension | `neuracore/data_daemon/_data_bridge*.so` | `data_daemon_bridge` (cdylib) | `recording_context._load_native()` → `import neuracore.data_daemon._data_bridge` |
+
+Both lookups degrade gracefully when `neuracore-data-daemon` is absent (binary path → `None`, extension import → a helpful `RuntimeError`).
+
+The daemon wheel installs its files **into** the `neuracore/data_daemon/` import path the `neuracore` wheel owns, but ships **no** `__init__.py` for those dirs — so the two distributions share the directory with no file collision: `neuracore` owns the `.py` + `__init__.py`, `neuracore-data-daemon` owns the `.so` + binary. (Installed alone, the daemon wheel's `neuracore/data_daemon/` imports as a PEP 420 namespace package; installed alongside `neuracore`, it's a normal package — both ways `import neuracore.data_daemon._data_bridge` resolves.)
+
+### Local build
+
+The daemon binary is a *separate* crate that maturin doesn't build, so the helper
+script compiles it into the daemon package tree first; then maturin builds the
+extension:
 
 ```bash
-./rust/scripts/build_wheel_artefacts.sh
+./rust/scripts/build_wheel_artefacts.sh   # cargo build -p data-daemon -> packaging/.../neuracore/data_daemon/bin/data-daemon
+cd packaging/neuracore-data-daemon
+maturin develop                            # builds + editable-installs _data_bridge into the active env
 ```
 
-What it does:
+`maturin develop` builds and installs the **extension only** — it doesn't run the
+binary build or evaluate `include`, so run the helper script first for an
+end-to-end daemon. For the SDK itself, `pip install -e .` (or `.[dev]`) at the repo
+root installs `neuracore` pure-Python with no Rust.
 
-1. `cargo build --release -p data-daemon` and copies the binary to [neuracore/data_daemon/bin/data-daemon](../neuracore/data_daemon/bin/data-daemon).
-2. `cargo build --release -p data_daemon_producer` and copies the cdylib to [neuracore/data_daemon/_native_producer.so](../neuracore/data_daemon/_native_producer.so) (renames `libdata_daemon_producer.so` → `_native_producer.so` so PyO3's `PyInit__native_producer` is discoverable).
-
-Both targets are gitignored (`neuracore/data_daemon/bin/` and `*.so`); the script is idempotent so re-running it after a `cargo` edit refreshes the in-tree copies. `pip install -e .` after the script picks the new artefacts up automatically via `package_data`.
-
-For day-to-day iteration on the producer crate only, prefer `maturin develop` from [rust/data_daemon_producer/](../rust/data_daemon_producer/) — it skips the binary build, only refreshes the cdylib, and is faster.
-
-### Building a wheel
+### Building wheels
 
 ```bash
+# neuracore (pure Python, py3-none-any)
+python -m build
+
+# neuracore-data-daemon (Linux x86_64 and arm64 macOS)
 ./rust/scripts/build_wheel_artefacts.sh
-python -m build --wheel
+cd packaging/neuracore-data-daemon
+maturin build --release --out dist --interpreter python3.11
 ```
 
-The wheel is platform-tagged (Linux x86_64 today) because [setup.py](../setup.py) sets `Distribution.has_ext_modules` so setuptools tags the wheel for the host platform — without that hook setuptools would tag it `py3-none-any` and pip would happily install a Linux .so onto macOS. `package_data` ships both artefacts; `MANIFEST.in` ships the script and the `rust/` sources for the sdist.
+The daemon wheel is platform-specific: pyo3 uses `extension-module` without `abi3`,
+so each is one Python minor × one platform and `--interpreter pythonX.Y` must be
+passed. `include` bundles the daemon binary; no sdist is shipped for the daemon
+package (its Rust sources live outside the package dir).
+
+> **Daemon: Linux and Apple-Silicon macOS only.** The daemon stack uses
+> `iceoryx2` shared-memory IPC; platform-specific syscalls (e.g.
+> `sync_file_range`, `gettid` on Linux) are gated behind `cfg(target_os)` so the
+> stack also builds and runs on macOS. `neuracore-data-daemon` ships
+> `linux-x86_64` and `macosx-arm64` wheels — **not** Intel Macs or Windows;
+> `neuracore` is unaffected on unsupported platforms (it falls back to the Python
+> daemon).
 
 ### CI
 
-The wheel job runs in [.github/workflows/build-wheels.yaml](../.github/workflows/build-wheels.yaml):
-
-1. Installs the Rust toolchain + ffmpeg (for unit tests).
-2. Runs the helper script above.
-3. Runs `python -m build --wheel` to produce the wheel.
-4. Uploads the wheel as an artefact for the release job to consume.
-
-The matrix is Linux x86_64 only for v1; aarch64 ships when there's demand (the script is platform-agnostic — only the cross-compilation toolchain would need to grow). Each wheel is one Python version × one platform, matching the cdylib's ABI.
+[.github/workflows/build-wheels.yaml](../.github/workflows/build-wheels.yaml) builds
+the `neuracore-data-daemon` wheels — a `PyO3/maturin-action` matrix over
+`linux-x86_64` and `macosx-arm64` × py3.10/3.11. The Linux legs build the daemon
+binary inside the `manylinux_2_28` container (glibc match, plus a `clang` install
+for iceoryx2's bindgen — `manylinux_2_28` is required over the default
+`manylinux2014` because iceoryx2's bindgen needs libclang >= 5.0, which 2014's
+clang 3.4 can't provide); the macOS legs build natively on an `macos-15`
+Apple-silicon runner (libclang via `brew install llvm`, deployment target pinned
+to 11.0). Each leg runs `maturin build` and smoke-tests
+`import neuracore.data_daemon._data_bridge` + the executable binary. The pure-Python
+`neuracore` wheel needs no special CI — it's built with `python -m build`.
 
 ### Release path
 
-The [release workflow](../.github/workflows/release.yaml) wires the wheel job into its publish step: it depends on `build-wheels.yaml`, downloads the matrix of wheels, and `twine upload`s them alongside the sdist. The sdist remains useful as a portable fallback (users build the Rust artefacts themselves at install time) but is not the recommended install path — the bundled-binary wheel is.
+The [release workflow](../.github/workflows/release.yaml) bumps the version (in both
+pyprojects + the `daemon` extra pin, kept in lockstep by [.bumpversion.cfg](../.bumpversion.cfg)),
+pushes the tag, then: the `release` job builds + `twine`-publishes the pure-Python
+`neuracore` wheel + sdist (`python -m build`), and a `publish-daemon-wheels`
+linux-x86_64 matrix checks out the tag, builds the `neuracore-data-daemon` wheels,
+and publishes them. `twine --skip-existing` makes re-running any leg idempotent.
 
 ---
 

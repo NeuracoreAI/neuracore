@@ -1,5 +1,5 @@
 [workspace]
-members = ["data_daemon", "data_daemon_shared", "data_daemon_producer"]
+members = ["data_daemon", "data_daemon_shared", "data_daemon_bridge"]
 resolver = "2"
 
 [workspace.package]
@@ -63,6 +63,6 @@ uuid = { version = "1", features = ["v4"] }
 # a prod [dependencies] table by inheriting `.workspace = true`.
 
 [profile.release]
-# Strip symbols from the shipped daemon binary / producer cdylib (~3 MB off the
+# Strip symbols from the shipped daemon binary / data bridge cdylib (~3 MB off the
 # 16 MB debug-symbol binary); the wheel ships only the stripped artefacts.
 strip = true
