@@ -1,0 +1,152 @@
+[build-system]
+requires = ["maturin>=1.14,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "neuracore"
+# `neuracore` is a single merged distribution: the Python SDK plus the Rust
+# data daemon (the `_data_bridge` extension built by maturin from
+# rust/data_daemon_bridge and the standalone `data-daemon` binary bundled via
+# [tool.maturin] include). Wheels ship for Linux x86_64 (manylinux_2_28) and
+# Apple-Silicon macOS only — no sdist and no pure wheel, so other platforms
+# resolve to the last pure release. neuracore/__init__.py re-derives
+# __version__ from the installed metadata, so this is the single source of
+# truth.
+version = "13.3.0"
+description = "Neuracore Client Library"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Stephen James", email = "support@neuracore.com" }]
+keywords = ["robotics", "machine-learning", "ai", "client-library"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
+dependencies = [
+    "numpy>=2.0.0",
+    "requests>=2.31.0",
+    "pillow>=10.0.0",
+    "pyyaml>=6.0.1",
+    "tqdm>=4.66.0",
+    "requests-oauthlib==2.0.0",
+    "pydantic>=2.10",
+    "av==15.1.0",
+    "aiortc==1.14.0",
+    "aiohttp-sse-client==0.2.1",
+    "numpy-stl",
+    "wget",
+    "uvicorn[standard]==0.42.0",
+    "fastapi==0.135.2",
+    "psutil",
+    "typer>=0.20.0",
+    "neuracore_types>=10.0.0,<11.0.0",
+    "ordered_set",
+    "pyzmq==27.1.0",
+    "sqlalchemy>=2.0.0",
+    "aiosqlite>=0.19.0",
+    "aiohttp>=3.9.0",
+    "aiofiles>=23.0.0",
+    "aiolimiter",
+    "pyee==13.0.0",
+    "greenlet",
+    "filelock>=3.0.0",
+    "omegaconf",
+    "msgpack>=1.0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/neuracoreai/neuracore"
+
+[project.optional-dependencies]
+examples = ["matplotlib>=3.3.0", "mujoco==2.3.7", "pyquaternion>=0.9.5"]
+mjcf = ["mujoco>3"]
+ml = [
+    # torch==2.10.0 is minimum version defaulting to CUDA 12.8.
+    # Do NOT upgrade to 2.11.0+: it defaults to CUDA 13 which drops
+    # V100 support, which Neuracore still uses.
+    # hub pinned to 0.35.3 to match lerobot==0.4.4's
+    # <0.36.0 constraint, allowing [ml] and [import] to coexist.
+    # We have dropped support for P100 and P4 due to CUDA 12.8
+    # dropping support for them.
+    "torch==2.10.0",
+    "torchvision==0.25.0",
+    "transformers==4.53.2",
+    "huggingface-hub==0.35.3",
+    "diffusers==0.35.1",
+    "safetensors==0.6.2",
+    "einops",
+    "hydra-core>=1.3.0",
+    "tensorboard>=2",
+    "names-generator>=0.2.0",
+]
+dev = [
+    "pytest>=6.2.5",
+    "pytest-cov>=2.12.1",
+    "diff-cover",
+    "pytest-asyncio>=0.15.1",
+    "pytest-xdist",
+    "twine>=3.4.2",
+    "requests-mock>=1.9.3",
+    "pre-commit",
+    "types-aiofiles",
+    "pyinstrument",
+    "plotly",
+]
+import = [
+    # lerobot is used only for dataset importing
+    # (LeRobotDataset/LeRobotDatasetMetadata).
+    # Do NOT install lerobot[transformers-dep] — that extra requires
+    # transformers>=4.57.1 which conflicts with our transformers==4.53.2 pin.
+    # lerobot>=0.4.x drops v2 dataset format support.
+    # torch is not pinned here as lerobot==0.4.4 constrains it to
+    # >=2.2.1,<2.11.0, compatible with [ml]'s torch==2.10.0.
+    # hub pinned to match [ml], allowing both extras to coexist.
+    # The importer only uses torch for CPU tensor ops
+    # (data loading + .numpy()), so CUDA version does not matter.
+    "lerobot==0.4.4",
+    "huggingface-hub==0.35.3",
+    "tensorflow-datasets>=4.9.9",
+    "tensorflow-cpu>=2.20.0",
+    "pin==3.9.0",
+    "pin-pink==4.2.0",
+    "coal==3.0.2",
+    "eigenpy==3.12.0",
+    "cmeel-boost==1.89.0",
+    "cmeel-urdfdom==4.0.1",
+    "cmeel-tinyxml2==10.0.0",
+    "cmeel-assimp==6.0.5",
+    "cmeel-octomap==1.10.0",
+    "mcap>=1.3.1,<2",
+    "mcap-protobuf-support>=0.5.4,<0.6",
+    "mcap-ros1-support>=0.7.4,<0.8",
+    "mcap-ros2-support>=0.5.7,<0.6",
+]
+
+# [examples] (mujoco==2.3.7) and [mjcf] (mujoco>3) can never co-install;
+# declaring it lets uv's universal lock succeed.
+[tool.uv]
+conflicts = [[{ extra = "examples" }, { extra = "mjcf" }]]
+
+[project.scripts]
+neuracore = "neuracore.core.cli.app:main"
+
+[tool.maturin]
+# maturin auto-includes every tracked file under neuracore/, so config trees
+# ship without globs — but anything committed there ships silently; keep
+# build junk out or gitignored.
+python-source = "."
+# Extension lands at neuracore/data_daemon/_data_bridge<abi>.so; last
+# component must match `#[pymodule] fn _data_bridge`.
+module-name = "neuracore.data_daemon._data_bridge"
+manifest-path = "rust/data_daemon_bridge/Cargo.toml"
+include = [{ path = "neuracore/data_daemon/bin/data-daemon", format = "wheel" }]

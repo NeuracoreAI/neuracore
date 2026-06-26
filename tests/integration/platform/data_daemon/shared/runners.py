@@ -34,7 +34,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 
 
 @contextmanager
-def scoped_daemon_storage_env() -> Generator[None, None, None]:
+def scoped_daemon_storage_env() -> Generator[None]:
     """Point the daemon at the shared ``.data_daemon_test_state`` directory for the
     duration of the block.
 
@@ -58,7 +58,7 @@ def scoped_daemon_storage_env() -> Generator[None, None, None]:
 
 
 @contextmanager
-def offline_daemon_running() -> Generator[None, None, None]:
+def offline_daemon_running() -> Generator[None]:
     """Run the daemon in offline mode for the duration of the block.
 
     Asserts clean process/socket state before starting the daemon and again
@@ -87,7 +87,7 @@ def offline_daemon_running() -> Generator[None, None, None]:
 
 
 @contextmanager
-def online_daemon_running() -> Generator[None, None, None]:
+def online_daemon_running() -> Generator[None]:
     """Run the daemon in online mode for the duration of the block.
 
     Stops any suite-owned leftover daemon, asserts clean process/socket state,

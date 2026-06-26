@@ -267,6 +267,11 @@ fn free_disk_bytes(path: &Path) -> Result<u64, BudgetError> {
     loop {
         match nix::sys::statvfs::statvfs(probe.as_path()) {
             Ok(stats) => {
+                // statvfs reports available blocks as u32 on macOS, u64 on Linux.
+                #[cfg(target_os = "macos")]
+                let blocks_available: u64 = stats.blocks_available().into();
+
+                #[cfg(not(target_os = "macos"))]
                 let blocks_available: u64 = stats.blocks_available();
                 let fragment_size: u64 = stats.fragment_size();
                 return Ok(blocks_available.saturating_mul(fragment_size));

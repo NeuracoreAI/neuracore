@@ -12,14 +12,14 @@ import os
 import sys
 
 from neuracore.data_daemon.rust_selection import (
+    is_rust_daemon_enabled,
     rust_daemon_binary_path,
-    rust_daemon_enabled,
 )
 
 
 def main() -> None:
     """Dispatch to the Rust data daemon when enabled, else the Python CLI."""
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         binary = rust_daemon_binary_path()
         if binary is None:
             print(
@@ -29,6 +29,14 @@ def main() -> None:
             )
         else:
             try:
+                # maturin's wheel `include` can drop the bundled binary without
+                # the executable bit, which would make execv fail and silently
+                # fall back to the Python daemon. Restore it best-effort first.
+                if not os.access(binary, os.X_OK):
+                    try:
+                        os.chmod(binary, 0o755)
+                    except OSError:
+                        pass
                 os.execv(str(binary), [str(binary), *sys.argv[1:]])
             except OSError as error:
                 # The binary is present but couldn't be executed (e.g. not

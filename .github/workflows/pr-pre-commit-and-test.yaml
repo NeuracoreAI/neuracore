@@ -37,7 +37,8 @@ jobs:
               - 'tests/unit/**'
               - '!tests/unit/ml/**'
             deps:
-              - 'setup.py'
+              - 'pyproject.toml'
+              - 'rust/**'
             ci:
               - '.github/workflows/pr-pre-commit-and-test.yaml'
               - '.pre-commit-config.yaml'
@@ -46,7 +47,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.14"]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -61,12 +62,14 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-24.04, macos-26]
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.14"]
         package-manager: [uv, pip]
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
-      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.11' && matrix.package-manager == 'uv' }}
+      # Coverage runs on the 3.10 leg: it's the only Linux leg that installs
+      # [import] (no cp314 wheels for tensorflow-cpu), so importer tests count.
+      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.10' && matrix.package-manager == 'uv' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
@@ -80,18 +83,38 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Install Rust toolchain
+        if: env.SHOULD_RUN == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        if: env.SHOULD_RUN == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Use brew's libclang — bindgen doesn't reliably find Xcode's. Matches
+      # build-wheels.yaml.
+      - name: Set up libclang (macOS)
+        if: env.SHOULD_RUN == 'true' && runner.os == 'macOS'
+        run: |
+          brew install llvm
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
       - name: Set up uv
         if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'uv'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          if [ "${{ matrix.os }}" = "macos-26" ]; then
+          # [import] needs tensorflow-cpu (cp313 max, no cp314 wheels) and
+          # pinocchio (manylinux-only): Linux + Python < 3.14 legs only.
+          if [ "${{ matrix.os }}" = "macos-26" ] || [ "${{ matrix.python-version }}" = "3.14" ]; then
             EXTRAS=".[dev]"
           else
             EXTRAS=".[dev,import]"
@@ -108,13 +131,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.package-manager }}" = "uv" ]; then
-            PYTEST="uv run pytest"
+            # --no-project: deps came from `uv pip install`; re-syncing would
+            # drop the dev/import extras.
+            PYTEST="uv run --no-project pytest"
           else
             PYTEST="pytest"
           fi
-          # Importer tests require pinocchio, which only publishes manylinux wheels
+          # Importer tests need the [import] extra, skipped on macOS
+          # (pinocchio is manylinux-only) and 3.14 (no tensorflow-cpu wheels).
           IGNORE="--ignore=tests/unit/ml"
-          if [ "${{ matrix.os }}" = "macos-26" ]; then
+          if [ "${{ matrix.os }}" = "macos-26" ] || [ "${{ matrix.python-version }}" = "3.14" ]; then
             IGNORE="${IGNORE} --ignore=tests/unit/importer"
           fi
           PYTEST_ARGS="-sv -o log_cli=true --log-cli-level=INFO"
@@ -170,18 +196,28 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        python-version: ["3.10", "3.11"]
+        python-version: ["3.10", "3.11", "3.14"]
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
         uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        if: env.SHOULD_RUN == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        if: env.SHOULD_RUN == 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
 
       - name: Set up uv
         if: env.SHOULD_RUN == 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "setup.py"
+          cache-dependency-glob: "pyproject.toml"
           python-version: ${{ matrix.python-version }}
 
       - name: Install Python dependencies
@@ -192,4 +228,4 @@ jobs:
         if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run pytest tests/unit/ml -m "not slow" -sv -o log_cli=true --log-cli-level=INFO
+        run: uv run --no-project pytest tests/unit/ml -m "not slow" -sv -o log_cli=true --log-cli-level=INFO

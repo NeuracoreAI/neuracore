@@ -2,6 +2,12 @@
 # Run the data-daemon integration tests against staging with the Rust daemon
 # enabled (NCD_RUST_DAEMON=1).
 #
+# This script does not build anything: build + install the merged wheel once
+# first (bash rust/scripts/build_wheel_artefacts.sh && pip install .) so the
+# installed neuracore bundles the compiled extension and daemon binary. Tests
+# run with --import-mode=importlib so they resolve `import neuracore` to that
+# installed wheel instead of the in-tree package.
+#
 # The script cleans every piece of host state the daemon touches before
 # starting — a previous SIGKILL'd run can otherwise leave behind iceoryx2
 # nodes, /dev/shm slot segments, pid/socket files, and stale recordings that
@@ -138,6 +144,38 @@ cleanup_state() {
   shopt -u nullglob
 }
 
+# The test runner never compiles anything — it only checks the installed
+# neuracore wheel bundles the Rust daemon. The probe runs from outside the
+# repo root so `import neuracore` resolves to site-packages, not the in-tree
+# package (pytest gets --import-mode=importlib for the same reason).
+check_installed_bundle() {
+  if ! (cd "$script_dir" && python3 - <<'PY'
+import importlib.util
+import os
+import sys
+
+try:
+    from neuracore.data_daemon.rust_selection import rust_daemon_binary_path
+except ImportError as error:
+    sys.exit(f"neuracore is not installed: {error}")
+
+binary = rust_daemon_binary_path()
+if binary is None:
+    sys.exit("installed neuracore does not bundle the data-daemon binary")
+if not os.access(binary, os.X_OK):
+    sys.exit(f"daemon binary is not executable: {binary}")
+if importlib.util.find_spec("neuracore.data_daemon._data_bridge") is None:
+    sys.exit("installed neuracore is missing the _data_bridge extension")
+print(f"bundled data-daemon binary: {binary}")
+PY
+  ); then
+    log "error: the installed neuracore wheel does not bundle the Rust daemon"
+    log "build + install it with: bash rust/scripts/build_wheel_artefacts.sh && pip install ."
+    exit 1
+  fi
+  log "using the Rust daemon bundled in the installed neuracore wheel"
+}
+
 # ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
@@ -217,6 +255,7 @@ run_pytest_phase() {
   pytest \
     --exitfirst \
     --tb=short \
+    --import-mode=importlib \
     -vv \
     -o log_cli=true \
     -o log_cli_level=DEBUG \
@@ -259,6 +298,7 @@ run_tests() {
 
 main() {
   log "==== integration test run starting ===="
+  check_installed_bundle
   stop_daemon
   cleanup_state
 
