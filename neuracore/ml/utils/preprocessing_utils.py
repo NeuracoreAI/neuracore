@@ -10,9 +10,10 @@ from omegaconf import DictConfig
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
-from neuracore.ml.preprocessing.base import PreprocessingMethod
-
-PreprocessingConfiguration = dict[DataType, list[PreprocessingMethod]]
+from neuracore.ml.preprocessing.base import (
+    PreprocessingConfiguration,
+    PreprocessingMethod,
+)
 
 
 def validate_preprocessing_configuration(
@@ -56,10 +57,10 @@ def resolve_preprocessing_config(
     from hydra.utils import instantiate
 
     preprocessing_methods = instantiate(config_dict, _convert_="all")
-    resolved_config = {
+    resolved_config = PreprocessingConfiguration({
         DataType(data_type): methods
         for data_type, methods in preprocessing_methods.items()
-    }
+    })
     validate_preprocessing_configuration(preprocessing_config=resolved_config)
     return resolved_config
 
