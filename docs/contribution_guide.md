@@ -323,6 +323,32 @@ If you encounter issues with your algorithm:
 - When uploading as a ZIP, make sure your module imports are correctly structured
 
 
+## Development environment
+
+### Python
+
+```bash
+git clone https://github.com/neuracoreai/neuracore
+cd neuracore
+pip install -e .[dev,ml]
+pre-commit install
+```
+
+### Rust toolchain (data daemon)
+
+The data daemon is being rewritten in Rust under [rust/](../rust/). The pre-commit configuration runs `cargo fmt` and `cargo clippy` against the `data_daemon` crate, and CI ([.github/workflows/rust-data-daemon.yaml](../.github/workflows/rust-data-daemon.yaml)) builds and tests it on every PR that touches `rust/data_daemon/**`.
+
+The hooks invoke `cargo` from your `PATH` (`language: system`), so you need a working Rust toolchain locally to commit changes that touch the crate. Install one via [rustup](https://rustup.rs/):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup component add rustfmt clippy
+```
+
+If you do not touch any file under `rust/data_daemon/`, the cargo hooks are skipped and rustup is not required.
+
+For the full developer workflow on the Rust crates — workspace layout, build/test/lint commands, running the daemon locally, the PyO3 producer cdylib, and SQLite state inspection — see [rust_data_daemon_development.md](rust_data_daemon_development.md).
+
 ## Release Process
 
 ### Branch Strategy

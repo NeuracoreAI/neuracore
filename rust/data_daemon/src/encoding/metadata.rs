@@ -1,0 +1,299 @@
+//! Sidecar `trace.json` for video traces.
+//!
+//! Each frame's metadata dictionary is captured as it arrives, and on finalize
+//! the writer flushes a compact JSON array alongside the mp4 outputs.
+//!
+//! On-disk byte layout:
+//!
+//! - One JSON array; `serde_json` default rendering, no whitespace.
+//! - On finish, each entry gets `"frame_idx": <index>` and `"frame": null`
+//!   added/overwritten — `frame_idx` is the 0-based position in the list and
+//!   `frame` is a base64 thumbnail slot the dashboard schema expects (always
+//!   null in the current pipeline, kept for forward compatibility).
+//! - Map insertion order is preserved (enabled by `preserve_order` on
+//!   `serde_json` in `data_daemon`'s `Cargo.toml`).
+
+use std::fs::OpenOptions;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use crate::storage::paths::TRACE_JSON_FILENAME;
+
+/// Errors raised by [`VideoMetadataAccumulator`].
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataError {
+    /// Failed to create the parent directory or open the output file.
+    #[error("failed to open metadata file {path}: {source}")]
+    Open {
+        /// Path that failed to open.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+    /// Failed to serialise the accumulated metadata array.
+    #[error("failed to serialise video metadata: {0}")]
+    Serialize(#[source] serde_json::Error),
+    /// Failed to write buffered bytes to disk.
+    #[error("failed to write metadata file {path}: {source}")]
+    Write {
+        /// Path being written.
+        path: PathBuf,
+        /// Underlying I/O error.
+        #[source]
+        source: io::Error,
+    },
+}
+
+/// Accumulator for per-frame metadata dictionaries.
+///
+/// Construction is allocation-only; the file isn't touched until
+/// [`finish`](Self::finish) runs, which streams the sidecar entry-by-entry to a
+/// `BufWriter` (no whole-array serialised intermediate) after both mp4 encoders
+/// close. Buffering the entry maps in memory is acceptable here because video
+/// metadata is tiny relative to the raw frame payloads — a 30 minute capture at
+/// 30 fps caps out around 50 K entries with a handful of small numeric fields
+/// each.
+#[derive(Debug, Default)]
+pub struct VideoMetadataAccumulator {
+    entries: Vec<Map<String, Value>>,
+}
+
+impl VideoMetadataAccumulator {
+    /// Construct an empty accumulator.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of metadata entries currently buffered.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// True when no entries have been recorded yet.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Record one frame's metadata. The supplied map is taken by value so the
+    /// caller cannot accidentally mutate it after recording, and so we avoid
+    /// an extra clone on the hot path. The `"frame"` slot is initialised to
+    /// `null` immediately; `finish` re-stamps it alongside `frame_idx`.
+    pub fn record_frame(&mut self, mut entry: Map<String, Value>) {
+        entry.insert("frame".to_string(), Value::Null);
+        self.entries.push(entry);
+    }
+
+    /// Convenience: record a frame whose metadata is provided as a
+    /// `serde_json::Value`. Non-object values (numbers, strings, arrays) are
+    /// dropped silently.
+    #[allow(dead_code)]
+    pub fn record_value(&mut self, value: Value) {
+        match value {
+            Value::Object(map) => self.record_frame(map),
+            Value::Array(items) => {
+                for item in items {
+                    match item {
+                        Value::Object(map) => self.record_frame(map),
+                        _ => tracing::trace!("ignoring non-object metadata list item"),
+                    }
+                }
+            }
+            _ => {
+                tracing::trace!("ignoring non-object metadata entry");
+            }
+        }
+    }
+
+    /// Flush the accumulated metadata to `{output_dir}/trace.json`.
+    ///
+    /// Returns the total bytes written. The directory is created if missing.
+    pub fn finish(self, output_dir: &Path) -> Result<u64, MetadataError> {
+        self.finish_with_filename(output_dir, TRACE_JSON_FILENAME)
+    }
+
+    /// Variant of [`finish`](Self::finish) that lets the caller override the
+    /// sidecar filename. Used by tests; the production code always uses
+    /// [`TRACE_JSON_FILENAME`].
+    pub fn finish_with_filename(
+        mut self,
+        output_dir: &Path,
+        filename: &str,
+    ) -> Result<u64, MetadataError> {
+        std::fs::create_dir_all(output_dir).map_err(|source| MetadataError::Open {
+            path: output_dir.to_path_buf(),
+            source,
+        })?;
+        let path = output_dir.join(filename);
+
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|source| MetadataError::Open {
+                path: path.clone(),
+                source,
+            })?;
+        let mut writer = BufWriter::new(file);
+
+        // Stream the array one entry at a time rather than building the whole
+        // serialised blob in a single `serde_json::to_vec` of every entry — for
+        // the doc's 50 K-entry figure that intermediate is multiple MB allocated
+        // just to be copied straight to the writer. Concatenating compact
+        // per-entry encodings with `,` separators inside `[` … `]` is byte-for-
+        // byte identical to serialising the array as a whole.
+        let mut written: u64 = 0;
+        let mut write = |bytes: &[u8]| -> Result<(), MetadataError> {
+            writer
+                .write_all(bytes)
+                .map_err(|source| MetadataError::Write {
+                    path: path.clone(),
+                    source,
+                })?;
+            written += bytes.len() as u64;
+            Ok(())
+        };
+
+        write(b"[")?;
+        for (index, entry) in self.entries.iter_mut().enumerate() {
+            // `frame_idx` is the 0-based position; `frame` is the base64
+            // thumbnail slot the dashboard schema expects but the pipeline
+            // does not populate. Stamping both here keeps the sidecar
+            // well-formed even when the producer omitted them upstream.
+            entry.insert("frame_idx".to_string(), Value::from(index as u64));
+            entry.insert("frame".to_string(), Value::Null);
+
+            if index > 0 {
+                write(b",")?;
+            }
+            let entry_bytes = serde_json::to_vec(entry).map_err(MetadataError::Serialize)?;
+            write(&entry_bytes)?;
+        }
+        write(b"]")?;
+
+        writer.flush().map_err(|source| MetadataError::Write {
+            path: path.clone(),
+            source,
+        })?;
+        Ok(written)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    fn read_back(path: &Path) -> Vec<u8> {
+        std::fs::read(path).expect("read metadata file")
+    }
+
+    #[test]
+    fn empty_accumulator_writes_empty_array() {
+        let tempdir = TempDir::new().unwrap();
+        let accumulator = VideoMetadataAccumulator::new();
+        assert!(accumulator.is_empty());
+        let bytes = accumulator.finish(tempdir.path()).unwrap();
+        let written = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
+        assert_eq!(written, b"[]");
+        assert_eq!(bytes, written.len() as u64);
+    }
+
+    #[test]
+    fn fixture_matches_expected_video_trace_output() {
+        // Pins the exact sidecar byte layout:
+        //   - compact JSON (no whitespace, non-ASCII left unescaped)
+        //   - on every entry: `frame_idx` is the index, `frame` is null
+        //   - object insertion order is preserved
+        //
+        // Inputs intentionally exercise: integer + float timestamps, string
+        // values, nested objects, and an entry whose `frame` key was already
+        // present (overwrite path).
+        let tempdir = TempDir::new().unwrap();
+        let mut accumulator = VideoMetadataAccumulator::new();
+
+        let mut entry_a = Map::new();
+        entry_a.insert("timestamp".to_string(), json!(1.5));
+        entry_a.insert("width".to_string(), json!(640));
+        entry_a.insert("height".to_string(), json!(480));
+        accumulator.record_frame(entry_a);
+
+        let mut entry_b = Map::new();
+        entry_b.insert("timestamp".to_string(), json!(2));
+        entry_b.insert("source".to_string(), json!("rgb-camera"));
+        entry_b.insert("extra".to_string(), json!({"sequence": 17, "flag": true}));
+        // Pre-existing `frame` payload — `finish` must overwrite it with null;
+        // this test confirms that.
+        entry_b.insert("frame".to_string(), json!("stale"));
+        accumulator.record_frame(entry_b);
+
+        let written_bytes = accumulator.finish(tempdir.path()).unwrap();
+        let actual = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
+
+        let expected = br#"[{"timestamp":1.5,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
+        assert_eq!(
+            actual, expected,
+            "metadata sidecar bytes diverged from expected fixture"
+        );
+        assert_eq!(written_bytes, expected.len() as u64);
+    }
+
+    #[test]
+    fn frame_idx_starts_at_zero_and_is_contiguous() {
+        let tempdir = TempDir::new().unwrap();
+        let mut accumulator = VideoMetadataAccumulator::new();
+        for index in 0..5 {
+            let mut entry = Map::new();
+            entry.insert("timestamp".to_string(), json!(index as f64 * 0.033));
+            accumulator.record_frame(entry);
+        }
+        assert_eq!(accumulator.len(), 5);
+        accumulator.finish(tempdir.path()).unwrap();
+
+        let bytes = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        let array = parsed.as_array().unwrap();
+        assert_eq!(array.len(), 5);
+        for (index, entry) in array.iter().enumerate() {
+            assert_eq!(entry["frame_idx"], json!(index as u64));
+            assert!(entry["frame"].is_null());
+        }
+    }
+
+    #[test]
+    fn record_value_flattens_array_payloads() {
+        // The producer is allowed to batch several frames into one envelope,
+        // so a list payload must be flattened: the accumulator records each
+        // contained dict as its own entry.
+        let tempdir = TempDir::new().unwrap();
+        let mut accumulator = VideoMetadataAccumulator::new();
+        accumulator.record_value(json!([
+            {"timestamp": 0.1},
+            {"timestamp": 0.2},
+            42,           // non-object — dropped
+            {"timestamp": 0.3},
+        ]));
+        assert_eq!(accumulator.len(), 3);
+        accumulator.finish(tempdir.path()).unwrap();
+
+        let bytes = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(parsed.as_array().unwrap().len(), 3);
+        assert_eq!(parsed[2]["timestamp"], json!(0.3));
+    }
+
+    #[test]
+    fn record_value_ignores_scalar_payloads() {
+        let mut accumulator = VideoMetadataAccumulator::new();
+        accumulator.record_value(json!(42));
+        accumulator.record_value(json!("ignored"));
+        accumulator.record_value(json!(null));
+        assert!(accumulator.is_empty());
+    }
+}

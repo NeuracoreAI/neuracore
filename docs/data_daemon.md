@@ -15,7 +15,7 @@ Profiles are optional. If you do not use a named profile, the daemon uses the de
 - How to run the daemon (CLI or from a script)
 - How profiles work (optional) and where they are stored
 - The configuration fields you can set
-- Environment variables that control DB path, recordings root, and upload concurrency
+- Environment variables that control DB path, recordings root, and other runtime settings
 - The order of precedence (defaults, profile, environment variables, CLI)
 - What happens to old daemon databases at startup (automatic schema migration)
 - A full CLI reference for the commands currently in use
@@ -32,13 +32,21 @@ It does not explain internal implementation details.
 pip install -e .
 ```
 
-Optional, but recommended for video performance:
+Recommended for video recording, and **required** when running the Rust daemon
+(`NCD_RUST_DAEMON=1`):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
 ```
 
-The data daemon prefers the `ffmpeg` CLI encoder for recording. If the binary is not installed or encoder init fails, it automatically falls back to PyAV.
+Both daemons encode video with the `ffmpeg` CLI, but they differ when `ffmpeg`
+is missing or fails to initialise:
+- The **Rust daemon** shells out to `ffmpeg` and runs a preflight at startup; if
+  the binary is missing or the build is incompatible it fails fast with a clear
+  message rather than starting and dropping every video recording. Install
+  `ffmpeg` before launching.
+- The **legacy Python daemon** prefers the `ffmpeg` CLI but automatically falls
+  back to PyAV when `ffmpeg` is unavailable or the encoder fails to initialise.
 
 ### 2) Launch the daemon
 
@@ -115,13 +123,18 @@ When you run:
 neuracore data-daemon launch
 ```
 
-the CLI starts the daemon as a separate Python process by running:
+the CLI launches the daemon as a separate background process. There are two
+daemon implementations and the launcher picks one based on the `NCD_RUST_DAEMON`
+flag (see [rust_data_daemon_development.md](rust_data_daemon_development.md)):
 
-```text
-python -m neuracore.data_daemon.runner_entry
-```
+- **Rust daemon** — when `NCD_RUST_DAEMON` is truthy,
+  the launcher `exec`s the bundled native binary shipped in the wheel at
+  `neuracore/data_daemon/bin/data-daemon`. This is the implementation described
+  throughout this guide.
+- **Legacy Python daemon (default)** — when `NCD_RUST_DAEMON` is unset or not
+  truthy, the launcher runs the Python implementation instead.
 
-That daemon process:
+Either daemon process:
 - boots the internal components it needs
 - starts its main loop
 - stays running until you stop it (or the machine shuts down)
@@ -132,20 +145,16 @@ You may see simple messages when it stops:
 
 ### Startup and schema migration
 
-On startup, the daemon initializes the SQLite store and ensures schema compatibility.
+On startup the daemon opens its SQLite store (WAL mode) and applies any pending
+schema migrations before serving requests.
 
-If an older single-table schema is detected (legacy `traces.status` format), the daemon
-automatically migrates data to the current schema:
-
-- `traces` rows are transformed into lifecycle fields:
-  - `write_status`
-  - `registration_status`
-  - `upload_status`
-- `recordings` rows are generated per unique `recording_id`
-- Existing trace metadata/bytes/error fields are preserved
-- Migration runs before normal startup reconciliation
-
-Migration runs once per DB file. After a successful migration, startup continues normally.
+The Rust daemon's schema is defined by the SQL migrations under
+[rust/data_daemon/migrations/](../rust/data_daemon/migrations/) and applied
+automatically with `sqlx::migrate!`. A fresh database is created and migrated on
+first launch; an existing one has only the not-yet-applied migrations run. There
+is no legacy single-table conversion — the migrations are the single source of
+truth for the schema. To inspect the live database see
+[rust_data_daemon_development.md#sqlite-state-inspection](rust_data_daemon_development.md#sqlite-state-inspection).
 
 ---
 
@@ -290,11 +299,6 @@ export NEURACORE_DAEMON_DB_PATH=/workspaces/neuracore/data_daemon_state.db
 export NEURACORE_DAEMON_RECORDINGS_ROOT=/workspaces/neuracore/recordings
 ```
 
-Recommended upload concurrency:
-- Most machines: `5-10`
-- Start at `5`, increase only if CPU/network/disk are stable
-- Very high values can increase retries, memory pressure, and shutdown latency
-
 ---
 
 ## CLI reference
@@ -366,8 +370,10 @@ Notes:
 ### `neuracore data-daemon launch`
 
 ```bash
-neuracore data-daemon launch [--profile <name>] [--background]
+neuracore data-daemon launch [--profile <name>] [--background] [--debug]
 ```
+
+`--debug` raises the log level (equivalent to setting `NDD_DEBUG=1`).
 
 Examples:
 
@@ -393,6 +399,18 @@ neuracore data-daemon status
 
 ```bash
 neuracore data-daemon stop
+```
+
+### `neuracore data-daemon reset`
+
+Stops the daemon (if running) and removes **all** of its local state: the
+recordings tree, the SQLite database, the PID file, and the shared-memory
+artefacts. This is destructive and cannot be undone — use it to return a wedged
+host to a clean slate.
+
+```bash
+neuracore data-daemon reset          # prompts for confirmation
+neuracore data-daemon reset --yes    # skip the prompt (for scripts)
 ```
 
 ---
@@ -463,17 +481,23 @@ neuracore data-daemon launch
 
 ### Which video encoder backend is being used
 
-The recording encoder selects backend at runtime:
-- Uses `ffmpeg` CLI when `ffmpeg` is available on `PATH`
-- Falls back to PyAV when `ffmpeg` is unavailable or fails to initialize
+Both daemons encode video with `ffmpeg`, but they handle a missing or broken
+`ffmpeg` differently:
+- **Rust daemon** (`NCD_RUST_DAEMON=1`) — verifies `ffmpeg` at startup. If the
+  binary is missing from `PATH`, or the local build cannot run the encode the
+  daemon needs, the preflight fails and the daemon refuses to start (rather than
+  starting and silently dropping every video recording).
+- **Legacy Python daemon** (default) — uses the `ffmpeg` CLI when it is on
+  `PATH` and falls back to PyAV when `ffmpeg` is unavailable or fails to
+  initialise.
 
-Quick check:
+Confirm `ffmpeg` is installed and runnable:
 
 ```bash
 ffmpeg -version
 ```
 
-If this command succeeds, the daemon will use the FFmpeg backend for new recordings.
+If that command fails, install `ffmpeg` (see [Quick start](#1-install-from-repo-root)) for the Rust daemon, or rely on the PyAV fallback under the Python daemon.
 
 ### Migration issues on startup
 
