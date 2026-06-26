@@ -1,4 +1,4 @@
-name: Integration ML Training Flow - Staging
+name: Integration ML - Training Flow (Staging)
 
 on:
   schedule:

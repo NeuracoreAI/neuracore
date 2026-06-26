@@ -1,4 +1,4 @@
-name: Integration ML Algorithm Performance - Start Training (Production)
+name: Integration ML - Algorithm Performance Start Training (Production)
 
 on:
   schedule:

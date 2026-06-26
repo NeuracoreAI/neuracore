@@ -1,4 +1,4 @@
-name: Integration Importer (Production)
+name: Integration PF - Importer (Production)
 
 on:
   schedule:

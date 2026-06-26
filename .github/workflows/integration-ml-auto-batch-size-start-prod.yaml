@@ -1,4 +1,4 @@
-name: Integration ML Auto Batch Size - Production
+name: Integration ML - Auto Batch Size (Production)
 
 on:
   schedule:

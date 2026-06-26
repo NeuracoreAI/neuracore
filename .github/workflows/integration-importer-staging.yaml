@@ -1,4 +1,4 @@
-name: Integration Importer (Staging)
+name: Integration PF - Importer (Staging)
 
 on:
   schedule:

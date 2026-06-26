@@ -1,4 +1,4 @@
-name: Integration ML Training Flow - Production
+name: Integration ML - Training Flow (Production)
 
 on:
   schedule:
