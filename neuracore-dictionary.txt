@@ -315,6 +315,7 @@ rotvec
 roundoff
 rowwise
 rtype
+savez
 Safetensors
 schematypens
 SCTP

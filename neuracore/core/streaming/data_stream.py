@@ -14,7 +14,8 @@ from abc import ABC
 from dataclasses import dataclass
 
 import numpy as np
-from neuracore_types import CameraData, DataType, NCData
+from neuracore_types import CameraData, DataType, NCData, PointCloudData
+from neuracore_types.nc_data.point_cloud_data import encode_point_cloud_frame_parts
 
 from neuracore.data_daemon.communications_management.producer import ProducerChannel
 
@@ -252,6 +253,40 @@ class JsonDataStream(DataStream):
         # Serialize to JSON bytes and send to daemon
         json_bytes = json.dumps(data.model_dump(mode="json")).encode("utf-8")
         self._send_to_daemon(json_bytes)
+
+
+class PointCloudDataStream(DataStream):
+    """Stream that sends point cloud data with a JSON metadata header and raw arrays."""
+
+    def __init__(self, data_type_name: str):
+        """Initialize the point cloud data stream.
+
+        Args:
+            data_type_name: Name of the point cloud stream
+        """
+        super().__init__(data_type=DataType.POINT_CLOUDS, stream_name=data_type_name)
+
+    def log(self, data: PointCloudData) -> None:
+        """Log point cloud data using the binary wire format.
+
+        Args:
+            data: Point cloud data to log
+        """
+        self._latest_data = data
+        if not self.is_recording():
+            return
+
+        header, metadata_json, points_view, rgb_view = encode_point_cloud_frame_parts(
+            data
+        )
+        total_bytes = len(header) + len(metadata_json) + len(points_view)
+        parts: tuple[bytes | memoryview, ...]
+        if rgb_view is not None:
+            total_bytes += len(rgb_view)
+            parts = (header, metadata_json, points_view, rgb_view)
+        else:
+            parts = (header, metadata_json, points_view)
+        self._send_to_daemon_parts(parts, total_bytes=total_bytes)
 
 
 class VideoDataStream(DataStream):

@@ -175,6 +175,7 @@ class UploadManager:
         content_type_map = {
             ".mp4": "video/mp4",
             ".json": "application/json",
+            ".bin": "application/octet-stream",
         }
         return content_type_map.get(file.suffix.lower(), "application/octet-stream")
 
