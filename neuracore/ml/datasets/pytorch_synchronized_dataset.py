@@ -337,46 +337,58 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         max_start = max(0, episode_length)
         return np.random.randint(0, max_start - 1)
 
-    def _get_output_sync_points(
+    def _load_projected_output_sync_points(
         self,
         synced_recording: SynchronizedRecording,
         timestep: int,
-        data_type: DataType,
         embodiment_description: EmbodimentDescription,
     ) -> list[SynchronizedPoint]:
-        """Return output sync points for *data_type* at *timestep*.
+        """Load the superset window for all output data types.
 
-        Target output types are aligned with the input timestep.
-        Other outputs use the next timestep onward.
+        Fetches ``[timestep, timestep + 1 + horizon]`` once so target types
+        (aligned to the input step) and non-target types (next step onward)
+        can share the same loaded sync points.
         """
-        if data_type in TARGET_OUTPUT_DATA_TYPES:
-            start = timestep
-        else:
-            start = timestep + 1
-
         output_sync_points = cast(
             list[SynchronizedPoint],
-            synced_recording[start : start + self.output_prediction_horizon],
+            synced_recording[timestep : timestep + 1 + self.output_prediction_horizon],
         )
-        output_sync_points = [
+        return [
             self._project_sync_point_to_embodiment_description(
                 sync_point, embodiment_description
             )
             for sync_point in output_sync_points
         ]
 
-        if not output_sync_points:
-            recording_name = getattr(synced_recording, "name", "recording")
+    @staticmethod
+    def _output_sync_points_for_data_type(
+        output_sync_points: list[SynchronizedPoint],
+        data_type: DataType,
+        output_prediction_horizon: int,
+        *,
+        timestep: int,
+        recording_name: str,
+    ) -> list[SynchronizedPoint]:
+        """Select the per-type output window from a preloaded sync-point slice.
+
+        Target output types are aligned with the input timestep.
+        Other outputs use the next timestep onward.
+        """
+        window_start = 0 if data_type in TARGET_OUTPUT_DATA_TYPES else 1
+        aligned_output_sync_points = list(
+            output_sync_points[window_start : window_start + output_prediction_horizon]
+        )
+
+        if not aligned_output_sync_points:
             raise ValueError(
                 f"No output sync points available for data type {data_type.value} "
                 f"at timestep {timestep} in recording '{recording_name}'"
             )
 
-        # Padding for future sync points
-        for _ in range(self.output_prediction_horizon - len(output_sync_points)):
-            output_sync_points.append(output_sync_points[-1])
+        for _ in range(output_prediction_horizon - len(aligned_output_sync_points)):
+            aligned_output_sync_points.append(aligned_output_sync_points[-1])
 
-        return output_sync_points
+        return aligned_output_sync_points
 
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
@@ -397,7 +409,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if timestep is None:
             timestep = self._get_timestep(episode_length)
 
-        sync_point = cast(SynchronizedPoint, synced_recording[timestep])
+        input_sync_point = cast(SynchronizedPoint, synced_recording[timestep])
 
         # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
@@ -408,9 +420,16 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         robot_merged_embodiment_description: EmbodimentDescription = (
             self._convert_to_embodiment_description(robot_embodiment_union)
         )
-        sync_point = self._project_sync_point_to_embodiment_description(
-            sync_point, robot_merged_embodiment_description
+        input_sync_point = self._project_sync_point_to_embodiment_description(
+            input_sync_point, robot_merged_embodiment_description
         )
+
+        output_sync_points = self._load_projected_output_sync_points(
+            synced_recording=synced_recording,
+            timestep=timestep,
+            embodiment_description=robot_merged_embodiment_description,
+        )
+        recording_name = getattr(synced_recording, "name", "recording")
 
         # Sort out Inputs
         inputs: dict[DataType, list[BatchedNCData]] = {}
@@ -445,7 +464,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 else:
                     # If the current robot has a name for this index, use it to
                     # get the data.
-                    nc_data = sync_point.data[data_type][name]
+                    nc_data = input_sync_point.data[data_type][name]
                     batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
                     input_mask_values[index] = 1.0
 
@@ -477,6 +496,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         max_items_trained_on = index
 
             max_items_trained_on += 1
+            aligned_output_sync_points = self._output_sync_points_for_data_type(
+                output_sync_points,
+                data_type,
+                self.output_prediction_horizon,
+                timestep=timestep,
+                recording_name=recording_name,
+            )
             output_mask_values: list[float] = [0.0] * max_items_trained_on
             for index in range(max_items_trained_on):
                 name = self.output_cross_embodiment_description[robot_id][
@@ -490,18 +516,11 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         time_steps=self.output_prediction_horizon,
                     )
                 else:
-                    output_sync_points = self._get_output_sync_points(
-                        synced_recording=synced_recording,
-                        timestep=timestep,
-                        data_type=data_type,
-                        embodiment_description=robot_merged_embodiment_description,
-                    )
-
                     # If the current robot has a name for this index,
                     # use it to get the data.
                     nc_data_list = [
                         output_sp.data[data_type][name]
-                        for output_sp in output_sync_points
+                        for output_sp in aligned_output_sync_points
                     ]
                     batched_nc_data = batched_nc_data_class.from_nc_data_list(
                         nc_data_list
