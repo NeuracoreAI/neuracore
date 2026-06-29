@@ -1,5 +1,6 @@
 """Synchronized recording iterator."""
 
+import json
 import logging
 import os
 import shutil
@@ -9,7 +10,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import wget
@@ -17,10 +18,15 @@ from neuracore_types import (
     CameraData,
     CrossEmbodimentUnion,
     DataType,
+    PointCloudData,
     SynchronizationDetails,
 )
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import SynchronizedPoint, SynchronizeRecordingRequest
+from neuracore_types.nc_data.point_cloud_data import (
+    POINT_CLOUD_TRACE_BIN_FILENAME,
+    decode_point_cloud_frame,
+)
 from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
@@ -122,24 +128,21 @@ class SynchronizedRecording:
         response.raise_for_status()
         return SynchronizedEpisodeModel.model_validate(response.json())
 
-    def _get_video_url(self, camera_type: DataType, camera_id: str) -> str:
-        """Get streaming URL for a specific camera's video data.
+    def _get_recording_file_url(self, filepath: str) -> str:
+        """Get a signed download URL for a file in this recording.
 
         Args:
-            camera_type: Type of camera (e.g., "rgbs", "depths").
-            camera_id: Unique identifier for the camera.
+            filepath: Recording-root-relative path
+                (e.g. ``rgbs/cam1/lossless.mp4``).
 
         Returns:
-            URL string for downloading the video file.
-
-        Raises:
-            requests.HTTPError: If the API request fails.
+            URL string for downloading the file.
         """
         auth = get_auth()
         session = thread_local_session()
         response = session.get(
             f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
-            params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
+            params={"filepath": filepath},
             headers=auth.get_headers(),
         )
         response.raise_for_status()
@@ -247,7 +250,9 @@ class SynchronizedRecording:
                 staging_dir.mkdir()
                 video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
                 wget.download(
-                    self._get_video_url(camera_type, camera_id),
+                    self._get_recording_file_url(
+                        f"{camera_type.value}/{camera_id}/lossless.mp4"
+                    ),
                     str(video_location),
                     bar=None if self._suppress_wget_progress else wget.bar_thermometer,
                 )
@@ -362,17 +367,115 @@ class SynchronizedRecording:
 
         return result
 
-    def _insert_camera_data_intro_sync_point(
+    def _download_bytes(self, url: str) -> bytes:
+        """Download a remote file and return its contents."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            destination = Path(temp_dir) / "download.bin"
+            wget.download(
+                url,
+                str(destination),
+                bar=None if self._suppress_wget_progress else wget.bar_thermometer,
+            )
+            return destination.read_bytes()
+
+    def _cache_point_cloud_frames_to_disk(
+        self, sensor_id: str, sensor_root: Path
+    ) -> None:
+        """Download trace files and cache decoded point cloud frames to disk."""
+        trace_prefix = f"{DataType.POINT_CLOUDS.value}/{sensor_id}"
+        trace_json = json.loads(
+            self._download_bytes(
+                self._get_recording_file_url(f"{trace_prefix}/trace.json")
+            ).decode("utf-8")
+        )
+        if not isinstance(trace_json, list):
+            raise RuntimeError("Point cloud trace.json must be a JSON array")
+
+        trace_bin_path = sensor_root / POINT_CLOUD_TRACE_BIN_FILENAME
+        if trace_bin_path.exists():
+            trace_bin = trace_bin_path.read_bytes()
+        else:
+            trace_bin = self._download_bytes(
+                self._get_recording_file_url(
+                    f"{trace_prefix}/{POINT_CLOUD_TRACE_BIN_FILENAME}"
+                )
+            )
+
+        for entry_idx, entry in enumerate(trace_json):
+            if not isinstance(entry, dict):
+                raise RuntimeError("Invalid point cloud trace frame metadata")
+
+            frame_idx = entry.get("frame_idx", entry_idx)
+            frame_file = sensor_root / f"{frame_idx}.npz"
+            if frame_file.exists():
+                continue
+
+            offset = entry.get("offset")
+            length = entry.get("length")
+            if not isinstance(offset, int) or not isinstance(length, int):
+                raise RuntimeError(
+                    f"Invalid point cloud frame offset/length for frame_idx={frame_idx}"
+                )
+            decoded = decode_point_cloud_frame(trace_bin[offset : offset + length])
+
+            save_kwargs: dict[str, Any] = {"points": decoded.points}
+            if decoded.rgb_points is not None:
+                save_kwargs["rgb_points"] = decoded.rgb_points
+            np.savez_compressed(frame_file, **save_kwargs)
+
+    def _get_point_cloud_from_disk_cache(
+        self, point_cloud_data: dict[str, PointCloudData]
+    ) -> dict[str, PointCloudData]:
+        """Load point cloud arrays from disk cache."""
+        result: dict[str, PointCloudData] = {}
+        for sensor_id, pc_data in point_cloud_data.items():
+            sensor_root = (
+                self.cache_dir / f"{self.id}" / DataType.POINT_CLOUDS.value / sensor_id
+            )
+            lock_file = sensor_root / ".recording.lock"
+            self._wait_for_lock_release(lock_file, sensor_root)
+
+            frame_file = sensor_root / f"{pc_data.frame_idx}.npz"
+            if not sensor_root.exists() or not frame_file.exists():
+                sensor_root.mkdir(parents=True, exist_ok=True)
+                self._download_point_cloud_and_cache_frames_to_disk(
+                    sensor_id, sensor_root
+                )
+
+            frame_file = sensor_root / f"{pc_data.frame_idx}.npz"
+            with np.load(frame_file) as cached:
+                points = cached["points"]
+                rgb_points = cached["rgb_points"] if "rgb_points" in cached else None
+
+            result[sensor_id] = pc_data.model_copy(
+                update={"points": points, "rgb_points": rgb_points}
+            )
+        return result
+
+    def _download_point_cloud_and_cache_frames_to_disk(
+        self, sensor_id: str, point_cloud_cache_path: Path
+    ) -> None:
+        """Download point cloud trace files and cache frames to disk."""
+        lock_file = point_cloud_cache_path / ".recording.lock"
+        lock_acquired = self._create_decoding_lock(lock_file, sensor_id)
+
+        try:
+            self.cache_manager.ensure_space_available()
+            self._cache_point_cloud_frames_to_disk(sensor_id, point_cloud_cache_path)
+        finally:
+            if lock_acquired:
+                self._delete_decoding_lock(lock_file)
+
+    def _load_sync_point_payloads(
         self, sync_point: SynchronizedPoint
     ) -> SynchronizedPoint:
-        """Populate video frames for a given sync point.
+        """Load lazy sensor payloads from disk cache for a sync point.
 
         Args:
-            sync_point: SynchronizedPoint object containing
-                camera data (without frames).
+            sync_point: Sync point with metadata-only camera and point cloud entries.
 
         Returns:
-            A new SynchronizedPoint object with populated video frames.
+            Sync point with camera frames and point cloud arrays populated.
         """
         # Build new data dict with loaded frames
         new_data = {}
@@ -385,6 +488,8 @@ class SynchronizedRecording:
                 new_data[data_type] = self._get_frame_from_disk_cache(
                     DataType.DEPTH_IMAGES, data_dict, rgb_to_depth_storage
                 )
+            elif data_type == DataType.POINT_CLOUDS:
+                new_data[data_type] = self._get_point_cloud_from_disk_cache(data_dict)
             else:
                 # create NEW instances to avoid shared references
                 new_data[data_type] = {
@@ -408,8 +513,7 @@ class SynchronizedRecording:
                 for the specified index.
         """
         sync_point = self._episode_synced.observations[idx]
-        sync_point = self._insert_camera_data_intro_sync_point(sync_point)
-        return sync_point
+        return self._load_sync_point_payloads(sync_point)
 
     def __iter__(self) -> "SynchronizedRecording":
         """Initialize iteration over the episode.
