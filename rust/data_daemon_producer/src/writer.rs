@@ -62,14 +62,33 @@ use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 /// first (see [`should_flush_chunk`]). Small frames never reach 256 MiB
 /// mid-recording, so the frame cap is what bounds the chunk's announcement
 /// envelope to one commands slice.
+///
+/// One chunk's worth is also the in-RAM writer-queue ceiling
+/// ([`WRITER_QUEUE_MAX_BYTES`]): changing this size moves both the chunk
+/// granularity *and* the producer's backpressure headroom.
 const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Backpressure cap for the writer's frame queue. A transient disk stall is
-/// absorbed by buffering frames up to this many bytes before `log_frame`
-/// blocks; only a *sustained* overload (the writer genuinely can't keep up)
-/// propagates backpressure to the caller. 64 MiB holds ~a second of a
-/// multi-camera 256×256@30 workload while staying small next to a worker's RSS.
-const WRITER_QUEUE_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Backpressure cap for the writer's frame queue. `log_frame` copies a frame in
+/// and returns; the background writer thread drains the queue to disk, so the
+/// caller blocks only once the queue is *full*. The cap is therefore sized by
+/// the writer-side stall it lets the caller ride out before `log_rgb` slows.
+///
+/// Those stalls are the kernel's system-wide `balance_dirty_pages` throttle —
+/// hundreds of ms once dirty pages cross `vm.dirty_ratio`, driven by *any*
+/// process on the host (the daemon's ffmpeg transcodes, other tenants) and not
+/// preventable by the producer. So size by drain time: at the heaviest workload
+/// the suite runs — 1080p RGB @ 60 fps ≈ 356 MiB/s per camera — one chunk's
+/// 256 MiB buys ≈ 0.7 s, enough to absorb the ~0.6-0.8 s stalls seen in
+/// practice. The old 64 MiB bought only ~0.17 s and was overrun.
+///
+/// The queue holds *raw* RGB ([`FrameJob::data`]) — PNG-encoding happens after
+/// dequeue — so PNG shrinks what hits the disk but not the queue-fill rate
+/// during a stall; the raw sizing stands. One chunk is also the deliberate
+/// ceiling: this anonymous RAM competes with the page cache, so a larger queue
+/// would shrink the dirty headroom and worsen the very throttle it absorbs.
+/// Sustained overload is bounded by the on-disk spool cap (`spool_max`, default
+/// 2 GiB).
+const WRITER_QUEUE_MAX_BYTES: usize = CHUNK_FLUSH_BYTES as usize;
 
 /// How often the writer rescans its spool inbox to refresh the on-disk backlog
 /// estimate and release frame-admission backpressure. Also bounds how long a
@@ -646,15 +665,19 @@ fn current_thread_id() -> i64 {
 /// Whether the in-progress chunk should be sealed now, checked after each
 /// appended frame. A chunk is rolled at the **lower** of two bounds:
 ///
-/// * [`CHUNK_FLUSH_BYTES`] — keeps the daemon's per-chunk encode cost amortised.
+/// * [`CHUNK_FLUSH_BYTES`] — measured against *logical* (decoded-equivalent)
+///   bytes, not the compressed on-disk size, so chunk granularity (and the
+///   daemon's per-chunk transcode cost) stays stable however well the PNG
+///   frames compress. Keying off the on-disk size would pack thousands of
+///   tiny PNG frames into one chunk and balloon that transcode unit.
 /// * [`MAX_VIDEO_CHUNK_FRAMES`] — keeps the chunk's `VideoChunkReady`
 ///   announcement within one `COMMANDS_MAX_PAYLOAD_BYTES` sample. Small frames
 ///   never reach the byte threshold mid-recording, so without the frame cap a
 ///   long recording accumulates one ever-growing chunk whose per-frame
 ///   timestamp vectors eventually overflow the commands slice — the
 ///   announcement then fails to publish and the recording's video is lost.
-fn should_flush_chunk(chunk_bytes: u64, frame_count: u32) -> bool {
-    chunk_bytes >= CHUNK_FLUSH_BYTES || frame_count >= MAX_VIDEO_CHUNK_FRAMES
+fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32) -> bool {
+    logical_chunk_bytes >= CHUNK_FLUSH_BYTES || frame_count >= MAX_VIDEO_CHUNK_FRAMES
 }
 
 /// Append one frame to the `(source, sensor)` in-progress NUT chunk, opening
@@ -836,7 +859,9 @@ fn append_frame_locked(
         }
     }
 
-    let bytes_after_write = {
+    // Roll on decoded-equivalent volume, not the on-disk byte count — see
+    // [`should_flush_chunk`] for why.
+    let logical_bytes_after_write = {
         let writer = state.nut_writer.as_mut().expect("opened immediately above");
         if let Err(error) = writer.write_frame(pts, payload) {
             tracing::warn!(
@@ -846,14 +871,14 @@ fn append_frame_locked(
             );
             return announcements;
         }
-        writer.bytes_written()
+        writer.logical_bytes()
     };
     state.last_pts_us = Some(pts);
     state.frame_count = state.frame_count.saturating_add(1);
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
 
-    if should_flush_chunk(bytes_after_write, state.frame_count) {
+    if should_flush_chunk(logical_bytes_after_write, state.frame_count) {
         if let Some(envelope) =
             flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
         {
@@ -1056,6 +1081,113 @@ mod tests {
             "a fresh chunk is reopened at the new geometry"
         );
         assert_eq!(state.frame_count, 1, "the new chunk holds the 4x4 frame");
+    }
+
+    #[test]
+    fn flush_seals_chunk_with_populated_announcement_and_resets_state() {
+        // The normal seal path the daemon routes on (size/frame-cap roll or the
+        // stop barrier). The announcement must carry every frame's identity in
+        // order, and the state must reset so the next frame opens a fresh chunk
+        // rather than re-announcing these frames.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        for (timestamp_ns, timestamp_s) in [(1_000, 0.0), (2_000, 0.001), (3_000, 0.002)] {
+            let announcements = append_frame_locked(
+                &mut state,
+                "r",
+                0,
+                "RGB",
+                "cam",
+                2,
+                2,
+                &frame,
+                timestamp_ns,
+                timestamp_s,
+            );
+            assert!(
+                announcements.is_empty(),
+                "frames below both bounds accumulate without sealing"
+            );
+        }
+        assert_eq!(state.frame_count, 3);
+
+        let envelope = flush_chunk_locked("r", 0, "RGB", "cam", &mut state)
+            .expect("an open chunk seals into an announcement");
+        match envelope {
+            Envelope::VideoChunkReady {
+                sensor_name,
+                width,
+                height,
+                frame_count,
+                byte_count,
+                frame_timestamps_ns,
+                frame_timestamps_s,
+                ..
+            } => {
+                assert_eq!(sensor_name.as_deref(), Some("cam"));
+                assert_eq!((width, height), (2, 2));
+                assert_eq!(frame_count, 3);
+                assert!(byte_count > 0, "a sealed chunk has a non-zero NUT file");
+                assert_eq!(frame_timestamps_ns, vec![1_000, 2_000, 3_000]);
+                assert_eq!(frame_timestamps_s, vec![0.0, 0.001, 0.002]);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+
+        // The seal takes the writer and clears the counters / per-frame vectors,
+        // so the next frame opens a brand-new chunk.
+        assert!(state.nut_writer.is_none());
+        assert_eq!(state.frame_count, 0);
+        assert!(state.frame_timestamps_ns.is_empty());
+        assert!(state.frame_timestamps_s.is_empty());
+    }
+
+    #[test]
+    fn flush_without_an_open_chunk_announces_nothing() {
+        // No frames written since the last seal → nothing to announce. Keeps the
+        // stop barrier's empty-source case from emitting a bogus zero-frame
+        // chunk.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        assert!(flush_chunk_locked("r", 0, "RGB", "cam", &mut state).is_none());
+    }
+
+    #[test]
+    fn non_monotonic_timestamps_do_not_drop_frames() {
+        // Capture timestamps can repeat or go backwards (clock coalescing,
+        // batched logging). Every frame must still be recorded: the writer bumps
+        // each PTS to stay strictly increasing rather than dropping the
+        // colliding frames.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        // Three frames at the same instant, then one that goes backwards.
+        for timestamp_ns in [5_000, 5_000, 5_000, 4_000] {
+            let _ = append_frame_locked(
+                &mut state,
+                "r",
+                0,
+                "RGB",
+                "cam",
+                2,
+                2,
+                &frame,
+                timestamp_ns,
+                0.0,
+            );
+        }
+        assert_eq!(
+            state.frame_count, 4,
+            "every frame is written despite non-monotonic capture timestamps"
+        );
+
+        match flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal") {
+            Envelope::VideoChunkReady { frame_count, .. } => assert_eq!(frame_count, 4),
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
     }
 
     /// A minimal video-frame message carrying `bytes` of payload.

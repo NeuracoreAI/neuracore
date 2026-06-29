@@ -371,6 +371,50 @@ impl RecordingBatch {
 mod tests {
     use super::*;
 
+    use crate::api::auth::StaticAuthProvider;
+    use crate::api::client::ApiClientOptions;
+    use crate::state::store::NewRecording;
+    use tempfile::TempDir;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn open_store() -> (SqliteStateStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    fn client(server: &MockServer) -> Arc<ApiClient> {
+        let auth = Arc::new(StaticAuthProvider::new("test"));
+        let mut options = ApiClientOptions::new(server.uri());
+        options.max_backoff = Duration::from_millis(10);
+        Arc::new(ApiClient::new(options, auth).unwrap())
+    }
+
+    /// A live-org receiver fixed at `org`. The sender is leaked so the channel
+    /// stays open for the test's duration (matches `progress.rs`).
+    fn org_rx(org: Option<&str>) -> OrgIdRx {
+        let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
+        Box::leak(Box::new(org_tx));
+        org_rx
+    }
+
+    /// Create a recording stamped with the given cloud `recording_id` so the
+    /// wiremock URL expectations resolve. Returns the local `recording_index`.
+    async fn seed_recording(store: &SqliteStateStore, cloud_recording_id: &str) -> i64 {
+        let recording = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(recording.recording_index, cloud_recording_id)
+            .await
+            .unwrap();
+        recording.recording_index
+    }
+
     #[test]
     fn batch_records_completion_flag() {
         let mut batch = RecordingBatch::new(1);
@@ -417,5 +461,274 @@ mod tests {
         assert!(batch.deadline() <= baseline);
         batch.add(StatusUpdate::completed(1, "t".to_string(), 1));
         assert!(batch.deadline() < baseline);
+    }
+
+    #[tokio::test]
+    async fn flush_batch_sends_coalesced_updates() {
+        // The whole point of the coordinator: the per-trace coalesced state
+        // reaches the backend in one batch-update PUT. The body asserts the
+        // coalescing — t1's later byte count supersedes the earlier one, and
+        // t2 carries its completion status + totals.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/traces/batch-update"))
+            .and(body_json(serde_json::json!({
+                "updates": {
+                    "t1": {"uploaded_bytes": 30},
+                    "t2": {"status": "UPLOAD_COMPLETE", "uploaded_bytes": 200, "total_bytes": 200}
+                }
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store, "rec-1").await;
+        let mut batch = RecordingBatch::new(index);
+        batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 10));
+        batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 30)); // supersedes 10
+        batch.add(StatusUpdate::completed(index, "t2".to_string(), 200));
+
+        let result = flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+        assert!(result.is_none(), "a sent batch is not re-queued");
+    }
+
+    #[tokio::test]
+    async fn flush_batch_defers_when_recording_row_missing() {
+        // The start notifier hasn't written the recording row yet. The batch
+        // must be re-queued with its deadline pushed into the future so the
+        // select loop doesn't busy-wait on a permanently-past deadline.
+        let server = MockServer::start().await; // no mock mounted: nothing is sent
+        let (store, _dir) = open_store().await;
+        let mut batch = RecordingBatch::new(999); // never created
+        batch.add(StatusUpdate::in_progress(999, "t1".to_string(), 5));
+
+        let before = Instant::now();
+        let result = flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+        let deferred = result.expect("a missing recording row re-queues the batch");
+        assert!(
+            deferred.deadline() > before,
+            "the re-queued batch's deadline is pushed into the future"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_batch_defers_when_org_id_unset() {
+        let server = MockServer::start().await; // nothing is sent
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store, "rec-1").await;
+        let mut batch = RecordingBatch::new(index);
+        batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 5));
+
+        let result = flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(None),
+            batch,
+        )
+        .await;
+        assert!(
+            result.is_some(),
+            "no org_id → the batch is deferred, not sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_batch_defers_when_cloud_recording_id_unset() {
+        let server = MockServer::start().await; // nothing is sent
+        let (store, _dir) = open_store().await;
+        // Created but NOT start-notified, so the cloud recording_id is absent.
+        let index = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap()
+            .recording_index;
+        let mut batch = RecordingBatch::new(index);
+        batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 5));
+
+        let result = flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+        assert!(
+            result.is_some(),
+            "no cloud recording_id → the batch is deferred, not sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_batch_skips_empty_batch() {
+        let server = MockServer::start().await; // nothing is sent
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store, "rec-1").await;
+        let batch = RecordingBatch::new(index); // no updates added
+
+        let result = flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+        assert!(
+            result.is_none(),
+            "an empty batch is a no-op, nothing is sent"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_all_drains_every_pending_batch() {
+        // The shutdown path: every pending recording's batch is flushed and the
+        // map left empty.
+        let server = MockServer::start().await;
+        for recording_id in ["rec-1", "rec-2"] {
+            Mock::given(method("PUT"))
+                .and(path(format!(
+                    "/org/org-1/recording/{recording_id}/traces/batch-update"
+                )))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let (store, _dir) = open_store().await;
+        let first = seed_recording(&store, "rec-1").await;
+        let second = seed_recording(&store, "rec-2").await;
+        let mut pending: HashMap<i64, RecordingBatch> = HashMap::new();
+        let mut first_batch = RecordingBatch::new(first);
+        first_batch.add(StatusUpdate::in_progress(first, "t1".to_string(), 1));
+        pending.insert(first, first_batch);
+        let mut second_batch = RecordingBatch::new(second);
+        second_batch.add(StatusUpdate::completed(second, "t2".to_string(), 9));
+        pending.insert(second, second_batch);
+
+        flush_all(
+            &Arc::new(store.clone()),
+            &client(&server),
+            &org_rx(Some("org-1")),
+            &mut pending,
+        )
+        .await;
+        assert!(pending.is_empty(), "flush_all drains the pending map");
+    }
+
+    #[tokio::test]
+    async fn flush_due_spawns_only_batches_past_their_deadline() {
+        // The periodic tick must flush only batches whose deadline has elapsed,
+        // leaving younger batches pending to keep coalescing.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/traces/batch-update"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let due_index = seed_recording(&store, "rec-1").await;
+        let fresh_index = seed_recording(&store, "rec-2").await;
+        let mut pending: HashMap<i64, RecordingBatch> = HashMap::new();
+        // A batch whose deadline is already well in the past.
+        let mut due = RecordingBatch::new(due_index);
+        due.add(StatusUpdate::in_progress(due_index, "t1".to_string(), 1));
+        due.opened_at = Instant::now() - Duration::from_secs(60);
+        pending.insert(due_index, due);
+        // A just-opened batch whose deadline is comfortably in the future.
+        let mut fresh = RecordingBatch::new(fresh_index);
+        fresh.add(StatusUpdate::in_progress(fresh_index, "t2".to_string(), 1));
+        pending.insert(fresh_index, fresh);
+
+        let mut background: JoinSet<Option<RecordingBatch>> = JoinSet::new();
+        flush_due(
+            &Arc::new(store.clone()),
+            &client(&server),
+            &org_rx(Some("org-1")),
+            &mut pending,
+            &mut background,
+        );
+
+        assert_eq!(background.len(), 1, "only the past-deadline batch flushes");
+        assert!(
+            pending.contains_key(&fresh_index),
+            "the fresh batch keeps coalescing"
+        );
+        assert!(
+            !pending.contains_key(&due_index),
+            "the due batch was taken for flushing"
+        );
+
+        // Drain the spawned flush so the task doesn't outlive the test.
+        while background.join_next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn run_loop_flushes_a_full_batch_via_the_inbox() {
+        // Drive the public updater end to end: MAX_BATCH_SIZE distinct-trace
+        // updates for one recording trip the size trigger, which spawns a
+        // background flush. Exercises run()'s inbox + max-batch + join_next arms.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/traces/batch-update"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store, "rec-1").await;
+
+        let (tx, rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let (shutdown_tx, shutdown_rx) = broadcast::channel(4);
+        let handle = spawn_status_updater(
+            store.clone(),
+            client(&server),
+            org_rx(Some("org-1")),
+            rx,
+            shutdown_rx,
+        );
+
+        for n in 0..MAX_BATCH_SIZE {
+            tx.send(StatusUpdate::in_progress(index, format!("t-{n}"), n as i64))
+                .unwrap();
+        }
+
+        // Poll the mock until the size-triggered flush lands, breaking as soon
+        // as it does rather than sleeping a fixed duration. The only requests
+        // this server sees are batch-update PUTs.
+        let mut flushed = false;
+        for _ in 0..100 {
+            if let Some(requests) = server.received_requests().await {
+                if !requests.is_empty() {
+                    flushed = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            flushed,
+            "a full batch is flushed to the backend by the run loop"
+        );
+
+        // Closing the inbox stops the loop (recv → None → break); keep the
+        // shutdown sender alive until then so the shutdown arm doesn't pre-empt.
+        drop(tx);
+        handle.join().await;
+        drop(shutdown_tx);
     }
 }

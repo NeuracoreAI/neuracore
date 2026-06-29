@@ -42,8 +42,6 @@ pub const CHUNK_SIZE: usize = 16 * 1024 * 1024;
 /// (`parse_resume_offset`) re-derives the committed offset from the server on
 /// restart, so a stale DB offset only costs re-sending at most this many chunks.
 const PROGRESS_PERSIST_EVERY_CHUNKS: u32 = 4;
-/// Cap on the exponential backoff for transient upload failures.
-const MAX_BACKOFF: Duration = Duration::from_secs(300);
 /// Maximum retries for a single chunk.
 const MAX_RETRIES: u32 = 5;
 /// Hard deadline for a single chunk PUT. Belt-and-braces over the reqwest
@@ -373,7 +371,7 @@ async fn put_chunk(
                     }
                     attempt += 1;
                     tracing::warn!(%error, attempt, "upload chunk transport error; retrying");
-                    sleep(backoff(attempt)).await;
+                    sleep(backoff(attempt, client.options().max_backoff)).await;
                     continue;
                 }
                 Err(_elapsed) => {
@@ -390,7 +388,7 @@ async fn put_chunk(
                         ));
                     }
                     attempt += 1;
-                    sleep(backoff(attempt)).await;
+                    sleep(backoff(attempt, client.options().max_backoff)).await;
                     continue;
                 }
             };
@@ -429,16 +427,20 @@ async fn put_chunk(
         if matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504) && attempt + 1 < MAX_RETRIES {
             attempt += 1;
             tracing::warn!(%status, attempt, "retrying upload chunk after transient failure");
-            sleep(backoff(attempt)).await;
+            sleep(backoff(attempt, client.options().max_backoff)).await;
             continue;
         }
         return Ok(PutChunkOutcome::Failed { status, body });
     }
 }
 
-fn backoff(attempt: u32) -> Duration {
+/// Exponential backoff (1s, 2s, 4s, …) for a chunk retry, capped at the API
+/// client's configured `max_backoff`. At [`MAX_RETRIES`] the cap never binds in
+/// production (the largest delay reached is 8s), but exposing it lets tests
+/// drive the retry path without real-time sleeps.
+fn backoff(attempt: u32, max: Duration) -> Duration {
     let secs = 2u64.saturating_pow(attempt.saturating_sub(1));
-    Duration::from_secs(secs.min(MAX_BACKOFF.as_secs()))
+    Duration::from_secs(secs).min(max)
 }
 
 fn parse_resume_offset(headers: &HeaderMap) -> Option<u64> {

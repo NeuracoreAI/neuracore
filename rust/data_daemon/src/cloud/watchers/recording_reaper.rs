@@ -137,3 +137,203 @@ async fn reclaim(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    use tempfile::TempDir;
+
+    use crate::state::{
+        NewRecording, ProgressReportStatus, TraceUpdate, TraceUploadStatus, TraceWriteStatus,
+    };
+
+    async fn open_store() -> (SqliteStateStore, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&dir.path().join("state.db"))
+            .await
+            .unwrap();
+        (store, dir)
+    }
+
+    fn new_recording(instance: i64) -> NewRecording<'static> {
+        NewRecording {
+            robot_id: Some("robot-1"),
+            robot_instance: Some(instance),
+            dataset_id: Some("ds-1"),
+            start_timestamp_ns: 1_700_000_000_000_000_000,
+        }
+    }
+
+    /// Drive a stopped recording with one fully-uploaded trace through every
+    /// notify + progress gate so the server-side reclaim filter reports it.
+    async fn seed_reclaimable_stopped(store: &SqliteStateStore, instance: i64) -> i64 {
+        let index = store
+            .create_recording(new_recording(instance))
+            .await
+            .unwrap()
+            .recording_index;
+        let trace_id = format!("t-{instance}");
+        store
+            .mark_recording_start_notified(index, &format!("cloud-{instance}"))
+            .await
+            .unwrap();
+        store
+            .create_trace(index, &trace_id, Some("J"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                &trace_id,
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(TraceUploadStatus::Uploaded),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store.mark_recording_stopped(index, 1).await.unwrap();
+        store.mark_recording_stop_notified(index).await.unwrap();
+        store.set_expected_trace_count(index, 1).await.unwrap();
+        store
+            .set_progress_report_status(
+                index,
+                ProgressReportStatus::Pending,
+                ProgressReportStatus::Reported,
+            )
+            .await
+            .unwrap();
+        index
+    }
+
+    /// A cancelled recording whose backend cancel has been notified — the
+    /// reaper is the single owner of removing its files.
+    async fn seed_reclaimable_cancelled(store: &SqliteStateStore, instance: i64) -> i64 {
+        let index = store
+            .create_recording(new_recording(instance))
+            .await
+            .unwrap()
+            .recording_index;
+        store
+            .mark_recording_start_notified(index, &format!("cloud-{instance}"))
+            .await
+            .unwrap();
+        store.cancel_recording(index, 1).await.unwrap();
+        store.mark_recording_cancel_notified(index).await.unwrap();
+        index
+    }
+
+    fn touch(path: &Path) {
+        std::fs::write(path, b"x").expect("write file");
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_files_and_rows_of_a_reclaimable_recording() {
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = seed_reclaimable_stopped(&store, 0).await;
+
+        let dir = recording_dir(&root, index);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir.join("trace.json"));
+        assert!(dir.exists());
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(!dir.exists(), "the recording directory is removed");
+        assert!(
+            store.get_recording(index).await.unwrap().is_none(),
+            "the recording row is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_reclaims_a_cancelled_recording() {
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = seed_reclaimable_cancelled(&store, 0).await;
+
+        let dir = recording_dir(&root, index);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir.join("video.mp4"));
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(!dir.exists(), "cancelled recording files are reclaimed");
+        assert!(store.get_recording(index).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn sweep_leaves_an_unsettled_recording_intact() {
+        // A live (never stopped) recording is not reclaimable: the reaper must
+        // touch neither its files nor its rows.
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = store
+            .create_recording(new_recording(0))
+            .await
+            .unwrap()
+            .recording_index;
+
+        let dir = recording_dir(&root, index);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir.join("trace.json"));
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(dir.exists(), "a live recording's files are untouched");
+        assert!(
+            store.get_recording(index).await.unwrap().is_some(),
+            "a live recording's row is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_deletes_rows_when_directory_already_gone() {
+        // Crash-recovery: a prior sweep removed the files but died before its
+        // row delete committed. The next sweep must still drop the rows —
+        // NotFound on the directory is treated as success and falls through.
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = seed_reclaimable_stopped(&store, 0).await;
+        // Deliberately never create the on-disk directory.
+        assert!(!recording_dir(&root, index).exists());
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(
+            store.get_recording(index).await.unwrap().is_none(),
+            "rows are reclaimed even when the directory is already gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_retains_rows_when_directory_removal_fails() {
+        // Files are removed before rows. If the unlink fails the rows must be
+        // left in place so the next sweep retries — never orphan files with no
+        // row pointing at them. We force the failure by planting a regular
+        // file where the directory is expected: `remove_dir_all` then fails
+        // with ENOTDIR (not NotFound), exercising the retain-and-retry branch.
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = seed_reclaimable_stopped(&store, 0).await;
+
+        let dir_path = recording_dir(&root, index);
+        std::fs::write(&dir_path, b"not a directory").unwrap();
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(
+            store.get_recording(index).await.unwrap().is_some(),
+            "rows are retained for retry when file removal fails"
+        );
+        assert!(dir_path.exists(), "the undeletable path is left in place");
+    }
+}

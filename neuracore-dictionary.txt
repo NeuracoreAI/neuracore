@@ -127,8 +127,10 @@ embs
 Emika
 ENOENT
 enoexec
+ENOTDIR
 EPERM
 EPIPE
+eprintln
 erfinv
 errno
 ESRCH
@@ -189,12 +191,16 @@ gptj
 GPTJ
 groot
 Groot
+hdlc
 hookwrapper
 hparams
 hstack
 huggingface
 hyperparameters
 iceoryx
+idat
+iend
+ihdr
 iiwa
 imageio
 imagenet
@@ -262,6 +268,7 @@ metadatas
 metafunc
 metas
 mimsave
+miniz
 Mish
 mjcf
 MJFC
@@ -269,7 +276,9 @@ mline
 mocap
 moov
 movflags
+mpng
 mpsa
+mpsc
 Mujoco
 mujocoinclude
 multihead
@@ -394,6 +403,8 @@ rtype
 rustls
 rustup
 Safetensors
+scanline
+scanlines
 schematypens
 SCTP
 sdecode
@@ -427,6 +438,7 @@ synchronizable
 syncpoint
 syncpoints
 targetbody
+tdefl
 TDVB
 teleop
 temb
@@ -450,6 +462,7 @@ torq
 tqdm
 traj
 triu
+truecolour
 trunc
 tryfirst
 TTYNTK

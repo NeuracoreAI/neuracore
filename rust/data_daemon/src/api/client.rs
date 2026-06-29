@@ -691,6 +691,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exhausts_retry_budget_then_surfaces_status() {
+        // A persistently failing retryable status must stop after the budget
+        // (`max_retries` attempts total) and surface the error rather than
+        // retrying forever. `expect(3)` pins the bounded attempt count.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(503))
+            .expect(3)
+            .mount(&server)
+            .await;
+
+        let client = client(&server);
+        let error = client.batch_register("org-1", &[]).await.unwrap_err();
+        match error {
+            ApiClientError::Status { status, .. } => {
+                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reloads_auth_at_most_once_on_repeated_401() {
+        // A 401 triggers exactly one token reload; a second 401 surfaces as an
+        // error instead of looping forever on reload + retry.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        struct CountingProvider {
+            calls: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl AuthProvider for CountingProvider {
+            async fn bearer_token(&self) -> Result<String, AuthError> {
+                Ok("token".to_string())
+            }
+            async fn reload(&self) -> Result<(), AuthError> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+        let auth = Arc::new(CountingProvider {
+            calls: Arc::clone(&calls),
+        });
+        let client = ApiClient::new(options(server.uri()), auth).unwrap();
+
+        let error = client.batch_register("org-1", &[]).await.unwrap_err();
+        assert!(
+            matches!(error, ApiClientError::Status { status, .. } if status == StatusCode::UNAUTHORIZED),
+            "a repeated 401 surfaces as an error, not an infinite reload loop"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "auth is reloaded exactly once, not on every 401"
+        );
+    }
+
+    #[tokio::test]
     async fn non_retryable_status_surfaces_error() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
