@@ -28,8 +28,6 @@ from tests.integration.platform.data_daemon.shared.profiles import (
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
-)
-from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
 )
