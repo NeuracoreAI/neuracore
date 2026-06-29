@@ -534,4 +534,175 @@ mod tests {
             ProgressReportStatus::Reported
         ));
     }
+
+    #[tokio::test]
+    async fn sweep_skips_when_org_id_unset() {
+        // No current org (e.g. not logged in / no org selected): the sweep must
+        // skip the recording without POSTing anything, leaving it pending.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, "rec-1").await;
+        store
+            .create_trace(recording_index, "t-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    total_bytes: Some(5),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+
+        sweep_once(&Arc::new(store.clone()), &client(&server), &org_rx(None)).await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert_eq!(
+            recording.expected_trace_count_reported, 0,
+            "no org → nothing reported"
+        );
+        assert!(matches!(
+            recording.progress_reported,
+            ProgressReportStatus::Pending
+        ));
+    }
+
+    #[tokio::test]
+    async fn progress_post_failure_rolls_back_to_pending() {
+        // The expected-count PUT succeeds but the traces-metadata POST fails:
+        // the recording's progress status must roll Reporting → Pending so the
+        // next tick retries, never wedging in the transient Reporting state.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, "rec-1").await;
+        for (trace_id, bytes) in [("t-1", 10), ("t-2", 20)] {
+            store
+                .create_trace(recording_index, trace_id, Some("JOINT_POSITIONS"), None)
+                .await
+                .unwrap();
+            store
+                .update_trace(
+                    trace_id,
+                    TraceUpdate {
+                        write_status: Some(TraceWriteStatus::Written),
+                        total_bytes: Some(bytes),
+                        ..TraceUpdate::default()
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+
+        sweep_once(
+            &Arc::new(store.clone()),
+            &client(&server),
+            &org_rx(Some("org-1")),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert_eq!(
+            recording.expected_trace_count_reported, 2,
+            "the expected-count PUT succeeded"
+        );
+        assert!(
+            matches!(recording.progress_reported, ProgressReportStatus::Pending),
+            "a failed progress POST rolls Reporting back to Pending for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_count_put_failure_leaves_it_unreported() {
+        // The count is persisted locally first, then PUT to the backend. If the
+        // PUT fails it must NOT be marked reported (the next tick re-sends it),
+        // but the local count is retained.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/org/org-1/recording/rec-1/expected-trace-count"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/rec-1/traces-metadata"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, "rec-1").await;
+        store
+            .create_trace(recording_index, "t-1", Some("JOINT_POSITIONS"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    total_bytes: Some(7),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+
+        sweep_once(
+            &Arc::new(store.clone()),
+            &client(&server),
+            &org_rx(Some("org-1")),
+        )
+        .await;
+
+        let recording = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert_eq!(
+            recording.expected_trace_count,
+            Some(1),
+            "the count is persisted locally first"
+        );
+        assert_eq!(
+            recording.expected_trace_count_reported, 0,
+            "a failed PUT does not mark the count reported"
+        );
+    }
 }

@@ -222,3 +222,136 @@ fn writer_gone() -> JsonTraceError {
         source: std::io::Error::other("json trace writer thread stopped"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::paths::TRACE_JSON_FILENAME;
+    use serde_json::json;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    fn read_back(trace_dir: &Path) -> Value {
+        let bytes = std::fs::read(trace_dir.join(TRACE_JSON_FILENAME)).expect("read trace.json");
+        serde_json::from_slice(&bytes).expect("parse trace.json")
+    }
+
+    /// Drain the write-behind thread: drop the handle so the channel closes,
+    /// then join so any in-flight disk write has landed before assertions.
+    fn shutdown(handle: JsonWriteHandle, join: JoinHandle<()>) {
+        drop(handle);
+        join.join().expect("json writer thread join");
+    }
+
+    #[tokio::test]
+    async fn open_append_finish_round_trips_to_disk() {
+        let tempdir = TempDir::new().unwrap();
+        let (handle, join) = spawn();
+
+        handle.open("t-1", tempdir.path().to_path_buf());
+        handle.append("t-1", 1, br#"{"frame":0,"v":1.5}"#.to_vec());
+        handle.append("t-1", 2, br#"{"frame":1,"v":2.5}"#.to_vec());
+        let bytes = handle.finish("t-1").await.expect("finish");
+
+        let path = tempdir.path().join(TRACE_JSON_FILENAME);
+        assert_eq!(
+            bytes,
+            std::fs::metadata(&path).unwrap().len(),
+            "reported byte count must match the file on disk"
+        );
+        assert_eq!(
+            read_back(tempdir.path()),
+            json!([{"frame":0,"v":1.5},{"frame":1,"v":2.5}])
+        );
+        shutdown(handle, join);
+    }
+
+    #[tokio::test]
+    async fn already_json_payload_is_forwarded_verbatim() {
+        // A float the SDK formatted itself must land on disk byte-for-byte:
+        // the integration matrix compares `trace.json` floats exactly, so the
+        // already-JSON branch forwards the raw bytes with no serde round trip.
+        let tempdir = TempDir::new().unwrap();
+        let (handle, join) = spawn();
+
+        handle.open("t-1", tempdir.path().to_path_buf());
+        handle.append("t-1", 1, br#"{"v":0.11666666666666667}"#.to_vec());
+        handle.finish("t-1").await.expect("finish");
+
+        let raw = std::fs::read_to_string(tempdir.path().join(TRACE_JSON_FILENAME)).unwrap();
+        assert!(
+            raw.contains("0.11666666666666667"),
+            "float text must survive verbatim, got {raw}"
+        );
+        shutdown(handle, join);
+    }
+
+    #[tokio::test]
+    async fn non_json_payload_is_wrapped_in_fallback_entry() {
+        let tempdir = TempDir::new().unwrap();
+        let (handle, join) = spawn();
+
+        handle.open("t-1", tempdir.path().to_path_buf());
+        handle.append("t-1", 42, b"not-json".to_vec());
+        handle.finish("t-1").await.expect("finish");
+
+        assert_eq!(
+            read_back(tempdir.path()),
+            json!([{"timestamp_ns": 42, "payload_len": 8}]),
+            "a non-JSON payload is replaced by a length-only fallback object"
+        );
+        shutdown(handle, join);
+    }
+
+    #[tokio::test]
+    async fn finish_without_open_reports_zero_bytes() {
+        let (handle, join) = spawn();
+        let bytes = handle.finish("never-opened").await.expect("finish");
+        assert_eq!(bytes, 0, "finalising an unknown trace is a no-op");
+        shutdown(handle, join);
+    }
+
+    #[tokio::test]
+    async fn drop_discards_an_open_writer() {
+        let tempdir = TempDir::new().unwrap();
+        let (handle, join) = spawn();
+
+        handle.open("t-1", tempdir.path().to_path_buf());
+        handle.append("t-1", 1, br#"{"frame":0}"#.to_vec());
+        handle.drop_trace("t-1");
+        // After a drop the writer is gone, so a later finish finalises nothing.
+        let bytes = handle.finish("t-1").await.expect("finish");
+        assert_eq!(bytes, 0, "a dropped trace has no writer left to finalise");
+        shutdown(handle, join);
+    }
+
+    #[tokio::test]
+    async fn concurrent_traces_do_not_interleave() {
+        // Two traces share the one FIFO thread; each must retain only its own
+        // entries, in order, in its own file — no cross-trace corruption.
+        let tempdir = TempDir::new().unwrap();
+        let dir_one = tempdir.path().join("one");
+        let dir_two = tempdir.path().join("two");
+        let (handle, join) = spawn();
+
+        handle.open("one", dir_one.clone());
+        handle.open("two", dir_two.clone());
+        handle.append("one", 1, br#"{"trace":"one","i":0}"#.to_vec());
+        handle.append("two", 1, br#"{"trace":"two","i":0}"#.to_vec());
+        handle.append("one", 2, br#"{"trace":"one","i":1}"#.to_vec());
+        handle.append("two", 2, br#"{"trace":"two","i":1}"#.to_vec());
+
+        handle.finish("one").await.expect("finish one");
+        handle.finish("two").await.expect("finish two");
+
+        assert_eq!(
+            read_back(&dir_one),
+            json!([{"trace":"one","i":0},{"trace":"one","i":1}])
+        );
+        assert_eq!(
+            read_back(&dir_two),
+            json!([{"trace":"two","i":0},{"trace":"two","i":1}])
+        );
+        shutdown(handle, join);
+    }
+}

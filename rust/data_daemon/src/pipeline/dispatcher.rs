@@ -1446,4 +1446,125 @@ mod tests {
         }
         assert!(saw_cancel, "RecordingCancelled must be published");
     }
+
+    #[tokio::test]
+    async fn reap_idle_force_closes_a_silent_live_window() {
+        // A producer that crashes without a Stop leaves a live window open. The
+        // idle reaper must force-close it (open upper bound, so straggler data
+        // still routes) and mark the recording stopped so it reaches a terminal,
+        // notifiable state — otherwise the recording leaks forever.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let bus = crate::state::EventBus::new();
+        let mut sub = bus.subscribe();
+        let mut dispatcher = Dispatcher::new(
+            store.clone(),
+            context,
+            DispatcherContext {
+                event_bus: Some(bus.clone()),
+            },
+        );
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        assert!(dispatcher.windows.get(&source).unwrap().live.is_some());
+
+        // Advance past the idle horizon (a future instant — no real waiting).
+        let now = opened_at + IDLE_REAP + Duration::from_secs(1);
+        dispatcher.reap_idle(now).await;
+
+        let entry = dispatcher.windows.get(&source).unwrap();
+        assert!(entry.live.is_none(), "the idle live window is force-closed");
+        assert_eq!(entry.closing.len(), 1);
+        assert_eq!(
+            entry.closing[0].stopped_at_ns,
+            Some(i64::MAX),
+            "the reaped window keeps an open upper bound for stragglers"
+        );
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert!(
+            recordings[0].stopped_at.is_some(),
+            "the recording row is marked stopped at the reap moment"
+        );
+
+        let mut saw_stop = false;
+        while let Ok(event) = sub.try_recv() {
+            if matches!(event, DaemonEvent::RecordingStopped { .. }) {
+                saw_stop = true;
+            }
+        }
+        assert!(
+            saw_stop,
+            "RecordingStopped is published for the reaped window"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_idle_leaves_a_recently_active_window_open() {
+        // A window whose source was seen within the idle horizon must NOT be
+        // reaped — the guard against force-closing a still-live recording.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+
+        // Only a short time has passed — well within the idle horizon.
+        dispatcher
+            .reap_idle(opened_at + Duration::from_millis(5))
+            .await;
+
+        assert!(
+            dispatcher.windows.get(&source).unwrap().live.is_some(),
+            "a recently-active window must stay live"
+        );
+    }
+
+    #[tokio::test]
+    async fn housekeep_evicts_a_closing_window_past_retention() {
+        // A closing window is retained for 2·holdback (so its in-window data has
+        // released) and then evicted; without this the window map — and the
+        // actor handles it holds — leak for the daemon's lifetime.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        let stopped_at = opened_at + Duration::from_millis(1);
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .await;
+        assert_eq!(
+            dispatcher.windows.get(&source).unwrap().closing.len(),
+            1,
+            "the stopped window is retained as closing"
+        );
+
+        // Just past the 2·holdback retention window.
+        let retention = dispatcher.holdback * 2;
+        let now = stopped_at + retention + Duration::from_millis(1);
+        dispatcher.housekeep(now).await;
+
+        let closing = dispatcher
+            .windows
+            .get(&source)
+            .map_or(0, |entry| entry.closing.len());
+        assert_eq!(closing, 0, "a closing window past 2·holdback is evicted");
+    }
 }

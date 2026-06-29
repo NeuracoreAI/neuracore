@@ -15,6 +15,7 @@ path = "src/lib.rs"
 data_daemon_shared = { path = "../data_daemon_shared" }
 iceoryx2.workspace = true
 libc.workspace = true
+miniz_oxide = "0.8"
 pyo3.workspace = true
 # Used by the batched joint-data fast path to format each per-item
 # `{"timestamp":...,"value":...}` payload. We deliberately do NOT hand-format

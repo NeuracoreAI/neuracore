@@ -1,13 +1,17 @@
-//! Minimal NUT-container muxer for a single raw-RGB24 video stream.
+//! Minimal NUT-container muxer for a single video stream of lossless PNG
+//! frames.
 //!
-//! The video trace actor spools captured frames into a `raw.nut` file with
-//! this writer; the file is then handed off to an `ffmpeg` transcoder.
+//! The video trace actor spools captured frames into a `.nut` file with this
+//! writer; the file is then handed off to an `ffmpeg` transcoder. The caller
+//! always supplies packed RGB24; the writer PNG-encodes each frame (see
+//! [`PngScratch::encode`]) so the on-disk spool — and the daemon's transcode
+//! read-back of it — is a small fraction of the raw video bandwidth.
 //!
 //! The output is intentionally the bare minimum NUT spec elements needed for
-//! `ffprobe` to report the stream geometry: file id string, main header,
-//! stream header, one syncpoint, and one frame packet per captured RGB
-//! buffer. We deliberately skip the optional index packet so the file stays
-//! crash-safe — a truncated tail still demuxes up to the last complete frame.
+//! `ffprobe`/`ffmpeg` to demux the PNG stream: file id string, main header,
+//! stream header, one syncpoint, and one frame packet per captured frame. We
+//! deliberately skip the optional index packet so the file stays crash-safe — a
+//! truncated tail still demuxes up to the last complete frame.
 //!
 //! See `https://ffmpeg.org/~michael/nut.txt` for the authoritative spec. The
 //! bit-level layout is non-obvious in several places (frame-code table
@@ -20,6 +24,10 @@ use std::io::{self, BufWriter, Write};
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use miniz_oxide::deflate::core::{
+    compress, create_comp_flags_from_zip_params, CompressorOxide, TDEFLFlush, TDEFLStatus,
+};
 
 /// Fixed 25-byte file identifier mandated by the NUT spec. The trailing NUL
 /// is part of the signature.
@@ -70,8 +78,32 @@ const FLAG_INVALID: u64 = 1 << 13; // bit 13 — entry is unusable
 /// table, this means every frame carries its own flags inline.
 const FRAME_CODE_ALL_EXPLICIT: u8 = 0xFF;
 
+/// zlib level for the PNG IDAT stream. Level 1 (fastest) is deliberate: the
+/// encode runs on the writer thread that drains the frame queue, so a slow
+/// encode backs the queue up into producer backpressure — speed matters more
+/// than ratio. And with the Up filter the flat frames compress to almost
+/// nothing at level 1 anyway. Raise only with a measured CPU/ratio trade.
+const PNG_COMPRESSION_LEVEL: u8 = 1;
+
+/// `window_bits` for [`create_comp_flags_from_zip_params`]: a positive value
+/// asks miniz_oxide to wrap the deflate stream in a zlib header — what PNG IDAT
+/// requires (and what `compress_to_vec_zlib` passed).
+const ZLIB_WINDOW_BITS: i32 = 1;
+
+/// `strategy` for [`create_comp_flags_from_zip_params`]: 0 is the default
+/// (no forced Huffman-only/RLE strategy).
+const DEFLATE_STRATEGY_DEFAULT: i32 = 0;
+
+/// 8-byte PNG file signature.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// PNG row-filter tag for the "Up" predictor (residual vs the pixel directly
+/// above). Prefixes every scanline; see [`PngScratch::encode`] for why Up.
+const PNG_FILTER_UP: u8 = 2;
+
 /// Configuration captured at writer-creation time. The writer is single
-/// stream and assumes packed RGB24 (3 bytes per pixel, no padding).
+/// stream; the caller always supplies packed RGB24 (3 bytes per pixel, no
+/// padding), which the writer stores as per-frame lossless PNG.
 #[derive(Debug, Clone, Copy)]
 pub struct NutVideoConfig {
     /// Frame width in pixels. Must be non-zero.
@@ -144,6 +176,14 @@ pub struct NutWriter {
     /// Number of bytes a well-formed RGB24 frame must occupy. Cached so the
     /// per-frame size check stays in a single `usize`.
     expected_frame_bytes: usize,
+    /// Decoded-equivalent bytes seen so far: `expected_frame_bytes` summed over
+    /// every appended frame. The chunk-roll threshold keys off this rather than
+    /// the compressed [`bytes_written`], so a chunk holds the same frame count
+    /// — and thus the same daemon per-chunk transcode granularity — regardless
+    /// of how well the PNG frames happened to compress.
+    ///
+    /// [`bytes_written`]: Self::bytes_written
+    logical_bytes: u64,
     /// File offset of the most recently written syncpoint packet. Drives the
     /// bytes-since-last-syncpoint check that triggers the next periodic
     /// syncpoint.
@@ -151,6 +191,9 @@ pub struct NutWriter {
     /// File offset up to which an async writeback hint has been issued. The
     /// next hint covers `[last_writeback_hint, bytes_written)`.
     last_writeback_hint: u64,
+    /// Reused PNG-encode scratch space (buffers + compressor); see
+    /// [`PngScratch`].
+    png: PngScratch,
 }
 
 /// Emit a new syncpoint when the bytes-since-last-syncpoint would exceed
@@ -237,8 +280,10 @@ impl NutWriter {
             config,
             bytes_written: 0,
             expected_frame_bytes,
+            logical_bytes: 0,
             last_syncpoint_offset: 0,
             last_writeback_hint: 0,
+            png: PngScratch::new(),
         };
         writer.write_headers()?;
         Ok(writer)
@@ -257,9 +302,17 @@ impl NutWriter {
         self.bytes_written
     }
 
-    /// Append one raw-RGB24 frame at the supplied PTS (frame index in
-    /// time-base ticks). The supplied slice must be exactly
-    /// `width * height * 3` bytes long.
+    /// Decoded-equivalent bytes appended so far — `width * height * 3` per
+    /// frame, not the compressed on-disk size. See the
+    /// [`logical_bytes`](Self::logical_bytes) field for why chunk rolls key off
+    /// this rather than [`bytes_written`](Self::bytes_written).
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+
+    /// Append one frame at the supplied PTS (frame index in time-base ticks).
+    /// The frame is supplied as packed RGB24 — exactly `width * height * 3`
+    /// bytes — and stored as a per-frame lossless PNG.
     pub fn write_frame(&mut self, pts: u64, rgb_bytes: &[u8]) -> Result<(), NutError> {
         if rgb_bytes.len() != self.expected_frame_bytes {
             return Err(NutError::FrameSize {
@@ -268,6 +321,14 @@ impl NutWriter {
             });
         }
 
+        // The caller always supplies packed RGB24; we compress it to a per-frame
+        // PNG here, into the writer's reused scratch. `payload_len` is the length
+        // of the assembled PNG now sitting in `self.png.output` — the bytes that
+        // land in the NUT frame packet below.
+        let payload_len = self
+            .png
+            .encode(self.config.width, self.config.height, rgb_bytes);
+
         // Emit a periodic syncpoint before appending the frame so the gap
         // between consecutive syncpoints stays within the demuxer's reach.
         // Without this, files containing more than a few frames of >16 KiB
@@ -275,7 +336,7 @@ impl NutWriter {
         let bytes_since_last = self
             .bytes_written
             .saturating_sub(self.last_syncpoint_offset);
-        let projected_frame_bytes = rgb_bytes.len() as u64 + 32;
+        let projected_frame_bytes = payload_len as u64 + 32;
         if bytes_since_last.saturating_add(projected_frame_bytes) > SYNCPOINT_INTERVAL_BYTES {
             self.write_syncpoint(pts)?;
         }
@@ -312,8 +373,8 @@ impl NutWriter {
         vencode(&mut header, coded_pts);
 
         // data_size = data_size_lsb (0) + data_size_msb * data_size_mul (1)
-        //           = data_size_msb, so we encode the raw frame length here.
-        vencode(&mut header, rgb_bytes.len() as u64);
+        //           = data_size_msb, so we encode the on-disk frame length here.
+        vencode(&mut header, payload_len as u64);
 
         // Frame header checksum: CRC32/MPEG-2 over framecode + all header
         // bytes up to (but not including) the checksum itself.
@@ -321,7 +382,13 @@ impl NutWriter {
         header.extend_from_slice(&checksum.to_be_bytes());
 
         self.write_all(&header)?;
-        self.write_all(rgb_bytes)?;
+        self.write_png_payload(payload_len)?;
+
+        // Track decoded-equivalent volume so chunk rolls track frame count, not
+        // the (much smaller, content-dependent) compressed PNG size.
+        self.logical_bytes = self
+            .logical_bytes
+            .saturating_add(self.expected_frame_bytes as u64);
 
         // Once enough has accumulated, kick off async writeback for it so dirty
         // pages drain continuously instead of piling up to the throttle's hard
@@ -439,6 +506,21 @@ impl NutWriter {
         Ok(())
     }
 
+    /// Write the first `len` bytes of the reused `png.output` (the assembled PNG
+    /// payload). A dedicated method rather than `write_all(&self.png.output)` so
+    /// the borrow stays a disjoint `&mut self.writer` + `&self.png.output` rather
+    /// than the whole-`self` borrow a method argument would force.
+    fn write_png_payload(&mut self, len: usize) -> Result<(), NutError> {
+        self.writer
+            .write_all(&self.png.output[..len])
+            .map_err(|source| NutError::Write {
+                path: self.path.clone(),
+                source,
+            })?;
+        self.bytes_written = self.bytes_written.saturating_add(len as u64);
+        Ok(())
+    }
+
     fn flush(&mut self) -> Result<(), NutError> {
         self.writer.flush().map_err(|source| NutError::Write {
             path: self.path.clone(),
@@ -504,17 +586,17 @@ fn build_stream_header_payload(config: NutVideoConfig) -> Vec<u8> {
     vencode(&mut payload, 0); // stream_id
     vencode(&mut payload, 0); // stream_class — 0 = video
 
-    // fourcc as a `vb`: length-prefixed bytes. "RGB\x18" advertises packed
-    // RGB24 (8 bits per channel, 24 bpp). FFmpeg's libavformat maps this
-    // fourcc to `AV_CODEC_ID_RAWVIDEO` with pix_fmt = `AV_PIX_FMT_RGB24`.
-    let fourcc: &[u8] = b"RGB\x18";
+    // fourcc as a `vb`: length-prefixed bytes. "MPNG" tells ffmpeg's NUT
+    // demuxer the frame packets are PNG (`AV_CODEC_ID_PNG`) — the tag ffmpeg
+    // itself writes for png-in-NUT, verified via `ffprobe` codec_tag_string.
+    let fourcc: &[u8] = b"MPNG";
     vencode(&mut payload, fourcc.len() as u64);
     payload.extend_from_slice(fourcc);
 
     vencode(&mut payload, 0); // time_base_id
     vencode(&mut payload, MSB_PTS_SHIFT);
     vencode(&mut payload, 1); // max_pts_distance — we always include FLAG_CHECKSUM anyway
-    vencode(&mut payload, 0); // decode_delay — no B-frames in raw video
+    vencode(&mut payload, 0); // decode_delay — PNG is all intra, no B-frames
                               // stream_flags = 0. We deliberately do *not* set FLAG_FIXED_FPS: our
                               // time_base is microsecond ticks (1/1_000_000), and FLAG_FIXED_FPS would
                               // tell downstream demuxers the stream runs at exactly 1/time_base fps
@@ -691,6 +773,199 @@ fn crc32_nut(bytes: &[u8]) -> u32 {
     crc
 }
 
+/// Per-frame PNG-encode scratch, owned by the [`NutWriter`] and reused across
+/// frames so a steady-state frame allocates nothing. The three buffers and the
+/// compressor are bundled (rather than loose fields) because [`encode`] always
+/// drives them as a unit.
+///
+/// [`encode`]: Self::encode
+struct PngScratch {
+    /// One frame's filtered PNG scanlines (each row: a filter tag + the row's
+    /// filtered bytes) — the input to the zlib stream that becomes IDAT.
+    filter: Vec<u8>,
+    /// The zlib-compressed IDAT payload. Grown once to fit and then held; see
+    /// [`compress_zlib_into`].
+    idat: Vec<u8>,
+    /// The assembled PNG bitstream (signature + IHDR + IDAT + IEND) that becomes
+    /// one NUT frame packet. After [`encode`](Self::encode) the frame is
+    /// `output[..len]`.
+    output: Vec<u8>,
+    /// Persistent zlib compressor, [`reset`](CompressorOxide::reset) between
+    /// frames. Holding one across frames keeps its internal Huffman/dictionary
+    /// allocations off the per-frame path — `compress_to_vec_zlib` would build a
+    /// fresh `CompressorOxide` (two heap allocations) every call.
+    compressor: CompressorOxide,
+}
+
+impl PngScratch {
+    fn new() -> Self {
+        Self {
+            filter: Vec::new(),
+            idat: Vec::new(),
+            output: Vec::new(),
+            compressor: CompressorOxide::new(create_comp_flags_from_zip_params(
+                PNG_COMPRESSION_LEVEL as i32,
+                ZLIB_WINDOW_BITS,
+                DEFLATE_STRATEGY_DEFAULT,
+            )),
+        }
+    }
+
+    /// Encode one packed RGB24 frame as a standalone PNG (truecolour, 8-bit,
+    /// "Up" filter) into `self.output`, returning the byte length written (the
+    /// PNG is `self.output[..len]`).
+    ///
+    /// We hand-roll the container — signature + IHDR + IDAT + IEND — rather than
+    /// pull in an image crate; the IDAT payload is a miniz_oxide zlib stream and
+    /// the chunk checksums use a standard CRC-32 ([`png_crc32`]).
+    fn encode(&mut self, width: u32, height: u32, rgb: &[u8]) -> usize {
+        let row_bytes = width as usize * 3;
+
+        // Filtered scanlines: each row is a one-byte filter tag followed by the
+        // row's filtered bytes — the input to the zlib stream that becomes IDAT.
+        //
+        // We use the "Up" filter (residual vs the pixel directly above) on every
+        // row. It is the cheapest predictor (a flat byte subtraction, no
+        // per-pixel bookkeeping) yet collapses the flat/slowly-varying regions
+        // typical of camera frames into runs of zeros, which deflate then
+        // crushes far faster and smaller than the raw bytes — measured ~3x
+        // faster and ~4x smaller than filter "None" on the near-uniform
+        // integration frames.
+        self.filter.clear();
+        self.filter.reserve((row_bytes + 1) * height as usize);
+        for row in 0..height as usize {
+            let start = row * row_bytes;
+            let current = &rgb[start..start + row_bytes];
+            self.filter.push(PNG_FILTER_UP);
+            if row == 0 {
+                // PNG defines the scanline above row 0 as all-zero, so Up leaves
+                // the first row's bytes unchanged.
+                self.filter.extend_from_slice(current);
+            } else {
+                let above = &rgb[start - row_bytes..start];
+                self.filter.extend(
+                    current
+                        .iter()
+                        .zip(above)
+                        .map(|(value, prior)| value.wrapping_sub(*prior)),
+                );
+            }
+        }
+
+        let idat_len = compress_zlib_into(&mut self.compressor, &self.filter, &mut self.idat);
+        let idat = &self.idat[..idat_len];
+
+        let mut ihdr = [0u8; 13];
+        ihdr[0..4].copy_from_slice(&width.to_be_bytes());
+        ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+        ihdr[8] = 8; // bit depth
+        ihdr[9] = 2; // colour type: truecolour (RGB)
+        ihdr[10] = 0; // compression method: zlib/deflate
+        ihdr[11] = 0; // filter method: adaptive (per-row tag; all Up here)
+        ihdr[12] = 0; // interlace: none
+
+        self.output.clear();
+        self.output
+            .reserve(PNG_SIGNATURE.len() + 12 + 13 + 12 + idat.len() + 12);
+        self.output.extend_from_slice(&PNG_SIGNATURE);
+        write_png_chunk(&mut self.output, b"IHDR", &ihdr);
+        write_png_chunk(&mut self.output, b"IDAT", idat);
+        write_png_chunk(&mut self.output, b"IEND", &[]);
+        self.output.len()
+    }
+}
+
+/// Compress `input` as a zlib stream into `output`, reusing both `compressor`
+/// and `output`'s allocation across calls; returns the compressed length (the
+/// IDAT payload is `output[..len]`).
+///
+/// This is the buffer-reusing equivalent of miniz_oxide's `compress_to_vec_zlib`
+/// (which allocates a fresh output `Vec` *and* a fresh `CompressorOxide` every
+/// call). Every frame in a trace is the same size, so `output` grows to fit
+/// within the first frame or two and then never resizes again.
+fn compress_zlib_into(
+    compressor: &mut CompressorOxide,
+    input: &[u8],
+    output: &mut Vec<u8>,
+) -> usize {
+    compressor.reset();
+
+    // `compress` writes into the slice's *length*, not its spare capacity, so
+    // the buffer must be sized (not merely reserved). Seed a small floor on the
+    // first frame; later frames keep whatever length earlier ones grew it to.
+    const MIN_OUTPUT: usize = 1024;
+    if output.len() < MIN_OUTPUT {
+        output.resize(MIN_OUTPUT, 0);
+    }
+
+    let mut remaining = input;
+    let mut written = 0;
+    loop {
+        let (status, consumed, produced) = compress(
+            compressor,
+            remaining,
+            &mut output[written..],
+            TDEFLFlush::Finish,
+        );
+        written += produced;
+        match status {
+            TDEFLStatus::Done => return written,
+            // Ran out of output room before finishing: advance past the consumed
+            // input (the compressor itself holds no input cursor), grow, repeat.
+            TDEFLStatus::Okay => {
+                remaining = &remaining[consumed..];
+                let headroom = output.len() - written;
+                if headroom < 64 {
+                    output.resize((output.len() * 2).max(written + 64), 0);
+                }
+            }
+            // `compress` only ever returns Done/Okay for a valid compressor and
+            // a real output buffer (BadParam/PutBufFailed need a null compressor
+            // or the callback-func variant, neither of which we use).
+            other => unreachable!("zlib compress returned {other:?}"),
+        }
+    }
+}
+
+/// Append one PNG chunk — length (u32 BE) + type + data + CRC-32 (u32 BE) over
+/// type+data — per the PNG spec.
+fn write_png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    let checksum_start = out.len();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&png_crc32(&out[checksum_start..]).to_be_bytes());
+}
+
+/// Standard CRC-32 (ISO-HDLC: reflected, polynomial 0xEDB88320, init/final XOR
+/// 0xFFFFFFFF) — the variant PNG chunk checksums use. This is a *different*
+/// variant from [`crc32_nut`] (NUT uses CRC-32/MPEG-2), so the two are kept
+/// separate rather than parameterised.
+fn png_crc32(bytes: &[u8]) -> u32 {
+    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut table = [0u32; 256];
+        for (index, slot) in table.iter_mut().enumerate() {
+            let mut crc = index as u32;
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 {
+                    0xEDB8_8320 ^ (crc >> 1)
+                } else {
+                    crc >> 1
+                };
+            }
+            *slot = crc;
+        }
+        table
+    });
+
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc = table[((crc ^ byte as u32) & 0xFF) as usize] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFF_FFFF
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,15 +1095,13 @@ mod tests {
         ));
     }
 
-    /// Locate `ffprobe`. Returns `None` (with a logged note) if it is not on
-    /// PATH so the test can skip cleanly rather than fail in sandboxes that
-    /// lack the FFmpeg suite.
-    fn locate_ffprobe() -> Option<PathBuf> {
-        // `which ffprobe` is the most portable check across the Linux
-        // distributions we run CI on. Falling back to a literal "ffprobe"
-        // string lets the eventual `Command::new` produce a clear error if
-        // the binary disappears between this lookup and execution.
-        let output = Command::new("which").arg("ffprobe").output().ok()?;
+    /// Locate `binary` on PATH. Returns `None` (so the caller can skip cleanly)
+    /// when it is absent — sandboxes without the FFmpeg suite skip these tests
+    /// rather than failing.
+    fn locate_on_path(binary: &str) -> Option<PathBuf> {
+        // `which` is the most portable check across the Linux distributions we
+        // run CI on.
+        let output = Command::new("which").arg(binary).output().ok()?;
         if !output.status.success() {
             return None;
         }
@@ -843,7 +1116,7 @@ mod tests {
 
     #[test]
     fn ffprobe_recognises_stream_metadata() {
-        let ffprobe = match locate_ffprobe() {
+        let ffprobe = match locate_on_path("ffprobe") {
             Some(path) => path,
             None => {
                 eprintln!(
@@ -925,5 +1198,93 @@ mod tests {
                 "ffprobe reported {reported} frames, expected {frame_count}"
             );
         }
+    }
+
+    #[test]
+    fn png_chunk_round_trips_losslessly() {
+        let ffprobe = match locate_on_path("ffprobe") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffprobe not on PATH — skipping PNG round-trip test.");
+                return;
+            }
+        };
+        let ffmpeg = match locate_on_path("ffmpeg") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffmpeg not on PATH — skipping PNG round-trip test.");
+                return;
+            }
+        };
+
+        let (width, height) = (32u32, 24u32);
+        let tempdir = TempDir::new().unwrap();
+        let path = tempdir.path().join("frames.nut");
+        let config = NutVideoConfig {
+            width,
+            height,
+            time_base_num: 1,
+            time_base_den: 1_000_000,
+        };
+        let mut writer = NutWriter::create(&path, config).unwrap();
+
+        // Distinct, high-entropy-ish pixels per frame so a regression that
+        // dropped/duplicated pixels (or silently lost the alpha/channel order)
+        // is caught by the bit-exact comparison below.
+        let frame_count = 5usize;
+        let frame_bytes = (width * height * 3) as usize;
+        let mut expected = Vec::with_capacity(frame_bytes * frame_count);
+        for index in 0..frame_count {
+            let mut buffer = vec![0u8; frame_bytes];
+            for (pixel_index, channels) in buffer.chunks_mut(3).enumerate() {
+                channels[0] = ((pixel_index * 7 + index * 13) & 0xFF) as u8;
+                channels[1] = ((pixel_index * 5 + index * 29) & 0xFF) as u8;
+                channels[2] = ((pixel_index * 3 + index * 31) & 0xFF) as u8;
+            }
+            writer.write_frame(index as u64, &buffer).unwrap();
+            expected.extend_from_slice(&buffer);
+        }
+        writer.finish().unwrap();
+
+        // The NUT must advertise the PNG codec so the daemon's codec-agnostic
+        // transcode picks the right decoder off the stream header.
+        let probe = Command::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+            ])
+            .arg(&path)
+            .output()
+            .expect("spawn ffprobe");
+        assert!(probe.status.success(), "ffprobe failed: {probe:?}");
+        assert_eq!(String::from_utf8_lossy(&probe.stdout).trim(), "png");
+
+        // Decode the whole NUT back to packed RGB24 and assert it is bit-exact
+        // to what we wrote — PNG is lossless, so the round-trip must be exact.
+        let decoded = Command::new(&ffmpeg)
+            .args(["-v", "error", "-vsync", "passthrough"])
+            .arg("-i")
+            .arg(&path)
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+            .output()
+            .expect("spawn ffmpeg");
+        assert!(
+            decoded.status.success(),
+            "ffmpeg decode failed: stderr={}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert_eq!(
+            decoded.stdout,
+            expected,
+            "PNG round-trip was not bit-exact (len got {}, want {})",
+            decoded.stdout.len(),
+            expected.len()
+        );
     }
 }

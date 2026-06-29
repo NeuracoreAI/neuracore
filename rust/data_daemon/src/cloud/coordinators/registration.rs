@@ -765,4 +765,127 @@ mod tests {
             Some("Unexpected error during registration")
         );
     }
+
+    #[tokio::test]
+    async fn silent_omission_retries_under_budget() {
+        // The backend returns neither a registered nor a failed entry for the
+        // trace. It must be retried (rolled back to pending) under the bounded
+        // budget, never silently dropped.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [],
+                "failed_traces": []
+            })))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
+        let bus = EventBus::new();
+        let api = client(&server);
+
+        let claimed = store
+            .claim_traces_for_registration(BATCH_SIZE, 0.0)
+            .await
+            .unwrap();
+        submit_batch(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            claimed,
+            &mut HashMap::new(),
+        )
+        .await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.registration_status,
+            TraceRegistrationStatus::Pending,
+            "a silently-omitted trace is retried, not lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_once_registers_and_emits_ready() {
+        // End-to-end through the coordinator's own drain: claim → register →
+        // promotion sweep. Exercises drain_once (which the per-call tests above
+        // bypass by calling submit_batch directly).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [{
+                    "trace_id": "trace-1",
+                    "upload_session_uris": {"JOINT_POSITIONS/arm0/trace.json": "https://upload/abc"}
+                }],
+                "failed_traces": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
+        let bus = EventBus::new();
+        let mut subscriber = bus.subscribe();
+        let api = client(&server);
+
+        // `Duration::ZERO` max_wait claims the freshly-seeded trace immediately.
+        drain_once(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            Duration::from_secs(0),
+            &mut HashMap::new(),
+        )
+        .await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.registration_status,
+            TraceRegistrationStatus::Registered
+        );
+        assert_eq!(trace.upload_status, TraceUploadStatus::Queued);
+        let mut saw_ready = false;
+        while let Ok(event) = subscriber.try_recv() {
+            if matches!(event, DaemonEvent::ReadyForUpload { .. }) {
+                saw_ready = true;
+            }
+        }
+        assert!(
+            saw_ready,
+            "drain_once promotes the registered+written trace to ReadyForUpload"
+        );
+    }
+
+    #[tokio::test]
+    async fn drain_once_with_no_claimable_traces_is_a_noop() {
+        // Nothing claimable → no register POST, no panic (the empty-claim early
+        // return).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let bus = EventBus::new();
+        let api = client(&server);
+
+        drain_once(
+            &Arc::new(store.clone()),
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            Duration::from_secs(0),
+            &mut HashMap::new(),
+        )
+        .await;
+    }
 }

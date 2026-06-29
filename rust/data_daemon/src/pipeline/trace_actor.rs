@@ -1256,4 +1256,102 @@ mod tests {
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert!(trace.total_bytes > 0);
     }
+
+    #[tokio::test]
+    async fn frames_over_storage_budget_are_dropped_not_written() {
+        // Under storage pressure the actor must refuse frames (counting the
+        // drops) and keep writing the ones that fit, rather than blow past the
+        // cap or wedge — a silent-data-loss path with no other guard.
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        // A tight 25-byte cap: the first 20-byte frame fits; later ones don't.
+        let policy = StoragePolicy {
+            storage_limit_bytes: Some(25),
+            min_free_disk_bytes: 0,
+            refresh_interval: Duration::from_secs(60),
+        };
+        let recordings_root = tempdir.path().join("recordings");
+        let budget = Arc::new(StorageBudget::new(&recordings_root, policy));
+        let (trace_writer, _writer_owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        let (json_writer, _json_owner) = crate::pipeline::json_writer::spawn();
+        let context = Arc::new(TraceActorContext::new(
+            recordings_root,
+            budget,
+            VideoEncoder::new(),
+            trace_writer,
+            json_writer,
+        ));
+
+        let mut state = ActorState::new(identity(1, "trace-1", "joints"));
+        state.send_create(&context);
+        for _ in 0..3 {
+            state.handle_data(&context, 0, None, vec![0u8; 20]).await;
+        }
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
+
+        assert_eq!(state.frame_count, 1, "only the first frame fits the budget");
+        assert_eq!(
+            state.dropped_over_budget, 2,
+            "the two over-budget frames are counted as dropped"
+        );
+
+        let trace_dir =
+            TracePath::new("1", "joints", "trace-1").directory(context.recordings_root.as_path());
+        let bytes = std::fs::read(trace_dir.join("trace.json")).unwrap();
+        let parsed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            parsed.as_array().unwrap().len(),
+            1,
+            "only the accepted frame lands on disk"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_discards_writer_and_releases_budget_without_finalising() {
+        // A cancel mid-trace must drop the open writer (release its file handle
+        // without finalising) and give back the budget it reserved — never
+        // marking the trace Written.
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
+
+        let mut state = ActorState::new(identity(1, "trace-1", "joints"));
+        state.send_create(&context);
+        state
+            .handle_data(
+                &context,
+                0,
+                None,
+                serde_json::to_vec(&json!({"i": 0})).unwrap(),
+            )
+            .await;
+        assert!(state.bytes_on_disk > 0, "the frame was accounted on disk");
+
+        state.handle_cancel(&context).await;
+        context.trace_writer.flush().await;
+
+        assert!(
+            matches!(state.writer, TraceWriterKind::Pending),
+            "cancel discards the open writer"
+        );
+        assert_eq!(
+            state.bytes_on_disk, 0,
+            "cancel releases the byte accounting"
+        );
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_ne!(
+            trace.write_status,
+            TraceWriteStatus::Written,
+            "a cancelled trace is never finalised as Written"
+        );
+    }
 }

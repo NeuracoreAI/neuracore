@@ -218,9 +218,9 @@ impl RuntimeEnv {
             db_path: db_path(),
             recordings_root: recordings_root_path(),
             profile: active_profile_name(),
-            // Mirrors `helpers.py::is_debug_mode`.
             debug: env_var("NDD_DEBUG")
-                .map(|value| value.to_lowercase() == "true")
+                .as_deref()
+                .map(is_truthy)
                 .unwrap_or(false),
             api_url: env_var("NEURACORE_API_URL").unwrap_or_else(|| DEFAULT_API_URL.to_string()),
         }
@@ -250,5 +250,132 @@ mod tests {
         assert!(parse_bytes("abc").is_err());
         assert!(parse_bytes("12tb").is_err());
         assert!(parse_bytes("1 g").is_err());
+    }
+
+    #[test]
+    fn is_truthy_recognises_only_yes_values() {
+        for truthy in ["1", "true", "TRUE", "yes", "Yes", "y", "Y"] {
+            assert!(is_truthy(truthy), "{truthy:?} should be truthy");
+        }
+        for falsy in ["0", "false", "no", "n", "", "enabled", "2"] {
+            assert!(!is_truthy(falsy), "{falsy:?} should be falsy");
+        }
+    }
+
+    #[test]
+    fn deserialize_optional_bytes_accepts_int_unit_or_null() {
+        #[derive(Deserialize)]
+        struct Holder {
+            #[serde(default, deserialize_with = "deserialize_optional_bytes")]
+            limit: Option<i64>,
+        }
+        let limit_of = |json: &str| serde_json::from_str::<Holder>(json).map(|holder| holder.limit);
+
+        assert_eq!(limit_of(r#"{"limit": 1024}"#).unwrap(), Some(1024));
+        assert_eq!(
+            limit_of(r#"{"limit": "1G"}"#).unwrap(),
+            Some(1024 * 1024 * 1024)
+        );
+        assert_eq!(limit_of(r#"{"limit": null}"#).unwrap(), None);
+        assert_eq!(limit_of(r#"{}"#).unwrap(), None);
+        assert!(
+            limit_of(r#"{"limit": "not-a-size"}"#).is_err(),
+            "a malformed unit string surfaces as a deserialization error"
+        );
+    }
+
+    /// Every variable the env layer reads. Listed so the matrix test can
+    /// save/restore them all (and so a future field is added here too).
+    const MANAGED_VARS: &[&str] = &[
+        "NCD_STORAGE_LIMIT",
+        "NCD_BANDWIDTH_LIMIT",
+        "NCD_SPOOL_LIMIT",
+        "NCD_PATH_TO_STORE_RECORD",
+        "NCD_NUM_THREADS",
+        "NCD_KEEP_WAKELOCK_WHILE_UPLOAD",
+        "NCD_OFFLINE",
+        "NCD_API_KEY",
+        "NCD_CURRENT_ORG_ID",
+        "NEURACORE_DAEMON_PROFILE",
+    ];
+
+    #[test]
+    fn env_config_overrides_reads_ncd_vars() {
+        // Mutates process-wide env, so — per this crate's convention (see
+        // `paths.rs::resolution_precedence`) — a single test drives the whole
+        // matrix and saves/restores every variable it touches.
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> = MANAGED_VARS
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect();
+
+        // 1) Every override present and well-formed → every field populated.
+        std::env::set_var("NCD_STORAGE_LIMIT", "2G");
+        std::env::set_var("NCD_BANDWIDTH_LIMIT", "10mb");
+        std::env::set_var("NCD_SPOOL_LIMIT", "512");
+        std::env::set_var("NCD_PATH_TO_STORE_RECORD", "/srv/recordings");
+        std::env::set_var("NCD_NUM_THREADS", "4");
+        std::env::set_var("NCD_KEEP_WAKELOCK_WHILE_UPLOAD", "yes");
+        std::env::set_var("NCD_OFFLINE", "1");
+        std::env::set_var("NCD_API_KEY", "secret-key");
+        std::env::set_var("NCD_CURRENT_ORG_ID", "org-42");
+        std::env::set_var("NEURACORE_DAEMON_PROFILE", "lab");
+
+        let config = env_config_overrides();
+        assert_eq!(config.storage_limit, Some(2 * 1024 * 1024 * 1024));
+        assert_eq!(config.bandwidth_limit, Some(10 * 1024 * 1024));
+        assert_eq!(config.spool_limit, Some(512));
+        assert_eq!(
+            config.path_to_store_record.as_deref(),
+            Some("/srv/recordings")
+        );
+        assert_eq!(config.num_threads, Some(4));
+        assert_eq!(config.keep_wakelock_while_upload, Some(true));
+        assert_eq!(config.offline, Some(true));
+        assert_eq!(config.api_key.as_deref(), Some("secret-key"));
+        assert_eq!(config.current_org_id.as_deref(), Some("org-42"));
+        assert_eq!(active_profile_name().as_deref(), Some("lab"));
+
+        // 2) An empty string is treated as unset; an unparseable numeric is
+        //    skipped (not fatal) and leaves its field unset.
+        std::env::set_var("NCD_API_KEY", "");
+        std::env::set_var("NCD_OFFLINE", "");
+        std::env::set_var("NCD_STORAGE_LIMIT", "not-a-size");
+        std::env::set_var("NCD_NUM_THREADS", "twelve");
+        let config = env_config_overrides();
+        assert_eq!(config.api_key, None, "empty string is treated as unset");
+        assert_eq!(config.offline, None, "empty string is treated as unset");
+        assert_eq!(
+            config.storage_limit, None,
+            "an unparseable size is skipped, not fatal"
+        );
+        assert_eq!(
+            config.num_threads, None,
+            "an unparseable thread count is skipped"
+        );
+
+        // 3) Nothing set → an all-default (empty) override layer.
+        for name in MANAGED_VARS {
+            std::env::remove_var(name);
+        }
+        let config = env_config_overrides();
+        assert_eq!(config.storage_limit, None);
+        assert_eq!(config.bandwidth_limit, None);
+        assert_eq!(config.spool_limit, None);
+        assert_eq!(config.path_to_store_record, None);
+        assert_eq!(config.num_threads, None);
+        assert_eq!(config.keep_wakelock_while_upload, None);
+        assert_eq!(config.offline, None);
+        assert_eq!(config.api_key, None);
+        assert_eq!(config.current_org_id, None);
+        assert_eq!(active_profile_name(), None);
+
+        // Restore the pre-test environment for other tests in this binary.
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
     }
 }

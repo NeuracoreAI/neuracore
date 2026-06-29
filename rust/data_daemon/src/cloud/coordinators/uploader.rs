@@ -651,6 +651,35 @@ mod tests {
         (recording_index, local)
     }
 
+    /// Drive `upload_single` for `trace_id` with the standard single-trace
+    /// harness: an owned store handle, a fresh trace-event writer (held alive
+    /// for the await), the `recordings_root`, and org `org-1`. The caller owns
+    /// `bus`/`status_tx` so it can observe the emitted events and status updates.
+    async fn run_upload_single(
+        store: &SqliteStateStore,
+        recordings_root: std::path::PathBuf,
+        api: &Arc<ApiClient>,
+        bus: &EventBus,
+        status_tx: &mpsc::UnboundedSender<StatusUpdate>,
+        trace_id: &str,
+    ) {
+        let store_arc = Arc::new(store.clone());
+        let (trace_writer, _trace_writer_owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        let recordings_root = Arc::new(recordings_root);
+        upload_single(
+            &store_arc,
+            &trace_writer,
+            bus,
+            api,
+            &recordings_root,
+            &org_rx(Some("org-1")),
+            status_tx,
+            trace_id,
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn bad_server_checksum_marks_trace_retrying() {
         // Server returns a deliberately wrong CRC32C (0) — the real payload's
@@ -688,21 +717,7 @@ mod tests {
         let bus = EventBus::new();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
-        let store_arc = Arc::new(store.clone());
-        let (trace_writer, _trace_writer_owner) =
-            crate::state::trace_event_database_writer::spawn(store_arc.clone());
-        let recordings_root = Arc::new(recordings_root);
-        upload_single(
-            &store_arc,
-            &trace_writer,
-            &bus,
-            &api,
-            &recordings_root,
-            &org_rx(Some("org-1")),
-            &status_tx,
-            "trace-1",
-        )
-        .await;
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Retrying);
@@ -745,21 +760,7 @@ mod tests {
         let bus = EventBus::new();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
-        let store_arc = Arc::new(store.clone());
-        let (trace_writer, _trace_writer_owner) =
-            crate::state::trace_event_database_writer::spawn(store_arc.clone());
-        let recordings_root = Arc::new(recordings_root);
-        upload_single(
-            &store_arc,
-            &trace_writer,
-            &bus,
-            &api,
-            &recordings_root,
-            &org_rx(Some("org-1")),
-            &status_tx,
-            "trace-1",
-        )
-        .await;
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
@@ -826,21 +827,7 @@ mod tests {
         let bus = EventBus::new();
         let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
-        let store_arc = Arc::new(store.clone());
-        let (trace_writer, _trace_writer_owner) =
-            crate::state::trace_event_database_writer::spawn(store_arc.clone());
-        let recordings_root = Arc::new(recordings_root);
-        upload_single(
-            &store_arc,
-            &trace_writer,
-            &bus,
-            &api,
-            &recordings_root,
-            &org_rx(Some("org-1")),
-            &status_tx,
-            "trace-1",
-        )
-        .await;
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
@@ -904,21 +891,7 @@ mod tests {
         let mut subscriber = bus.subscribe();
         let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
 
-        let store_arc = Arc::new(store.clone());
-        let (trace_writer, _trace_writer_owner) =
-            crate::state::trace_event_database_writer::spawn(store_arc.clone());
-        let recordings_root = Arc::new(recordings_root);
-        upload_single(
-            &store_arc,
-            &trace_writer,
-            &bus,
-            &api,
-            &recordings_root,
-            &org_rx(Some("org-1")),
-            &status_tx,
-            "trace-1",
-        )
-        .await;
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
 
         let trace = store.get_trace("trace-1").await.unwrap().unwrap();
         assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
@@ -934,5 +907,494 @@ mod tests {
         // Status updater also gets a terminal entry.
         let update = status_rx.try_recv().expect("status update enqueued");
         assert!(update.completed);
+    }
+
+    #[tokio::test]
+    async fn empty_session_uris_marks_uploaded_immediately() {
+        // A registered-but-empty trace (nothing to PUT) settles as Uploaded
+        // with zero bytes and emits UploadComplete, so the progress gate isn't
+        // held waiting on an upload that has nothing to do.
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let recording = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(recording.recording_index, "rec-1")
+            .await
+            .unwrap();
+        store
+            .create_trace(
+                recording.recording_index,
+                "trace-1",
+                Some("JOINT_POSITIONS"),
+                Some("arm"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    upload_session_uris: Some("{}".to_string()),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let mut subscriber = bus.subscribe();
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(trace.bytes_uploaded, 0);
+        assert!(matches!(
+            subscriber.try_recv(),
+            Ok(DaemonEvent::UploadComplete { .. })
+        ));
+        assert!(status_rx.try_recv().unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn no_session_uris_leaves_trace_queued() {
+        // Ready-for-upload but no stored session URIs (registration hasn't
+        // persisted them yet): the uploader returns without touching the trace
+        // so a later drain retries once they land.
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let recording = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(recording.recording_index, "rec-1")
+            .await
+            .unwrap();
+        store
+            .create_trace(
+                recording.recording_index,
+                "trace-1",
+                Some("JOINT_POSITIONS"),
+                Some("arm"),
+            )
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    ..TraceUpdate::default() // no upload_session_uris
+                },
+            )
+            .await
+            .unwrap();
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.upload_status,
+            TraceUploadStatus::Queued,
+            "no URIs → trace untouched for retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_cloud_recording_id_defers_upload() {
+        // The recording row has no cloud id yet (start not notified). The
+        // uploader must defer (leave the trace queued), never marking it
+        // Uploading, so the periodic rescan re-enters once the id lands.
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let recording = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap();
+        // Deliberately NOT start-notified, so recording_id is None.
+        store
+            .create_trace(
+                recording.recording_index,
+                "trace-1",
+                Some("JOINT_POSITIONS"),
+                Some("arm"),
+            )
+            .await
+            .unwrap();
+        let mut uris = HashMap::new();
+        uris.insert(
+            "JOINT_POSITIONS/arm/trace.json".to_string(),
+            "https://upload/abc".to_string(),
+        );
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.upload_status,
+            TraceUploadStatus::Queued,
+            "no cloud id → upload deferred, not started"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_artefact_marks_trace_failed() {
+        // Session URI + cloud id + data_type all present, but the on-disk file
+        // is gone. The uploader marks the trace Failed and emits UploadComplete
+        // so the recording's progress gate isn't wedged on a vanished file.
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let recording = store
+            .create_recording(NewRecording::default())
+            .await
+            .unwrap();
+        store
+            .mark_recording_start_notified(recording.recording_index, "rec-1")
+            .await
+            .unwrap();
+        store
+            .create_trace(
+                recording.recording_index,
+                "trace-1",
+                Some("JOINT_POSITIONS"),
+                Some("arm"),
+            )
+            .await
+            .unwrap();
+        let mut uris = HashMap::new();
+        uris.insert(
+            "JOINT_POSITIONS/arm/trace.json".to_string(),
+            format!("{}/upload/abc", server.uri()),
+        );
+        store
+            .update_trace(
+                "trace-1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    upload_session_uris: Some(serde_json::to_string(&uris).unwrap()),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        // Deliberately do NOT create the on-disk artefact.
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let mut subscriber = bus.subscribe();
+        let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        assert!(matches!(
+            subscriber.try_recv(),
+            Ok(DaemonEvent::UploadComplete { .. })
+        ));
+        assert!(status_rx.try_recv().unwrap().completed);
+    }
+
+    #[tokio::test]
+    async fn spawn_upload_task_skips_already_dispatched_trace() {
+        // The dedup guard: a trace already in `in_flight_ids` must not be
+        // dispatched twice (a drain triggered before the task marks itself
+        // Uploading would otherwise double-upload).
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = Arc::new(tempdir.path().join("recordings"));
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let store_arc = Arc::new(store.clone());
+        let (trace_writer, _owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+        let mut in_flight: JoinSet<String> = JoinSet::new();
+        let mut in_flight_ids: HashSet<String> = HashSet::new();
+        in_flight_ids.insert("trace-1".to_string());
+
+        spawn_upload_task(
+            &store_arc,
+            &trace_writer,
+            &bus,
+            &api,
+            &recordings_root,
+            &org_rx(Some("org-1")),
+            &status_tx,
+            &semaphore,
+            &mut in_flight,
+            &mut in_flight_ids,
+            "trace-1".to_string(),
+        );
+
+        assert!(in_flight.is_empty(), "a duplicate dispatch is skipped");
+        assert_eq!(in_flight_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn spawn_upload_task_skips_when_semaphore_full() {
+        // No permit available → the task is not dispatched and the trace is not
+        // marked in-flight, so a later drain (which frees permits) retries it.
+        let server = MockServer::start().await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = Arc::new(tempdir.path().join("recordings"));
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let store_arc = Arc::new(store.clone());
+        let (trace_writer, _owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        let semaphore = Arc::new(Semaphore::new(0)); // no permits
+        let mut in_flight: JoinSet<String> = JoinSet::new();
+        let mut in_flight_ids: HashSet<String> = HashSet::new();
+
+        spawn_upload_task(
+            &store_arc,
+            &trace_writer,
+            &bus,
+            &api,
+            &recordings_root,
+            &org_rx(Some("org-1")),
+            &status_tx,
+            &semaphore,
+            &mut in_flight,
+            &mut in_flight_ids,
+            "trace-1".to_string(),
+        );
+
+        assert!(in_flight.is_empty(), "no permit → nothing dispatched");
+        assert!(
+            in_flight_ids.is_empty(),
+            "no permit → id not marked in-flight"
+        );
+    }
+
+    // The following drive the wire-level transfer layer (`upload_transfer.rs`)
+    // through the uploader entry point, exercising branches that only a live
+    // server reaches: transient-retry, auth refresh, a hard error, and the
+    // no-progress stall guard.
+
+    #[tokio::test]
+    async fn transient_5xx_chunk_is_retried_then_uploaded() {
+        // A 503 on the chunk PUT is transient: put_chunk retries within budget
+        // and the trace still settles as Uploaded.
+        let server = MockServer::start().await;
+        let payload = b"transient-ok";
+        let header = format!(
+            "crc32c={}",
+            BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
+        );
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(move |_req: &Request| {
+                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header.as_str())
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/abc", server.uri()),
+            payload,
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        assert_eq!(
+            store
+                .get_trace("trace-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .upload_status,
+            TraceUploadStatus::Uploaded
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_401_on_chunk_is_reloaded_then_uploaded() {
+        // A 401 mid-upload triggers one token reload and then the retried PUT
+        // succeeds.
+        let server = MockServer::start().await;
+        let payload = b"auth-ok";
+        let header = format!(
+            "crc32c={}",
+            BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
+        );
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(move |_req: &Request| {
+                ResponseTemplate::new(200).insert_header("X-Goog-Hash", header.as_str())
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/abc", server.uri()),
+            payload,
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        assert_eq!(
+            store
+                .get_trace("trace-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .upload_status,
+            TraceUploadStatus::Uploaded
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_4xx_chunk_error_rolls_trace_to_retrying() {
+        // A non-retryable 4xx is a hard error: put_chunk returns Failed,
+        // upload_one_file errors, and the uploader rolls the trace to Retrying
+        // for the registration recovery sweep to re-arm.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/abc", server.uri()),
+            b"hard-error",
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        assert_eq!(
+            store
+                .get_trace("trace-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .upload_status,
+            TraceUploadStatus::Retrying
+        );
+    }
+
+    #[tokio::test]
+    async fn no_progress_308_stall_marks_trace_retrying() {
+        // A peer that keeps replying 308 without committing any bytes must not
+        // wedge the upload task (and its concurrency permit) forever: the
+        // stall guard bails after MAX_RETRIES and the trace rolls to Retrying.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(ResponseTemplate::new(308)) // no Range → no forward progress
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/abc", server.uri()),
+            b"stall-me",
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        assert_eq!(
+            store
+                .get_trace("trace-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .upload_status,
+            TraceUploadStatus::Retrying
+        );
     }
 }

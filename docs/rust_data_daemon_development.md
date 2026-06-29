@@ -41,7 +41,7 @@ flowchart LR
     DISP --> ACT["per-trace actors"]
     ACT -->|fire-and-forget| TW["trace_writer<br/>batched DB write-behind"]
     ACT -->|fire-and-forget| JW["json_writer (IO thread)"]
-    ACT -->|spawn_blocking| FF["ffmpeg chunk encode"]
+    ACT -->|async subprocess| FF["ffmpeg chunk encode"]
     TW --> DB[("SQLite WAL")]
     LIS -->|recording-id queries| DB
     subgraph CLOUD["cloud coordinators"]
@@ -99,7 +99,7 @@ CI uses `stable` (via `dtolnay/rust-toolchain@stable`), so any recent stable too
 
 ### System dependencies
 
-- **ffmpeg + ffprobe** — required by the video-encoder subprocess and the `encoding::video_encoder` / `encoding::nut_writer` test suites (tests that need ffmpeg self-skip if it's missing, but the daemon itself depends on it at runtime):
+- **ffmpeg + ffprobe** — required by the video-encoder subprocess and the daemon's `encoding::video_encoder` and the producer's `data_daemon_producer::nut_writer` test suites (tests that need ffmpeg self-skip if it's missing, but the daemon itself depends on it at runtime):
 
     ```bash
     sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -144,7 +144,7 @@ cargo test -p data_daemon_shared
 
 # A specific module or test name (partial match)
 cargo test -p data-daemon pipeline::dispatcher
-cargo test -p data-daemon encoding::metadata::fixture_matches_python_video_trace_output
+cargo test -p data-daemon encoding::metadata::fixture_matches_expected_video_trace_output
 ```
 
 Tests that shell out to `ffmpeg` / `ffprobe` self-skip on hosts without those binaries — install them (see above) to exercise the full encoding suite.
