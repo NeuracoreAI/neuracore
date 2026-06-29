@@ -182,6 +182,8 @@ class SynchronizedRecording:
                         str(video_location),
                         "-vsync",
                         "0",
+                        "-pix_fmt",
+                        "rgb24",
                         "-q:v",
                         "1",
                         "-start_number",

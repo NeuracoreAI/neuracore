@@ -14,9 +14,10 @@ from abc import ABC
 from dataclasses import dataclass
 
 import numpy as np
-from neuracore_types import CameraData, DataType, NCData
+from neuracore_types import CameraData, DataType, JointData, NCData
 
 from neuracore.data_daemon.communications_management.producer import ProducerChannel
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,13 @@ class DataStream(ABC):
     """Base class for data streams.
 
     Provides common functionality for managing recording state and data
-    storage across different types of sensor data streams. Each stream
-    has its own ProducerChannel for sending data to the daemon.
+    storage across different types of sensor data streams.
+
+    Under the legacy daemon each stream owns a :class:`ProducerChannel` that
+    forwards its data over ZMQ. Under the Rust daemon the stream owns *no*
+    channel — the daemon interface lives at the logging-function layer
+    (``RecordingContext``) — so the stream only tracks recording state and the
+    latest sample for live-data consumers.
     """
 
     def __init__(self, data_type: DataType, stream_name: str) -> None:
@@ -65,6 +71,7 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
+        self._use_native_producer = rust_daemon_enabled()
 
     @property
     def data_type(self) -> DataType:
@@ -74,16 +81,12 @@ class DataStream(ABC):
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
 
-        If the stream is already recording, stop it first. Then, set the
-        recording state to True and store the recording context. Finally,
-        ensure a producer is available for this stream and start a new trace.
+        If the stream is already recording, stop it first. Then set the
+        recording state to True and store the recording context.
 
         Args:
             context: Recording context containing identifiers for the recording
                 session, robot, and dataset.
-
-        Returns:
-            None
         """
         if self.is_recording():
             _, stop_cutoff_sequence_number = self.prepare_recording_stopped()
@@ -96,16 +99,18 @@ class DataStream(ABC):
         self._handle_ensure_producer_channel(context)
 
     def _handle_ensure_producer_channel(self, context: DataRecordingContext) -> None:
-        """Ensures a producer is available for this data stream.
+        """Ensure a legacy producer channel exists for this data stream.
 
-        If the producer does not exist, it is created with the given context.
-        Afterwards, the producer channel starts a fresh recording session for
-        the supplied recording context.
+        Under the Rust daemon the stream owns no channel — lifecycle and data
+        envelopes are published by ``RecordingContext`` from the logging layer
+        — so this is a no-op and ``_producer_channel`` stays ``None``.
 
         Args:
             context: Recording context containing identifiers for
                 the recording session, robot, and dataset.
         """
+        if self._use_native_producer:
+            return
         if self._producer_channel is None:
             channel_id = f"{self._data_type.value}:\
             {self._stream_name}:{uuid.uuid4().hex[:8]}"
@@ -119,14 +124,20 @@ class DataStream(ABC):
             recording_id=context.recording_id
         )
 
-    def prepare_recording_stopped(self) -> tuple[ProducerChannel, int]:
-        """Mark the producer channel as stopping and return it."""
-        producer_channel = self.get_producer_channel()
+    def prepare_recording_stopped(self) -> tuple[ProducerChannel | None, int]:
+        """Mark the producer channel as stopping and return it.
 
-        if not isinstance(producer_channel, ProducerChannel):
-            raise MissingProducerChannelError(
-                f"Stream {self._stream_name} has no ProducerChannel"
-            )
+        Under the Rust daemon there is no channel, so this returns ``(None, 0)``.
+        Under the legacy daemon a missing channel means the stream is stale, so
+        it raises :class:`MissingProducerChannelError` to have it pruned.
+        """
+        producer_channel = self.get_producer_channel()
+        if producer_channel is None:
+            if not rust_daemon_enabled():
+                raise MissingProducerChannelError(
+                    "stream has no active producer channel"
+                )
+            return None, 0
 
         stop_cutoff_sequence_number = producer_channel.mark_recording_stop_requested()
 
@@ -143,8 +154,15 @@ class DataStream(ABC):
         producer_channel = self._producer_channel
         self._producer_channel = None
 
-        if not isinstance(producer_channel, ProducerChannel):
-            raise MissingProducerChannelError("Stream has no ProducerChannel")
+        if producer_channel is None:
+            if not rust_daemon_enabled():
+                # Legacy daemon: a stream with no producer channel is stale —
+                # raise so the caller prunes it.
+                raise MissingProducerChannelError(
+                    "stream has no active producer channel"
+                )
+            # Rust daemon: the stream never owned a channel — nothing to drain.
+            return
 
         try:
             if producer_channel.trace_id:
@@ -182,7 +200,11 @@ class DataStream(ABC):
         return self._context
 
     def _send_to_daemon(self, data: bytes) -> None:
-        """Send data to the daemon via the producer.
+        """Send data to the daemon via the legacy producer channel.
+
+        A no-op when there is no channel — which is always the case under the
+        Rust daemon, where the logging layer delivers data via
+        ``RecordingContext`` instead.
 
         Args:
             data: Serialized data bytes to send.
@@ -248,10 +270,66 @@ class JsonDataStream(DataStream):
         self._latest_data = data
         if not self.is_recording() or not send_to_daemon:
             return
+        if self._use_native_producer:
+            # Rust daemon: the logging layer delivers the sample to the daemon
+            # via RecordingContext; the stream only keeps `_latest_data`.
+            return
 
         # Serialize to JSON bytes and send to daemon
         json_bytes = json.dumps(data.model_dump(mode="json")).encode("utf-8")
         self._send_to_daemon(json_bytes)
+
+
+class JointDataStream(JsonDataStream):
+    """JSON stream for scalar joint samples with deferred latest-data builds.
+
+    Joint logging is the hottest path in the SDK: during a recording one
+    :class:`JointData` was materialised per joint per frame purely to keep
+    ``_latest_data`` current for live-data / endpoint consumers, which read it
+    at serving rate — far below the logging rate. At high joint counts that
+    per-sample Pydantic construction, and the GC churn it drove, dominated the
+    ``log_joint_*`` calls.
+
+    This stream lets the logging layer hand over the raw ``(timestamp, value)``
+    cheaply via :meth:`record_scalar` and defers building the ``JointData``
+    until :meth:`get_latest_data` is actually called, so the hot path performs
+    two attribute writes instead of a model construction.
+    """
+
+    def __init__(self, data_type: DataType, data_type_name: str) -> None:
+        """Initialize the joint data stream."""
+        super().__init__(data_type=data_type, data_type_name=data_type_name)
+        self._pending_timestamp: float = 0.0
+        self._pending_value: float = 0.0
+        self._has_pending_latest = False
+
+    def record_scalar(self, timestamp: float, value: float) -> None:
+        """Stash the latest scalar sample without building a ``JointData``.
+
+        The model is materialised lazily in :meth:`get_latest_data`. The
+        latest-data read is best-effort: under concurrency a reader may observe
+        a timestamp/value drawn from adjacent samples (the pair is not written
+        atomically), but it never raises and never returns a partially
+        constructed ``JointData``.
+        """
+        self._pending_timestamp = timestamp
+        self._pending_value = value
+        self._has_pending_latest = True
+
+    def log(self, data: NCData, *, send_to_daemon: bool = True) -> None:
+        """Log a materialised sample, superseding any deferred scalar."""
+        self._has_pending_latest = False
+        super().log(data=data, send_to_daemon=send_to_daemon)
+
+    def get_latest_data(self) -> NCData | None:
+        """Return the latest sample, materialising a deferred scalar on demand."""
+        if self._has_pending_latest:
+            self._latest_data = JointData(
+                timestamp=self._pending_timestamp,
+                value=self._pending_value,
+            )
+            self._has_pending_latest = False
+        return self._latest_data
 
 
 class VideoDataStream(DataStream):
@@ -289,21 +367,21 @@ class VideoDataStream(DataStream):
         self._latest_data = metadata
         if not self.is_recording():
             return
+        if self._use_native_producer:
+            # Rust daemon: the frame is delivered to the daemon by the logging
+            # layer (RecordingContext.log_frame); the stream only keeps
+            # `_latest_data` for live-data consumers.
+            return
 
-        # Serialize metadata and frame to bytes
-        # Frame is sent as raw numpy bytes with metadata as JSON header
+        frame_view = memoryview(frame).cast("B")
+
+        # Legacy daemon: pack [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
         metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
         metadata_dict["width"] = self.width
         metadata_dict["height"] = self.height
         metadata_dict["frame_nbytes"] = int(frame.size * frame.itemsize)
         metadata_json = json.dumps(metadata_dict).encode("utf-8")
-
-        # Pack: [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
         header = struct.pack("<I", len(metadata_json))
-        frame_source = (
-            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
-        )
-        frame_view = memoryview(frame_source).cast("B")
         total_bytes = len(header) + len(metadata_json) + len(frame_view)
         self._send_to_daemon_parts(
             (header, metadata_json, frame_view),
