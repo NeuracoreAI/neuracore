@@ -7,6 +7,7 @@ and outputs entire action sequences.
 """
 
 import os
+from functools import partial
 from typing import Any, cast
 
 import torch
@@ -43,6 +44,8 @@ from neuracore.ml.algorithm_utils.modules import (
     PoseEncoder,
 )
 from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
+from neuracore.ml.utils.hf_hub_retry import call_with_hf_hub_retry
+from neuracore.ml.utils.pretrained_cache import ensure_pretrained_model
 
 from .modules import ImageEncoder
 
@@ -261,7 +264,10 @@ class CNNMLP(NeuracoreModel):
         if DataType.LANGUAGE in self.input_data_types:
             from transformers import AutoTokenizer
 
-            _tokenizer = AutoTokenizer.from_pretrained(LANGUAGE_MODEL_NAME)
+            ensure_pretrained_model(LANGUAGE_MODEL_NAME)
+            _tokenizer = call_with_hf_hub_retry(
+                partial(AutoTokenizer.from_pretrained, LANGUAGE_MODEL_NAME)
+            )
             self.embedding_encoder = nn.Embedding(_tokenizer.vocab_size, 128)
             self.encoder_output_dims[DataType.LANGUAGE] = cnn_output_dim
             self.encoders[DataType.LANGUAGE] = nn.Sequential(

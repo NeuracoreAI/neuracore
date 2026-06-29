@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -34,6 +35,11 @@ from neuracore.ml.algorithms.pi05.utils import (
     _create_sinusoidal_pos_embedding,
     _make_att_2d_masks,
     _sample_beta,
+)
+from neuracore.ml.utils.hf_hub_retry import call_with_hf_hub_retry
+from neuracore.ml.utils.pretrained_cache import (
+    ensure_pretrained_model,
+    is_hf_hub_repo_id,
 )
 
 T = TypeVar("T")
@@ -556,16 +562,23 @@ class PI05Policy(nn.Module):
             return model
 
         try:
-            resolved_file = cached_file(
-                pretrained_name_or_path,
-                "model.safetensors",
-                cache_dir=kwargs.get("cache_dir"),
-                force_download=kwargs.get("force_download", False),
-                resume_download=kwargs.get("resume_download"),
-                proxies=kwargs.get("proxies"),
-                token=kwargs.get("token") or kwargs.get("use_auth_token"),
-                revision=kwargs.get("revision"),
-                local_files_only=kwargs.get("local_files_only", False),
+            repo_id = str(pretrained_name_or_path)
+            if is_hf_hub_repo_id(repo_id):
+                ensure_pretrained_model(repo_id)
+
+            resolved_file = call_with_hf_hub_retry(
+                partial(
+                    cached_file,
+                    pretrained_name_or_path,
+                    "model.safetensors",
+                    cache_dir=kwargs.get("cache_dir"),
+                    force_download=kwargs.get("force_download", False),
+                    resume_download=kwargs.get("resume_download"),
+                    proxies=kwargs.get("proxies"),
+                    token=kwargs.get("token") or kwargs.get("use_auth_token"),
+                    revision=kwargs.get("revision"),
+                    local_files_only=kwargs.get("local_files_only", False),
+                )
             )
             original_state_dict = load_file(resolved_file)
             logging.info("Loaded state dict from %s", resolved_file)
