@@ -1,0 +1,166 @@
+//! Broadcast event bus driving cross-actor coordination.
+//!
+//! A `tokio::sync::broadcast::channel(256)` whose subscribers are the
+//! dispatcher, registration coordinator, upload coordinator, status updater,
+//! and progress reporter.
+
+use tokio::sync::broadcast;
+
+/// Default capacity of the daemon event channel.
+///
+/// Capacity chosen so bursts of cross-actor events fit without lagging slow
+/// subscribers; a lagging subscriber gets [`broadcast::error::RecvError::Lagged`]
+/// and re-reads state on its next tick.
+pub const EVENT_BUS_CAPACITY: usize = 256;
+
+/// Connection state reported by the network monitor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Backend reachable.
+    Up,
+    /// Backend unreachable; uploaders pause until the next `Up` transition.
+    Down,
+}
+
+/// Events the daemon's coordinator tasks react to.
+///
+/// All payloads are owned `String`/`Copy` types so events can be cloned cheaply
+/// across `broadcast` receivers without holding any backing buffer alive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonEvent {
+    /// A recording was opened by the producer. The recording row (and its
+    /// `recording_index`) already exists by the time this fires; the
+    /// recording-start notifier reacts by POSTing `/recording/start`.
+    RecordingStarted {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
+    /// The recording-start notifier persisted the backend cloud `recording_id`
+    /// (via `/recording/start`). Fires once per recording, the moment its cloud
+    /// id becomes available. Coordinators that were waiting on the id — notably
+    /// the stop notifier, when a recording was stopped while offline before its
+    /// start had been notified — react to it without polling.
+    RecordingCloudIdAssigned {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
+    /// A trace finished writing to local disk and is ready for registration.
+    TraceWritten {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
+    },
+    /// A trace was successfully registered with the backend.
+    TraceRegistered {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
+    },
+    /// Registration completed and the trace is queued for upload.
+    ReadyForUpload {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
+    },
+    /// A trace has finished uploading.
+    UploadComplete {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
+    },
+    /// A trace's upload progressed by some number of bytes (used to drive the
+    /// debounced status updater).
+    UploadProgress {
+        /// Trace identifier the event applies to.
+        trace_id: String,
+        /// Parent recording's local index.
+        recording_index: i64,
+        /// Bytes uploaded so far.
+        bytes_uploaded: i64,
+        /// Total bytes once finalised; reported when known.
+        total_bytes: Option<i64>,
+    },
+    /// A recording was stopped by the producer.
+    RecordingStopped {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
+    /// A recording was cancelled by the producer. The dispatcher publishes
+    /// this after every per-trace actor for the recording has been torn
+    /// down, the on-disk artefacts have been deleted, and the recording's
+    /// `cancelled_at` has been stamped.
+    RecordingCancelled {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
+    /// Connection state to the backend changed.
+    ConnectionStateChanged(ConnectionState),
+}
+
+/// Owns the sender end of the broadcast channel and hands out subscribers.
+///
+/// Clone the bus to share the sender across tasks; clone the receiver via
+/// [`subscribe`](Self::subscribe).
+#[derive(Clone)]
+pub struct EventBus {
+    sender: broadcast::Sender<DaemonEvent>,
+}
+
+impl EventBus {
+    /// Create a new bus with the default [`EVENT_BUS_CAPACITY`].
+    pub fn new() -> Self {
+        let (sender, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self { sender }
+    }
+
+    /// Subscribe to events. The returned receiver only sees events published
+    /// *after* it was created — replay is intentionally not supported.
+    pub fn subscribe(&self) -> broadcast::Receiver<DaemonEvent> {
+        self.sender.subscribe()
+    }
+
+    /// Publish an event. Returns the number of active receivers reached, or
+    /// zero when no task is currently subscribed.
+    pub fn publish(&self, event: DaemonEvent) -> usize {
+        self.sender.send(event).unwrap_or(0)
+    }
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn publish_reaches_each_subscriber() {
+        let bus = EventBus::new();
+        let mut first = bus.subscribe();
+        let mut second = bus.subscribe();
+
+        let event = DaemonEvent::TraceWritten {
+            trace_id: "trace-1".to_string(),
+            recording_index: 1,
+        };
+        let delivered = bus.publish(event.clone());
+        assert_eq!(delivered, 2);
+
+        assert_eq!(first.recv().await.unwrap(), event);
+        assert_eq!(second.recv().await.unwrap(), event);
+    }
+
+    #[test]
+    fn publish_with_no_subscribers_is_zero() {
+        let bus = EventBus::new();
+        let delivered = bus.publish(DaemonEvent::RecordingStopped { recording_index: 2 });
+        assert_eq!(delivered, 0);
+    }
+}
