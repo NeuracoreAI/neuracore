@@ -19,10 +19,17 @@ import json
 import logging
 import os
 from contextlib import AbstractContextManager, nullcontext
+from functools import partial
 from typing import Any
 
 import torch
 from torch.nn.attention import SDPBackend, sdpa_kernel
+
+from neuracore.ml.utils.hf_hub_retry import call_with_hf_hub_retry
+from neuracore.ml.utils.pretrained_cache import (
+    ensure_pretrained_model,
+    is_hf_hub_repo_id,
+)
 
 from .eagle_config.eagle3_vl_dataconfig import Eagle3VLDataConfig
 
@@ -129,6 +136,9 @@ def load_pretrained_state_dict(model_path: str) -> dict[str, torch.Tensor]:
     """
     from safetensors.torch import load_file
 
+    if is_hf_hub_repo_id(model_path):
+        ensure_pretrained_model(model_path)
+
     # --- Try local single-file checkpoint ---
     local_file = os.path.join(model_path, "model.safetensors")
     if os.path.exists(local_file):
@@ -145,16 +155,18 @@ def load_pretrained_state_dict(model_path: str) -> dict[str, torch.Tensor]:
     try:
         from huggingface_hub import hf_hub_download
 
-        # Try single-file first
         try:
-            weight_path = hf_hub_download(model_path, "model.safetensors")
+            weight_path = call_with_hf_hub_retry(
+                partial(hf_hub_download, model_path, "model.safetensors")
+            )
             logger.info("Downloaded single-file checkpoint from HF Hub.")
             return load_file(weight_path)
         except Exception:
             pass
 
-        # Try sharded checkpoint
-        index_path = hf_hub_download(model_path, "model.safetensors.index.json")
+        index_path = call_with_hf_hub_retry(
+            partial(hf_hub_download, model_path, "model.safetensors.index.json")
+        )
         logger.info("Downloaded sharded checkpoint index from HF Hub.")
         return load_sharded_safetensors_from_hub(model_path, index_path)
 
@@ -213,7 +225,9 @@ def load_sharded_safetensors_from_hub(
     shard_files = set(index["weight_map"].values())
     state_dict: dict[str, torch.Tensor] = {}
     for shard_file in sorted(shard_files):
-        local_path = hf_hub_download(model_path, shard_file)
+        local_path = call_with_hf_hub_retry(
+            partial(hf_hub_download, model_path, shard_file)
+        )
         state_dict.update(load_file(local_path))
     return state_dict
 
@@ -233,11 +247,16 @@ def load_config_json(model_path: str) -> dict:
         with open(local_file) as f:
             return json.load(f)
 
+    if is_hf_hub_repo_id(model_path):
+        ensure_pretrained_model(model_path)
+
     # Try HuggingFace Hub
     try:
         from huggingface_hub import hf_hub_download
 
-        config_path = hf_hub_download(model_path, "config.json")
+        config_path = call_with_hf_hub_retry(
+            partial(hf_hub_download, model_path, "config.json")
+        )
         with open(config_path) as f:
             return json.load(f)
     except Exception:

@@ -13,6 +13,7 @@ import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Literal
 
 import torch
@@ -21,6 +22,12 @@ from huggingface_hub import snapshot_download
 from huggingface_hub.errors import EntryNotFoundError
 from torch import Tensor
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
+
+from neuracore.ml.utils.hf_hub_retry import call_with_hf_hub_retry
+from neuracore.ml.utils.pretrained_cache import (
+    ensure_pretrained_model,
+    is_hf_hub_repo_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -360,15 +367,19 @@ def resize_with_pad_torch(
 
 def _load_tokenizer(name_or_path: str) -> PreTrainedTokenizerBase:
     """Load a tokenizer, with local fallback for Hub path regressions."""
+    if is_hf_hub_repo_id(name_or_path):
+        ensure_pretrained_model(name_or_path)
     try:
-        return AutoTokenizer.from_pretrained(name_or_path)
+        return call_with_hf_hub_retry(
+            partial(AutoTokenizer.from_pretrained, name_or_path)
+        )
     except EntryNotFoundError:
         logger.warning(
             "Tokenizer '%s' could not be loaded directly from the Hub. "
             "Falling back to a local tokenizer-only snapshot.",
             name_or_path,
         )
-        local_snapshot_path = snapshot_download(
-            repo_id=name_or_path,
+        local_snapshot_path = call_with_hf_hub_retry(
+            partial(snapshot_download, repo_id=name_or_path)
         )
         return AutoTokenizer.from_pretrained(local_snapshot_path, local_files_only=True)
