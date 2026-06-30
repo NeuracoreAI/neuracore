@@ -30,10 +30,6 @@ GPU_TYPE = "NVIDIA_TESLA_V100"
 # separate so a failure identifies whether training or deletion became stuck.
 TRAINING_TIMEOUT_MINUTES = 120
 TRAINING_POLL_SECONDS = 20
-DELETION_TIMEOUT_SECONDS = 60
-DELETION_POLL_SECONDS = 5
-DATASET_READY_TIMEOUT_SECONDS = 120
-DATASET_READY_POLL_SECONDS = 5
 TERMINAL_STATES = {"COMPLETED", "FAILED", "CANCELLED", "ERROR"}
 
 # A single epoch is sufficient to produce a resumable completed run while
@@ -125,25 +121,6 @@ def _assert_no_training_errors(job_id: str) -> None:
     assert not error_logs, f"Initial training emitted error logs: {error_logs!r}"
 
 
-def _wait_for_dataset_deletion(dataset_name: str, dataset_id: str) -> None:
-    """Verify dataset metadata is unavailable through both lookup keys.
-
-    Checking both name and ID matters because the training job stores the ID,
-    while the expected error message should expose the human-readable name.
-    """
-    deadline = time.time() + DELETION_TIMEOUT_SECONDS
-    while time.time() < deadline:
-        by_name = Dataset.get_by_name(dataset_name, non_exist_ok=True)
-        by_id = Dataset.get_by_id(dataset_id, non_exist_ok=True)
-        if by_name is None and by_id is None:
-            return
-        time.sleep(DELETION_POLL_SECONDS)
-
-    pytest.fail(
-        f"Dataset {dataset_name!r} ({dataset_id}) remained accessible after deletion"
-    )
-
-
 def _assert_resume_failed_without_starting_job(
     *,
     job_id: str,
@@ -225,13 +202,22 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
             source_recording_count > 0
         ), f"Source dataset {SOURCE_DATASET_NAME!r} has no valid recordings"
 
-        # The dataset_clone call returns as soon as the new dataset record is created,
-        dataset = nc.dataset_clone(
-            new_dataset_name=dataset_name, dataset=source_dataset
+        # clone dataset waits until the cloned recording count reaches the source count,
+        # so the disposable dataset should already be usable for training.
+        dataset = nc.clone_dataset(
+            new_dataset_name=dataset_name, source_dataset=source_dataset
         )
 
         recordings = list(dataset)
         assert recordings, f"Created dataset {dataset_name!r} has no recordings"
+
+        # Check cloned recording IDs match the source dataset.
+        source_recording_ids = {rec.id for rec in source_dataset}
+        cloned_recording_ids = {rec.id for rec in recordings}
+        assert source_recording_ids == cloned_recording_ids, (
+            f"Cloned dataset {dataset_name!r} recordings do not match source dataset "
+            f"{SOURCE_DATASET_NAME!r}: {cloned_recording_ids} != {source_recording_ids}"
+        )
 
         # Step 2: launch and complete a real training run. Completion proves the
         # dataset was valid and leaves the job in a state that can be resumed.
@@ -269,11 +255,16 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
         ), f"Initial training did not complete successfully: {completed_job!r}"
         _assert_no_training_errors(job_id)
 
-        # Step 3: delete the dataset and prove both its metadata and its
-        # recordings are unavailable before attempting the resume.
+        # Step 3: delete the dataset
+        dataset_id = dataset.id
         dataset.delete()
-        _wait_for_dataset_deletion(dataset_name, dataset.id)
-        dataset = None
+
+        # Try accessing the dataset by name and ID to ensure it is fully deleted
+        # before proceeding.
+        by_name = Dataset.get_by_name(dataset_name, non_exist_ok=True)
+        by_id = Dataset.get_by_id(dataset_id, non_exist_ok=True)
+        assert by_name is None, f"Dataset {dataset_name!r} still exists after deletion"
+        assert by_id is None, f"Dataset {dataset_id!r} still exists after deletion"
 
         # Step 4: the backend must reject the request before mutating the job or
         # allocating replacement compute, and must name the deleted dataset.
