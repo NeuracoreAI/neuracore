@@ -190,30 +190,25 @@ def get_model_and_algorithm_config(
     model_init_description: ModelInitDescription,
 ) -> tuple[NeuracoreModel, dict[str, Any]]:
     """Get model and algorithm configuration."""
-    algorithm_config: dict[str, Any] = {}
+    algorithm_params: dict[str, Any] = (
+        OmegaConf.to_container(cfg.algorithm_params, resolve=True)
+        if cfg.get("algorithm_params") is not None
+        else {}
+    )
+
     if "algorithm" in cfg:
         algorithm_config = OmegaConf.to_container(cfg.algorithm, resolve=True)
         algorithm_config.pop("_target_", None)
-        logger.info("Using custom algorithm parameters")
-        logger.info(f"Algorithm parameters: {algorithm_config}")
-
+        algorithm_config.update(algorithm_params)
         model = hydra.utils.instantiate(
             cfg.algorithm,
             model_init_description=model_init_description,
             **algorithm_config,
         )
     elif cfg.algorithm_id is not None:
-        # Use algorithm_params for custom parameters
-        if cfg.algorithm_params is not None:
-            algorithm_config = OmegaConf.to_container(
-                cfg.algorithm_params, resolve=True
-            )
-            logger.info("Using custom algorithm parameters")
-            logger.info(f"Algorithm parameters: {algorithm_config}")
-
+        algorithm_config = algorithm_params
         extract_dir = Path(cfg.local_output_dir) / "algorithm"
-        algorithm_loader = AlgorithmLoader(extract_dir)
-        model_class = algorithm_loader.load_model()
+        model_class = AlgorithmLoader(extract_dir).load_model()
         model = model_class(
             model_init_description=model_init_description,
             **algorithm_config,
@@ -223,6 +218,11 @@ def get_model_and_algorithm_config(
             "Either 'algorithm' or 'algorithm_id' "
             "must be provided in the configuration"
         )
+
+    if algorithm_config:
+        logger.info("Using custom algorithm parameters")
+        logger.info(f"Algorithm parameters: {algorithm_config}")
+
     return model, algorithm_config
 
 
