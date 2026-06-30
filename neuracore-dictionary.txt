@@ -487,6 +487,7 @@ unregisterable
 upserts
 URDF
 urdfdom
+urlretrieve
 usefixtures
 userspace
 utaustin
