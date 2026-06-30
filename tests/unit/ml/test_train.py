@@ -1099,6 +1099,41 @@ class TestGetModelAndAlgorithmConfig:
         assert isinstance(model, NeuracoreModel)
         assert "_target_" not in algorithm_config
         assert algorithm_config == {"param1": "value1", "param2": "value2"}
+
+    def test_merges_algorithm_params_for_packaged_algorithm(
+        self, model_init_description, mock_model_class, monkeypatch
+    ):
+        cfg = OmegaConf.create({
+            "algorithm": {
+                "_target_": "tests.unit.ml.test_train.mock_model_class",
+                "param1": "default",
+                "param2": "value2",
+            },
+            "algorithm_params": {"param1": "override", "param3": "value3"},
+        })
+
+        mock_instantiate = Mock(return_value=mock_model_class(model_init_description))
+        monkeypatch.setattr(
+            "neuracore.ml.train.hydra.utils.instantiate", mock_instantiate
+        )
+
+        model, algorithm_config = get_model_and_algorithm_config(
+            cfg, model_init_description
+        )
+
+        assert isinstance(model, NeuracoreModel)
+        assert algorithm_config == {
+            "param1": "override",
+            "param2": "value2",
+            "param3": "value3",
+        }
+        mock_instantiate.assert_called_once_with(
+            cfg.algorithm,
+            model_init_description=model_init_description,
+            param1="override",
+            param2="value2",
+            param3="value3",
+        )
         mock_instantiate.assert_called_once()
 
 
