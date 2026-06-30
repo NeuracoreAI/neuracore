@@ -373,7 +373,10 @@ class VideoDataStream(DataStream):
             # `_latest_data` for live-data consumers.
             return
 
-        frame_view = memoryview(frame).cast("B")
+        frame_source = (
+            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
+        )
+        frame_view = memoryview(frame_source).cast("B")
 
         # Legacy daemon: pack [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
         metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
