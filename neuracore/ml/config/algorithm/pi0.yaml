@@ -39,7 +39,7 @@ algorithm:
 
   # Fine-tuning control
   finetune_action_expert_only: False   # Only train action expert parameters
-  freeze_language_model_only: True     # Freeze language model, train vision + action
+  freeze_language_model_only: False    # Freeze language model, train vision + action
 
   # Training speed / memory optimizations
   gradient_checkpointing: True         # Saves VRAM (~30% extra compute). Enable if OOM during training.

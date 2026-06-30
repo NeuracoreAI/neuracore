@@ -13,6 +13,7 @@ algorithm:
   hidden_dim: 64                          # Output dim per image encoder (spatial_softmax_num_keypoints * 2)
   spatial_softmax_num_keypoints: 32       # Number of keypoints for spatial softmax pooling
   use_pretrained_weights: true            # Load pretrained ResNet weights
+  use_resnet_stats: true                  # Use ResNet normalization statistics
 
   # Generative process
   process_type: "diffusion"               # "diffusion" or "flow_matching"
@@ -33,9 +34,13 @@ algorithm:
   # Learning rates
   lr: 1e-4                                # Learning rate for main parameters
   lr_backbone: 1e-4                       # Learning rate for backbone parameters
-  weight_decay: 2e-6                      # AdamW weight decay
-  optimizer_betas: [0.95, 0.999]          # Adam beta parameters
+  weight_decay: 1e-6                      # AdamW weight decay
+  optimizer_betas: [0.9, 0.999]           # Adam beta parameters
   optimizer_eps: 1e-8                     # Adam epsilon
+
+  # LR scheduler
+  lr_scheduler_type: "cosine"             # Learning rate scheduler type
+  lr_scheduler_num_warmup_steps: 500      # Number of warmup steps
 
   # Backbone
   freeze_backbone: false                  # Whether to freeze image encoder backbone
