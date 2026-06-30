@@ -21,3 +21,4 @@ algorithm:
 
   # Backbone
   freeze_backbone: false   # Whether to freeze image encoder backbone
+  use_resnet_stats: true   # Use ResNet normalization statistics

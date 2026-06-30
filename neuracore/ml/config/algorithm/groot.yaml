@@ -7,8 +7,9 @@ algorithm:
 
   # Denoising configuration
   num_denoising_steps: 4
-  use_relative_deltas: false  # Predict state-relative deltas and convert to absolute at output; false = predict absolute positions directly.
+  use_relative_deltas: true  # Predict state-relative deltas and convert to absolute at output; false = predict absolute positions directly.
   add_action_step_positional_encoding: true  # Add learned action-step positions across the predicted chunk, matching upstream GR00T behavior.
+  max_action_pos_embeddings: 1024  # Size of the action-step positional embedding table.
   use_alternate_vl_dit: true  # Alternate cross-attention over non-image vs image VLM tokens, matching upstream GR00T N1.6.
   attend_text_every_n_blocks: 2  # AlternateVLDiT schedule.
 
@@ -28,7 +29,7 @@ algorithm:
   # Fine-tuning component control (mirrors Isaac-GR00T tune_* flags)
   finetune_state_action_projector: true  # Train action head projector MLPs (proprio, action enc/dec, connector)
   finetune_action_expert: true           # Train DiT action head
-  finetune_vision_encoder: false         # Unfreeze visual encoder — only if visual domain differs significantly
+  finetune_vision_encoder: true          # Unfreeze visual encoder — only if visual domain differs significantly
   finetune_top_llm_layer: 0             # Unfreeze top N LLM layers (0 = fully frozen, NVIDIA uses 4 in N1.6 pretraining)
 
   # Flow matching time sampling (Beta distribution parameters)
@@ -41,13 +42,15 @@ algorithm:
   gradient_checkpointing: true  # Saves VRAM (~30% extra compute). Enable if OOM during training.
   use_torch_compile: false       # JIT-compile the DiT (PyTorch 2.0+). One-time compile overhead on first step.
   torch_compile_mode: "default"  # "max-autotune" for inference deployments; "default" is safe for training.
-  load_backbone_bf16: true      # Cast VLM backbone to bf16 (~halves memory). Trainable VLM modules (vision encoder, top LLM layers) also train in bf16.
+  load_backbone_bf16: false     # Cast VLM backbone to bf16 (~halves memory). Trainable VLM modules (vision encoder, top LLM layers) also train in bf16.
 
   # State augmentation (regularization, both default off)
   state_dropout_prob: 0.0   # Replace proprio token with learned mask token at this rate.
   state_noise_scale: 0.0    # Std of Gaussian noise added to proprio embedding during training.
 
   # Architecture hyperparameters (used when use_pretrained_weights is false)
+  use_pretrained_weights: true  # Load pretrained GR00T weights; false builds the model from the hyperparameters below.
+  use_tiny_vlm: false           # Use a tiny VLM backbone (testing only).
   num_dit_layers: 32
   num_attention_heads: 32
   attention_head_dim: 48

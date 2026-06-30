@@ -40,7 +40,7 @@ algorithm:
 
   # Fine-tuning control
   finetune_action_expert_only: False                  # Only train action expert parameters
-  finetune_vision_encoder_and_action_expert: True     # Train vision encoder and action expert
+  finetune_vision_encoder_and_action_expert: False    # Train vision encoder and action expert
 
   # Training speed / memory optimizations
   gradient_checkpointing: True         # Saves VRAM (~30% extra compute). Enable if OOM during training.
