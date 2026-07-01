@@ -13,6 +13,7 @@ from neuracore.core.utils.http_session import thread_local_session
 logger = logging.getLogger(__name__)
 
 COMPLETED_STATUS = "COMPLETED"
+_DATASETS_LIST_PAGE_SIZE = 30
 
 
 def unique_name(prefix: str) -> str:
@@ -133,20 +134,41 @@ def prune_training_runs_except(name_prefix: str, keep_id: str) -> None:
     )
 
 
+def list_org_datasets(org_id: str) -> list[dict]:
+    """Fetch all datasets for an org via the paginated list API."""
+    auth = get_auth()
+    session = thread_local_session()
+    headers = auth.get_headers()
+    datasets: list[dict] = []
+    start_after: dict | None = None
+
+    while True:
+        response = session.post(
+            f"{API_URL}/org/{org_id}/datasets/list",
+            params={"limit": _DATASETS_LIST_PAGE_SIZE},
+            json=start_after,
+            headers=headers,
+        )
+        response.raise_for_status()
+        page = response.json()
+        batch = page.get("data", [])
+        if not batch:
+            break
+        datasets.extend(batch)
+        if len(batch) < page.get("limit", _DATASETS_LIST_PAGE_SIZE):
+            break
+        start_after = page.get("start_after") or batch[-1]
+
+    return datasets
+
+
 def prune_datasets_by_name_prefix(name_prefix: str) -> int:
     """Delete datasets whose name starts with ``{name_prefix}_``.
 
     Returns the number of datasets deleted.
     """
-    auth = get_auth()
     org_id = get_current_org()
-    session = thread_local_session()
-    response = session.get(
-        f"{API_URL}/org/{org_id}/datasets",
-        headers=auth.get_headers(),
-    )
-    response.raise_for_status()
-    datasets = response.json()
+    datasets = list_org_datasets(org_id)
 
     deleted = 0
     prefix = f"{name_prefix}_"
