@@ -224,10 +224,10 @@ def test_get_training_job_data(
     # Ensure login
     nc.login("test_api_key")
 
-    # Mock training jobs endpoint
+    # Mock training job endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[training_job_response],
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
+        json=training_job_response,
         status_code=200,
     )
 
@@ -509,8 +509,8 @@ def test_get_training_job_status(
 
     # Mock training jobs endpoint
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[training_job_response],
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
+        json=training_job_response,
         status_code=200,
     )
 
@@ -580,11 +580,11 @@ def test_get_nonexistent_training_job(
     # Ensure login
     nc.login("test_api_key")
 
-    # Mock training jobs endpoint with empty list
+    # Mock training job endpoint with 404
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[],
-        status_code=200,
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/nonexistent_job",
+        status_code=404,
+        json={"detail": "Not found"},
     )
 
     # Attempt to get non-existent job
@@ -599,15 +599,15 @@ def test_failed_training_job_request(
     # Ensure login
     nc.login("test_api_key")
 
-    # Mock training jobs endpoint to return an error
+    # Mock training job endpoint to return an error
     mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123",
         status_code=500,
         text="Internal Server Error",
     )
 
-    # Attempt to get job data should raise an exception
-    with pytest.raises(ValueError, match="Error accessing job"):
+    # Attempt to get job data should raise the HTTP error
+    with pytest.raises(requests.exceptions.HTTPError):
         nc.get_training_job_data("train_job_123")
 
 
