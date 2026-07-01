@@ -8,6 +8,7 @@ import concurrent.futures
 import sys
 from typing import Any, cast
 
+import requests
 from neuracore_types import (
     CrossEmbodimentDescription,
     GPUType,
@@ -258,21 +259,25 @@ def get_training_job_data(job_id: str) -> dict:
         dict: Complete job data including status, configuration, and metadata
 
     Raises:
-        ValueError: If the job is not found or there is an error accessing the job
-        requests.exceptions.HTTPError: If the API request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        ValueError: If the job is not found
+        requests.exceptions.HTTPError: If the API request returns an error status
+        requests.exceptions.RequestException: If there is a network problem
         ConfigError: If there is an error trying to get the current org
     """
+    auth = get_auth()
+    org_id = get_current_org()
+    session = thread_local_session()
     try:
-        jobs = get_training_jobs()
-        for job_data in jobs:
-            if job_data.get("id") == job_id:
-                return job_data
-        raise ValueError("Job not found")
-    except ValueError:
+        response = session.get(
+            f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            raise ValueError("Job not found") from e
         raise
-    except Exception as e:
-        raise ValueError(f"Error accessing job: {e}")
 
 
 def get_training_job_status(job_id: str) -> str:
@@ -285,13 +290,15 @@ def get_training_job_status(job_id: str) -> str:
         str: Current status of the training job (e.g., "running", "completed", "failed")
 
     Raises:
-        ValueError: If the job is not found or there is an error accessing the job
-        requests.exceptions.HTTPError: If the API request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        ValueError: If the job is not found
+        requests.exceptions.HTTPError: If the API request returns an error status
+        requests.exceptions.RequestException: If there is a network problem
     """
     try:
         job_data = get_training_job_data(job_id)
         return job_data["status"]
+    except (ValueError, requests.exceptions.RequestException):
+        raise
     except Exception as e:
         raise ValueError(f"Error accessing job: {e}")
 

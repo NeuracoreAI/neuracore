@@ -3,6 +3,7 @@
 import logging
 import time
 
+import requests
 from neuracore_types import DataType
 
 import neuracore as nc
@@ -41,10 +42,19 @@ def wait_for_training(
 ) -> str:
     deadline = time.time() + timeout_minutes * 60
     while True:
-        status = nc.get_training_job_status(job_id=job_id)
-        logger.info(f"Training job {job_id}: {status}")
-        if status in TERMINAL_STATES:
-            return status
+        try:
+            status = nc.get_training_job_status(job_id=job_id)
+        except requests.exceptions.RequestException as e:
+            logger.warning(
+                "Transient error polling training job %s: %s; retrying in %ss",
+                job_id,
+                e,
+                poll_seconds,
+            )
+        else:
+            logger.info(f"Training job {job_id}: {status}")
+            if status in TERMINAL_STATES:
+                return status
         if time.time() >= deadline:
             cancel_incomplete_training_jobs([job_id])
             assert (
@@ -66,10 +76,19 @@ def wait_for_all_training(
         for job_id in job_ids:
             if job_id in final_statuses:
                 continue
-            status = nc.get_training_job_status(job_id=job_id)
-            logger.info(f"Training job {job_id}: {status}")
-            if status in TERMINAL_STATES:
-                final_statuses[job_id] = status
+            try:
+                status = nc.get_training_job_status(job_id=job_id)
+            except requests.exceptions.RequestException as e:
+                logger.warning(
+                    "Transient error polling training job %s: %s; retrying in %ss",
+                    job_id,
+                    e,
+                    poll_seconds,
+                )
+            else:
+                logger.info(f"Training job {job_id}: {status}")
+                if status in TERMINAL_STATES:
+                    final_statuses[job_id] = status
 
         if len(final_statuses) == len(job_ids):
             return final_statuses
