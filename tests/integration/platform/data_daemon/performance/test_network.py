@@ -39,6 +39,7 @@ CASES = DataDaemonTestBatch(
     cases=NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    requires_rust_daemon=True,
 ).as_cases()
 
 

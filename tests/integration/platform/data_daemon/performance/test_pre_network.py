@@ -29,10 +29,13 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
 )
 
+# Performance workloads target the Rust daemon's throughput ceiling; the legacy
+# Python daemon cannot sustain them, so the whole suite is Rust-only.
 _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    requires_rust_daemon=True,
 ).as_cases()
 
 
