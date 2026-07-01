@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -600,3 +602,94 @@ def assert_disk_recording_properties(
         )
 
     return durations
+
+
+def _ffprobe_video_stream(video_path: Path) -> dict | None:
+    """Return the first video stream's ffprobe info, or None if unavailable.
+
+    Returns None (rather than failing) when ffprobe is not installed, so the
+    file-existence checks still run on hosts without ffprobe.
+    """
+    ffprobe = shutil.which("ffprobe")
+    if ffprobe is None:
+        return None
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-count_frames",
+            "-show_entries",
+            "stream=codec_name,width,height,nb_read_frames",
+            "-of",
+            "json",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    streams = json.loads(result.stdout).get("streams", [])
+    return streams[0] if streams else None
+
+
+def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
+    """Assert every RGB video trace on disk is a single lossy H.264 video.
+
+    For a recording made with ``nc.Codec.H264_MEDIUM`` the daemon writes only
+    ``lossy.mp4`` (libx264) and no ``lossless.mp4``. For every ``RGB_IMAGES``
+    trace directory under the recordings root this verifies:
+
+    - ``lossy.mp4`` exists and ``lossless.mp4`` does NOT,
+    - (when ffprobe is available) the video is H.264 and its frame count matches
+      the per-frame ``trace.json`` sidecar.
+
+    Works identically for the Python and Rust daemons (both write the same
+    on-disk artefact layout).
+
+    Args:
+        min_trace_count: Minimum number of RGB trace directories expected.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
+
+    trace_dirs = [
+        trace_dir
+        for recording_dir in sorted(recordings_root.iterdir())
+        if recording_dir.is_dir()
+        for rgb_dir in [recording_dir / "RGB_IMAGES"]
+        if rgb_dir.is_dir()
+        for trace_dir in sorted(rgb_dir.iterdir())
+        if trace_dir.is_dir()
+    ]
+    assert len(trace_dirs) >= min_trace_count, (
+        f"expected at least {min_trace_count} RGB trace dir(s), "
+        f"found {len(trace_dirs)} under {recordings_root}"
+    )
+
+    for trace_dir in trace_dirs:
+        lossy_path = trace_dir / "lossy.mp4"
+        lossless_path = trace_dir / "lossless.mp4"
+        assert lossy_path.is_file(), f"missing lossy.mp4 in {trace_dir}"
+        assert (
+            not lossless_path.exists()
+        ), f"lossy-only recording must not write lossless.mp4: {lossless_path}"
+
+        stream = _ffprobe_video_stream(lossy_path)
+        if stream is None:
+            continue
+        assert (
+            stream.get("codec_name") == "h264"
+        ), f"{lossy_path} should be H.264, got {stream.get('codec_name')!r}"
+
+        trace_json = trace_dir / TRACE_JSON_NAME
+        if trace_json.is_file():
+            expected_frames = len(json.loads(trace_json.read_text(encoding="utf-8")))
+            nb_read_frames = stream.get("nb_read_frames")
+            if nb_read_frames is not None and expected_frames > 0:
+                assert int(nb_read_frames) == expected_frames, (
+                    f"{lossy_path} has {nb_read_frames} frames, "
+                    f"trace.json expects {expected_frames}"
+                )

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import aiohttp
@@ -45,22 +46,49 @@ FAILED_TRACES_KEY = "failed_traces"
 
 
 def get_cloud_file_list(
-    data_type: DataType, data_type_name: str
+    data_type: DataType, data_type_name: str, trace_dir: str | None = None
 ) -> list[dict[str, str]]:
-    """Derive the cloud file list for a trace from its data type."""
+    """Derive the cloud file list for a trace from its data type.
+
+    For RGB content the lossless archive is registered only when it actually
+    exists on disk: in lossy-only mode (e.g. nc.Codec.H264_MEDIUM) the daemon
+    produces just ``lossy.mp4``. Deriving the lossless entry from disk keeps
+    registration in lock-step with the uploader (which uploads exactly the
+    files present in the trace directory), independent of any between-recording
+    codec change.
+
+    Args:
+        data_type: The trace's data type.
+        data_type_name: The sensor/stream name.
+        trace_dir: The local trace directory. When omitted, the lossless
+            archive is assumed present (the default behaviour).
+    """
     prefix = f"{data_type.value}/{data_type_name}"
     files = []
     if get_content_type(data_type) == "RGB":
         files.append(
             {"filepath": f"{prefix}/{LOSSY_VIDEO_NAME}", "content_type": "video/mp4"}
         )
-        files.append(
-            {"filepath": f"{prefix}/{LOSSLESS_VIDEO_NAME}", "content_type": "video/mp4"}
-        )
+        if _lossless_archive_present(trace_dir):
+            files.append({
+                "filepath": f"{prefix}/{LOSSLESS_VIDEO_NAME}",
+                "content_type": "video/mp4",
+            })
     files.append(
         {"filepath": f"{prefix}/{TRACE_FILE}", "content_type": "application/json"}
     )
     return files
+
+
+def _lossless_archive_present(trace_dir: str | None) -> bool:
+    """Return whether the lossless archive should be registered for a trace.
+
+    True when ``trace_dir`` is unknown (preserving the default both-files
+    behaviour) or when ``lossless.mp4`` is present in the trace directory.
+    """
+    if trace_dir is None:
+        return True
+    return (Path(trace_dir) / LOSSLESS_VIDEO_NAME).exists()
 
 
 @dataclass(frozen=True)
@@ -71,6 +99,9 @@ class RegistrationCandidate:
     recording_id: str
     data_type: DataType
     data_type_name: str
+    # Local trace directory, used to register exactly the files on disk (so the
+    # lossless archive is omitted in lossy-only mode). None when unknown.
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -281,7 +312,7 @@ class RegistrationManager:
                         "data_type": trace.data_type.value,
                         "trace_id": str(trace.trace_id),
                         "cloud_files": get_cloud_file_list(
-                            trace.data_type, trace.data_type_name
+                            trace.data_type, trace.data_type_name, trace.path
                         ),
                     }
                     for trace in traces

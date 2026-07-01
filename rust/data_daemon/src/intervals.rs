@@ -21,6 +21,13 @@ use std::time::Duration;
 /// than mtime gating.
 pub const ORG_CONFIG_POLL: Duration = Duration::from_secs(1);
 
+/// Daemon-profile config poll: re-resolves the effective `DaemonConfig` (profile
+/// YAML + env) so the trace actors and registration coordinator observe profile
+/// changes — chiefly the video codec — from an in-memory copy rather than
+/// re-reading the YAML per trace. Matches [`ORG_CONFIG_POLL`]; a `RefreshConfig`
+/// command additionally forces an immediate re-resolve for the SDK path.
+pub const CONFIG_POLL: Duration = Duration::from_secs(1);
+
 /// Registration drain fallback: the coordinator is event-driven off the bus and
 /// only falls back to this poll when the bus is quiet.
 pub const REGISTRATION_POLL: Duration = Duration::from_millis(500);

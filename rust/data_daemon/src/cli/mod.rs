@@ -121,6 +121,9 @@ enum ProfileCommand {
         /// Active organisation ID for scoping daemon operations.
         #[arg(long = "current-org-id", visible_alias = "current_org_id")]
         current_org_id: Option<String>,
+        /// Global RGB video codec: `h264_lossless` (default) or `h264_medium`
+        #[arg(long = "video-codec", visible_alias = "video_codec")]
+        video_codec: Option<String>,
     },
     /// Get a profile's configuration.
     Get {

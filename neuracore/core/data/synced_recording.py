@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import requests
 import wget
 from neuracore_types import (
     CameraData,
@@ -37,6 +38,11 @@ if TYPE_CHECKING:
 
 MAX_DECODING_ATTEMPTS = 3
 _FFMPEG_AVAILABLE: bool | None = None
+
+# Preferred camera video artefacts, tried in order. The lossless archive is the
+# canonical training source, but lossy-only recordings (nc.Codec.H264_MEDIUM)
+# upload only lossy.mp4, so we fall back to it when the lossless is absent.
+_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
 
 
 class SynchronizedRecording:
@@ -125,6 +131,10 @@ class SynchronizedRecording:
     def _get_video_url(self, camera_type: DataType, camera_id: str) -> str:
         """Get streaming URL for a specific camera's video data.
 
+        Tries the lossless archive first and falls back to the lossy video when
+        the lossless is absent, so lossy-only recordings
+        (``nc.Codec.H264_MEDIUM``) still load.
+
         Args:
             camera_type: Type of camera (e.g., "rgbs", "depths").
             camera_id: Unique identifier for the camera.
@@ -133,17 +143,38 @@ class SynchronizedRecording:
             URL string for downloading the video file.
 
         Raises:
-            requests.HTTPError: If the API request fails.
+            requests.HTTPError: If the lossless file is absent (404) and the
+                lossy fallback is also missing, or for any non-404 error (e.g.
+                auth or server failure), which is raised as-is rather than
+                masked by the fallback.
         """
         auth = get_auth()
         session = thread_local_session()
-        response = session.get(
-            f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
-            params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
-            headers=auth.get_headers(),
-        )
-        response.raise_for_status()
-        return response.json()["url"]
+        last_not_found: requests.HTTPError | None = None
+        for video_filename in _VIDEO_FILENAME_PREFERENCE:
+            response = session.get(
+                f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
+                params={
+                    "filepath": f"{camera_type.value}/{camera_id}/{video_filename}"
+                },
+                headers=auth.get_headers(),
+            )
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as error:
+                # Only a missing file (404) should fall back to the next
+                # preferred artefact; any other error (auth, server) is a real
+                # failure and must not be masked as "lossless absent".
+                if response.status_code != 404:
+                    raise
+                last_not_found = error
+                continue
+            return response.json()["url"]
+
+        # Every preferred artefact returned 404.
+        if last_not_found is not None:
+            raise last_not_found
+        raise RuntimeError("No video artefact candidates were configured")
 
     def _decode_video(self, video_location: Path, video_frame_cache_path: Path) -> None:
         """Extract frames from video and cache them to disk.
@@ -152,7 +183,6 @@ class SynchronizedRecording:
             video_location: Path to the video file.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        """Extract frames from video and cache them to disk."""
         global _FFMPEG_AVAILABLE
 
         # Lazily determine ffmpeg availability once

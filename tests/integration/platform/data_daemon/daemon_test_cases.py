@@ -91,6 +91,22 @@ PRE_NETWORK_INTEGRITY_CASES = (
         wait=False,
         requires_rust_daemon=True,
     ),
+    # Lossy-only video upload (nc.Codec.H264_MEDIUM): the daemon writes a single
+    # libx264 CRF-23 lossy.mp4 and drops the lossless archive. The offline test
+    # asserts the on-disk artefacts (lossy.mp4 present, lossless.mp4 absent,
+    # H.264); the network test (which runs the same cases) additionally verifies
+    # the recording registers, uploads, and syncs end-to-end with only lossy.mp4
+    # (frame counts checked; the pixel-encoded frame codes are skipped — lossy
+    # compression perturbs them by design).
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        video_codec="h264_medium",
+    ),
 )
 
 NETWORK_INTEGRITY_CASES = (

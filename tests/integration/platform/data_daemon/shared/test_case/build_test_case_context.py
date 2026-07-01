@@ -971,6 +971,16 @@ def run_case_contexts(
     if specs is None:
         specs = build_context_specs(case)
 
+    # Select the global video codec for this case (writing the active daemon
+    # profile). Set explicitly for every video case — including the
+    # H264_LOSSLESS default — so a lossy case can't leak its codec into a later
+    # default case via the persistent profile. The daemon re-reads the profile
+    # per recording, so this takes effect for the upcoming recordings.
+    if case.has_video:
+        nc.set_video_encoding_options(
+            nc.Codec(case.video_codec) if case.video_codec else nc.Codec.H264_LOSSLESS
+        )
+
     if specs:
         with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
             nc.create_dataset(specs[0].dataset_name)

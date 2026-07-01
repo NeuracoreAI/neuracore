@@ -226,6 +226,28 @@ def test_resolve_effective_config_env_overrides_profile(
     assert effective_config.offline is True
 
 
+def test_resolve_effective_config_env_sets_video_codec(
+    profile_manager: ProfileManager,
+    profiles_directory: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """NCD_VIDEO_CODEC should populate the resolved DaemonConfig.video_codec."""
+    profile_name = "recording"
+    profiles_directory.mkdir(parents=True, exist_ok=True)
+    profile_path = profiles_directory / f"{profile_name}.yaml"
+    with profile_path.open("w") as profile_file:
+        yaml.safe_dump({"offline": False}, profile_file)
+
+    monkeypatch.setenv("NCD_VIDEO_CODEC", "h264_medium")
+
+    config_manager = ConfigManager(
+        profile_manager=profile_manager, profile=profile_name
+    )
+    effective_config = config_manager.resolve_effective_config(cli_config={})
+
+    assert effective_config.video_codec == "h264_medium"
+
+
 def test_resolve_effective_config_env_supports_unit_suffixed_values(
     profile_manager: ProfileManager,
     profiles_directory: Path,

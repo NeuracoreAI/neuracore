@@ -50,6 +50,13 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.core.video_encoding import Codec
+from neuracore.data_daemon.communications_management.shared_transport.recording_context import (  # noqa: E501
+    notify_daemon_config_changed,
+)
+from neuracore.data_daemon.config_manager.video_codec import (
+    set_active_profile_video_codec,
+)
 from neuracore.data_daemon.models import (
     BatchedJointDataItemPayload,
     BatchedJointDataPayload,
@@ -1627,3 +1634,50 @@ def log_point_cloud(
         robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp
     )
     _publish_json_to_p2p(robot, str_id, DataType.POINT_CLOUDS, point_data)
+
+
+def set_video_encoding_options(codec: Codec | str) -> None:
+    """Configure how recorded camera video is encoded and uploaded.
+
+    By default each RGB camera is uploaded as a lossless archive (used for
+    training) plus a small lossy preview. Selecting a lossy codec drops the
+    lossless archive and uploads a single, more compact H.264 video that is
+    also used for training -- trading a little image fidelity for much smaller
+    uploads, which is useful for long recordings. Depth cameras always keep
+    their lossless storage regardless of this setting.
+
+    The selection is global (it applies to every camera) and is stored in the
+    active daemon profile, so it persists and is picked up by the data daemon
+    for the next recording -- call it before ``start_recording``. It can also be
+    set with the ``NCD_VIDEO_CODEC`` environment variable, which takes
+    precedence over the profile value.
+
+    Example:
+        >>> import neuracore as nc
+        >>> nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)
+        >>> nc.start_recording()
+        >>> ...  # log frames
+        >>> nc.stop_recording()
+
+    Args:
+        codec: The video codec to use. ``nc.Codec.H264_MEDIUM`` selects
+            lossy-only (libx264, CRF 23); ``nc.Codec.H264_LOSSLESS`` (the
+            default) keeps the lossless archive plus a lossy preview and is the
+            value to pass to switch back from a lossy mode.
+
+    Raises:
+        ValueError: If ``codec`` is not a recognised codec.
+    """
+    try:
+        resolved = Codec(codec).value
+    except ValueError as error:
+        valid = ", ".join(member.value for member in Codec)
+        raise ValueError(
+            f"Unknown video codec {codec!r}; expected one of: {valid}"
+        ) from error
+
+    set_active_profile_video_codec(resolved)
+    # Nudge a running Rust daemon to reload immediately so a set → start
+    # sequence uses the new codec; best-effort and a no-op under the Python
+    # daemon (which picks the change up on its config-watcher poll).
+    notify_daemon_config_changed()

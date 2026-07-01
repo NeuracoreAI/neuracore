@@ -43,6 +43,7 @@ class VideoTrace:
         chunk_size: int = CHUNK_SIZE,
         lossy_name: str = LOSSY_VIDEO_NAME,
         lossless_name: str = LOSSLESS_VIDEO_NAME,
+        lossy_only_codec_options: dict[str, str] | None = None,
     ) -> None:
         """Initialise a video trace writer.
 
@@ -51,6 +52,12 @@ class VideoTrace:
             chunk_size: Buffered write chunk size for video outputs.
             lossy_name: Filename for the lossy MP4 output.
             lossless_name: Filename for the lossless MP4 output.
+            lossy_only_codec_options: When provided, encode a single lossy
+                ``libx264`` video with these codec-context options (e.g.
+                ``{"crf": "23", "preset": "medium"}``) and skip the lossless
+                archive entirely. When ``None`` (the default) both the lossless
+                archive and the lossy preview are produced. Only set for RGB
+                cameras: depth keeps its lossless storage.
 
         Returns:
             None
@@ -63,6 +70,7 @@ class VideoTrace:
         self.trace_path = self.output_dir / TRACE_FILE
 
         self.chunk_size = chunk_size
+        self._lossy_only_codec_options = lossy_only_codec_options
 
         self.width: int | None = None
         self.height: int | None = None
@@ -216,6 +224,22 @@ class VideoTrace:
                 "VideoTrace needs width/height before frames. Send metadata first."
             )
 
+        # Lossy-only mode (e.g. nc.Codec.H264_MEDIUM): encode a single libx264
+        # video at the configured quality and skip the lossless archive. The
+        # lossy file then serves as both the preview and the training source.
+        if self._lossy_only_codec_options is not None:
+            if self._lossy_encoder is None:
+                self._lossy_encoder = DiskVideoEncoder(
+                    filepath=self.lossy_path,
+                    width=self.width,
+                    height=self.height,
+                    codec="libx264",
+                    pixel_format="yuv420p",
+                    codec_context_options=dict(self._lossy_only_codec_options),
+                    chunk_size=self.chunk_size,
+                )
+            return
+
         if self._lossless_encoder is None:
             self._lossless_encoder = DiskVideoEncoder(
                 filepath=self.lossless_path,
@@ -253,7 +277,12 @@ class VideoTrace:
             raise RuntimeError(
                 "VideoTrace missing width/height after encoder initialisation"
             )
-        if self._lossless_encoder is None or self._lossy_encoder is None:
+        # In lossy-only mode the lossless encoder is intentionally absent; the
+        # lossy encoder is always required.
+        lossless_required = self._lossy_only_codec_options is None
+        if self._lossy_encoder is None or (
+            lossless_required and self._lossless_encoder is None
+        ):
             raise RuntimeError(
                 "VideoTrace encoders unexpectedly None after initialisation"
             )
@@ -298,9 +327,10 @@ class VideoTrace:
         self._expected_raw_frame_bytes_total += len(frame_bytes)
 
         timestamp_value = self._get_frame_timestamp()
-        self._lossless_encoder.add_frame(
-            timestamp=timestamp_value, np_frame=np_frame_lossless
-        )
+        if self._lossless_encoder is not None:
+            self._lossless_encoder.add_frame(
+                timestamp=timestamp_value, np_frame=np_frame_lossless
+            )
         self._lossy_encoder.add_frame(
             timestamp=timestamp_value, np_frame=np_frame_lossy
         )

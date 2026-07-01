@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from neuracore.core.exceptions import AuthenticationError
+from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.config_manager.cli_options import (
     ApiKeyOption,
     AssumeYesOption,
@@ -26,6 +27,7 @@ from neuracore.data_daemon.config_manager.cli_options import (
     SpoolLimitOption,
     StorageLimitOption,
     StoragePathOption,
+    VideoCodecOption,
 )
 from neuracore.data_daemon.config_manager.helpers import collect_config_updates
 from neuracore.data_daemon.config_manager.profiles import (
@@ -66,6 +68,7 @@ def _update_profile(
     offline: bool | None,
     api_key: str | None,
     current_org_id: str | None,
+    video_codec: Codec | None,
 ) -> None:
     updates = collect_config_updates(
         storage_limit=storage_limit,
@@ -77,6 +80,7 @@ def _update_profile(
         offline=offline,
         api_key=api_key,
         current_org_id=current_org_id,
+        video_codec=video_codec.value if video_codec is not None else None,
     )
 
     if create_if_missing:
@@ -125,6 +129,7 @@ def run_profile_update(
     offline: OfflineOption = None,
     api_key: ApiKeyOption = None,
     current_org_id: CurrentOrgIdOption = None,
+    video_codec: VideoCodecOption = None,
 ) -> None:
     """Update an existing profile."""
     if not name:
@@ -142,6 +147,7 @@ def run_profile_update(
         offline=offline,
         api_key=api_key,
         current_org_id=current_org_id,
+        video_codec=video_codec,
     )
 
 

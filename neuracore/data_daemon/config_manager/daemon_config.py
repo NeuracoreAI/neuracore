@@ -17,6 +17,8 @@ class DaemonConfig(BaseModel):
         offline: when true, disable uploads and only store data locally.
         api_key: Neuracore API key for authentication.
         current_org_id: Organization ID for the authenticated user.
+        video_codec: global video codec selection (a Codec value, e.g.
+            "h264_medium"). None keeps the default lossless+lossy RGB encoders.
     """
 
     storage_limit: int | None = None
@@ -28,3 +30,4 @@ class DaemonConfig(BaseModel):
     offline: bool | None = None
     api_key: str | None = None
     current_org_id: str | None = None
+    video_codec: str | None = None

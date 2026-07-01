@@ -381,6 +381,14 @@ pub enum Envelope {
         /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
     },
+    /// Force the daemon to re-read its profile config immediately, rather than
+    /// waiting for the config watcher's next poll. Sent by the SDK's
+    /// `set_video_encoding_options` after it writes the profile so a
+    /// `set → start_recording → log_frame` sequence observes the new codec.
+    /// Carries no fields — the config is daemon-global — and touches no
+    /// recording window; the dispatcher handles it by refreshing the in-memory
+    /// config (see `cloud::config_watcher`).
+    RefreshConfig {},
 }
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
@@ -409,6 +417,7 @@ impl Envelope {
             Envelope::Data { .. } => "data",
             Envelope::BatchedData { .. } => "batched_data",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
+            Envelope::RefreshConfig {} => "refresh_config",
         }
     }
 
@@ -671,6 +680,14 @@ mod tests {
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
         assert_eq!(cancel.kind(), "cancel_recording");
+    }
+
+    #[test]
+    fn refresh_config_round_trips() {
+        let refresh = Envelope::RefreshConfig {};
+        let bytes = refresh.encode().expect("encode");
+        assert_eq!(refresh, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(refresh.kind(), "refresh_config");
     }
 
     #[test]

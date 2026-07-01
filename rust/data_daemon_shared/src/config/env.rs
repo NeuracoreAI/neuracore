@@ -145,6 +145,9 @@ pub fn env_config_overrides() -> DaemonConfig {
     if let Some(value) = env_var("NCD_CURRENT_ORG_ID") {
         config.current_org_id = Some(value);
     }
+    if let Some(value) = env_var("NCD_VIDEO_CODEC") {
+        config.video_codec = Some(value);
+    }
 
     config
 }
@@ -296,6 +299,7 @@ mod tests {
         "NCD_OFFLINE",
         "NCD_API_KEY",
         "NCD_CURRENT_ORG_ID",
+        "NCD_VIDEO_CODEC",
         "NEURACORE_DAEMON_PROFILE",
     ];
 
@@ -319,6 +323,7 @@ mod tests {
         std::env::set_var("NCD_OFFLINE", "1");
         std::env::set_var("NCD_API_KEY", "secret-key");
         std::env::set_var("NCD_CURRENT_ORG_ID", "org-42");
+        std::env::set_var("NCD_VIDEO_CODEC", "h264_medium");
         std::env::set_var("NEURACORE_DAEMON_PROFILE", "lab");
 
         let config = env_config_overrides();
@@ -334,6 +339,7 @@ mod tests {
         assert_eq!(config.offline, Some(true));
         assert_eq!(config.api_key.as_deref(), Some("secret-key"));
         assert_eq!(config.current_org_id.as_deref(), Some("org-42"));
+        assert_eq!(config.video_codec.as_deref(), Some("h264_medium"));
         assert_eq!(active_profile_name().as_deref(), Some("lab"));
 
         // 2) An empty string is treated as unset; an unparseable numeric is
@@ -368,6 +374,7 @@ mod tests {
         assert_eq!(config.offline, None);
         assert_eq!(config.api_key, None);
         assert_eq!(config.current_org_id, None);
+        assert_eq!(config.video_codec, None);
         assert_eq!(active_profile_name(), None);
 
         // Restore the pre-test environment for other tests in this binary.

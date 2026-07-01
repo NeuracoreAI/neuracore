@@ -111,6 +111,13 @@ impl DispatcherHandle {
 pub struct DispatcherContext {
     /// Daemon event bus, used to publish recording/trace lifecycle events.
     pub event_bus: Option<crate::state::EventBus>,
+    /// Refresh-request sender to the config watcher. On a `RefreshConfig`
+    /// command the dispatcher sends a request and awaits the ack before
+    /// handling the next envelope, so a `set_video_encoding_options →
+    /// start_recording` sequence observes the new codec (see
+    /// [`crate::cloud::config_watcher`]). `None` in tests / when no watcher is
+    /// wired, where `RefreshConfig` is a no-op.
+    pub config_refresh_tx: Option<tokio::sync::mpsc::Sender<crate::cloud::ConfigRefreshRequest>>,
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -441,7 +448,29 @@ impl Dispatcher {
                     },
                 });
             }
+            Envelope::RefreshConfig {} => self.handle_refresh_config().await,
         }
+    }
+
+    /// Force the config watcher to re-resolve the profile and wait for it to
+    /// finish before handling the next envelope. Because envelopes are
+    /// dispatched strictly in order, awaiting here guarantees the in-memory
+    /// config reflects the change before a following `StartRecording` /
+    /// `VideoChunkReady` for that recording resolves its codec — so the SDK's
+    /// `set_video_encoding_options → start_recording → log_frame` sequence never
+    /// races the async refresh. A missing sender (tests / no watcher) is a
+    /// no-op; a closed channel or dropped ack just means the watcher is gone
+    /// (shutdown), which is harmless.
+    async fn handle_refresh_config(&self) {
+        let Some(refresh_tx) = self.context.config_refresh_tx.as_ref() else {
+            return;
+        };
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if refresh_tx.send(ack_tx).await.is_err() {
+            tracing::debug!("config watcher gone; ignoring RefreshConfig");
+            return;
+        }
+        let _ = ack_rx.await;
     }
 
     fn touch_source(&mut self, source: &Source, recv_at: Instant) {
@@ -1029,13 +1058,14 @@ fn remove_spool_nut(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::ConfigRefreshRequest;
     use crate::encoding::video_encoder::VideoEncoder;
     use crate::state::{SqliteStateStore, TraceWriteStatus};
     use crate::storage::budget::{StorageBudget, StoragePolicy};
     use crate::storage::paths::TracePath;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc};
     use tokio::time::{timeout, Duration};
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -1117,6 +1147,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_config_forwards_to_watcher_and_awaits_ack() {
+        // The RefreshConfig arm must hand a refresh request to the config
+        // watcher and await its ack. Because the commands channel is in-order
+        // and the dispatcher processes envelopes sequentially, awaiting here is
+        // what guarantees the in-memory config is updated before a following
+        // StartRecording / VideoChunkReady resolves its codec. A stand-in
+        // watcher acks the request; the test proves the request is delivered and
+        // the dispatcher keeps running after the ack.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (refresh_tx, mut refresh_rx) = mpsc::channel::<ConfigRefreshRequest>(4);
+        let dispatcher_context = DispatcherContext {
+            event_bus: None,
+            config_refresh_tx: Some(refresh_tx),
+        };
+        let (tx, handle) =
+            spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
+
+        // Stand-in watcher: ack the first refresh request it receives.
+        let watcher = tokio::spawn(async move {
+            match refresh_rx.recv().await {
+                Some(ack) => ack.send(()).is_ok(),
+                None => false,
+            }
+        });
+
+        tx.send(Envelope::RefreshConfig {}).await.unwrap();
+        let acked = timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher observed the refresh within 5s")
+            .expect("watcher task joined");
+        assert!(
+            acked,
+            "dispatcher must forward RefreshConfig to the watcher"
+        );
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+    }
+
+    #[tokio::test]
     async fn routes_data_into_its_window_by_timestamp() {
         fast_holdback();
         let (store, dir) = open_store().await;
@@ -1125,6 +1199,7 @@ mod tests {
         let bus = crate::state::EventBus::new();
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1411,6 +1486,7 @@ mod tests {
         let mut sub = bus.subscribe();
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1463,6 +1539,7 @@ mod tests {
             context,
             DispatcherContext {
                 event_bus: Some(bus.clone()),
+                config_refresh_tx: None,
             },
         );
 

@@ -59,12 +59,29 @@ pub fn content_type_for_filename(filename: &str) -> &'static str {
 /// `data_type` is the wire label. `data_type_name` is the producer-supplied
 /// alias (e.g. camera name); when missing we fall back to a single underscore
 /// so the path is well-formed.
-pub fn cloud_file_list(data_type: &str, data_type_name: Option<&str>) -> Vec<CloudFile> {
+///
+/// For RGB content the lossless archive is registered unless `lossy_only` is set
+/// (`nc.Codec.H264_MEDIUM`), where the daemon writes just `lossy.mp4`. The caller
+/// derives `lossy_only` from the resolved codec — the same source the encoder
+/// uses (see [`crate::encoding::video_encoder::LossyVideoCodec::for_trace`]) — so
+/// registration lists exactly the files the encoder will produce.
+///
+/// The decision is NOT taken from disk: registration runs *while the recording
+/// is still writing* ("pre-registration", see the module docs on the
+/// registration coordinator), so the video files do not exist yet when this is
+/// called. `lossy_only` is ignored for non-RGB content.
+pub fn cloud_file_list(
+    data_type: &str,
+    data_type_name: Option<&str>,
+    lossy_only: bool,
+) -> Vec<CloudFile> {
     let prefix = format!("{data_type}/{}", data_type_name.unwrap_or("_"));
     let mut filenames = Vec::with_capacity(3);
     if matches!(content_type_for(data_type), ContentKind::Rgb) {
         filenames.push(LOSSY_VIDEO_NAME);
-        filenames.push(LOSSLESS_VIDEO_NAME);
+        if !lossy_only {
+            filenames.push(LOSSLESS_VIDEO_NAME);
+        }
     }
     filenames.push(TRACE_FILE);
     filenames
@@ -82,7 +99,7 @@ mod tests {
 
     #[test]
     fn scalar_trace_lists_only_trace_json() {
-        let files = cloud_file_list("JOINT_POSITIONS", Some("arm0"));
+        let files = cloud_file_list("JOINT_POSITIONS", Some("arm0"), false);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filepath, "JOINT_POSITIONS/arm0/trace.json");
         assert_eq!(files[0].content_type, "application/json");
@@ -90,7 +107,7 @@ mod tests {
 
     #[test]
     fn rgb_trace_lists_both_mp4_outputs_plus_sidecar() {
-        let files = cloud_file_list("RGB_IMAGES", Some("cam_0"));
+        let files = cloud_file_list("RGB_IMAGES", Some("cam_0"), false);
         let paths: Vec<&str> = files.iter().map(|f| f.filepath.as_str()).collect();
         assert_eq!(
             paths,
@@ -106,8 +123,70 @@ mod tests {
     }
 
     #[test]
+    fn rgb_trace_lossy_only_omits_lossless() {
+        // Lossy-only (nc.Codec.H264_MEDIUM): register just the lossy video plus
+        // its sidecar. Regression guard for the phantom-lossless bug — the
+        // daemon must not register a lossless.mp4 it never writes, or the
+        // uploader fails the RGB trace on the missing artefact.
+        let files = cloud_file_list("RGB_IMAGES", Some("cam_0"), true);
+        let paths: Vec<&str> = files.iter().map(|f| f.filepath.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec!["RGB_IMAGES/cam_0/lossy.mp4", "RGB_IMAGES/cam_0/trace.json"]
+        );
+    }
+
+    #[test]
+    fn depth_trace_ignores_lossy_only_and_keeps_lossless() {
+        // Depth always keeps its lossless storage even when a lossy codec is
+        // selected: the RGB-only gate lives in `LossyVideoCodec::for_trace`, so
+        // a DEPTH_IMAGES trace never reaches here with `lossy_only == true`, but
+        // pin the both-files layout regardless as a belt-and-braces guard.
+        let files = cloud_file_list("DEPTH_IMAGES", Some("cam_0"), false);
+        let paths: Vec<&str> = files.iter().map(|f| f.filepath.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "DEPTH_IMAGES/cam_0/lossy.mp4",
+                "DEPTH_IMAGES/cam_0/lossless.mp4",
+                "DEPTH_IMAGES/cam_0/trace.json",
+            ]
+        );
+    }
+
+    #[test]
     fn missing_data_type_name_falls_back_to_underscore() {
-        let files = cloud_file_list("JOINT_POSITIONS", None);
+        let files = cloud_file_list("JOINT_POSITIONS", None, false);
         assert_eq!(files[0].filepath, "JOINT_POSITIONS/_/trace.json");
+    }
+
+    #[test]
+    fn registration_decision_matches_encoder_output() {
+        use crate::encoding::video_encoder::LossyVideoCodec;
+
+        // Reproduce the registration coordinator's per-trace decision end to end
+        // (`for_trace(...).is_lossy_only()` feeding `cloud_file_list`) so the
+        // wiring can't regress into the phantom-lossless bug: the registered
+        // file set must match exactly what the encoder writes for that codec.
+        let registered = |data_type: &str, codec: Option<&str>| {
+            let lossy_only = LossyVideoCodec::for_trace(data_type, codec).is_lossy_only();
+            cloud_file_list(data_type, Some("cam"), lossy_only)
+                .into_iter()
+                .map(|file| file.filepath)
+                .collect::<Vec<_>>()
+        };
+
+        // RGB + h264_medium: lossy-only, so NO lossless is registered (C1).
+        assert_eq!(
+            registered("RGB_IMAGES", Some("h264_medium")),
+            vec!["RGB_IMAGES/cam/lossy.mp4", "RGB_IMAGES/cam/trace.json"]
+        );
+        // RGB default and depth-under-lossy both still register the lossless.
+        assert!(registered("RGB_IMAGES", None)
+            .iter()
+            .any(|path| path.ends_with("lossless.mp4")));
+        assert!(registered("DEPTH_IMAGES", Some("h264_medium"))
+            .iter()
+            .any(|path| path.ends_with("lossless.mp4")));
     }
 }

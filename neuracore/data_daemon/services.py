@@ -7,6 +7,7 @@ from pathlib import Path
 
 import aiohttp
 
+from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
 from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.connection_management.connection_manager import (
     ConnectionManager,
@@ -48,6 +49,7 @@ class DaemonServices:
         upload_manager: UploadManager,
         connection_manager: ConnectionManager,
         progress_reporter: ProgressReporter,
+        config_watcher: ConfigWatcher,
     ) -> None:
         """Store fully-initialised service instances."""
         self.client_session = client_session
@@ -58,6 +60,7 @@ class DaemonServices:
         self.upload_manager = upload_manager
         self.connection_manager = connection_manager
         self.progress_reporter = progress_reporter
+        self.config_watcher = config_watcher
 
     @classmethod
     async def create(
@@ -108,6 +111,14 @@ class DaemonServices:
         progress_reporter = ProgressReporter(client_session, emitter)
         logger.debug("ProgressReporter initialized")
 
+        # In-memory effective config, refreshed on a background poll so the
+        # encoder manager reads the video codec from memory rather than
+        # re-parsing the profile YAML per trace. Seeded with the launch-resolved
+        # config so it is valid immediately.
+        config_watcher = ConfigWatcher(initial_config=config)
+        await config_watcher.start()
+        logger.debug("ConfigWatcher started")
+
         logger.debug("Async services bootstrap complete")
 
         return cls(
@@ -119,6 +130,7 @@ class DaemonServices:
             upload_manager=upload_manager,
             connection_manager=connection_manager,
             progress_reporter=progress_reporter,
+            config_watcher=config_watcher,
         )
 
     async def shutdown(self) -> None:
@@ -130,6 +142,12 @@ class DaemonServices:
             logger.debug("ConnectionManager stopped")
         except Exception:
             logger.exception("Error stopping ConnectionManager")
+
+        try:
+            await self.config_watcher.stop()
+            logger.debug("ConfigWatcher stopped")
+        except Exception:
+            logger.exception("Error stopping ConfigWatcher")
 
         try:
             await self.registration_manager.shutdown()

@@ -34,6 +34,25 @@ def _load_native() -> ModuleType:
     return _NATIVE_MODULE
 
 
+def notify_daemon_config_changed() -> None:
+    """Best-effort: ask a running Rust daemon to reload its profile immediately.
+
+    Sent after a profile-changing SDK call (e.g. ``set_video_encoding_options``)
+    so a ``set → start_recording`` sequence observes the change without waiting
+    for the daemon's periodic config poll. Only meaningful under the Rust daemon
+    (the legacy Python daemon has no such command and relies on its poll). Never
+    raises and never blocks the caller: configuring is valid with no daemon
+    running (the profile write persists and is picked up on the next poll /
+    launch), so any failure here is logged at debug and swallowed.
+    """
+    if not rust_daemon_enabled():
+        return
+    try:
+        _load_native().refresh_config()
+    except Exception as error:  # noqa: BLE001 - best-effort, never fatal
+        logger.debug("Could not notify the daemon of a config change: %s", error)
+
+
 class RecordingContext:
     """Recording-scoped interface to the data daemon.
 

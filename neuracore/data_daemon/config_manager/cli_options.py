@@ -6,6 +6,7 @@ from typing import Annotated
 
 import typer
 
+from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.config_manager.helpers import parse_bytes
 
 ProfileNameCreateArgument = Annotated[
@@ -109,6 +110,19 @@ CurrentOrgIdOption = Annotated[
         "--current-org-id",
         "--current_org_id",
         help="Active organisation ID for scoping daemon operations.",
+    ),
+]
+
+VideoCodecOption = Annotated[
+    Codec | None,
+    typer.Option(
+        "--video-codec",
+        "--video_codec",
+        help=(
+            "Global RGB video codec. 'h264_lossless' (default) keeps the "
+            "lossless archive plus a lossy preview; 'h264_medium' uploads a "
+            "single lossy CRF 23 video and drops the lossless archive."
+        ),
     ),
 ]
 
