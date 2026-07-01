@@ -267,7 +267,8 @@ fn free_disk_bytes(path: &Path) -> Result<u64, BudgetError> {
     loop {
         match nix::sys::statvfs::statvfs(probe.as_path()) {
             Ok(stats) => {
-                let blocks_available: u64 = stats.blocks_available();
+                #[allow(clippy::useless_conversion)]
+                let blocks_available: u64 = stats.blocks_available().into();
                 let fragment_size: u64 = stats.fragment_size();
                 return Ok(blocks_available.saturating_mul(fragment_size));
             }

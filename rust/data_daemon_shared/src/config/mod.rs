@@ -142,7 +142,8 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
 /// `path`.
 fn free_disk_bytes(path: &Path) -> std::io::Result<u64> {
     let stats = nix::sys::statvfs::statvfs(path).map_err(std::io::Error::from)?;
-    let blocks_available: u64 = stats.blocks_available();
+    #[allow(clippy::useless_conversion)]
+    let blocks_available: u64 = stats.blocks_available().into();
     let fragment_size: u64 = stats.fragment_size();
     Ok(blocks_available * fragment_size)
 }

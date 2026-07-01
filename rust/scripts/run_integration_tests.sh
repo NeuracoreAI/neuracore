@@ -139,6 +139,58 @@ cleanup_state() {
 }
 
 # ---------------------------------------------------------------------------
+# Build + materialize the daemon artefacts into the source tree
+# ---------------------------------------------------------------------------
+
+# pytest is invoked from $repo_root below, and the test dirs form an unbroken
+# __init__.py package chain up to a repo root that has none, so pytest's default
+# (prepend) import mode puts $repo_root on sys.path and `import neuracore`
+# resolves to the in-tree ./neuracore/ — shadowing any site-packages install.
+# The Rust daemon path therefore imports `neuracore.data_daemon._data_bridge`
+# (and resolves the `data-daemon` binary) out of THIS tree, so the compiled
+# extension and the binary must physically live under ./neuracore/data_daemon/.
+# `maturin develop` installs the extension into site-packages (unreachable here)
+# and build_wheel_artefacts.sh drops the binary into the packaging tree, so
+# neither lands where the imported package can see it. Build both and copy them
+# into place — the same artefacts the CI staging job extracts from the wheel.
+materialize_artefacts() {
+  log "building data bridge extension (cargo build -p data_daemon_bridge --release)"
+  cargo build --release \
+    --manifest-path "$workspace_root/Cargo.toml" \
+    -p data_daemon_bridge 2>&1 | tee -a "$log_file"
+
+  local cdylib_src="$workspace_root/target/release/libdata_daemon_bridge.so"
+  if [[ ! -f "$cdylib_src" ]]; then
+    log "error: bridge cdylib not found at $cdylib_src"
+    exit 1
+  fi
+
+  # Name the extension with the running interpreter's ABI suffix (matching
+  # maturin) and drop any stale build first, so a Python-minor switch can't
+  # leave behind an ABI-incompatible _data_bridge that import picks up instead.
+  local ext_suffix
+  ext_suffix="$(python3 -c 'import importlib.machinery as m; print(m.EXTENSION_SUFFIXES[0])')"
+  local dd_dir="$repo_root/neuracore/data_daemon"
+  rm -f "$dd_dir"/_data_bridge*.so
+  install -m 0644 "$cdylib_src" "$dd_dir/_data_bridge${ext_suffix}"
+  log "    wrote $dd_dir/_data_bridge${ext_suffix}"
+
+  # Build the standalone binary into the packaging tree, then copy it next to
+  # the extension so rust_daemon_binary_path() (importlib.resources over this
+  # tree) can find it.
+  log "building data-daemon binary (build_wheel_artefacts.sh)"
+  bash "$script_dir/build_wheel_artefacts.sh" 2>&1 | tee -a "$log_file"
+  local bin_src="$repo_root/packaging/neuracore-data-daemon/neuracore/data_daemon/bin/data-daemon"
+  if [[ ! -f "$bin_src" ]]; then
+    log "error: data-daemon binary not found at $bin_src"
+    exit 1
+  fi
+  mkdir -p "$dd_dir/bin"
+  install -m 0755 "$bin_src" "$dd_dir/bin/data-daemon"
+  log "    wrote $dd_dir/bin/data-daemon"
+}
+
+# ---------------------------------------------------------------------------
 # Environment
 # ---------------------------------------------------------------------------
 
@@ -261,6 +313,7 @@ main() {
   log "==== integration test run starting ===="
   stop_daemon
   cleanup_state
+  materialize_artefacts
 
   set +e
   run_tests

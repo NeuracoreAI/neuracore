@@ -152,7 +152,7 @@ predictions = policy.predict(timeout=5)
 - [Environment Variables](./docs/environment_variable.md)
 - [Contribution Guide](./docs/contribution_guide.md)
 - [Data Daemon](./docs/data_daemon.md)
-- [Rust Data Daemon — Developer Guide](./docs/rust_data_daemon_development.md) — building the [rust/](./rust/) workspace that ships inside the wheel as the data-daemon binary + `neuracore.data_daemon._native_producer` cdylib.
+- [Rust Data Daemon — Developer Guide](./docs/rust_data_daemon_development.md) — building the [rust/](./rust/) workspace that ships inside the wheel as the data-daemon binary + `neuracore.data_daemon._data_bridge` cdylib.
 
 # 💬 Community
 

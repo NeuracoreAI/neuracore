@@ -1,8 +1,17 @@
-name: Build Wheels
+name: Build Daemon Wheels
 
-# Builds the Python wheel that bundles the Rust data-daemon binary and the
-# producer cdylib. See docs/rust_data_daemon_development.md#packaging-the-wheel
-# for the build pipeline rationale (cargo → build_wheel_artefacts.sh → python -m build).
+# Builds the `neuracore-data-daemon` wheels (the Rust `_data_bridge` extension +
+# the bundled `data-daemon` binary) for Linux and macOS. maturin owns the build
+# (packaging/neuracore-data-daemon/pyproject.toml); the daemon binary is a
+# separate crate, so rust/scripts/build_wheel_artefacts.sh compiles it into the
+# package tree first. The pure-Python `neuracore` wheel is NOT built here — it
+# needs no compilation (built with `python -m build`).
+#
+# Linux uses maturin-action's manylinux container + before-script-linux. macOS
+# runs natively (no container), so its libclang setup + binary build run as an
+# explicit step before maturin-action. macOS ships an arm64 (Apple Silicon)
+# wheel only — Intel Macs are not supported.
+# See docs/rust_data_daemon_development.md#packaging-the-wheel.
 
 on:
   pull_request:
@@ -10,18 +19,14 @@ on:
       - main
     paths:
       - 'rust/**'
-      - 'neuracore/data_daemon/**'
-      - 'setup.py'
-      - 'MANIFEST.in'
+      - 'packaging/neuracore-data-daemon/**'
       - '.github/workflows/build-wheels.yaml'
   push:
     branches:
       - main
     paths:
       - 'rust/**'
-      - 'neuracore/data_daemon/**'
-      - 'setup.py'
-      - 'MANIFEST.in'
+      - 'packaging/neuracore-data-daemon/**'
       - '.github/workflows/build-wheels.yaml'
   workflow_call:
 
@@ -31,16 +36,19 @@ concurrency:
 
 jobs:
   build:
-    name: wheel (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: daemon wheel (${{ matrix.target }}, py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Linux-first per docs/data-daemon-rewrite.md §Open items.
-        # aarch64 ships when there's demand — the helper script is platform-
-        # agnostic but cross-compilation isn't wired up here yet.
-        os: [ubuntu-22.04]
-        python-version: ["3.10", "3.11"]
+        include:
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, python-version: "3.10" }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, python-version: "3.11" }
+          # Apple Silicon (arm64) — the only supported macOS target (no Intel).
+          # Runs natively on a GitHub Apple-silicon runner so the smoke test can
+          # launch the arm64 binary.
+          - { os: macos-15, target: aarch64-apple-darwin, python-version: "3.10", macos-deployment-target: "11.0" }
+          - { os: macos-15, target: aarch64-apple-darwin, python-version: "3.11", macos-deployment-target: "11.0" }
 
     steps:
       - name: Checkout code
@@ -48,6 +56,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
@@ -55,37 +65,83 @@ jobs:
           workspaces: rust
 
       - name: Set up Python ${{ matrix.python-version }}
-        id: setup-python
         uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade pip build
-
-      - name: Build Rust artefacts
-        # PYO3_PYTHON pins pyo3-build-config to the matrix interpreter so the
-        # produced cdylib's ABI matches the wheel's python tag. Ubuntu images
-        # ship multiple python3 binaries; relying on PATH order would silently
-        # pick the wrong one and produce a wheel that imports under the wrong
-        # interpreter.
-        env:
-          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-        run: ./rust/scripts/build_wheel_artefacts.sh
-
-      - name: Build wheel
-        run: python -m build --wheel
-
-      - name: Smoke-test the built wheel
+      # macOS has no manylinux container, so maturin-action's before-script-linux
+      # never runs there. Do the equivalent setup natively first: make libclang
+      # available for iceoryx2's bindgen (needed by BOTH the standalone binary
+      # built here and the extension maturin builds next), pin the deployment
+      # target so the wheel tag matches the binary, and build + ad-hoc-sign the
+      # daemon binary into the package tree. LIBCLANG_PATH/MACOSX_DEPLOYMENT_TARGET
+      # go through $GITHUB_ENV so the maturin-action step inherits them.
+      - name: Set up libclang and build daemon binary (macOS)
+        if: runner.os == 'macOS'
         run: |
-          python -m pip install dist/neuracore-*.whl
-          python -c "import neuracore.data_daemon._native_producer as p; print('producer ok:', p)"
-          python -c "from importlib.resources import files; b = files('neuracore.data_daemon') / 'bin' / 'data-daemon'; assert b.is_file(), b; print('binary ok:', b)"
+          brew install llvm
+          export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-deployment-target }}" >> "$GITHUB_ENV"
+          MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos-deployment-target }}" \
+            bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target ${{ matrix.target }}
+
+      - name: Build daemon wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: packaging/neuracore-data-daemon
+          target: ${{ matrix.target }}
+          # manylinux_2_28 (AlmaLinux 8), NOT auto/manylinux2014: iceoryx2's
+          # bindgen calls clang_getTranslationUnitTargetInfo, which needs
+          # libclang >= 5.0. manylinux2014's `yum install clang` is clang 3.4 and
+          # panics with "unsupported version"; 2_28's `dnf install clang` is 15+.
+          # Cost: wheel glibc floor rises to 2.28 (RHEL8/Ubuntu 18.10+/Debian 10+).
+          manylinux: 2_28
+          args: >-
+            --release
+            --out dist
+            --interpreter python${{ matrix.python-version }}
+          # Linux only: build the daemon binary inside the manylinux container so
+          # its glibc matches the wheel, and install clang/libclang for iceoryx2's
+          # bindgen. $GITHUB_WORKSPACE anchors the script path regardless of the
+          # build working-directory. macOS does the equivalent in the native step
+          # above (before-script-linux never runs off Linux).
+          before-script-linux: |
+            (command -v yum && yum install -y clang) || (command -v dnf && dnf install -y clang) || true
+            bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target ${{ matrix.target }}
+
+      - name: Smoke-test the daemon wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --find-links packaging/neuracore-data-daemon/dist neuracore-data-daemon
+          # Run the import checks from OUTSIDE the checkout. At the repo root the
+          # in-tree `neuracore/` source package sits on sys.path[0] and shadows
+          # the installed namespace wheel, so importing it would execute the full
+          # SDK __init__ and pull in deps (pydantic, ...) this job never installs.
+          # cd-ing away tests the actually-installed daemon wheel.
+          cd "$RUNNER_TEMP"
+          python -c "import neuracore.data_daemon._data_bridge as p; print('extension ok:', p)"
+          python - <<'PY'
+          import os, subprocess
+          from importlib.resources import files
+          b = files("neuracore.data_daemon") / "bin" / "data-daemon"
+          assert b.is_file(), b
+          assert os.access(b, os.X_OK), f"daemon binary is not executable: {b}"
+          # Actually launch it (clap's --help exits 0) so any code-signing,
+          # Gatekeeper/quarantine or wrong-architecture problem surfaces here in
+          # CI rather than at a user's runtime. This matters most on Apple Silicon.
+          r = subprocess.run([str(b), "--help"], capture_output=True)
+          assert r.returncode == 0, (
+              f"daemon binary failed to launch ({r.returncode}): "
+              f"{r.stderr.decode(errors='replace')}"
+          )
+          print("binary ok (launched):", b)
+          PY
 
       - name: Upload wheel artefact
         uses: actions/upload-artifact@v4
         with:
-          name: neuracore-wheel-${{ matrix.os }}-py${{ matrix.python-version }}
-          path: dist/*.whl
+          name: neuracore-data-daemon-wheel-${{ matrix.target }}-py${{ matrix.python-version }}
+          path: packaging/neuracore-data-daemon/dist/*.whl
           if-no-files-found: error
           retention-days: 7

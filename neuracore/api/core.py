@@ -20,7 +20,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
@@ -334,7 +334,7 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         cloud_recording_id = robot.get_cloud_recording_id() if wait else None
         robot.stop_recording(
             recording_id, wait_for_producer_drain=wait, timestamp=timestamp

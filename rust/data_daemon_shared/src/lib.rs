@@ -1,7 +1,7 @@
 //! Shared definitions for the Neuracore data daemon.
 //!
 //! Both the daemon binary and the PyO3 producer crate
-//! (`data_daemon_producer`) depend on this crate so they agree on everything
+//! (`data_daemon_bridge`) depend on this crate so they agree on everything
 //! that crosses the process boundary:
 //!
 //! - the iceoryx2 service-name conventions ([`service_name`]),
@@ -125,7 +125,7 @@ pub mod service_name {
     /// Maximum number of concurrent publishers per service.
     ///
     /// iceoryx2's default cap of 2 is unworkable for the SDK's threading
-    /// model: the native producer parks its iceoryx2 publisher in a
+    /// model: the data bridge parks its iceoryx2 publisher in a
     /// `thread_local!` (publishers are `!Sync`), so each Python OS thread
     /// that calls into the producer builds its own. The integration matrix
     /// fans up to ~32 worker threads (`parallel_contexts=8` × three joint
@@ -152,7 +152,7 @@ pub mod service_name {
     /// Maximum number of concurrent iceoryx2 nodes attached to any service.
     ///
     /// One node is built per **thread** (the `thread_local!` PRODUCER slot in
-    /// the native producer). The integration matrix fans to 8 parallel worker
+    /// the data bridge). The integration matrix fans to 8 parallel worker
     /// subprocesses each running 5+ threads (main + RGB + joint roles), giving
     /// 40+ nodes plus the daemon. 512 gives enough headroom that the cap is
     /// never approached in any test configuration.
@@ -188,7 +188,7 @@ pub mod service_name {
     pub const QUERIES_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
     /// Maximum number of concurrent query clients. Mirrors
-    /// [`MAX_PUBLISHERS_PER_SERVICE`]: the native producer parks one client port
+    /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
     /// per OS thread (iceoryx2 ports are `!Sync`), so the cap must cover the
     /// integration matrix's full thread fan-out.
     pub const MAX_QUERY_CLIENTS_PER_SERVICE: usize = 128;

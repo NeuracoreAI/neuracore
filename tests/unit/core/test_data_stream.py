@@ -233,7 +233,7 @@ def test_rgb_stream_owns_no_channel_under_rust_daemon(monkeypatch) -> None:
         _FakeProducerChannel,
     )
     monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.rust_daemon_enabled",
+        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
         lambda: True,
     )
 
