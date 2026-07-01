@@ -123,6 +123,7 @@ class DataStream(ABC):
         self._producer_channel.start_recording_session(
             recording_id=context.recording_id
         )
+        self._on_producer_channel_ready()
 
     def prepare_recording_stopped(self) -> tuple[ProducerChannel | None, int]:
         """Mark the producer channel as stopping and return it.
