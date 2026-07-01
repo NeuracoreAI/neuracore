@@ -269,7 +269,6 @@ class TestAlgorithmPerformance:
                     f"{endpoint_status}"
                 )
 
-            nc.connect_robot("Mujoco VX300s")
             policy = nc.policy_remote_server(endpoint_name)
             env = make_sim_env(seed=42)
             success_rate = eval_model(
