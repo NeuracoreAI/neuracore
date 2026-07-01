@@ -2,7 +2,7 @@ name: Integration ML - Algorithm Performance Evaluate (Production)
 
 on:
   schedule:
-    - cron: "0 8 * * *"  # 8 hours after training starts; training cap is 6 hours
+    - cron: "0 4 * * *"  # 4 hours after training starts
   workflow_dispatch:
 
 jobs:
