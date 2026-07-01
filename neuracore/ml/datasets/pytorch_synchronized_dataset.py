@@ -30,12 +30,10 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.json_serialization import JsonValue, to_json_serializable
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
-    apply_preprocessing_methods,
-)
+from neuracore.ml.utils.preprocessing_utils import apply_preprocessing_methods
 
 logger = logging.getLogger(__name__)
 

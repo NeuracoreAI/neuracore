@@ -37,6 +37,7 @@ from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.trainers.batch_autotuner import (
     find_optimal_batch_size,
     is_valid_batch_size,
@@ -49,10 +50,7 @@ from neuracore.ml.trainers.distributed_trainer import (
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
-    resolve_preprocessing_config,
-)
+from neuracore.ml.utils.preprocessing_utils import resolve_preprocessing_config
 from neuracore.ml.utils.training_config import (
     resolve_to_complete_config,
     resolve_user_input_config,
