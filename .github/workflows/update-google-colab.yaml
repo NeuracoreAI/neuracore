@@ -1,0 +1,157 @@
+name: Update Google Colab
+
+# Manual workflow: retrain the public Colab demo model against the latest
+# released neuracore version, upload it to the public GCS bucket, bump the
+# notebook's pinned version, and open a PR.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Validate only: skip training, GCS upload, and PR (no cloud job, no side effects)"
+        type: boolean
+        default: false
+      epochs:
+        description: "Training epochs for the demo model"
+        type: string
+        default: "50"
+
+env:
+  PUBLIC_BUCKET: public-bucket-us-central1
+  GCP_PROJECT_ID: neuracore-prod
+  # Service-account key with object-admin on PUBLIC_BUCKET.
+  GCP_SA_KEY_SECRET: GCP_SERVICE_ACCOUNT_DEPLOY_PROD_KEY
+  MODEL_ARTIFACT: bigym_pretrained_model.nc.zip
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-colab-demo:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+
+      - name: Checkout repository
+        uses: actions/checkout@v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve latest release tag
+        id: release-tag
+        run: |
+          latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -z "$latest_release_tag" ]; then
+            echo "::error::No release tag matching v* found"
+            exit 1
+          fi
+          version="${latest_release_tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Latest released version: $version"
+
+      - name: Dry run plan
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          v="${{ steps.release-tag.outputs.version }}"
+          echo "DRY RUN: showing planned actions, nothing will be executed."
+          echo "Target neuracore version: $v"
+          echo "Would install neuracore[ml,mjcf]==$v and bigym."
+          echo "Would collect bigym ReachTarget demos and train CNNMLP on prod (GPU NVIDIA_TESLA_T4, epochs ${{ github.event.inputs.epochs }})."
+          echo "Would download the model and upload to gs://${{ env.PUBLIC_BUCKET }}/colab/${{ env.MODEL_ARTIFACT }}."
+          echo "Would bump the notebook pin to $v and open a pull request."
+
+      - name: Set up uv
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+          python-version: "3.11"
+
+      - name: Install released neuracore
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          uv pip install --system \
+            "neuracore[ml,mjcf]==${{ steps.release-tag.outputs.version }}" \
+            google-cloud-storage \
+            --extra-index-url https://download.pytorch.org/whl/cpu \
+            --index-strategy unsafe-best-match
+
+      - name: Install bigym
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          git clone https://github.com/NeuracoreAI/bigym.git /tmp/bigym
+          uv pip install --system -e /tmp/bigym
+
+      - name: Install headless rendering dependencies
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1-mesa-dev libgl1 libosmesa6-dev libxml2-utils
+
+      - name: Train and download demo model
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        env:
+          NEURACORE_API_URL: https://api.neuracore.com/api
+          NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
+          NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
+          MUJOCO_GL: egl
+          DISPLAY: ":0"
+        run: |
+          Xvfb $DISPLAY -screen 0 1280x1024x24 &
+          python admin/update_google_colab.py \
+            --skip-upload --skip-patch \
+            --epochs "${{ github.event.inputs.epochs }}" \
+            --model-output "${{ env.MODEL_ARTIFACT }}"
+
+      - name: Authenticate to Google Cloud
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: google-github-actions/auth@v3.0.0
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          credentials_json: ${{ secrets[env.GCP_SA_KEY_SECRET] }}
+
+      - name: Upload model and patch notebook
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          python admin/update_google_colab.py \
+            --skip-train \
+            --bucket "${{ env.PUBLIC_BUCKET }}" \
+            --model-output "${{ env.MODEL_ARTIFACT }}"
+
+      - name: Run pre-commit on the patched notebook
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        run: |
+          uvx pre-commit run --files examples/getting_started_with_neuracore.ipynb \
+            || uvx pre-commit run --files examples/getting_started_with_neuracore.ipynb
+
+      - name: Open pull request
+        if: ${{ github.event.inputs.dry_run != 'true' }}
+        uses: peter-evans/create-pull-request@v8.1.1
+        with:
+          branch: chore/refresh-colab-demo-v${{ steps.release-tag.outputs.version }}
+          base: main
+          commit-message: >-
+            chore: refresh Colab demo for neuracore
+            v${{ steps.release-tag.outputs.version }}
+          title: >-
+            chore: refresh Colab demo for neuracore
+            v${{ steps.release-tag.outputs.version }}
+          body: |
+            Refresh the getting-started Colab notebook for neuracore
+            v${{ steps.release-tag.outputs.version }}:
+
+            - Bump the pinned neuracore version.
+
+            The demo model was retrained against this release and uploaded to
+            `gs://${{ env.PUBLIC_BUCKET }}/colab/${{ env.MODEL_ARTIFACT }}`.
+          assignees: ${{ github.actor }}
+          add-paths: examples/getting_started_with_neuracore.ipynb
