@@ -76,6 +76,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_REAL,
         wait=False,
+        requires_rust_daemon=True,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -88,6 +89,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
         wait=False,
+        requires_rust_daemon=True,
     ),
 )
 

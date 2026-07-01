@@ -156,6 +156,12 @@ class DataDaemonTestCase:
             in the suite (documented and discoverable) without running.  A
             batch with ``skip=True`` forces every case to skip regardless of
             this per-case value.
+        requires_rust_daemon: When ``True``, the case only runs against the
+            Rust data daemon and is skipped when the legacy Python daemon is
+            active (``NCD_RUST_DAEMON`` unset).  High-contention, high-rate, and
+            long-running workloads that the Python daemon cannot sustain use
+            this flag so they still exercise the Rust daemon in CI without
+            failing the legacy suite.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -184,6 +190,7 @@ class DataDaemonTestCase:
     video_fps: int = 60
     timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
     skip: bool = False
+    requires_rust_daemon: bool = False
 
     @property
     def has_video(self) -> bool:
@@ -235,6 +242,10 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
+        requires_rust_daemon: When ``True``, every case in the batch runs only
+            against the Rust data daemon and is skipped on the legacy Python
+            daemon.  When ``False`` (default), each case keeps its own per-case
+            ``requires_rust_daemon`` value.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -244,6 +255,7 @@ class DataDaemonTestBatch:
     stop_method: StopMethod = STOP_METHOD_CLI
     timestamp_mode: TimestampMode | None = None
     skip: bool = False
+    requires_rust_daemon: bool = False
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -257,6 +269,8 @@ class DataDaemonTestBatch:
             batch_overrides["timestamp_mode"] = self.timestamp_mode
         if self.skip:
             batch_overrides["skip"] = True
+        if self.requires_rust_daemon:
+            batch_overrides["requires_rust_daemon"] = True
         return [
             DataDaemonTestCase(**{
                 **{

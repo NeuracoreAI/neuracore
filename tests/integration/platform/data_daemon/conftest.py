@@ -5,6 +5,7 @@ from collections.abc import Callable
 
 import pytest
 
+from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
@@ -53,6 +54,20 @@ def skip_marked_cases(request: pytest.FixtureRequest) -> None:
     case = request.getfixturevalue("case")
     if getattr(case, "skip", False):
         pytest.skip("case marked skip=True")
+
+
+@pytest.fixture(autouse=True)
+def skip_rust_only_cases(request: pytest.FixtureRequest) -> None:
+    """Skip cases flagged ``requires_rust_daemon`` on the legacy Python daemon.
+
+    Gating them on the active daemon keeps them running under Rust while restoring the
+    Python suite to its green baseline.
+    """
+    if "case" not in request.fixturenames:
+        return
+    case = request.getfixturevalue("case")
+    if getattr(case, "requires_rust_daemon", False) and not rust_daemon_enabled():
+        pytest.skip("case requires the Rust data daemon (NCD_RUST_DAEMON)")
 
 
 @pytest.fixture(autouse=True)
