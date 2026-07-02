@@ -243,13 +243,20 @@ class Robot:
         self._data_streams[stream_id] = stream
 
     def _remove_data_stream(self, stream_id: str, stream: DataStream) -> None:
-        """Remove a stream from the robot registry if it still matches."""
+        """Remove a stream from the robot registry and evict its cached bindings."""
         if self._data_streams.get(stream_id) is not stream:
             return
 
         self._data_streams.pop(stream_id)
         if self._data_stream_counts[stream.data_type] > 0:
             self._data_stream_counts[stream.data_type] -= 1
+
+        bindings = self._joint_stream_bindings.get(stream.data_type)
+        if bindings:
+            for joint_name, binding in list(bindings.items()):
+                if binding.stream is stream:
+                    bindings.pop(joint_name)
+        self._joint_group_cache.pop(stream.data_type, None)
 
     def get_data_stream(self, stream_id: str) -> DataStream | None:
         """Retrieve a data stream by its identifier.
