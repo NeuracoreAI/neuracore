@@ -8,6 +8,8 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    env:
+      NCD_RUST_DAEMON: "1"
     # TODO: NDD has socket issue when running in parallel
     #   in CommunicationsManager when calling create_producer_socket()
 
@@ -43,13 +45,14 @@ jobs:
         with:
           ref: ${{ steps.release-tag.outputs.latest_release_tag }}
           fetch-depth: 0
+          path: test-harness
 
       - name: Pull LFS objects
-        run: git lfs pull
+        run: git -C test-harness lfs pull
 
       - name: Verify production test harness ref
         run: |
-          checked_out_ref="$(git describe --tags --exact-match HEAD)"
+          checked_out_ref="$(git -C test-harness describe --tags --exact-match HEAD)"
           expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
           if [ "$checked_out_ref" != "$expected_ref" ]; then
             echo "::error::Expected production test harness ref $expected_ref, got $checked_out_ref"
@@ -72,12 +75,31 @@ jobs:
         run: |
           echo "Test harness environment: production"
           echo "Test harness ref: ${{ steps.release-tag.outputs.latest_release_tag }}"
-          echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/ml/test_failure_reporting.py"
+          echo "Test harness commit: $(git -C test-harness rev-parse HEAD)"
+          echo "Test harness path: test-harness/tests/integration/ml/test_failure_reporting.py"
           python - << 'EOF'
           import neuracore
 
           print(f"Installed neuracore version: {neuracore.__version__}")
+          EOF
+
+      - name: Smoke-check Rust daemon selection
+        run: |
+          python - << 'EOF'
+          from neuracore.data_daemon.rust_selection import (
+              rust_daemon_binary_path,
+              rust_daemon_enabled,
+          )
+
+          assert rust_daemon_enabled(), "Expected NCD_RUST_DAEMON to enable Rust daemon"
+          binary_path = rust_daemon_binary_path()
+          assert binary_path is not None and binary_path.is_file(), binary_path
+
+          import neuracore.data_daemon._native_producer as native_producer
+
+          print("Rust daemon enabled:", rust_daemon_enabled())
+          print("Bundled binary:", binary_path)
+          print("Native producer:", native_producer)
           EOF
 
       - name: Run Integration Test
@@ -97,4 +119,4 @@ jobs:
             --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
             --log-cli-date-format="%H:%M:%S" \
             -v \
-            tests/integration/ml/test_failure_reporting.py
+            test-harness/tests/integration/ml/test_failure_reporting.py

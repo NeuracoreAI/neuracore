@@ -32,6 +32,8 @@ jobs:
   test:
     needs: pre-commit
     runs-on: ubuntu-24.04
+    env:
+      NCD_RUST_DAEMON: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -74,15 +76,29 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
+        id: setup-python
         uses: actions/setup-python@v4
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
       - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+
+      - name: Build Rust daemon artefacts
+        env:
+          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: ./rust/scripts/build_wheel_artefacts.sh
 
       - name: Verify importer datasets token
         run: |
@@ -136,6 +152,25 @@ jobs:
           import neuracore
 
           print(f"Installed neuracore version: {neuracore.__version__}")
+          EOF
+
+      - name: Smoke-check Rust daemon selection
+        run: |
+          python - << 'EOF'
+          from neuracore.data_daemon.rust_selection import (
+              rust_daemon_binary_path,
+              rust_daemon_enabled,
+          )
+
+          assert rust_daemon_enabled(), "Expected NCD_RUST_DAEMON to enable Rust daemon"
+          binary_path = rust_daemon_binary_path()
+          assert binary_path is not None and binary_path.is_file(), binary_path
+
+          import neuracore.data_daemon._native_producer as native_producer
+
+          print("Rust daemon enabled:", rust_daemon_enabled())
+          print("Bundled binary:", binary_path)
+          print("Native producer:", native_producer)
           EOF
 
       - name: Run Importer Integration Tests
