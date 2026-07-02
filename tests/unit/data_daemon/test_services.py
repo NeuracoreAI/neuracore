@@ -50,6 +50,9 @@ def mock_daemon_services() -> DaemonServices:
     mock_connection_manager = MagicMock()
     mock_connection_manager.stop = AsyncMock()
 
+    mock_config_watcher = MagicMock()
+    mock_config_watcher.stop = AsyncMock()
+
     return DaemonServices(
         client_session=mock_session,
         state_store=mock_state_store,
@@ -59,6 +62,7 @@ def mock_daemon_services() -> DaemonServices:
         upload_manager=mock_upload_manager,
         connection_manager=mock_connection_manager,
         progress_reporter=MagicMock(),
+        config_watcher=mock_config_watcher,
     )
 
 
@@ -82,6 +86,7 @@ class TestDaemonServicesCreate:
     ) -> None:
         with (
             patch("neuracore.data_daemon.services.ConnectionManager") as MockConnMgr,
+            patch("neuracore.data_daemon.services.ConfigWatcher") as MockConfigWatcher,
             patch("neuracore.data_daemon.services.UploadManager") as MockUploadMgr,
             patch(
                 "neuracore.data_daemon.services.ProgressReporter"
@@ -92,6 +97,10 @@ class TestDaemonServicesCreate:
             mock_conn_instance = AsyncMock()
             mock_conn_instance.start = AsyncMock()
             MockConnMgr.return_value = mock_conn_instance
+
+            mock_config_watcher_instance = AsyncMock()
+            mock_config_watcher_instance.start = AsyncMock()
+            MockConfigWatcher.return_value = mock_config_watcher_instance
 
             mock_upload_instance = MagicMock()
             MockUploadMgr.return_value = mock_upload_instance
@@ -117,9 +126,11 @@ class TestDaemonServicesCreate:
             assert services.upload_manager is mock_upload_instance
             assert services.connection_manager is mock_conn_instance
             assert services.progress_reporter is mock_progress_instance
+            assert services.config_watcher is mock_config_watcher_instance
 
             mock_state_store_instance.init_async_store.assert_called_once()
             mock_conn_instance.start.assert_called_once()
+            mock_config_watcher_instance.start.assert_called_once()
             await services.client_session.close()
 
 
@@ -132,6 +143,7 @@ class TestDaemonServicesShutdown:
         await mock_daemon_services.shutdown()
 
         mock_daemon_services.connection_manager.stop.assert_called_once()
+        mock_daemon_services.config_watcher.stop.assert_called_once()
         mock_daemon_services.upload_manager.shutdown.assert_called_once()
         mock_daemon_services.trace_status_updater.shutdown.assert_called_once()
         mock_daemon_services.state_store.close.assert_called_once()

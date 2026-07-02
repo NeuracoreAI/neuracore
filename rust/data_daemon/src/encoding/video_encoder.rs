@@ -82,6 +82,70 @@ pub const ENCODE_THREADS_PER_OUTPUT: usize = 2;
 /// scrub/preview proxy.
 const LOSSY_PREVIEW_MAX_HEIGHT: u32 = 480;
 
+/// Lossy RGB video codec selection for a trace, resolved once at the trace's
+/// first chunk (and by the registration coordinator, from the same source).
+///
+/// The default produces the lossless archive plus a downscaled lossy preview.
+/// `H264MediumLossyOnly` (the SDK's `nc.Codec.H264_MEDIUM`) instead produces a
+/// single full-resolution `libx264 -crf 23 -preset medium` video and skips the
+/// lossless archive — smaller uploads, with that one video used for training.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LossyVideoCodec {
+    /// Default: lossless archive (`libx264rgb -qp 0`) plus a preview-resolution
+    /// lossy proxy (`libx264 -qp 23`). Both outputs are produced.
+    #[default]
+    LosslessPlusPreview,
+    /// `nc.Codec.H264_MEDIUM`: one full-resolution `libx264 -crf 23 -preset
+    /// medium` video; no lossless archive, no preview downscale.
+    H264MediumLossyOnly,
+}
+
+impl LossyVideoCodec {
+    /// Resolve a codec from a config/env string. Only `"h264_medium"` selects
+    /// lossy-only; `"h264_lossless"` and unset/empty keep the default silently.
+    /// An unrecognised value also keeps the default but logs a warning (parity
+    /// with the SDK's `resolve_codec`), so a typo can't silently change codecs.
+    /// Callers gate this to RGB traces — depth always keeps lossless storage.
+    pub fn from_config_str(value: Option<&str>) -> Self {
+        match value {
+            Some("h264_medium") => Self::H264MediumLossyOnly,
+            None | Some("") | Some("h264_lossless") => Self::LosslessPlusPreview,
+            Some(other) => {
+                tracing::warn!(
+                    codec = other,
+                    "Ignoring unknown video codec; expected one of: \
+                     h264_lossless, h264_medium"
+                );
+                Self::LosslessPlusPreview
+            }
+        }
+    }
+
+    /// Resolve the codec for a trace of `data_type` given the configured global
+    /// codec string (the resolved `NCD_VIDEO_CODEC` / active-profile
+    /// `video_codec`).
+    ///
+    /// Only RGB cameras honour the selection — a depth trace's lossy proxy is a
+    /// visualisation, not precise depth, so depth (and every non-RGB stream)
+    /// always keeps the default lossless archive. This RGB-only gate is
+    /// deliberately narrower than the video-family predicate in
+    /// [`crate::cloud::cloud_files`] (which includes depth). Kept pure (the
+    /// config string is passed in, not read here) so the encoder path and the
+    /// registration coordinator resolve from the same source, and the gate is
+    /// unit-testable without touching the environment.
+    pub fn for_trace(data_type: &str, codec_value: Option<&str>) -> Self {
+        if data_type != "RGB_IMAGES" {
+            return Self::LosslessPlusPreview;
+        }
+        Self::from_config_str(codec_value)
+    }
+
+    /// Whether this codec produces only the lossy output (no lossless archive).
+    pub fn is_lossy_only(self) -> bool {
+        matches!(self, Self::H264MediumLossyOnly)
+    }
+}
+
 /// Inputs to one per-chunk transcode invocation.
 #[derive(Debug, Clone)]
 pub struct ChunkEncodeRequest {
@@ -89,8 +153,12 @@ pub struct ChunkEncodeRequest {
     pub raw_nut: PathBuf,
     /// Destination for the per-chunk lossy mp4 segment.
     pub lossy_out: PathBuf,
-    /// Destination for the per-chunk lossless mp4 segment.
+    /// Destination for the per-chunk lossless mp4 segment. Unused in lossy-only
+    /// mode (no lossless output is produced).
     pub lossless_out: PathBuf,
+    /// Lossy codec selection for this trace. Controls whether a lossless
+    /// archive is produced and how the lossy output is encoded.
+    pub codec: LossyVideoCodec,
 }
 
 /// Outcome of a successful per-chunk transcode.
@@ -363,7 +431,11 @@ impl VideoEncoder {
         request: &ChunkEncodeRequest,
     ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
         ensure_parent_dirs(&request.lossy_out)?;
-        ensure_parent_dirs(&request.lossless_out)?;
+        // No lossless output is produced in lossy-only mode, so don't prepare a
+        // directory for a file that will never be written.
+        if !request.codec.is_lossy_only() {
+            ensure_parent_dirs(&request.lossless_out)?;
+        }
 
         // `-y` overwrites existing outputs (resume safety: a previous failed
         // run may have left a partial mp4). `-fflags +genpts` rebuilds the
@@ -391,15 +463,14 @@ impl VideoEncoder {
         // mode, but `-fps_mode` is unrecognised by ffmpeg < 5.1 (e.g. the 4.4
         // build shipped on Ubuntu 22.04 / the integration host), where it aborts
         // the encode with "Unrecognized option 'fps_mode'". `-vsync` is accepted
-        // on both (only deprecated, not removed, on 5.1+). Two `-map 0:v -c:v ...`
-        // blocks emit both outputs from a single demux pass.
+        // on both (only deprecated, not removed, on 5.1+). The default branch
+        // emits two `-map 0:v -c:v ...` output blocks from a single demux pass;
+        // lossy-only emits a single block (no preview/archive split).
         // Bound each output's libx264 thread pool (see
         // `ENCODE_THREADS_PER_OUTPUT`) so the transcode fleet doesn't
         // oversubscribe the cores the logging threads need.
         let encode_threads = ENCODE_THREADS_PER_OUTPUT.to_string();
-        // Downscale the lossy preview proxy (only) to keep the dominant pass
-        // cheap at high resolution. The lossless output stays native.
-        let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
+        let lossy_only = request.codec.is_lossy_only();
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -414,42 +485,65 @@ impl VideoEncoder {
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
-            .arg("passthrough")
-            // Lossy preview proxy only: cap to preview resolution (see
-            // `preview_scale_filter`). vsync passthrough still emits every
-            // input frame, so the lossy frame count matches the lossless
-            // output and the per-frame timestamp sidecar.
-            .arg("-vf")
-            .arg(&preview_filter)
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-threads")
-            .arg(&encode_threads)
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-preset")
-            .arg("ultrafast")
-            .arg("-qp")
-            .arg("23")
-            .arg(&request.lossy_out)
-            .arg("-map")
-            .arg("0:v")
-            .arg("-vsync")
-            .arg("passthrough")
-            // libx264rgb encodes the rgb24 frames directly: bit-exact to the
-            // captured pixels, ~2.5× faster than a yuv444p10le pass, and the
-            // format the Python reference encoder writes.
-            .arg("-c:v")
-            .arg("libx264rgb")
-            .arg("-threads")
-            .arg(&encode_threads)
-            .arg("-pix_fmt")
-            .arg("rgb24")
-            .arg("-preset")
-            .arg("ultrafast")
-            .arg("-qp")
-            .arg("0")
-            .arg(&request.lossless_out)
+            .arg("passthrough");
+        if lossy_only {
+            // Single full-resolution training-quality video: libx264 CRF 23 at
+            // `-preset medium`. No preview downscale and no lossless pass — this
+            // is the canonical (and only) upload for the trace.
+            command
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-threads")
+                .arg(&encode_threads)
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-preset")
+                .arg("medium")
+                .arg("-crf")
+                .arg("23")
+                .arg(&request.lossy_out);
+        } else {
+            // Downscale the lossy preview proxy (only) to keep this dominant
+            // pass cheap at high resolution; the lossless output stays native.
+            let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
+            command
+                // Lossy preview proxy only: cap to preview resolution (see
+                // `preview_scale_filter`). vsync passthrough still emits every
+                // input frame, so the lossy frame count matches the lossless
+                // output and the per-frame timestamp sidecar.
+                .arg("-vf")
+                .arg(&preview_filter)
+                .arg("-c:v")
+                .arg("libx264")
+                .arg("-threads")
+                .arg(&encode_threads)
+                .arg("-pix_fmt")
+                .arg("yuv420p")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-qp")
+                .arg("23")
+                .arg(&request.lossy_out)
+                .arg("-map")
+                .arg("0:v")
+                .arg("-vsync")
+                .arg("passthrough")
+                // libx264rgb encodes the rgb24 frames directly: bit-exact to the
+                // captured pixels, ~2.5× faster than a yuv444p10le pass, and the
+                // format the Python reference encoder writes.
+                .arg("-c:v")
+                .arg("libx264rgb")
+                .arg("-threads")
+                .arg(&encode_threads)
+                .arg("-pix_fmt")
+                .arg("rgb24")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-qp")
+                .arg("0")
+                .arg(&request.lossless_out);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -488,7 +582,13 @@ impl VideoEncoder {
         }
 
         let lossy_bytes = non_empty_file_size(&request.lossy_out)?;
-        let lossless_bytes = non_empty_file_size(&request.lossless_out)?;
+        // In lossy-only mode no lossless archive is produced, so there is no
+        // file to size — report zero rather than erroring on a missing output.
+        let lossless_bytes = if lossy_only {
+            0
+        } else {
+            non_empty_file_size(&request.lossless_out)?
+        };
 
         Ok(ChunkEncodeOutcome {
             lossy_bytes,
@@ -924,6 +1024,7 @@ mod tests {
             raw_nut: raw.clone(),
             lossy_out: lossy.clone(),
             lossless_out: lossless.clone(),
+            codec: LossyVideoCodec::LosslessPlusPreview,
         };
         let outcome = encoder.encode_chunk(&request).await.expect("transcode");
 
@@ -985,6 +1086,7 @@ mod tests {
                 raw_nut: raw,
                 lossy_out: lossy.clone(),
                 lossless_out: lossless.clone(),
+                codec: LossyVideoCodec::LosslessPlusPreview,
             })
             .await
             .expect("transcode");
@@ -1045,6 +1147,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn encode_chunk_lossy_only_writes_single_full_res_h264() {
+        let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping lossy-only encode test.");
+            return;
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("chunk_0000.nut");
+        let lossy = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0000_lossless.mp4");
+
+        // 1280x720 source, above the 480-line preview cap. Lossy-only must NOT
+        // downscale — the single output is the training-quality video.
+        write_synthetic_nut_sized(&ffmpeg, &raw, 6, 1280, 720);
+
+        let encoder = VideoEncoder::new();
+        let outcome = encoder
+            .encode_chunk(&ChunkEncodeRequest {
+                raw_nut: raw,
+                lossy_out: lossy.clone(),
+                lossless_out: lossless.clone(),
+                codec: LossyVideoCodec::H264MediumLossyOnly,
+            })
+            .await
+            .expect("transcode");
+
+        // No lossless archive is produced in lossy-only mode.
+        assert_eq!(outcome.lossless_bytes, 0, "no lossless output expected");
+        assert!(!lossless.exists(), "lossless.mp4 must not be written");
+        assert!(outcome.lossy_bytes > 0);
+
+        // The single video keeps native resolution, is H.264, and carries every
+        // source frame so it stays aligned with the per-frame timestamp sidecar.
+        let probe = StdCommand::new(&ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=width,height,nb_read_frames,codec_name",
+                "-of",
+                "json",
+            ])
+            .arg(&lossy)
+            .output()
+            .expect("spawn ffprobe");
+        assert!(probe.status.success());
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&probe.stdout).expect("ffprobe JSON");
+        let stream = &parsed["streams"][0];
+        assert_eq!(stream["codec_name"], "h264");
+        assert_eq!(stream["width"], 1280);
+        assert_eq!(stream["height"], 720);
+        let frames: u64 = stream["nb_read_frames"]
+            .as_u64()
+            .or_else(|| {
+                stream["nb_read_frames"]
+                    .as_str()
+                    .and_then(|value| value.parse().ok())
+            })
+            .expect("frame count");
+        assert_eq!(frames, 6, "all source frames must be encoded");
+    }
+
+    #[test]
+    fn lossy_video_codec_resolves_from_config_str() {
+        assert_eq!(
+            LossyVideoCodec::from_config_str(Some("h264_medium")),
+            LossyVideoCodec::H264MediumLossyOnly
+        );
+        assert!(LossyVideoCodec::from_config_str(Some("h264_medium")).is_lossy_only());
+        // h264_lossless is the explicit default; unset/unknown also default.
+        for value in [None, Some(""), Some("unknown"), Some("h264_lossless")] {
+            assert_eq!(
+                LossyVideoCodec::from_config_str(value),
+                LossyVideoCodec::LosslessPlusPreview,
+                "{value:?} should map to the default codec"
+            );
+            assert!(!LossyVideoCodec::from_config_str(value).is_lossy_only());
+        }
+    }
+
+    #[test]
+    fn for_trace_gates_lossy_codec_to_rgb_only() {
+        // Only RGB honours a lossy codec; depth and every non-RGB stream keep
+        // the lossless archive even when h264_medium is configured. This is the
+        // core RGB-only invariant of the feature — a regression that dropped a
+        // depth lossless archive would corrupt depth training data.
+        assert_eq!(
+            LossyVideoCodec::for_trace("RGB_IMAGES", Some("h264_medium")),
+            LossyVideoCodec::H264MediumLossyOnly
+        );
+        for data_type in ["DEPTH_IMAGES", "JOINT_POSITIONS", "CUSTOM_1D", ""] {
+            assert_eq!(
+                LossyVideoCodec::for_trace(data_type, Some("h264_medium")),
+                LossyVideoCodec::LosslessPlusPreview,
+                "{data_type} must keep lossless regardless of the codec"
+            );
+            assert!(!LossyVideoCodec::for_trace(data_type, Some("h264_medium")).is_lossy_only());
+        }
+        // RGB with the default/unset codec stays on the lossless+preview path.
+        for value in [None, Some(""), Some("h264_lossless")] {
+            assert_eq!(
+                LossyVideoCodec::for_trace("RGB_IMAGES", value),
+                LossyVideoCodec::LosslessPlusPreview
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn concat_segments_produces_single_mp4() {
         let ffmpeg = match locate_binary("ffmpeg") {
             Some(path) => path,
@@ -1080,6 +1295,7 @@ mod tests {
                     raw_nut: raw,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless,
+                    codec: LossyVideoCodec::LosslessPlusPreview,
                 })
                 .await
                 .expect("transcode chunk");
@@ -1134,6 +1350,7 @@ mod tests {
             raw_nut: tempdir.path().join("does-not-exist.nut"),
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
+            codec: LossyVideoCodec::LosslessPlusPreview,
         };
         let encoder = VideoEncoder::new();
         let error = encoder
@@ -1155,6 +1372,7 @@ mod tests {
             raw_nut: raw,
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
+            codec: LossyVideoCodec::LosslessPlusPreview,
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");

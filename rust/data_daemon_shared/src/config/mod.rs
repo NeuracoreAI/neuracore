@@ -69,6 +69,8 @@ pub struct DaemonConfig {
     pub api_key: Option<String>,
     /// Organisation ID for the authenticated user.
     pub current_org_id: Option<String>,
+    /// Global video codec selection (a Codec value, e.g. "h264_medium").
+    pub video_codec: Option<String>,
 }
 
 impl DaemonConfig {
@@ -104,6 +106,9 @@ impl DaemonConfig {
         if other.current_org_id.is_some() {
             self.current_org_id = other.current_org_id.clone();
         }
+        if other.video_codec.is_some() {
+            self.video_codec = other.video_codec.clone();
+        }
     }
 }
 
@@ -135,6 +140,7 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
         offline: Some(false),
         api_key: None,
         current_org_id: None,
+        video_codec: None,
     })
 }
 
@@ -245,6 +251,7 @@ mod tests {
             offline: Some(false),
             api_key: None,
             current_org_id: None,
+            video_codec: None,
         };
         let json = serde_json::to_string_pretty(&config).unwrap();
         let keys: Vec<&str> = json
@@ -264,6 +271,7 @@ mod tests {
                 "offline",
                 "api_key",
                 "current_org_id",
+                "video_codec",
             ]
         );
     }

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
+import requests
 import wget
 from neuracore_types import (
     CameraData,
@@ -37,6 +38,9 @@ if TYPE_CHECKING:
 
 MAX_DECODING_ATTEMPTS = 3
 _FFMPEG_AVAILABLE: bool | None = None
+
+_RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
+_DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
 
 
 class SynchronizedRecording:
@@ -133,17 +137,38 @@ class SynchronizedRecording:
             URL string for downloading the video file.
 
         Raises:
-            requests.HTTPError: If the API request fails.
+            requests.HTTPError: If every candidate is absent (404), or for any
+                non-404 HTTP error.
         """
         auth = get_auth()
         session = thread_local_session()
-        response = session.get(
-            f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
-            params={"filepath": f"{camera_type.value}/{camera_id}/lossless.mp4"},
-            headers=auth.get_headers(),
+
+        filename_preference = (
+            _DEPTH_VIDEO_FILENAME_PREFERENCE
+            if camera_type == DataType.DEPTH_IMAGES
+            else _RGB_VIDEO_FILENAME_PREFERENCE
         )
-        response.raise_for_status()
-        return response.json()["url"]
+
+        last_not_found: requests.HTTPError | None = None
+        for video_filename in filename_preference:
+            response = session.get(
+                f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
+                params={
+                    "filepath": f"{camera_type.value}/{camera_id}/{video_filename}"
+                },
+                headers=auth.get_headers(),
+            )
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as error:
+                if response.status_code != 404:
+                    raise
+                last_not_found = error
+                continue
+            return response.json()["url"]
+
+        assert last_not_found is not None
+        raise last_not_found
 
     def _decode_video(self, video_location: Path, video_frame_cache_path: Path) -> None:
         """Extract frames from video and cache them to disk.
@@ -152,7 +177,6 @@ class SynchronizedRecording:
             video_location: Path to the video file.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        """Extract frames from video and cache them to disk."""
         global _FFMPEG_AVAILABLE
 
         # Lazily determine ffmpeg availability once

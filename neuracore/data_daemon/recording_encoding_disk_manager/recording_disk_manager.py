@@ -11,6 +11,7 @@ from typing import Any
 
 from neuracore_types import DataType
 
+from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
 from neuracore.data_daemon.config_manager.helpers import calculate_storage_limit
 from neuracore.data_daemon.const import (
     DEFAULT_FLUSH_BYTES,
@@ -54,6 +55,7 @@ class RecordingDiskManager:
         *,
         loop_manager: EventLoopManager,
         emitter: Emitter,
+        config_watcher: ConfigWatcher,
         flush_bytes: int | None = None,
         storage_limit_bytes: int | None = None,
         recordings_root: str | None = None,
@@ -63,10 +65,12 @@ class RecordingDiskManager:
         Args:
             loop_manager: EventLoopManager instance for scheduling workers.
             emitter: Event emitter for cross-component signaling.
+            config_watcher: In-memory daemon config
             flush_bytes: Flush threshold for buffered raw writes.
             storage_limit_bytes: Max bytes allowed for on-disk trace storage.
             recordings_root: Root directory for per-recording trace folders.
         """
+        self._config_watcher = config_watcher
         self._emitter = emitter
         self.flush_bytes = flush_bytes or DEFAULT_FLUSH_BYTES
         self.storage_limit_bytes = storage_limit_bytes
@@ -134,6 +138,7 @@ class RecordingDiskManager:
             filesystem=self._filesystem,
             abort_trace=self._controller.abort_trace_due_to_storage,
             emitter=self._emitter,
+            config_watcher=self._config_watcher,
         )
 
         self._writer = _RawBatchWriter(

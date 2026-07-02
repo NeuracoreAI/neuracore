@@ -614,6 +614,7 @@ class StateManager:
                     recording_id=trace.recording_id,
                     data_type=trace.data_type,
                     data_type_name=trace.data_type_name,
+                    path=trace.path,
                 )
             )
         return candidates

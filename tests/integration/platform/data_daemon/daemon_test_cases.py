@@ -91,6 +91,15 @@ PRE_NETWORK_INTEGRITY_CASES = (
         wait=False,
         requires_rust_daemon=True,
     ),
+    DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        video_codec="h264_medium",
+    ),
 )
 
 NETWORK_INTEGRITY_CASES = (

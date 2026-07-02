@@ -6,6 +6,7 @@ import pytest
 import typer
 
 import neuracore.data_daemon.config_manager.args_handler as ah
+from neuracore.core.video_encoding import Codec
 
 
 def test_run_profile_create_happy_path(
@@ -50,6 +51,33 @@ def test_run_profile_update_validates_and_updates(
     assert called["name"] == "demo"
     assert called["updates"] == {"storage_limit": 2048, "bandwidth_limit": 4096}
     assert "Updated profile 'demo'." in capsys.readouterr().out
+
+
+def test_run_profile_update_sets_video_codec(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called: dict[str, Any] = {}
+
+    def fake_update_profile(name: str, updates: dict[str, Any]) -> None:
+        called["updates"] = updates
+
+    monkeypatch.setattr(ah.profile_manager, "update_profile", fake_update_profile)
+
+    ah.run_profile_update(
+        name="demo",
+        storage_limit=None,
+        bandwidth_limit=None,
+        path_to_store_record=None,
+        num_threads=None,
+        keep_wakelock_while_upload=None,
+        offline=None,
+        api_key=None,
+        current_org_id=None,
+        video_codec=Codec.H264_MEDIUM,
+    )
+
+    # The enum is persisted as its plain string value.
+    assert called["updates"] == {"video_codec": "h264_medium"}
 
 
 def test_run_profile_get_prints_json(

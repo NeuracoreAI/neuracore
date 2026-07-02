@@ -68,6 +68,7 @@ class TestDaemonRuntimeInitialize:
         mock_rdm = MagicMock()
         mock_comm = MagicMock()
         mock_services = MagicMock(spec=DaemonServices)
+        mock_services.config_watcher = MagicMock()
         mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 
@@ -470,6 +471,7 @@ class TestDaemonRuntimeShutdown:
         mock_rdm = MagicMock()
         mock_rdm.shutdown = AsyncMock()
         mock_services = MagicMock(spec=DaemonServices)
+        mock_services.config_watcher = MagicMock()
         mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 
@@ -597,6 +599,7 @@ class TestDaemonRuntimeShutdown:
         """
         mock_rdm = MagicMock()
         mock_services = MagicMock(spec=DaemonServices)
+        mock_services.config_watcher = MagicMock()
         mock_loop_mgr = MagicMock()
 
         context = DaemonContext(
@@ -701,6 +704,7 @@ class TestDaemonRuntimeContext:
         mock_rdm = MagicMock()
         mock_comm = MagicMock()
         mock_services = MagicMock(spec=DaemonServices)
+        mock_services.config_watcher = MagicMock()
         mock_services.state_store = MagicMock()
         mock_loop_mgr = MagicMock()
 

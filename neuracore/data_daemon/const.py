@@ -86,3 +86,8 @@ COMPLETED_RECORDING_RETENTION_HOURS = 24 * 30
 
 # default profile name
 DEFAULT_PROFILE_NAME = "default_profile"
+
+
+def active_profile_name() -> str:
+    """Return the active daemon profile name, mirroring the launch resolution."""
+    return os.environ.get("NEURACORE_DAEMON_PROFILE") or DEFAULT_PROFILE_NAME

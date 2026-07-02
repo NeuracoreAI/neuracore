@@ -19,6 +19,7 @@ _ENV_MAP: dict[str, str] = {
     "offline": "NCD_OFFLINE",
     "api_key": "NCD_API_KEY",
     "current_org_id": "NCD_CURRENT_ORG_ID",
+    "video_codec": "NCD_VIDEO_CODEC",
 }
 
 YES_CONFIRMATION = {"1", "true", "yes", "y"}

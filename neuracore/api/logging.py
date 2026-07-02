@@ -50,6 +50,13 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.core.video_encoding import Codec
+from neuracore.data_daemon.communications_management.shared_transport.recording_context import (  # noqa: E501
+    notify_daemon_config_changed,
+)
+from neuracore.data_daemon.config_manager.video_codec import (
+    set_active_profile_video_codec,
+)
 from neuracore.data_daemon.models import (
     BatchedJointDataItemPayload,
     BatchedJointDataPayload,
@@ -1627,3 +1634,41 @@ def log_point_cloud(
         robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp
     )
     _publish_json_to_p2p(robot, str_id, DataType.POINT_CLOUDS, point_data)
+
+
+def set_video_encoding_options(codec: Codec | str) -> None:
+    """Configure how recorded camera video is encoded and uploaded.
+
+    Selects the global RGB video codec (see
+    :class:`~neuracore.core.video_encoding.Codec` for what each option produces).
+    Depth cameras always keep their lossless storage regardless of this setting.
+
+    The selection applies to every camera and is stored in the active daemon
+    profile, so it persists and is picked up for the next recording. Call it
+    before ``start_recording``. The ``NCD_VIDEO_CODEC`` environment variable
+    overrides the profile value.
+
+    Example:
+        >>> import neuracore as nc
+        >>> nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)
+        >>> nc.start_recording()
+        >>> ...  # log frames
+        >>> nc.stop_recording()
+
+    Args:
+        codec: The video codec to use, e.g. ``nc.Codec.H264_MEDIUM`` (lossy-only)
+            or the default ``nc.Codec.H264_LOSSLESS``.
+
+    Raises:
+        ValueError: If ``codec`` is not a recognised codec.
+    """
+    try:
+        resolved = Codec(codec).value
+    except ValueError as error:
+        valid = ", ".join(member.value for member in Codec)
+        raise ValueError(
+            f"Unknown video codec {codec!r}; expected one of: {valid}"
+        ) from error
+
+    set_active_profile_video_codec(resolved)
+    notify_daemon_config_changed()

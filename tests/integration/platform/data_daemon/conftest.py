@@ -5,6 +5,8 @@ from collections.abc import Callable
 
 import pytest
 
+from neuracore.data_daemon.config_manager.profiles import ProfileManager
+from neuracore.data_daemon.const import active_profile_name
 from neuracore.data_daemon.rust_selection import rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
@@ -39,6 +41,33 @@ def cleanup_profiles():
     """Remove test-created daemon profiles after each test."""
     yield
     cleanup_test_profiles()
+
+
+@pytest.fixture(autouse=True)
+def reset_video_codec():
+    """Restore the active daemon profile to its exact pre-test state.
+
+    The codec is a persistent daemon-profile setting, so a case selecting a
+    lossy codec must not leak into a later test or the developer's real profile.
+    Offline cases write an ephemeral profile (removed by ``cleanup_profiles``),
+    but online cases write the default profile. Snapshot the active profile file
+    and restore it byte-for-byte (or delete it if it did not exist), rather than
+    forcing a literal ``h264_lossless`` — which would otherwise leave a residual
+    ``video_codec`` key on a developer's default profile that had none. Only
+    writes when the test actually changed the file, so non-video tests are free.
+    """
+    profile_path = ProfileManager()._get_profile_path(active_profile_name())
+    original_bytes = profile_path.read_bytes() if profile_path.exists() else None
+    try:
+        yield
+    finally:
+        current_bytes = profile_path.read_bytes() if profile_path.exists() else None
+        if current_bytes == original_bytes:
+            return
+        if original_bytes is not None:
+            profile_path.write_bytes(original_bytes)
+        elif profile_path.exists():
+            profile_path.unlink()
 
 
 @pytest.fixture(autouse=True)

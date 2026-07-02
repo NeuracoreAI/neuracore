@@ -36,13 +36,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::{self, JoinSet};
 
+use crate::cloud::ConfigRx;
+use crate::config::DaemonConfig;
 use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{
-    ChunkEncodeRequest, VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
+    ChunkEncodeRequest, LossyVideoCodec, VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::TraceWriteHandle;
@@ -142,6 +144,11 @@ pub struct TraceActorContext {
     /// stall can't back-pressure the dispatcher / IPC listener (see
     /// [`crate::pipeline::json_writer`]).
     pub json_writer: JsonWriteHandle,
+    /// Live view of the effective daemon config, published by the config
+    /// watcher. The actor reads `video_codec` from here at a trace's first
+    /// chunk instead of re-parsing the profile YAML. Seeded with the default
+    /// config; production overrides it via [`TraceActorContext::with_config_rx`].
+    pub config_rx: ConfigRx,
 }
 
 impl TraceActorContext {
@@ -174,6 +181,12 @@ impl TraceActorContext {
         trace_writer: TraceWriteHandle,
         json_writer: JsonWriteHandle,
     ) -> Self {
+        // Seed the config view with defaults. The sender is dropped
+        // immediately; a `watch::Receiver` still serves its last value via
+        // `borrow()` after the sender is gone, which is all the actor needs
+        // when no watcher is wired (tests / offline construction). Production
+        // replaces this via `with_config_rx`.
+        let (_seed_tx, config_rx) = watch::channel(DaemonConfig::default());
         Self {
             recordings_root: Arc::new(recordings_root.into()),
             storage_budget,
@@ -182,6 +195,7 @@ impl TraceActorContext {
             event_bus: None,
             trace_writer,
             json_writer,
+            config_rx,
         }
     }
 
@@ -190,6 +204,13 @@ impl TraceActorContext {
     /// [`TraceActorContext::with_ffmpeg_permits`].
     pub fn with_event_bus(mut self, bus: crate::state::EventBus) -> Self {
         self.event_bus = Some(bus);
+        self
+    }
+
+    /// Attach the live config view published by the config watcher. Returns
+    /// `self` so it composes with the constructors and [`Self::with_event_bus`].
+    pub fn with_config_rx(mut self, config_rx: ConfigRx) -> Self {
+        self.config_rx = config_rx;
         self
     }
 }
@@ -255,6 +276,9 @@ enum TraceWriterKind {
         width: u32,
         /// Frame height in pixels.
         height: u32,
+        /// Lossy codec for this trace, resolved once at the first chunk and
+        /// applied uniformly to every chunk encode and the finalise concat.
+        codec: LossyVideoCodec,
         /// Encodes completed so far, keyed by `chunk_index` so the finalise
         /// concat can iterate in order regardless of completion order.
         completed_chunks: BTreeMap<u32, CompletedChunk>,
@@ -555,9 +579,19 @@ impl ActorState {
         // progress. The mark happens once per trace.
         let bumped_status = matches!(self.writer, TraceWriterKind::Pending);
         if bumped_status {
+            // Resolve the lossy codec once, at the trace's first chunk, so every
+            // chunk and the finalise concat agree even if the config changes
+            // mid-recording. Read from the in-memory config the watcher keeps
+            // current (env override + active profile); the RGB-only gate lives
+            // in `LossyVideoCodec::for_trace`.
+            let codec = LossyVideoCodec::for_trace(
+                &self.identity.key.data_type,
+                context.config_rx.borrow().video_codec.as_deref(),
+            );
             self.writer = TraceWriterKind::Video {
                 width,
                 height,
+                codec,
                 completed_chunks: BTreeMap::new(),
                 pending_encodes: JoinSet::new(),
             };
@@ -591,12 +625,15 @@ impl ActorState {
         }
 
         let TraceWriterKind::Video {
-            pending_encodes, ..
+            pending_encodes,
+            codec,
+            ..
         } = &mut self.writer
         else {
             // Should be unreachable — we just allocated the writer above.
             return;
         };
+        let codec = *codec;
 
         // Spawn the encode as a background task. The actor returns to the
         // inbox immediately so a slow ffmpeg invocation cannot back-pressure
@@ -609,6 +646,7 @@ impl ActorState {
             raw_nut: raw_nut.clone(),
             lossy_out: lossy_segment.clone(),
             lossless_out: lossless_segment.clone(),
+            codec,
         };
         pending_encodes.spawn(async move {
             // Acquire a permit, then encode. The permit lives only inside
@@ -828,6 +866,7 @@ impl ActorState {
             TraceWriterKind::Video {
                 width,
                 height,
+                codec,
                 mut completed_chunks,
                 mut pending_encodes,
             } => {
@@ -861,6 +900,10 @@ impl ActorState {
                     return Ok(context.json_writer.finish(&self.identity.trace_id).await?);
                 }
 
+                // In lossy-only mode (nc.Codec.H264_MEDIUM) no lossless archive
+                // is produced — only lossy.mp4 is stitched and uploaded.
+                let lossy_only = codec.is_lossy_only();
+
                 let trace_dir = self.trace_directory(context);
                 let lossy_out = trace_dir.join(paths::LOSSY_VIDEO_FILENAME);
                 let lossless_out = trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME);
@@ -872,10 +915,14 @@ impl ActorState {
                     .values()
                     .map(|chunk| chunk.lossy_segment.clone())
                     .collect();
-                let lossless_segments: Vec<PathBuf> = completed_chunks
-                    .values()
-                    .map(|chunk| chunk.lossless_segment.clone())
-                    .collect();
+                let lossless_segments: Vec<PathBuf> = if lossy_only {
+                    Vec::new()
+                } else {
+                    completed_chunks
+                        .values()
+                        .map(|chunk| chunk.lossless_segment.clone())
+                        .collect()
+                };
 
                 // Build the metadata accumulator in the same chunk-index
                 // order so per-frame entries appear in capture order.
@@ -903,10 +950,15 @@ impl ActorState {
                     .video_encoder
                     .concat_segments(&lossy_segments, &lossy_out)
                     .await?;
-                let lossless_outcome = context
-                    .video_encoder
-                    .concat_segments(&lossless_segments, &lossless_out)
-                    .await?;
+                let lossless_bytes = if lossy_only {
+                    0
+                } else {
+                    context
+                        .video_encoder
+                        .concat_segments(&lossless_segments, &lossless_out)
+                        .await?
+                        .bytes
+                };
                 drop(permit);
 
                 // Unlink per-chunk segments now that the final outputs are
@@ -938,7 +990,7 @@ impl ActorState {
 
                 Ok(lossy_outcome
                     .bytes
-                    .saturating_add(lossless_outcome.bytes)
+                    .saturating_add(lossless_bytes)
                     .saturating_add(metadata_bytes))
             }
         }

@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 from neuracore_types import DataType
 
+from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
 from neuracore.data_daemon.models import CompleteMessage
@@ -138,6 +140,7 @@ def rdm_factory(
         rdm = rdm_module.RecordingDiskManager(
             loop_manager=loop_manager,
             emitter=rdm_emitter,
+            config_watcher=ConfigWatcher(initial_config=DaemonConfig()),
             flush_bytes=flush_bytes,
             storage_limit_bytes=storage_limit,
             recordings_root=str(recordings_root),

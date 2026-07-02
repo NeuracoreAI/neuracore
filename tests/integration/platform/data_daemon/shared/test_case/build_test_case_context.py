@@ -971,6 +971,11 @@ def run_case_contexts(
     if specs is None:
         specs = build_context_specs(case)
 
+    if case.has_video:
+        nc.set_video_encoding_options(
+            nc.Codec(case.video_codec) if case.video_codec else nc.Codec.H264_LOSSLESS
+        )
+
     if specs:
         with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
             nc.create_dataset(specs[0].dataset_name)

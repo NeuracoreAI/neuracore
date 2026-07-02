@@ -11,10 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::sync::{mpsc, watch};
 
 use crate::cli::coordinators::{build_api_client, spawn_cloud_coordinators};
 use crate::cli::launch_logging::{init_tracing, log_path_for, report_failure};
-use crate::cloud::{read_org_id_from_config, spawn_recording_reaper};
+use crate::cloud::{
+    read_org_id_from_config, spawn_config_watcher, spawn_recording_reaper, ConfigRefreshRequest,
+};
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
@@ -36,6 +39,11 @@ use crate::storage::budget::{StorageBudget, StoragePolicy};
 /// timeout exists so a future bug that lets the listener exit without a
 /// shutdown signal degrades to a `?signal=sigterm` log rather than a hang.
 const SIGNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Capacity of the dispatcher → config-watcher refresh-request channel. Refresh
+/// requests are rare and drained promptly; the small buffer just avoids blocking
+/// the dispatcher on a burst of back-to-back commands.
+const CONFIG_REFRESH_CHANNEL_CAPACITY: usize = 8;
 
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
@@ -76,6 +84,7 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
             DaemonizeOutcome::Child(reporter) => run_daemon(
                 runtime_env,
                 config,
+                selected_profile,
                 effective_debug,
                 Some(reporter),
                 Some(log_path),
@@ -83,7 +92,14 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
         }
     } else {
         print_preflight(&runtime_env, &config, &selected_profile);
-        run_daemon(runtime_env, config, effective_debug, None, None)
+        run_daemon(
+            runtime_env,
+            config,
+            selected_profile,
+            effective_debug,
+            None,
+            None,
+        )
     }
 }
 
@@ -115,6 +131,7 @@ fn handle_parent_readiness(reader: crate::lifecycle::daemonize::ReadinessReader)
 fn run_daemon(
     runtime_env: RuntimeEnv,
     config: DaemonConfig,
+    profile: String,
     debug: bool,
     reporter: Option<ReadinessReporter>,
     log_file: Option<PathBuf>,
@@ -308,6 +325,17 @@ fn run_daemon(
         // once the dispatcher and every actor (the last `JsonWriteHandle` holders)
         // are gone at shutdown.
         let (json_write_handle, _json_writer_owner) = crate::pipeline::json_writer::spawn();
+
+        // In-memory daemon config: seed the watch channel with the
+        // launch-resolved effective config so its value is available before the
+        // watcher's first tick, then let the config watcher (spawned below, once
+        // the shutdown broadcaster exists) refresh it on an interval and on
+        // demand. The trace actors and registration coordinator read the codec
+        // from this channel instead of re-parsing the profile YAML per trace.
+        let (config_tx, config_rx) = watch::channel(config_for_runtime.clone());
+        let (config_refresh_tx, config_refresh_rx) =
+            mpsc::channel::<ConfigRefreshRequest>(CONFIG_REFRESH_CHANNEL_CAPACITY);
+
         let actor_context = Arc::new(
             TraceActorContext::new(
                 recordings_root.clone(),
@@ -316,7 +344,8 @@ fn run_daemon(
                 trace_write_handle.clone(),
                 json_write_handle,
             )
-            .with_event_bus(event_bus.clone()),
+            .with_event_bus(event_bus.clone())
+            .with_config_rx(config_rx.clone()),
         );
 
         // Run the wait loop in a nested block so the state store can be
@@ -345,6 +374,21 @@ fn run_daemon(
             let org_id = read_org_id_from_config(&config_path)
                 .or_else(|| config_for_runtime.current_org_id.clone());
 
+            // Spawn the daemon-config watcher. Unconditional — offline mode
+            // skips the cloud coordinators, but the per-trace actors still need
+            // the live codec, so the watcher must run regardless. It owns
+            // `config_tx` / `config_refresh_rx`; the seeded `config_rx` is
+            // already wired into the actor context and, below, the registration
+            // coordinator, and `config_refresh_tx` goes to the dispatcher for
+            // the `RefreshConfig` command path.
+            let config_watcher = spawn_config_watcher(
+                Some(profile.clone()),
+                None,
+                config_tx,
+                config_refresh_rx,
+                shutdown_tx.subscribe(),
+            );
+
             // Spawn the cloud-side coordinators *before* the dispatcher so
             // they have an active subscription to the event bus by the time
             // any `TraceWritten` / `RecordingStopped` fires. A late
@@ -367,6 +411,7 @@ fn run_daemon(
                         Arc::new(recordings_root.clone()),
                         config_path.clone(),
                         org_id.clone(),
+                        config_rx.clone(),
                         shutdown_tx.clone(),
                     )),
                     Err(error) => {
@@ -391,6 +436,7 @@ fn run_daemon(
 
             let dispatcher_context = DispatcherContext {
                 event_bus: Some(event_bus.clone()),
+                config_refresh_tx: Some(config_refresh_tx),
             };
             let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
                 state_store.clone(),
@@ -456,6 +502,10 @@ fn run_daemon(
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
             }
+            // The dispatcher (the last `config_refresh_tx` holder) is gone, so
+            // the watcher's refresh branch has closed; it exits on the shutdown
+            // broadcast.
+            config_watcher.join().await;
             if let Some(handle) = wakelock_handle {
                 handle.join().await;
             }

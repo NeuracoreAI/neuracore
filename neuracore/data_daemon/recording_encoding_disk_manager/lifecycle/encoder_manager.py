@@ -5,6 +5,10 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from neuracore_types import DataType
+
+from neuracore.core.video_encoding import codec_option_overrides
+from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import get_content_type
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
@@ -37,6 +41,7 @@ class _EncoderManager:
         filesystem: _TraceFilesystem,
         abort_trace: Callable[[TraceKey], None],
         emitter: Emitter,
+        config_watcher: ConfigWatcher,
     ) -> None:
         """Initialise _EncoderManager.
 
@@ -44,9 +49,12 @@ class _EncoderManager:
             filesystem: Filesystem helper for path resolution.
             abort_trace: Callback used to abort traces on failure.
             emitter: Event emitter for cross-component signaling.
+            config_watcher: In-memory daemon config, read for the video codec for new
+                encoders.
         """
         self._filesystem = filesystem
         self._abort_trace = abort_trace
+        self._config_watcher = config_watcher
 
         self._encoders: dict[TraceKey, JsonTrace | VideoTrace] = {}
 
@@ -87,7 +95,12 @@ class _EncoderManager:
 
         try:
             if content_kind == "RGB":
-                created_encoder = VideoTrace(output_dir=trace_dir)
+                created_encoder = VideoTrace(
+                    output_dir=trace_dir,
+                    codec_option_overrides=self._resolve_lossy_only_options(
+                        trace_key.data_type
+                    ),
+                )
             else:
                 created_encoder = JsonTrace(output_dir=trace_dir)
         except Exception:
@@ -96,6 +109,18 @@ class _EncoderManager:
 
         self._encoders[trace_key] = created_encoder
         return created_encoder
+
+    def _resolve_lossy_only_options(self, data_type: DataType) -> dict[str, str] | None:
+        """Resolve lossy-only encoder options for a trace, or None for default.
+
+        Returns:
+            Lossy codec-context options (dropping the lossless archive), or None
+            to keep the default lossless+lossy encoders.
+        """
+        if data_type != DataType.RGB_IMAGES:
+            return None
+        self._config_watcher.refresh_now()
+        return codec_option_overrides(self._config_watcher.video_codec())
 
     def safe_get_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace | None:
         """Get or create an encoder for a trace, converting failures into a trace abort.
