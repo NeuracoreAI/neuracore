@@ -169,6 +169,38 @@ def test_log_joint_group_rebuilds_on_middle_joint_change(
     assert "joint10" not in rebuilt_group.joint_names
 
 
+def test_pruned_joint_streams_reregister_on_next_log(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+):
+    """Pruning a joint stream evicts its cached binding so the next log call
+    registers a live stream instead of reviving the pruned one."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    robot = nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    nc.log_joint_positions({"joint1": 0.5, "joint2": -0.3})
+    pruned_streams = list(robot._data_streams.values())
+    assert pruned_streams
+    for stream_id, stream in list(robot._data_streams.items()):
+        robot._remove_data_stream(stream_id, stream)
+    assert not robot._data_streams
+
+    nc.log_joint_positions({"joint1": 0.6, "joint2": -0.4})
+
+    bindings = robot._joint_stream_bindings[DataType.JOINT_POSITIONS]
+    assert len(bindings) == 2
+    for binding in bindings.values():
+        assert robot.get_data_stream(binding.stream_id) is binding.stream
+        assert binding.stream not in pruned_streams
+    group = robot._joint_group_cache[DataType.JOINT_POSITIONS]
+    for binding in group.bindings:
+        assert robot.get_data_stream(binding.stream_id) is binding.stream
+
+
 def test_log_joints_large_frame(
     temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
 ):
