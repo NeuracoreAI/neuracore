@@ -3,7 +3,8 @@
 Builds a dataset of 8 recordings (2x joint positions only, 2x joint
 velocities only, 2x rgb only, 2x all three), then asserts that requesting
 all three input types raises a grouped ValueError before any job is
-submitted.
+submitted. Parametrized over episode shapes that vary step count and
+wall-clock pacing, from single-burst to multi-second episodes.
 """
 
 import logging
@@ -48,9 +49,17 @@ ROBOT_INSTANCE = 0
 FREQUENCY = 20
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
-EPISODE_STEPS = 5
 RECORDING_STOP_TIMEOUT_SECONDS = 300
 RECORDING_POLL_SECONDS = 5
+
+# variant name -> (steps per episode, wall-clock delay between steps)
+EPISODE_VARIANTS: dict[str, tuple[int, float]] = {
+    "short": (5, 0.0),
+    "burst": (500, 0.0),
+    "medium": (20, 1.0 / FREQUENCY),
+    "long": (100, 1.0 / FREQUENCY),
+    "sparse": (10, 0.5),
+}
 
 JOINT_POSITION_SAMPLE = {name: 0.1 for name in JOINT_NAMES}
 JOINT_VELOCITY_SAMPLE = {name: 0.05 for name in JOINT_NAMES}
@@ -81,23 +90,27 @@ CNNMLP_CONFIG = {
 }
 
 
-def _record_episode(data_types: set[DataType]) -> None:
+def _record_episode(
+    data_types: set[DataType], robot_name: str, steps: int, step_interval_s: float
+) -> None:
     """Record one episode logging only the given data types."""
     t = time.time()
-    nc.start_recording(robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
-    for _ in range(EPISODE_STEPS):
+    nc.start_recording(robot_name=robot_name, instance=ROBOT_INSTANCE)
+    for _ in range(steps):
+        if step_interval_s > 0:
+            time.sleep(step_interval_s)
         t += 1.0 / FREQUENCY
         if DataType.JOINT_POSITIONS in data_types:
             nc.log_joint_positions(
                 positions=JOINT_POSITION_SAMPLE,
-                robot_name=ROBOT_NAME,
+                robot_name=robot_name,
                 instance=ROBOT_INSTANCE,
                 timestamp=t,
             )
         if DataType.JOINT_VELOCITIES in data_types:
             nc.log_joint_velocities(
                 velocities=JOINT_VELOCITY_SAMPLE,
-                robot_name=ROBOT_NAME,
+                robot_name=robot_name,
                 instance=ROBOT_INSTANCE,
                 timestamp=t,
             )
@@ -105,11 +118,11 @@ def _record_episode(data_types: set[DataType]) -> None:
             nc.log_rgb(
                 name=NC_CAM_NAME,
                 rgb=RGB_FRAME,
-                robot_name=ROBOT_NAME,
+                robot_name=robot_name,
                 instance=ROBOT_INSTANCE,
                 timestamp=t,
             )
-    nc.stop_recording(wait=False, robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
+    nc.stop_recording(wait=False, robot_name=robot_name, instance=ROBOT_INSTANCE)
 
 
 def _missing_recordings_from_error(error_msg: str) -> dict[str, set[str]]:
@@ -141,22 +154,26 @@ def _delete_training_job_by_name(job_name: str) -> None:
                 )
 
 
+@pytest.mark.parametrize("episode_variant", list(EPISODE_VARIANTS))
 class TestDatasetDatatypeValidation:
     """Mixed-datatype dataset must fail training validation with a grouped error."""
 
     track_step_teardown = True
     all_steps_passed: bool = True
-    dataset_name: str
-    dataset: Dataset | None = None
-    # recording id -> data types logged for that episode in step 1
-    recording_data_types: dict[str, set[DataType]]
+    dataset_names: dict[str, str]
+    datasets: dict[str, Dataset]
+    # variant -> recording id -> data types logged for that episode in step 1
+    recording_data_types: dict[str, dict[str, set[DataType]]]
 
     @classmethod
     def setup_class(cls) -> None:
         cls.all_steps_passed = True
-        cls.dataset_name = unique_name(prefix="datatype_validation")
-        cls.dataset = None
-        cls.recording_data_types = {}
+        cls.dataset_names = {
+            variant: unique_name(prefix=f"datatype_validation_{variant}")
+            for variant in EPISODE_VARIANTS
+        }
+        cls.datasets = {}
+        cls.recording_data_types = {variant: {} for variant in EPISODE_VARIANTS}
         nc.login()
 
     @classmethod
@@ -167,62 +184,73 @@ class TestDatasetDatatypeValidation:
                 "one or more steps failed"
             )
             return
-        if cls.dataset is not None:
+        for variant, dataset in cls.datasets.items():
             try:
-                cls.dataset.delete()
+                dataset.delete()
             except Exception:
                 logger.warning(
-                    f"Failed to delete dataset {cls.dataset_name}", exc_info=True
+                    f"Failed to delete dataset {cls.dataset_names[variant]}",
+                    exc_info=True,
                 )
 
-    def test_step1_collect_mixed_recordings(self) -> None:
+    def test_step1_collect_mixed_recordings(self, episode_variant: str) -> None:
         """Collect 8 recordings with four distinct datatype profiles."""
+        dataset_name = self.dataset_names[episode_variant]
+        recorded_data_types = self.recording_data_types[episode_variant]
+        steps, step_interval_s = EPISODE_VARIANTS[episode_variant]
+        robot_name = f"{ROBOT_NAME}_{episode_variant}"
+
         nc.connect_robot(
-            robot_name=ROBOT_NAME,
+            robot_name=robot_name,
             instance=ROBOT_INSTANCE,
             overwrite=False,
         )
-        nc.create_dataset(name=self.dataset_name)
+        nc.create_dataset(name=dataset_name)
 
         with online_daemon_running():
             assert_exactly_one_daemon_pid()
             for ep_idx, data_types in enumerate(EPISODE_DATA_TYPES):
                 logger.info(
-                    f"Recording episode {ep_idx + 1}/{TOTAL_RECORDINGS}: "
+                    f"Recording {episode_variant} episode "
+                    f"{ep_idx + 1}/{TOTAL_RECORDINGS}: "
                     f"{sorted(dt.value for dt in data_types)}"
                 )
-                _record_episode(data_types)
+                _record_episode(data_types, robot_name, steps, step_interval_s)
                 wait_for_dataset_ready(
-                    self.dataset_name,
+                    dataset_name,
                     expected_recording_count=ep_idx + 1,
                     timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
                     poll_interval_s=RECORDING_POLL_SECONDS,
                 )
-                current_ids = {
-                    str(r.id) for r in nc.get_dataset(name=self.dataset_name)
-                }
-                new_ids = current_ids - set(self.recording_data_types)
+                current_ids = {str(r.id) for r in nc.get_dataset(name=dataset_name)}
+                new_ids = current_ids - set(recorded_data_types)
                 assert len(new_ids) == 1, (
                     f"Expected exactly one new recording after episode "
                     f"{ep_idx + 1}, got {sorted(new_ids)}"
                 )
-                self.recording_data_types[new_ids.pop()] = data_types
+                recorded_data_types[new_ids.pop()] = data_types
                 logger.info(f"Episode {ep_idx + 1} ready.")
 
-        self.__class__.dataset = nc.get_dataset(name=self.dataset_name)
+        dataset = nc.get_dataset(name=dataset_name)
+        self.__class__.datasets[episode_variant] = dataset
         assert (
-            len(self.dataset) == TOTAL_RECORDINGS
-        ), f"Expected {TOTAL_RECORDINGS} recordings, got {len(self.dataset)}"
+            len(dataset) == TOTAL_RECORDINGS
+        ), f"Expected {TOTAL_RECORDINGS} recordings, got {len(dataset)}"
         logger.info(
-            f"[STEP 1] [PASSED] Collected {len(self.dataset)} recordings "
-            f"in '{self.dataset_name}'"
+            f"[STEP 1] [PASSED] Collected {len(dataset)} recordings "
+            f"in '{dataset_name}'"
         )
 
-    def test_step2_training_fails_with_grouped_error(self) -> None:
+    def test_step2_training_fails_with_grouped_error(
+        self, episode_variant: str
+    ) -> None:
         """start_training_run must raise the grouped ValueError before submitting."""
-        assert self.dataset is not None, "[STEP 1] Did Not Complete"
+        dataset = self.datasets.get(episode_variant)
+        assert dataset is not None, "[STEP 1] Did Not Complete"
+        dataset_name = self.dataset_names[episode_variant]
+        recorded_data_types = self.recording_data_types[episode_variant]
 
-        robot_ids = self.dataset.robot_ids
+        robot_ids = dataset.robot_ids
         assert len(robot_ids) == 1, f"Expected 1 robot, got {robot_ids}"
         robot_id = robot_ids[0]
 
@@ -238,21 +266,21 @@ class TestDatasetDatatypeValidation:
             }
         }
 
-        assert len(self.recording_data_types) == TOTAL_RECORDINGS, (
+        assert len(recorded_data_types) == TOTAL_RECORDINGS, (
             f"Expected datatype ground truth for {TOTAL_RECORDINGS} recordings, "
-            f"got {len(self.recording_data_types)}"
+            f"got {len(recorded_data_types)}"
         )
         expected_missing = {
             data_type.value: {
                 recording_id
-                for recording_id, logged_types in self.recording_data_types.items()
+                for recording_id, logged_types in recorded_data_types.items()
                 if data_type not in logged_types
             }
             for data_type in REQUESTED_TYPES
         }
         complete_recordings = {
             recording_id
-            for recording_id, logged_types in self.recording_data_types.items()
+            for recording_id, logged_types in recorded_data_types.items()
             if logged_types == REQUESTED_TYPES
         }
         assert len(complete_recordings) == COMPLETE_RECORDINGS, (
@@ -267,7 +295,7 @@ class TestDatasetDatatypeValidation:
             ) as exc_info:
                 nc.start_training_run(
                     name=job_name,
-                    dataset_name=self.dataset_name,
+                    dataset_name=dataset_name,
                     algorithm_name="CNNMLP",
                     algorithm_config=CNNMLP_CONFIG,
                     gpu_type=GPU_TYPE,

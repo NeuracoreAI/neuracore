@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-24.04
     # TODO: NDD has socket issue when running in parallel
     #   in CommunicationsManager when calling create_producer_socket()
+    strategy:
+      fail-fast: false
+      matrix:
+        episode-variant: [short, burst, medium, long, sparse]
 
     steps:
       - name: Free Disk Space (Ubuntu)
@@ -71,4 +75,5 @@ jobs:
             --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
             --log-cli-date-format="%H:%M:%S" \
             -v \
+            -k "${{ matrix.episode-variant }}" \
             tests/integration/ml/test_dataset_datatype_validation.py
