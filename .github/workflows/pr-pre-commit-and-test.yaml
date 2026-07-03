@@ -143,7 +143,7 @@ jobs:
           if [ "${{ matrix.os }}" = "macos-26" ] || [ "${{ matrix.python-version }}" = "3.14" ]; then
             IGNORE="${IGNORE} --ignore=tests/unit/importer"
           fi
-          PYTEST_ARGS="-sv -o log_cli=true --log-cli-level=INFO"
+          PYTEST_ARGS="-v -n 4 --dist loadfile -o log_level=INFO"
           if [ "${SHOULD_RUN_COVERAGE}" = "true" ]; then
             ${PYTEST} tests/unit \
               ${IGNORE} \
@@ -228,4 +228,5 @@ jobs:
         if: env.SHOULD_RUN == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run --no-project pytest tests/unit/ml -m "not slow" -sv -o log_cli=true --log-cli-level=INFO
+          OMP_NUM_THREADS: "1"
+        run: uv run --no-project pytest tests/unit/ml -m "not slow" -v -n 4 --dist loadscope -o log_level=INFO

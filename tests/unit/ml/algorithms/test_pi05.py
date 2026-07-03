@@ -61,14 +61,18 @@ INPUT_PARAMS = [
         OrderedSet([data_type]),
         id="".join(w.capitalize() for w in data_type.value.split("_")),
     )
-    for data_type in Pi05Model.get_supported_input_data_types()
+    for data_type in sorted(
+        Pi05Model.get_supported_input_data_types(), key=lambda d: d.value
+    )
 ]
 OUTPUT_PARAMS = [
     pytest.param(
         OrderedSet([data_type]),
         id="".join(w.capitalize() for w in data_type.value.split("_")),
     )
-    for data_type in Pi05Model.get_supported_output_data_types()
+    for data_type in sorted(
+        Pi05Model.get_supported_output_data_types(), key=lambda d: d.value
+    )
 ]
 
 

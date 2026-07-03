@@ -23,8 +23,8 @@ import neuracore.api.endpoints as endpoints
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import DirectPolicy
 from neuracore.core.exceptions import RobotError
+from tests.unit.conftest import TEST_API_KEY
 
-TEST_API_KEY = "test_api_key"
 TEST_ROBOT_ID = "test_robot"
 TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
 TRAIN_RUN_NAME = "test_run"

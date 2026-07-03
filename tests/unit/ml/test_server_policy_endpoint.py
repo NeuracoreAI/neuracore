@@ -16,10 +16,10 @@ import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import EndpointError, Policy
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
+from tests.unit.conftest import TEST_API_KEY
 
 B = 1
 PREDICTION_HORIZON = 3
-TEST_API_KEY = "test_api_key"
 TEST_ROBOT_ID = "test_robot"
 TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
 FAKE_PREDICTED_DATA: dict[DataType, dict[str, BatchedNCData]] = {
