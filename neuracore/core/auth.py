@@ -7,17 +7,64 @@ the application.
 """
 
 import os
+import sys
+from typing import Any
 
 import requests
 
 from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.config.get_api_key import get_api_key
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 from .const import API_URL
 from .exceptions import AuthenticationError
+
+
+def _response_json_payload(response: requests.Response) -> dict[str, Any] | None:
+    """Return the response JSON body when it is an object."""
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        return None
+
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def _payload_value(payload: dict[str, Any], key: str) -> Any:
+    """Read a value from top-level or nested FastAPI detail payloads."""
+    value = payload.get(key)
+    if value is not None:
+        return value
+
+    detail = payload.get("detail")
+    if isinstance(detail, dict):
+        return detail.get(key)
+    return None
+
+
+def _format_version_validation_error(response: requests.Response) -> str:
+    """Build a user-facing version validation error message."""
+    detail = extract_error_detail(response) or "Version validation failed."
+    payload = _response_json_payload(response)
+
+    if payload is None:
+        return detail
+
+    client_version = _payload_value(payload, "client_version")
+    required_version = _payload_value(payload, "required_version")
+
+    if client_version and required_version and required_version not in detail:
+        return (
+            f"{detail}. Client version: {client_version}. "
+            f"Required version: {required_version}."
+        )
+
+    return detail
 
 
 class Auth(metaclass=SingletonMetaclass):
@@ -136,15 +183,27 @@ class Auth(metaclass=SingletonMetaclass):
         # Placeholder for version validation logic
         from neuracore_types import __version__ as nc_types_version
 
-        session = thread_local_session()
-        response = session.get(
-            f"{API_URL}/auth/verify-version",
-            params={"version": nc_types_version},
-        )
-        if response.status_code != 200:
-            raise AuthenticationError(
-                f"Version validation failed: {response.json().get('detail')}"
+        try:
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/auth/verify-version",
+                params={"version": nc_types_version},
             )
+            response.raise_for_status()
+        except requests.exceptions.HTTPError as exc:
+            response = exc.response
+            if response is None:
+                raise AuthenticationError(str(exc)) from exc
+
+            error_message = _format_version_validation_error(response)
+            print(error_message, file=sys.stderr)
+            raise AuthenticationError(
+                error_message, response_payload=_response_json_payload(response)
+            ) from exc
+        except requests.exceptions.ConnectionError as exc:
+            raise AuthenticationError(str(exc)) from exc
+        except requests.exceptions.RequestException as exc:
+            raise AuthenticationError(str(exc)) from exc
 
     @property
     def access_token(self) -> str | None:

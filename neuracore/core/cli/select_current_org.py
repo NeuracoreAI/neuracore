@@ -119,8 +119,13 @@ def run(
         config_manager.config.current_org_id = organization.id
         config_manager.save_config()
 
-    except AuthenticationError:
-        typer.echo("Failed to Authenticate, please try again", err=True)
+    except AuthenticationError as exc:
+        error_message = str(exc)
+        if exc.required_version is None:
+            typer.echo(
+                error_message or "Failed to Authenticate, please try again",
+                err=True,
+            )
         raise typer.Exit(code=1)
     except OrganizationError:
         typer.echo("Failed to select organization, please try again", err=True)
