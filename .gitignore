@@ -127,4 +127,4 @@ examples/test_streaming/
 # so we never commit them; the wheel-build CI job recreates them on every run.
 # See docs/rust_data_daemon_development.md#packaging-the-wheel.
 neuracore/data_daemon/bin/
-neuracore/data_daemon/_native_producer*.so
+neuracore/data_daemon/_data_bridge*.so

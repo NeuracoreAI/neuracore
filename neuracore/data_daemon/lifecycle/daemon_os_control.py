@@ -18,11 +18,15 @@ from neuracore.data_daemon.const import (
     DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS,
     SOCKET_PATH,
 )
-from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.helpers import (
+    bridge_sdk_org_id_env,
+    get_daemon_db_path,
+    get_daemon_pid_path,
+)
 from neuracore.data_daemon.lifecycle.auth_preflight import ensure_daemon_auth_ready
 from neuracore.data_daemon.rust_selection import (
+    is_rust_daemon_enabled,
     rust_daemon_binary_path,
-    rust_daemon_enabled,
 )
 
 # cspell:ignore WNOHANG waitpid
@@ -118,7 +122,7 @@ def _build_daemon_runner_command() -> list[str]:
     foreground so it inherits the same process semantics the Python runner
     relies on (signal handling, parent-side ``Popen.wait``).
     """
-    if rust_daemon_enabled():
+    if is_rust_daemon_enabled():
         binary = rust_daemon_binary_path()
         if binary is not None:
             return [str(binary), "launch"]
@@ -146,7 +150,7 @@ def _build_daemon_launch_env(
     environment = os.environ.copy()
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-    if not rust_daemon_enabled():
+    if not is_rust_daemon_enabled():
         environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
     if env_overrides:
         environment.update(env_overrides)
@@ -327,7 +331,7 @@ def launch_daemon_subprocess(
     )
     poll_interval_s = 0.05
     daemon_startup_timeout_s = time.monotonic() + timeout_s
-    rust_mode = rust_daemon_enabled() and rust_daemon_binary_path() is not None
+    rust_mode = is_rust_daemon_enabled() and rust_daemon_binary_path() is not None
 
     def _ready() -> bool:
         if rust_mode:
@@ -374,6 +378,7 @@ def launch_new_daemon_subprocess(
     pid_path.parent.mkdir(parents=True, exist_ok=True)
     pid_file_lock = str(pid_path) + ".lock"
 
+    bridge_sdk_org_id_env()
     ensure_daemon_auth_ready(env_overrides)
 
     with filelock.FileLock(pid_file_lock):
@@ -409,6 +414,7 @@ def ensure_daemon_running(
 
     os.environ.setdefault("NEURACORE_DAEMON_PID_PATH", str(pid_path))
     os.environ.setdefault("NEURACORE_DAEMON_DB_PATH", str(db_path))
+    bridge_sdk_org_id_env()
 
     with filelock.FileLock(pid_file_lock):
         existing_pid = read_pid_from_file(pid_path)

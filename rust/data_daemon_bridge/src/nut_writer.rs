@@ -21,6 +21,9 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
+// Only the Linux `sync_file_range` writeback hint needs the raw fd; gated to
+// avoid an unused-import warning on platforms without that syscall (e.g. macOS).
+#[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -424,26 +427,35 @@ impl NutWriter {
         if nbytes == 0 {
             return;
         }
-        let fd = self.writer.get_ref().as_raw_fd();
-        // SAFETY: `fd` is the open NUT file's descriptor (valid for the
-        // lifetime of `self.writer`), offset/nbytes are non-negative, and
-        // `SYNC_FILE_RANGE_WRITE` only *queues* writeback — it does not block,
-        // mutate user memory, or take ownership of the fd.
-        let result = unsafe {
-            libc::sync_file_range(
-                fd,
-                offset as libc::off64_t,
-                nbytes as libc::off64_t,
-                libc::SYNC_FILE_RANGE_WRITE,
-            )
-        };
-        if result != 0 {
-            tracing::debug!(
-                errno = %io::Error::last_os_error(),
-                path = %self.path.display(),
-                "sync_file_range writeback hint failed (ignored)",
-            );
+        // `sync_file_range` is Linux-only. On other platforms (macOS) the
+        // `flush()` above has already pushed the tail into the page cache, which
+        // is all the hint guarantees; there is no portable async-writeback
+        // equivalent worth the complexity, so we simply skip it.
+        #[cfg(target_os = "linux")]
+        {
+            let fd = self.writer.get_ref().as_raw_fd();
+            // SAFETY: `fd` is the open NUT file's descriptor (valid for the
+            // lifetime of `self.writer`), offset/nbytes are non-negative, and
+            // `SYNC_FILE_RANGE_WRITE` only *queues* writeback — it does not block,
+            // mutate user memory, or take ownership of the fd.
+            let result = unsafe {
+                libc::sync_file_range(
+                    fd,
+                    offset as libc::off64_t,
+                    nbytes as libc::off64_t,
+                    libc::SYNC_FILE_RANGE_WRITE,
+                )
+            };
+            if result != 0 {
+                tracing::debug!(
+                    errno = %io::Error::last_os_error(),
+                    path = %self.path.display(),
+                    "sync_file_range writeback hint failed (ignored)",
+                );
+            }
         }
+        #[cfg(not(target_os = "linux"))]
+        let _ = offset;
     }
 
     /// Flush any remaining buffered bytes and return the total bytes

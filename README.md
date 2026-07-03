@@ -86,6 +86,14 @@ To run our examples:
 pip install neuracore[examples]
 ```
 
+For MuJoCo MJCF model support:
+
+```bash
+pip install neuracore[mjcf]
+```
+
+**Note:** `[examples]` and `[mjcf]` cannot be installed together: the examples pin `mujoco==2.3.7`, while MJCF support requires `mujoco>3`. Use separate environments if you need both.
+
 # 🍰 A Short Taste
 
 Here is a short taste on what neuracore can do.\
@@ -152,7 +160,7 @@ predictions = policy.predict(timeout=5)
 - [Environment Variables](./docs/environment_variable.md)
 - [Contribution Guide](./docs/contribution_guide.md)
 - [Data Daemon](./docs/data_daemon.md)
-- [Rust Data Daemon — Developer Guide](./docs/rust_data_daemon_development.md) — building the [rust/](./rust/) workspace that ships inside the wheel as the data-daemon binary + `neuracore.data_daemon._native_producer` cdylib.
+- [Rust Data Daemon — Developer Guide](./docs/rust_data_daemon_development.md) — building the [rust/](./rust/) workspace that ships inside the wheel as the data-daemon binary + `neuracore.data_daemon._data_bridge` cdylib.
 
 # 💬 Community
 

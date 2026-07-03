@@ -1,8 +1,11 @@
 name: Build Wheels
 
-# Builds the Python wheel that bundles the Rust data-daemon binary and the
-# producer cdylib. See docs/rust_data_daemon_development.md#packaging-the-wheel
-# for the build pipeline rationale (cargo → build_wheel_artefacts.sh → python -m build).
+# Builds the merged `neuracore` wheels (SDK + Rust `_data_bridge` extension +
+# bundled `data-daemon` binary) for Linux and macOS arm64, one per Python minor
+# (cp310-cp314) — no sdist, no pure wheel. maturin owns the build; the daemon
+# binary is a separate crate compiled into the package tree first by
+# rust/scripts/build_wheel_artefacts.sh. A separate smoke-test job installs and
+# launches the wheels on a different machine than the one that built them.
 
 on:
   pull_request:
@@ -10,20 +13,22 @@ on:
       - main
     paths:
       - 'rust/**'
-      - 'neuracore/data_daemon/**'
-      - 'setup.py'
-      - 'MANIFEST.in'
+      - 'pyproject.toml'
       - '.github/workflows/build-wheels.yaml'
   push:
     branches:
       - main
     paths:
       - 'rust/**'
-      - 'neuracore/data_daemon/**'
-      - 'setup.py'
-      - 'MANIFEST.in'
+      - 'pyproject.toml'
       - '.github/workflows/build-wheels.yaml'
   workflow_call:
+    inputs:
+      ref:
+        description: Git ref to check out and build (e.g. a release tag)
+        required: false
+        type: string
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -31,61 +36,166 @@ concurrency:
 
 jobs:
   build:
-    name: wheel (${{ matrix.os }}, py${{ matrix.python-version }})
+    name: wheels (${{ matrix.target }}, cp310-cp314)
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # Linux-first per docs/data-daemon-rewrite.md §Open items.
-        # aarch64 ships when there's demand — the helper script is platform-
-        # agnostic but cross-compilation isn't wired up here yet.
-        os: [ubuntu-22.04]
-        python-version: ["3.10", "3.11"]
+        include:
+          # Each leg builds all five per-Python wheels; Linux resolves
+          # interpreters in the manylinux container, macOS via setup-python.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            interpreters: "3.10 3.11 3.12 3.13 3.14"
+          # Apple Silicon only (no Intel); runs natively so the smoke test can
+          # launch the arm64 binary.
+          - os: macos-15
+            target: aarch64-apple-darwin
+            interpreters: "python3.10 python3.11 python3.12 python3.13 python3.14"
+            macos-deployment-target: "11.0"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref || '' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
 
-      - name: Set up Python ${{ matrix.python-version }}
-        id: setup-python
+      # On macOS these are maturin's build interpreters; on Linux builds happen
+      # in the container and these only serve the smoke test.
+      - name: Set up Pythons
         uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade pip build
-
-      - name: Build Rust artefacts
-        # PYO3_PYTHON pins pyo3-build-config to the matrix interpreter so the
-        # produced cdylib's ABI matches the wheel's python tag. Ubuntu images
-        # ship multiple python3 binaries; relying on PATH order would silently
-        # pick the wrong one and produce a wheel that imports under the wrong
-        # interpreter.
-        env:
-          PYO3_PYTHON: ${{ steps.setup-python.outputs.python-path }}
-        run: ./rust/scripts/build_wheel_artefacts.sh
-
-      - name: Build wheel
-        run: python -m build --wheel
-
-      - name: Smoke-test the built wheel
+      - name: Set up libclang and build daemon binary (macOS)
+        if: runner.os == 'macOS'
         run: |
-          python -m pip install dist/neuracore-*.whl
-          python -c "import neuracore.data_daemon._native_producer as p; print('producer ok:', p)"
-          python -c "from importlib.resources import files; b = files('neuracore.data_daemon') / 'bin' / 'data-daemon'; assert b.is_file(), b; print('binary ok:', b)"
+          brew install llvm
+          export LIBCLANG_PATH="$(brew --prefix llvm)/lib"
+          echo "LIBCLANG_PATH=$LIBCLANG_PATH" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=${{ matrix.macos-deployment-target }}" >> "$GITHUB_ENV"
+          MACOSX_DEPLOYMENT_TARGET="${{ matrix.macos-deployment-target }}" \
+            bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target ${{ matrix.target }}
 
-      - name: Upload wheel artefact
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          # manylinux_2_28, not 2014: iceoryx2's bindgen needs libclang >= 5.0
+          # (manylinux2014 has clang 3.4). Cost: glibc floor rises to 2.28.
+          manylinux: 2_28
+          args: >-
+            --release
+            --out dist
+            --interpreter ${{ matrix.interpreters }}
+          before-script-linux: |
+            (command -v yum && yum install -y clang) || (command -v dnf && dnf install -y clang) || true
+            bash "$GITHUB_WORKSPACE/rust/scripts/build_wheel_artefacts.sh" --target ${{ matrix.target }}
+
+      - name: Upload wheel artefacts
         uses: actions/upload-artifact@v4
         with:
-          name: neuracore-wheel-${{ matrix.os }}-py${{ matrix.python-version }}
+          name: neuracore-wheels-${{ matrix.target }}
           path: dist/*.whl
           if-no-files-found: error
           retention-days: 7
+
+  # Install and launch the wheels on a DIFFERENT machine than the one that
+  # built them — no checkout, no Rust toolchain, just the downloaded artefact.
+  # This is what proves the wheels work outside the build environment: the
+  # macOS leg runs on a different OS image (macos-14) than the macos-15
+  # builder, so a signature that only validated on the build machine, a
+  # deployment-target mismatch, or a glibc-floor problem fails here instead of
+  # at a user's install.
+  smoke-test:
+    name: smoke (${{ matrix.target }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - name: Set up Pythons
+        uses: actions/setup-python@v6
+        with:
+          python-version: |
+            3.10
+            3.11
+            3.12
+            3.13
+            3.14
+
+      - name: Download wheel artefacts
+        uses: actions/download-artifact@v4
+        with:
+          name: neuracore-wheels-${{ matrix.target }}
+          path: dist
+
+      - name: Smoke-test the wheels
+        run: |
+          set -euo pipefail
+          ls -l dist/
+          [ "$(ls dist/*.whl | wc -l)" -eq 5 ] || { echo "expected 5 wheels"; exit 1; }
+          for whl in dist/*.whl; do
+            cptag="$(basename "$whl" | cut -d- -f3)"
+            pybin="python3.${cptag:3}"   # cp312 -> python3.12
+            echo "==> $whl via $pybin"
+            venv_dir="$RUNNER_TEMP/venv-$cptag"
+            "$pybin" -m venv "$venv_dir"
+            if [ "$cptag" = "cp310" ] || [ "$cptag" = "cp314" ]; then
+              "$venv_dir/bin/pip" install --quiet "$whl"
+              FULL=1
+            else
+              "$venv_dir/bin/pip" install --quiet --no-deps "$whl"
+              FULL=0
+            fi
+            if [ "$FULL" = "1" ]; then
+              "$venv_dir/bin/python" -c "import neuracore; print('sdk ok:', neuracore.__version__)"
+              "$venv_dir/bin/python" -c "import neuracore.data_daemon._data_bridge as p; print('extension ok:', p)"
+              "$venv_dir/bin/neuracore" --help > /dev/null && echo "cli ok"
+            fi
+            "$venv_dir/bin/python" - <<'PY'
+          import os, subprocess, sys, sysconfig
+          from pathlib import Path
+          site = Path(sysconfig.get_paths()["purelib"])
+          dd = site / "neuracore" / "data_daemon"
+          assert list(dd.glob("_data_bridge*.so")), f"extension missing under {dd}"
+          b = dd / "bin" / "data-daemon"
+          assert b.is_file(), b
+          assert os.access(b, os.X_OK), f"daemon binary is not executable: {b}"
+          if sys.platform == "darwin":
+              # Verify the ad-hoc signature on a machine that never saw the
+              # build: it embeds no machine identity, so it must validate here.
+              subprocess.run(["codesign", "--verify", "--strict", str(b)], check=True)
+              print("signature ok (codesign --verify off the build machine)")
+          # Actually launch the binary so signing/Gatekeeper/architecture
+          # problems surface in CI, not at a user's runtime.
+          r = subprocess.run([str(b), "--help"], capture_output=True)
+          assert r.returncode == 0, (
+              f"daemon binary failed to launch ({r.returncode}): "
+              f"{r.stderr.decode(errors='replace')}"
+          )
+          print("binary ok (launched):", b)
+          PY
+          done

@@ -654,12 +654,25 @@ fn next_chunk_open_ns() -> i64 {
     }
 }
 
-/// OS thread id of the calling thread (Linux `gettid`). Used to disambiguate a
-/// video chunk's spool filename across producer threads and as a breadcrumb
-/// when inspecting the spool directory.
+/// OS thread id of the calling thread. Used to disambiguate a video chunk's
+/// spool filename across producer threads and as a breadcrumb when inspecting
+/// the spool directory. Only needs to be stable and per-thread-unique within a
+/// process, so any OS-native thread id will do.
+#[cfg(target_os = "linux")]
 fn current_thread_id() -> i64 {
     // SAFETY: `gettid` takes no arguments and cannot fail.
     unsafe { libc::gettid() as i64 }
+}
+
+/// macOS has no `gettid`; `pthread_threadid_np` yields the same kind of
+/// kernel-assigned, per-thread-unique 64-bit id.
+#[cfg(not(target_os = "linux"))]
+fn current_thread_id() -> i64 {
+    let mut tid: u64 = 0;
+    // SAFETY: writes the id of the calling thread (`pthread_self()`) into `tid`;
+    // it cannot fail for a valid, live thread.
+    unsafe { libc::pthread_threadid_np(libc::pthread_self(), &mut tid) };
+    tid as i64
 }
 
 /// Whether the in-progress chunk should be sealed now, checked after each

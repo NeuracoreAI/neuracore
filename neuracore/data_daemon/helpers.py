@@ -66,6 +66,20 @@ def get_daemon_recordings_root_path() -> Path:
     )
 
 
+def bridge_sdk_org_id_env() -> None:
+    """Mirror the SDK's ``NEURACORE_ORG_ID`` into ``NCD_CURRENT_ORG_ID``.
+
+    The daemon resolves its org from ``~/.neuracore/config.json`` or
+    ``NCD_CURRENT_ORG_ID`` — it never reads the SDK's ``NEURACORE_ORG_ID``,
+    and an env-only org is never persisted to config.json, so without this
+    bridge the daemon has no org and uploads stall with traces pending
+    forever. An explicit ``NCD_CURRENT_ORG_ID`` always wins.
+    """
+    sdk_org_id = os.environ.get("NEURACORE_ORG_ID")
+    if sdk_org_id:
+        os.environ.setdefault("NCD_CURRENT_ORG_ID", sdk_org_id)
+
+
 def is_debug_mode() -> bool:
     """Return True if the daemon is running in debug mode."""
     return os.environ.get("NDD_DEBUG", "false").lower() == "true"

@@ -7,31 +7,37 @@ from importlib import import_module
 from types import ModuleType
 
 from neuracore.data_daemon.models import CommandType
-from neuracore.data_daemon.rust_selection import rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 from .communications_manager import CommunicationsManager, MessageEnvelope
 
 logger = logging.getLogger(__name__)
 
-_NATIVE_MODULE: ModuleType | None = None
+_DATA_BRIDGE_MODULE: ModuleType | None = None
 
-_NATIVE_IMPORT_HINT = (
-    "neuracore.data_daemon._native_producer is not available. Build the Rust "
-    "data_daemon_producer crate with maturin and ensure the resulting "
-    "extension is on sys.path, or unset NCD_RUST_DAEMON to fall back to the "
-    "legacy Python producer."
+_DATA_BRIDGE_IMPORT_HINT = (
+    "neuracore.data_daemon._data_bridge is not available. The Rust extension "
+    "is bundled in the neuracore wheel (prebuilt for Linux x86_64 and "
+    "Apple-Silicon macOS); reinstall with `pip install neuracore` on one of "
+    "those platforms, or unset NCD_RUST_DAEMON to fall back to the legacy "
+    "Python data daemon."
 )
 
 
 def _load_native() -> ModuleType:
-    """Lazily import and cache the PyO3 producer module for the process."""
-    global _NATIVE_MODULE
-    if _NATIVE_MODULE is None:
+    """Lazily import and cache the PyO3 data daemon bridge module for the process.
+
+    The compiled extension ships inside the ``neuracore`` wheel (prebuilt for
+    Linux x86_64 and Apple-Silicon macOS), so this raises a helpful error when
+    it is absent (e.g. a source install without the Rust build).
+    """
+    global _DATA_BRIDGE_MODULE
+    if _DATA_BRIDGE_MODULE is None:
         try:
-            _NATIVE_MODULE = import_module("neuracore.data_daemon._native_producer")
+            _DATA_BRIDGE_MODULE = import_module("neuracore.data_daemon._data_bridge")
         except ImportError as error:
-            raise RuntimeError(_NATIVE_IMPORT_HINT) from error
-    return _NATIVE_MODULE
+            raise RuntimeError(_DATA_BRIDGE_IMPORT_HINT) from error
+    return _DATA_BRIDGE_MODULE
 
 
 class RecordingContext:
@@ -39,7 +45,7 @@ class RecordingContext:
 
     Under the Rust daemon this is a *thin shipper* bridge: ``start_recording``
     / ``log_joints`` / ``log_frame`` / ``log_json`` / ``stop_recording`` /
-    ``cancel_recording`` forward straight through to ``_native_producer`` over
+    ``cancel_recording`` forward straight through to ``_data_bridge`` over
     iceoryx2, tagged only with the **source** ``(robot_id, robot_instance)``.
     The daemon owns all recording identity — there is no recording id on the
     wire. Routing is by a producer-stamped *publish* timestamp (wall clock),
@@ -58,11 +64,11 @@ class RecordingContext:
         """Initialize the recording context.
 
         Under the Rust daemon the ZMQ producer socket is unused — every
-        envelope flows through ``_native_producer`` over iceoryx2 — so we skip
+        envelope flows through ``_data_bridge`` over iceoryx2 — so we skip
         creating it.
         """
         self.recording_id = recording_id
-        self._rust_mode = rust_daemon_enabled()
+        self._rust_mode = is_rust_daemon_enabled()
         self._robot_id: str | None = None
         self._robot_instance: int = 0
         self._recording_marker_ns: int = 0

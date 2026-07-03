@@ -1,10 +1,3 @@
-// PyO3 0.22's `#[pyfunction]` expansion includes an `.into()` on the
-// `PyResult<T>` return value that fires clippy's `useless_conversion` lint
-// when T resolves to `()`. The lint is correct about the generated code but
-// the conversion lives in the macro expansion, not anything we wrote, so we
-// silence it at the crate level rather than spraying allows over every
-// `#[pyfunction]`.
-#![allow(clippy::useless_conversion)]
 // The crate-level docs link to the producer's private `#[pyfunction]` entry
 // points and internal modules. CI builds docs with `--document-private-items`,
 // so those links resolve; silence the lint that flags them as private.
@@ -12,7 +5,7 @@
 
 //! PyO3 producer client for the Neuracore data daemon — a *thin shipper*.
 //!
-//! This crate ships as `neuracore.data_daemon._native_producer` inside the
+//! This crate ships as `neuracore.data_daemon._data_bridge` inside the
 //! Python wheel. It knows nothing about recordings: it publishes
 //! source/sensor/timestamp-tagged data and three fire-and-forget lifecycle
 //! events, and the daemon decides which recording (if any) each datum belongs
@@ -90,7 +83,7 @@ fn start_recording(
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
-    py.allow_threads(|| -> PyResult<i64> {
+    py.detach(|| -> PyResult<i64> {
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
@@ -142,7 +135,7 @@ fn log_joints(
     let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
     let joined_names = names.to_string();
-    py.allow_threads(move || {
+    py.detach(move || {
         // Stamp the window-routing clock at enqueue (inside the recording
         // window). The publisher thread splits the names, zips them with the
         // values, serialises, and publishes the `BatchedData`, keeping that work
@@ -240,7 +233,7 @@ fn log_frame(
     // GIL would stall every Python thread in the process. A frame that cannot be
     // admitted before the spool-stall window elapses surfaces as an error rather
     // than being silently dropped, so the caller learns the daemon has stalled.
-    py.allow_threads(move || writer_queue().push(WriterMsg::Frame(job)))
+    py.detach(move || writer_queue().push(WriterMsg::Frame(job)))
         .map_err(|_| {
             PyRuntimeError::new_err(
                 "video logging stalled: the data daemon is not draining the spool \
@@ -280,7 +273,7 @@ fn log_json(
     let data_type = data_type.to_string();
     let name = name.to_string();
     let owned_payload = payload.to_vec();
-    py.allow_threads(move || {
+    py.detach(move || {
         // Stamp the window-routing clock at enqueue; the publisher thread
         // publishes the `Data` envelope off this call (see [`PublishMsg::Json`]).
         let publish_timestamp_ns = now_ns();
@@ -322,7 +315,7 @@ fn stop_recording(
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
-    py.allow_threads(|| -> PyResult<()> {
+    py.detach(|| -> PyResult<()> {
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
@@ -376,7 +369,7 @@ fn cancel_recording(
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
-    py.allow_threads(|| -> PyResult<()> {
+    py.detach(|| -> PyResult<()> {
         let capture_timestamp_ns = timestamp_ns.unwrap_or_else(now_ns);
         // Barrier on the writer: it drains any frames still queued for this
         // source (FIFO) and drops the in-progress chunk state without announcing
@@ -428,14 +421,14 @@ fn get_recording_id(
         timestamp_ns,
     };
     let request_bytes = query.encode().map_err(ProducerError::from)?;
-    py.allow_threads(|| -> PyResult<Option<String>> {
+    py.detach(|| -> PyResult<Option<String>> {
         Ok(resolve_recording_id(&request_bytes, timeout_s)?)
     })
 }
 
-/// Python module entrypoint registered as `neuracore.data_daemon._native_producer`.
+/// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
-fn _native_producer(module: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;

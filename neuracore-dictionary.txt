@@ -8,8 +8,11 @@ addfinalizer
 addinivalue
 agentview
 agilex
+aiofiles
+aiohttp
 aiolimiter
 aiortc
+aiosqlite
 allclose
 allocvec
 altclip
@@ -38,6 +41,7 @@ bodyless
 Brawner
 broadcastable
 buildtool
+bumpversion
 byteswap
 calcsize
 caplog
@@ -121,6 +125,7 @@ DONTNEED
 dtype
 EADDRINUSE
 eigenpy
+einops
 elementwise
 elems
 embs
@@ -147,11 +152,13 @@ facecolor
 facenum
 fadvise
 falsey
+fastapi
 fcntl
 feedforward
 fflags
 ffprobe
 figsize
+filelock
 filtergraph
 finetune
 finetuning
@@ -188,6 +195,7 @@ getpgid
 getpid
 gettid
 ghjdidnia
+gitignored
 gptj
 GPTJ
 groot
@@ -242,6 +250,7 @@ LEROBOT
 levelname
 libavformat
 libc
+libclang
 libcs
 libgl
 libglew
@@ -258,7 +267,9 @@ loglik
 logsigmoid
 logvar
 makereport
-maxpool
+manylinux
+matplotlib
+maturin
 maxs
 mcap
 MCAP
@@ -312,9 +323,7 @@ nprocs
 numpy
 octomap
 offsamples
-oieb
-Oieb
-OIEB
+omegaconf
 oneshot
 openarm
 openarm_description
@@ -354,16 +363,20 @@ pretraining
 prio
 proprio
 proprios
-PSNR
+psutil
 pthread
 pyav
 pycache
 pydantic
+pyee
 pyfunction
 pygments
+pyinstrument
 pymodule
 pyquaternion
 pytest
+pyyaml
+pyzmq
 Qbcaa
 qpos
 qposadr
@@ -428,6 +441,7 @@ softmax
 solimp
 solref
 splitn
+sqlalchemy
 sqlx
 squaredcos
 startcode
@@ -449,6 +463,7 @@ tfds
 TFDS
 tfrecord
 thiserror
+threadid
 thres
 timestep
 timesteps
@@ -459,6 +474,7 @@ tobytes
 tolist
 torchdynamo
 torchserve
+torchvision
 torq
 tqdm
 traj
@@ -490,6 +506,7 @@ urdfdom
 usefixtures
 userspace
 utaustin
+uvicorn
 varint
 Vaswani
 vdecode
@@ -511,6 +528,7 @@ WRONLY
 wxyz
 XARM
 xdata
+xdist
 xlabel
 xmat
 xmls

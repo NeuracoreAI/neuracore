@@ -47,10 +47,45 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Build the standalone daemon binary before `pip install .` so the
+      # [tool.maturin] include bundles it into the built wheel; without it the
+      # SDK silently falls back to the Python daemon.
+      - name: Build Rust data-daemon binary
+        run: bash rust/scripts/build_wheel_artefacts.sh
+
       - name: Install Python dependencies
         run: |
           python -m pip install --no-cache-dir --upgrade pip
           pip install --no-cache-dir ".[dev,ml,examples]"
+
+      # cd away from the repo root so `import neuracore` resolves to the
+      # installed wheel, not the source tree the binary was staged into.
+      - name: Verify bundled Rust daemon
+        run: |
+          cd "$RUNNER_TEMP"
+          python - << 'PYEOF'
+          import os
+
+          from neuracore.data_daemon.rust_selection import rust_daemon_binary_path
+
+          # Fail fast if the daemon bundle didn't install -- otherwise the SDK
+          # silently falls back to the Python daemon.
+          binary = rust_daemon_binary_path()
+          assert binary is not None, (
+              "bundled Rust data-daemon binary not found; the neuracore "
+              "install did not bundle it"
+          )
+          assert os.access(binary, os.X_OK), f"daemon binary not executable: {binary}"
+          print(f"Bundled data-daemon binary: {binary}")
+          PYEOF
 
       - name: Resolve test harness
         run: |
@@ -68,6 +103,7 @@ jobs:
         env:
           NEURACORE_API_URL: https://staging.api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+          NCD_RUST_DAEMON: "1"
           NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
           NEURACORE_ENDPOINT_TIMEOUT: 30
           DISPLAY: :0

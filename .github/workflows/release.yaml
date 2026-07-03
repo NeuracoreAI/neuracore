@@ -344,7 +344,7 @@ jobs:
         python-version: '3.11'
 
     - name: Install build tools
-      run: pip install bump2version build twine
+      run: pip install bump2version
 
     - name: Bump version
       run: |
@@ -369,22 +369,13 @@ jobs:
       run: |
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
-        git add .bumpversion.cfg neuracore/__init__.py changelogs/pending-changelog.md
+        git add .bumpversion.cfg pyproject.toml changelogs/pending-changelog.md
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
 
         TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
         git push origin "HEAD:${TARGET_BRANCH}"
 
         echo "Pushed version bump to ${TARGET_BRANCH}"
-
-    - name: Build Python package
-      run: python -m build
-
-    - name: Publish to PyPI
-      env:
-        TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
-        TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
-      run: twine upload --skip-existing dist/*
 
     - name: Create git tag
       run: |
@@ -444,8 +435,8 @@ jobs:
           summary += `**Version:** \`${version}\`\n\n`;
           summary += `## Actions Completed\n\n`;
           summary += `- Version bumped and pushed to \`main\`\n`;
-          summary += `- Package published to PyPI\n`;
           summary += `- Git tag \`v${version}\` created\n`;
+          summary += `- Platform wheels (linux x86_64 + macOS arm64, cp310-cp314) publishing to PyPI (see publish job)\n`;
           summary += `- GitHub Release created\n\n`;
           summary += `### Links\n\n`;
           summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;
@@ -453,6 +444,42 @@ jobs:
           summary += `### Installation\n\n`;
           summary += `\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n`;
           fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary);
+
+  # Build the merged `neuracore` wheels (Python SDK + Rust extension + bundled
+  # daemon binary) for every supported platform × Python minor by re-running
+  # build-wheels.yaml against the just-pushed tag, so each wheel carries the
+  # bumped version.
+  build-release-wheels:
+    needs: release
+    uses: ./.github/workflows/build-wheels.yaml
+    with:
+      ref: v${{ needs.release.outputs.new_version }}
+
+  # Publish ALL wheels in one job, only after every platform leg has built and
+  # smoke-tested. A version can never be half-published: if any leg fails,
+  # nothing is uploaded, and re-running the workflow is idempotent thanks to
+  # twine --skip-existing. These platform wheels are the only artefacts — no
+  # pure wheel and no sdist (see build-wheels.yaml).
+  publish:
+    needs: [release, build-release-wheels]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download wheel artefacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: neuracore-wheels-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish wheels to PyPI
+        env:
+          TWINE_USERNAME: ${{ secrets.PYPI_USERNAME }}
+          TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
+        run: |
+          ls -l dist/
+          [ "$(ls dist/*.whl | wc -l)" -eq 10 ] || { echo "expected 10 wheels"; exit 1; }
+          python -m pip install --upgrade twine
+          twine upload --skip-existing dist/*.whl
 
   dry-run-summary:
     needs: [analyze-changes, generate-changelog]
