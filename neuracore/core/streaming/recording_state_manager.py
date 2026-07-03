@@ -272,6 +272,9 @@ class RecordingStateManager(BaseSSEConsumer):
         if current_recording != recording_id:
             return
         self.recording_robot_instances.pop(instance_key, None)
+        # Data-bridge stop is driven by the recording context or expiry timer —
+        # not here — so the daemon gets exactly one StopRecording with the
+        # correct data-clock boundary.
         if recording_id is not None:
             self._cancel_recording_timers(recording_id)
 

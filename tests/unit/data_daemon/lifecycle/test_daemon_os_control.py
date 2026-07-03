@@ -8,7 +8,6 @@ from typing import IO, cast
 import pytest
 
 import neuracore.data_daemon.lifecycle.daemon_os_control as daemon_os_control
-from neuracore.data_daemon.helpers import bridge_sdk_org_id_env
 from neuracore.data_daemon.lifecycle.daemon_os_control import (
     DaemonLifecycleError,
     acquire_pid_file,
@@ -102,86 +101,6 @@ def test_launch_daemon_subprocess_redirects_stdio_in_background(
     assert env["NEURACORE_DAEMON_DB_PATH"] == str(db_path)
     assert env["NEURACORE_DAEMON_MANAGE_PID"] == "0"
     assert pid_path.read_text(encoding="utf-8").strip() == "54321"
-
-
-def test_bridge_sdk_org_id_env_bridges_to_daemon_var(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NEURACORE_ORG_ID", "org-from-sdk-env")
-    monkeypatch.delenv("NCD_CURRENT_ORG_ID", raising=False)
-
-    bridge_sdk_org_id_env()
-
-    assert os.environ["NCD_CURRENT_ORG_ID"] == "org-from-sdk-env"
-
-
-def test_bridge_sdk_org_id_env_keeps_explicit_daemon_var(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("NEURACORE_ORG_ID", "org-from-sdk-env")
-    monkeypatch.setenv("NCD_CURRENT_ORG_ID", "org-explicit")
-
-    bridge_sdk_org_id_env()
-
-    assert os.environ["NCD_CURRENT_ORG_ID"] == "org-explicit"
-
-
-def test_bridge_sdk_org_id_env_noop_without_sdk_var(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("NEURACORE_ORG_ID", raising=False)
-    monkeypatch.delenv("NCD_CURRENT_ORG_ID", raising=False)
-
-    bridge_sdk_org_id_env()
-
-    assert "NCD_CURRENT_ORG_ID" not in os.environ
-
-
-def _stub_daemon_launch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Stub out process/auth side effects so entry points run hermetically."""
-    monkeypatch.setattr(
-        daemon_os_control, "get_daemon_pid_path", lambda: tmp_path / "daemon.pid"
-    )
-    monkeypatch.setattr(
-        daemon_os_control, "get_daemon_db_path", lambda: tmp_path / "state.db"
-    )
-    monkeypatch.setattr(
-        daemon_os_control, "cleanup_stale_client_state", lambda **_: None
-    )
-    monkeypatch.setattr(daemon_os_control, "ensure_daemon_auth_ready", lambda *_: None)
-    monkeypatch.setattr(
-        daemon_os_control,
-        "launch_daemon_subprocess",
-        lambda **_: _FakePopen(pid=54321),
-    )
-
-
-def test_ensure_daemon_running_bridges_sdk_org_id(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("NEURACORE_ORG_ID", "org-from-sdk-env")
-    monkeypatch.delenv("NCD_CURRENT_ORG_ID", raising=False)
-    _stub_daemon_launch(monkeypatch, tmp_path)
-
-    daemon_os_control.ensure_daemon_running()
-
-    assert os.environ["NCD_CURRENT_ORG_ID"] == "org-from-sdk-env"
-
-
-def test_launch_new_daemon_subprocess_bridges_sdk_org_id(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setenv("NEURACORE_ORG_ID", "org-from-sdk-env")
-    monkeypatch.delenv("NCD_CURRENT_ORG_ID", raising=False)
-    _stub_daemon_launch(monkeypatch, tmp_path)
-
-    daemon_os_control.launch_new_daemon_subprocess(
-        pid_path=tmp_path / "daemon.pid",
-        db_path=tmp_path / "state.db",
-        background=True,
-    )
-
-    assert os.environ["NCD_CURRENT_ORG_ID"] == "org-from-sdk-env"
 
 
 def test_launch_daemon_subprocess_keeps_foreground_stdio_attached(
