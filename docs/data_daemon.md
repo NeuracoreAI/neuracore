@@ -261,7 +261,13 @@ Supported environment variables:
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
 | `offline` | `NCD_OFFLINE` |
 | `api_key` | `NCD_API_KEY` |
-| `current_org_id` | `NCD_CURRENT_ORG_ID` |
+| `current_org_id` | `NEURACORE_ORG_ID` (shared with the SDK) |
+
+Note on `NEURACORE_ORG_ID`: the daemon uses it only as a fallback while
+`~/.neuracore/config.json` has no organization set. The config file is watched
+live, so an org selected with `neuracore select-org` mid-run always takes
+precedence. This differs from the SDK, where `NEURACORE_ORG_ID` overrides the
+config file.
 
 Boolean values treat these as true:
 - `1`

@@ -38,7 +38,7 @@ impl OrgWatcherHandle {
 /// Spawn the config-file watcher.
 ///
 /// Returns a [`OrgIdRx`] seeded with the org resolved at spawn time and the
-/// task handle. `fallback` is the daemon-profile override (`NCD_CURRENT_ORG_ID`
+/// task handle. `fallback` is the daemon-profile override (`NEURACORE_ORG_ID`
 /// / YAML profile) used whenever the config file has no `current_org_id`,
 /// matching the launch-time resolution order.
 pub fn spawn_org_watcher(

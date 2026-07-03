@@ -333,7 +333,7 @@ fn run_daemon(
                 IpcTransport::bring_up().context("failed to bring up iceoryx2 transport")?;
 
             // Resolve the initial org_id from the local SDK-managed config,
-            // falling back to the daemon profile (NCD_CURRENT_ORG_ID or the
+            // falling back to the daemon profile (NEURACORE_ORG_ID or the
             // YAML profile override). This is only the seed value: the cloud
             // coordinators spawn a watcher over `config_path` and read the
             // *current* org live, so an org selected after launch is picked up

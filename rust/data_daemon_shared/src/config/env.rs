@@ -91,7 +91,7 @@ where
 /// read through this helper treats an empty value as unset (so a shell that
 /// exports an unset variable as the empty string falls through to the
 /// configured profile value rather than clobbering it). This is most important
-/// for the secret-bearing `NCD_API_KEY` / `NCD_CURRENT_ORG_ID`, but it applies
+/// for the secret-bearing `NCD_API_KEY` / `NEURACORE_ORG_ID`, but it applies
 /// uniformly to the boolean and numeric overrides too — unlike Python's
 /// `config.py`, which honours an empty string as a real override.
 fn env_var(name: &str) -> Option<String> {
@@ -142,7 +142,7 @@ pub fn env_config_overrides() -> DaemonConfig {
     if let Some(value) = env_var("NCD_API_KEY") {
         config.api_key = Some(value);
     }
-    if let Some(value) = env_var("NCD_CURRENT_ORG_ID") {
+    if let Some(value) = env_var("NEURACORE_ORG_ID") {
         config.current_org_id = Some(value);
     }
 
@@ -295,7 +295,7 @@ mod tests {
         "NCD_KEEP_WAKELOCK_WHILE_UPLOAD",
         "NCD_OFFLINE",
         "NCD_API_KEY",
-        "NCD_CURRENT_ORG_ID",
+        "NEURACORE_ORG_ID",
         "NEURACORE_DAEMON_PROFILE",
     ];
 
@@ -318,7 +318,7 @@ mod tests {
         std::env::set_var("NCD_KEEP_WAKELOCK_WHILE_UPLOAD", "yes");
         std::env::set_var("NCD_OFFLINE", "1");
         std::env::set_var("NCD_API_KEY", "secret-key");
-        std::env::set_var("NCD_CURRENT_ORG_ID", "org-42");
+        std::env::set_var("NEURACORE_ORG_ID", "org-42");
         std::env::set_var("NEURACORE_DAEMON_PROFILE", "lab");
 
         let config = env_config_overrides();

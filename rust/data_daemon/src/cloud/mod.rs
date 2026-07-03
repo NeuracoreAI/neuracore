@@ -45,7 +45,7 @@ use serde::Deserialize;
 ///
 /// Used for the one-shot resolutions at launch/spawn. Returns `None` when the
 /// file is missing, malformed, or the field is unset. The daemon falls back to
-/// `NCD_CURRENT_ORG_ID` (via the `DaemonConfig` resolved at launch) when this
+/// `NEURACORE_ORG_ID` (via the `DaemonConfig` resolved at launch) when this
 /// returns `None`.
 pub fn read_org_id_from_config(path: &Path) -> Option<String> {
     match std::fs::read(path) {
