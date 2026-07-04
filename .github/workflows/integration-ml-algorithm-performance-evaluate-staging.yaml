@@ -60,6 +60,9 @@ jobs:
         large-packages: true
         swap-storage: true
 
+    - name: Install libclang for bindgen
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
+
     - name: Restore training metadata from cache
       uses: actions/cache/restore@v4
       with:
