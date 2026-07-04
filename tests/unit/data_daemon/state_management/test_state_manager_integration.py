@@ -41,6 +41,7 @@ async def manager_store(
     try:
         yield manager, store
     finally:
+        await manager.shutdown()
         await store.close()
 
 
@@ -1208,3 +1209,82 @@ async def test_retry_emit_does_not_emit_before_next_retry_at(
         assert scheduled[0] >= 30.0
     finally:
         emitter.remove_listener(Emitter.READY_FOR_UPLOAD, ready_handler)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_pending_retry_timers(
+    manager_store, emitter: Emitter
+) -> None:
+    manager, store = manager_store
+    await manager._handle_start_trace(
+        "trace-shutdown",
+        "rec-shutdown",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-shutdown.bin",
+    )
+    await manager._store.update_write_status(
+        "trace-shutdown", TraceWriteStatus.INITIALIZING
+    )
+    await manager._store.update_write_status("trace-shutdown", TraceWriteStatus.WRITTEN)
+    await manager._store.update_upload_status(
+        "trace-shutdown", TraceUploadStatus.UPLOADING
+    )
+
+    await manager.handle_upload_failed(
+        "trace-shutdown", 0, TraceErrorCode.NETWORK_ERROR, "net"
+    )
+
+    assert "trace-shutdown" in manager._retry_timer_handles
+    handle = manager._retry_timer_handles["trace-shutdown"]
+
+    await manager.shutdown()
+
+    assert manager._retry_timer_handles == {}
+    assert handle.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_rearmed_retry_timer_replaces_existing_handle(
+    manager_store, emitter: Emitter
+) -> None:
+    manager, store = manager_store
+    await manager._handle_start_trace(
+        "trace-rearm",
+        "rec-rearm",
+        DataType.CUSTOM_1D,
+        "custom",
+        1,
+        None,
+        None,
+        None,
+        None,
+        path="/tmp/trace-rearm.bin",
+    )
+    await manager._store.update_write_status(
+        "trace-rearm", TraceWriteStatus.INITIALIZING
+    )
+    await manager._store.update_write_status("trace-rearm", TraceWriteStatus.WRITTEN)
+    await manager._store.update_upload_status(
+        "trace-rearm", TraceUploadStatus.UPLOADING
+    )
+
+    await manager.handle_upload_failed(
+        "trace-rearm", 0, TraceErrorCode.NETWORK_ERROR, "net"
+    )
+    first_handle = manager._retry_timer_handles["trace-rearm"]
+
+    await manager._store.update_upload_status(
+        "trace-rearm", TraceUploadStatus.UPLOADING
+    )
+    await manager.handle_upload_failed(
+        "trace-rearm", 0, TraceErrorCode.NETWORK_ERROR, "net again"
+    )
+
+    assert first_handle.cancelled()
+    assert manager._retry_timer_handles["trace-rearm"] is not first_handle

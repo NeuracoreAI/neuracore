@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+The data daemon now cancels pending upload retry timers when it shuts down, so a retry can no longer fire after the daemon has stopped.

@@ -78,6 +78,27 @@ class StateManager:
             Emitter.SET_EXPECTED_TRACE_COUNT, self._handle_set_expected_trace_count
         )
 
+        self._retry_timer_handles: dict[str, asyncio.TimerHandle] = {}
+
+    async def shutdown(self) -> None:
+        """Cancel all pending retry timers."""
+        for handle in self._retry_timer_handles.values():
+            handle.cancel()
+        self._retry_timer_handles.clear()
+
+    def _schedule_retry_emit(self, trace_id: str, delay: float) -> None:
+        """Arm a retry timer for the trace, replacing any existing one."""
+        existing = self._retry_timer_handles.pop(trace_id, None)
+        if existing is not None:
+            existing.cancel()
+
+        def _fire() -> None:
+            self._retry_timer_handles.pop(trace_id, None)
+            asyncio.create_task(self._retry_emit(trace_id))
+
+        loop = asyncio.get_running_loop()
+        self._retry_timer_handles[trace_id] = loop.call_later(delay, _fire)
+
     async def _handle_start_trace(
         self,
         trace_id: str,
@@ -714,11 +735,7 @@ class StateManager:
             error_message=error_message,
         )
 
-        loop = asyncio.get_running_loop()
-        loop.call_later(
-            float(backoff),
-            lambda: asyncio.create_task(self._retry_emit(trace_id)),
-        )
+        self._schedule_retry_emit(trace_id, float(backoff))
 
     async def _retry_emit(self, trace_id: str) -> None:
         """Emit READY_FOR_UPLOAD when a trace is due for retry."""
@@ -731,11 +748,7 @@ class StateManager:
             now = datetime.now(timezone.utc).replace(tzinfo=None)
             if trace.next_retry_at > now:
                 delay = (trace.next_retry_at - now).total_seconds()
-                loop = asyncio.get_running_loop()
-                loop.call_later(
-                    float(delay),
-                    lambda: asyncio.create_task(self._retry_emit(trace_id)),
-                )
+                self._schedule_retry_emit(trace_id, float(delay))
                 return
         await self._emit_ready_for_upload_from_trace(trace)
 

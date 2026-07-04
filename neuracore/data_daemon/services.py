@@ -150,6 +150,12 @@ class DaemonServices:
             logger.exception("Error shutting down TraceStatusUpdater")
 
         try:
+            await self.state_manager.shutdown()
+            logger.debug("StateManager shutdown")
+        except Exception:
+            logger.exception("Error shutting down StateManager")
+
+        try:
             await self.state_store.reset_retrying_to_written()
             await self.state_store.close()
             logger.debug("SqliteStateStore closed")

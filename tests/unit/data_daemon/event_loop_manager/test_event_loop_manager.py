@@ -72,8 +72,8 @@ def test_stop_terminates_loops(running_loop_manager: EventLoopManager):
     assert not running_loop_manager.is_running()
     assert not running_loop_manager._started
 
-    time.sleep(0.1)
     if running_loop_manager._general_thread:
+        running_loop_manager._general_thread.join(timeout=2.0)
         assert not running_loop_manager._general_thread.is_alive()
 
 

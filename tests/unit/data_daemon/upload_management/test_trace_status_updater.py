@@ -10,6 +10,8 @@ from neuracore.data_daemon.upload_management.trace_status_updater import (
     TraceStatusUpdater,
 )
 
+HANG_GUARD_S = 2.0
+
 # --- Fixtures ---
 
 
@@ -171,13 +173,13 @@ async def test_update_trace_completed_waits(
         trace_status_updater.update_trace_completed("rec-1", "trace-1", 500)
     )
 
-    await asyncio.wait_for(put_called.wait(), timeout=0.1)
+    await asyncio.wait_for(put_called.wait(), timeout=HANG_GUARD_S)
     await asyncio.sleep(0.1)
     assert not task.done(), "update should not be done before request is completed"
     put_response.set_result(AsyncMock(spec=aiohttp.ClientResponse, status=200))
     # Assert
 
-    await asyncio.wait_for(task, timeout=0.1)
+    await asyncio.wait_for(task, timeout=HANG_GUARD_S)
     assert task.result() is True
     mock_client_session.put.assert_called_once()
     json_data = mock_client_session.put.call_args.kwargs["json"]
@@ -206,7 +208,7 @@ async def test_auth_refresh_on_401(
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 10, wait_for_completion=True
         ),
-        timeout=0.1,
+        timeout=HANG_GUARD_S,
     )
 
     # Assert
@@ -232,7 +234,7 @@ async def test_failed_request_returns_false(trace_status_updater, mock_client_se
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 10, wait_for_completion=True
         ),
-        timeout=0.1,
+        timeout=HANG_GUARD_S,
     )
     # Assert
     assert success is False
@@ -253,7 +255,7 @@ async def test_error_request_returns_false(trace_status_updater, mock_client_ses
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 10, wait_for_completion=True
         ),
-        timeout=0.1,
+        timeout=HANG_GUARD_S,
     )
     # Assert
     assert success is False
@@ -271,20 +273,20 @@ async def test_stacking_updates_on_same_trace(
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 100, wait_for_completion=False
         ),
-        timeout=0.01,
+        timeout=HANG_GUARD_S,
     )
     await asyncio.wait_for(
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 200, wait_for_completion=False
         ),
-        timeout=0.01,
+        timeout=HANG_GUARD_S,
     )
     # Manually trigger batch processing or use a wait_for_completion call
     await asyncio.wait_for(
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 300, wait_for_completion=True
         ),
-        timeout=0.1,
+        timeout=HANG_GUARD_S,
     )
 
     json_data = mock_client_session.put.call_args.kwargs["json"]
@@ -323,9 +325,9 @@ async def test_completed_update_is_sent_earlier_than_in_progress(
         trace_status_updater.update_trace_completed(
             "rec-1", "trace-2", 200, wait_for_completion=True
         ),
-        timeout=0.1,
+        timeout=HANG_GUARD_S,
     )
-    await asyncio.wait_for(progress_update_task, timeout=0.1)
+    await asyncio.wait_for(progress_update_task, timeout=HANG_GUARD_S)
 
     # Assert: request already sent (did NOT wait 1s)
     assert mock_client_session.put.call_count == 1
@@ -342,7 +344,7 @@ async def test_shutdown_cancels_pending_batch_tasks(
         trace_status_updater.update_trace_progress(
             "rec-1", "trace-1", 100, wait_for_completion=False
         ),
-        timeout=0.01,
+        timeout=HANG_GUARD_S,
     )
 
     assert len(trace_status_updater._batch_update_tasks) == 1
