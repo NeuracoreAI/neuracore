@@ -46,21 +46,8 @@ jobs:
             macos-deployment-target: '11.0'
 
     steps:
-    # Linux runners ship near-full; the native cargo build + ffmpeg need room.
-    # No-op on macOS (action is Ubuntu-only), so gate it to the Linux leg.
-    - name: Free Disk Space (Ubuntu)
-      if: runner.os == 'Linux'
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        swap-storage: true
-
-    - name: Install libclang for bindgen
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
+    - name: Show disk space
+      run: df -h /
 
     - name: Checkout repository metadata
       uses: actions/checkout@v4
@@ -195,3 +182,7 @@ jobs:
         if ! pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/test_consume_stream.py; then
           echo "::warning::test_consume_stream.py failed, but this is non-blocking."
         fi
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /

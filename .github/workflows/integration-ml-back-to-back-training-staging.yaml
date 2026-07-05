@@ -12,18 +12,11 @@ jobs:
     #   in CommunicationsManager when calling create_producer_socket()
 
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
+      - name: Show disk space
+        run: df -h /
 
       - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
       - name: Checkout test harness
         uses: actions/checkout@v4
@@ -109,3 +102,7 @@ jobs:
             --log-cli-date-format="%H:%M:%S" \
             -v \
             tests/integration/ml/test_back_to_back_training.py
+
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /

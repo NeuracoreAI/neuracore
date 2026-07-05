@@ -51,20 +51,11 @@ jobs:
         include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
 
     steps:
-    # The native cargo build of the Rust daemon needs more room than the
-    # stock runner provides alongside the Python dependencies.
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        swap-storage: true
+    - name: Show disk space
+      run: df -h /
 
     - name: Install system packages
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
     - name: Checkout code
       uses: actions/checkout@v4
@@ -219,3 +210,7 @@ jobs:
           echo "waiting ${RETRY_WAIT_SECONDS}s between attempts."
         } >> "$GITHUB_STEP_SUMMARY"
         exit 1
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /

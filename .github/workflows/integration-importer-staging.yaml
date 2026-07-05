@@ -38,18 +38,8 @@ jobs:
         python-version: ["3.11"]
 
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
-
-      - name: Install libclang for bindgen
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
+      - name: Show disk space
+        run: df -h /
 
       - name: Checkout repository metadata
         uses: actions/checkout@v4
@@ -193,3 +183,7 @@ jobs:
             -v
           )
           pytest "${pytest_args[@]}" tests/integration/importer/
+
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /

@@ -48,20 +48,11 @@ jobs:
         include: ${{ fromJson(needs.discover-algorithms.outputs.matrix) }}
 
     steps:
-    # The native cargo build of the Rust daemon needs more room than the
-    # stock runner provides alongside the Python dependencies.
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        swap-storage: true
+    - name: Show disk space
+      run: df -h /
 
     - name: Install system packages
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
     - name: Restore training metadata from cache
       uses: actions/cache/restore@v4
@@ -166,3 +157,7 @@ jobs:
       run: |
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
         pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate "$TEST_HARNESS_PATH"
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /
