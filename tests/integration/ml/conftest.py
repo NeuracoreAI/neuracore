@@ -6,6 +6,9 @@ from typing import Any
 import pytest
 import yaml
 
+# Resolve neuracore from the installed wheel before repo_root joins sys.path.
+import neuracore  # noqa: F401
+
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 repo_root = str(Path(__file__).resolve().parents[3])
 if repo_root not in sys.path:
