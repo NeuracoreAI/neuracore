@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
-import sys
+import tempfile
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -86,11 +87,20 @@ def find_robot_urdf(robot_repo_dir: Path, robot_keyword: str) -> Path:
     )
 
 
+_robots_repo_dir: Path | None = None
+
+
 def clone_robots_repo(tmp_path: Path) -> Path:
-    robots_repo_dir = tmp_path / "neuracore_robots"
-    run_checked(["git", "clone", ROBOTS_REPO_URL, str(robots_repo_dir)])
-    run_checked(["git", "-C", str(robots_repo_dir), "checkout", ROBOTS_REPO_COMMIT])
-    return robots_repo_dir
+    """Clone the robots repo once per session and reuse it across tests."""
+    global _robots_repo_dir
+    if _robots_repo_dir is None:
+        robots_repo_dir = (
+            Path(tempfile.mkdtemp(prefix="importer_it_")) / "neuracore_robots"
+        )
+        run_checked(["git", "clone", ROBOTS_REPO_URL, str(robots_repo_dir)])
+        run_checked(["git", "-C", str(robots_repo_dir), "checkout", ROBOTS_REPO_COMMIT])
+        _robots_repo_dir = robots_repo_dir
+    return _robots_repo_dir
 
 
 def resolve_source_config_path(dataset_config: str) -> Path:
@@ -284,10 +294,10 @@ def build_importer_command(
     worker_count = (
         max_workers if max_workers is not None else case.get("max_workers", 1)
     )
+    neuracore_cli = shutil.which("neuracore")
+    assert neuracore_cli is not None, "neuracore CLI entry point not on PATH"
     return [
-        sys.executable,
-        "-m",
-        "neuracore.core.cli.app",
+        neuracore_cli,
         "importer",
         "import",
         "--dataset-config",
