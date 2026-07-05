@@ -10,20 +10,11 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-    # The native cargo build of the Rust daemon needs more room than the
-    # stock runner provides alongside the Python dependencies.
-    - name: Free Disk Space (Ubuntu)
-      uses: jlumbroso/free-disk-space@main
-      with:
-        tool-cache: false
-        android: true
-        dotnet: true
-        haskell: true
-        large-packages: true
-        swap-storage: true
+    - name: Show disk space
+      run: df -h /
 
     - name: Install system packages
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
     - name: Checkout test harness
       uses: actions/checkout@v4
@@ -96,3 +87,7 @@ jobs:
         NCD_RUST_DAEMON: "1"
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
       run: pytest -o log_cli=true --log-cli-level=INFO -v tests/integration/ml/test_algorithm_validation.py
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /

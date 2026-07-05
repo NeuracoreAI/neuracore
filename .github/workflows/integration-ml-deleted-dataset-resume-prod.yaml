@@ -10,15 +10,8 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          swap-storage: true
+      - name: Show disk space
+        run: df -h /
 
       - name: Checkout repository metadata
         uses: actions/checkout@v4
@@ -96,3 +89,7 @@ jobs:
             --log-cli-date-format="%H:%M:%S" \
             -v \
             tests/integration/ml/test_deleted_dataset_on_resume_training.py::test_resume_fails_when_training_dataset_has_been_deleted
+
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /
