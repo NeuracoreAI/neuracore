@@ -32,8 +32,8 @@ jobs:
           large-packages: true
           swap-storage: true
 
-      - name: Install libclang for bindgen
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang libclang-dev ffmpeg libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
 
       - name: Checkout test harness
         uses: actions/checkout@v4
@@ -111,8 +111,6 @@ jobs:
           NEURACORE_ENDPOINT_TIMEOUT: 30
           DISPLAY: :0
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
           Xvfb $DISPLAY -screen 0 1280x1024x24 &
           pytest \
             -o log_cli=true \

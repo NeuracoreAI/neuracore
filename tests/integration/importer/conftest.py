@@ -5,6 +5,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+# Resolve neuracore from the installed wheel before repo_root joins sys.path.
+import neuracore  # noqa: F401
+
 ROBOTS_REPO_URL = "https://github.com/NeuracoreAI/neuracore_robots.git"
 ROBOTS_REPO_COMMIT = "c3d17b303296686ceb9a2fcddea06af95a88fe4f"
 
