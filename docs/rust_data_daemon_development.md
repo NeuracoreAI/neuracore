@@ -188,9 +188,9 @@ cargo run -p data-daemon -- stop
 To avoid polluting your real `~/.neuracore`, override the runtime paths (also documented in [data_daemon.md#runtime-path-environment-variables](data_daemon.md#runtime-path-environment-variables)):
 
 ```bash
-export NEURACORE_DAEMON_PID_PATH=/tmp/ndd-dev/daemon.pid
-export NEURACORE_DAEMON_DB_PATH=/tmp/ndd-dev/state.db
-export NEURACORE_DAEMON_RECORDINGS_ROOT=/tmp/ndd-dev/recordings
+export NEURACORE_DAEMON_PID_PATH=~/tmp/ndd-dev/daemon.pid
+export NEURACORE_DAEMON_DB_PATH=~/tmp/ndd-dev/state.db
+export NEURACORE_DAEMON_RECORDINGS_ROOT=~/tmp/ndd-dev/recordings
 cargo run -p data-daemon -- launch
 ```
 
