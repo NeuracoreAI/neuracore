@@ -7,70 +7,8 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
-    # TODO: NDD has socket issue when running in parallel
-    #   in CommunicationsManager when calling create_producer_socket()
-
-    steps:
-      - name: Show disk space
-        run: df -h /
-
-      - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
-
-      - name: Checkout test harness
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref_name }}
-          fetch-depth: 0
-
-      - name: Pull LFS objects
-        run: git lfs pull
-
-      - name: Set up Python 3.11
-        uses: actions/setup-python@v4
-        id: setup-python
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Set up neuracore with Rust data daemon
-        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-daemon-from-source@main
-        with:
-          checkout: "false"
-          path: "."
-          extras: dev,ml,examples
-
-      - name: Resolve test harness
-        run: |
-          echo "Test harness environment: staging"
-          echo "Test harness ref: ${{ github.ref_name }}"
-          echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/ml/test_back_to_back_training.py"
-          python - << 'EOF'
-          import neuracore
-
-          print(f"Installed neuracore version: {neuracore.__version__}")
-          EOF
-
-      - name: Run Integration Test
-        env:
-          NEURACORE_API_URL: https://staging.api.neuracore.com/api
-          NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-          NCD_RUST_DAEMON: "1"
-          NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-          NEURACORE_ENDPOINT_TIMEOUT: 30
-          DISPLAY: :0
-        run: |
-          Xvfb $DISPLAY -screen 0 1280x1024x24 &
-          pytest \
-            -o log_cli=true \
-            --log-cli-level=INFO \
-            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
-            --log-cli-date-format="%H:%M:%S" \
-            -v \
-            tests/integration/ml/test_back_to_back_training.py
-
-      - name: Show disk space after tests
-        if: always()
-        run: df -h /
+    uses: NeuracoreAI/shared-workflows/.github/workflows/integration-ml-test.yaml@main
+    with:
+      environment: staging
+      test-path: tests/integration/ml/test_back_to_back_training.py
+    secrets: inherit
