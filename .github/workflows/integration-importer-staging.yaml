@@ -74,11 +74,6 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install FFmpeg
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg
-
       - name: Verify importer datasets token
         run: |
           if [ -z "${{ secrets.INTEGRATION_TEST_DATA_GITHUB_TOKEN }}" ]; then
@@ -115,46 +110,13 @@ jobs:
           echo "Importer datasets ref: ${IMPORTER_DATASETS_REF}"
           echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo build
-        uses: Swatinem/rust-cache@v2
+      - name: Set up neuracore with Rust data daemon
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-daemon-from-source@main
         with:
-          workspaces: rust
-
-      # Build the standalone daemon binary before `pip install .` so the
-      # [tool.maturin] include bundles it into the built wheel; without it the
-      # SDK silently falls back to the Python daemon.
-      - name: Build Rust data-daemon binary
-        run: bash rust/scripts/build_wheel_artefacts.sh
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --no-cache-dir --upgrade pip
-          pip install --no-cache-dir ".[dev,import]" \
-            --extra-index-url https://download.pytorch.org/whl/cpu
-
-      # cd away from the repo root so `import neuracore` resolves to the
-      # installed wheel, not the source tree the binary was staged into.
-      - name: Verify bundled Rust daemon
-        run: |
-          cd "$RUNNER_TEMP"
-          python - << 'PYEOF'
-          import os
-
-          from neuracore.data_daemon.rust_selection import rust_daemon_binary_path
-
-          # Fail fast if the daemon bundle didn't install -- otherwise the SDK
-          # silently falls back to the Python daemon.
-          binary = rust_daemon_binary_path()
-          assert binary is not None, (
-              "bundled Rust data-daemon binary not found; the neuracore "
-              "install did not bundle it"
-          )
-          assert os.access(binary, os.X_OK), f"daemon binary not executable: {binary}"
-          print(f"Bundled data-daemon binary: {binary}")
-          PYEOF
+          checkout: "false"
+          path: "."
+          extras: dev,import
+          pytorch-cpu: "true"
 
       - name: Resolve test harness
         run: |
