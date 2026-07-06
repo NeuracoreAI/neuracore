@@ -1,0 +1,71 @@
+name: nightly-cache-cleanup
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log deletions without deleting"
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: cache-cleanup
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+    steps:
+      - name: Prune stale caches
+        run: |
+          set -euo pipefail
+          gh cache list --repo "$REPO" --limit 1000 \
+            --json id,key,ref,sizeInBytes,lastAccessedAt > caches.json
+
+          dead_refs=()
+          for ref in $(jq -r '.[].ref' caches.json | sort -u); do
+            if [[ "$ref" == "refs/heads/main" ]]; then
+              continue
+            fi
+            if [[ "$ref" =~ ^refs/pull/([0-9]+)/merge$ ]]; then
+              state=$(gh pr view "${BASH_REMATCH[1]}" --repo "$REPO" --json state -q .state 2>/dev/null || echo GONE)
+              [[ "$state" != "OPEN" ]] && dead_refs+=("$ref")
+            elif [[ "$ref" == refs/heads/* ]]; then
+              gh api "repos/$REPO/branches/${ref#refs/heads/}" >/dev/null 2>&1 || dead_refs+=("$ref")
+            fi
+          done
+
+          : > ids.txt
+          for ref in "${dead_refs[@]:-}"; do
+            [[ -z "$ref" ]] && continue
+            jq -r --arg r "$ref" '.[] | select(.ref == $r) | .id' caches.json >> ids.txt
+          done
+          jq -r '
+            def gkey: if test("\\|") then sub("\\|[^|]*$"; "") else sub("-[^-]*$"; "") end;
+            group_by([.ref, (.key | gkey)])
+            | map(sort_by(.lastAccessedAt) | reverse | .[1:][].id)
+            | .[]
+          ' caches.json >> ids.txt
+
+          freed=0
+          count=0
+          while read -r id; do
+            [[ -z "$id" ]] && continue
+            read -r sz key < <(jq -r --arg i "$id" '.[] | select(.id == ($i | tonumber)) | "\(.sizeInBytes) \(.key)"' caches.json)
+            freed=$((freed + sz))
+            count=$((count + 1))
+            echo "delete $id  $((sz / 1048576))MiB  $key"
+            [[ "$DRY_RUN" == "true" ]] || gh cache delete "$id" --repo "$REPO"
+          done < <(sort -u ids.txt)
+          echo "Reclaimed $count caches, ~$((freed / 1073741824)) GiB"
