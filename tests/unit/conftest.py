@@ -1,3 +1,5 @@
+# ruff: noqa: E402
+import os
 import pathlib
 import re
 import tempfile
@@ -6,6 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests_mock
+
+TEST_API_KEY = "test_api_key"
+MOCKED_ORG_ID = "test-org-id"
+
+os.environ["NEURACORE_API_KEY"] = TEST_API_KEY
+os.environ["NEURACORE_ORG_ID"] = MOCKED_ORG_ID
+os.environ["NEURACORE_API_URL"] = "http://127.0.0.1:9/api"
 
 import neuracore as nc
 from neuracore.api.globals import GlobalSingleton
@@ -22,25 +31,37 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def temp_config_dir(monkeypatch):
-    """Fixture to create a temporary config directory."""
+def test_api_key():
+    """Return the API key used by mocked authentication."""
+    return TEST_API_KEY
+
+
+@pytest.fixture
+def mocked_org_id():
+    """Return the organization id used by mocked API endpoints."""
+    return MOCKED_ORG_ID
+
+
+@pytest.fixture(autouse=True, scope="session")
+def isolated_config_dir(tmp_path_factory):
+    """Redirect the Neuracore config directory to a per-session temp dir."""
+    tmpdir = tmp_path_factory.mktemp("nc_config")
+    with patch.object(config_manager, "CONFIG_DIR", tmpdir):
+        yield tmpdir
+
+
+@pytest.fixture
+def temp_config_dir():
+    """Create a temporary config directory for a single test."""
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = pathlib.Path(tmpdir)
         with patch.object(config_manager, "CONFIG_DIR", tmpdir):
             yield tmpdir
 
 
-MOCKED_ORG_ID = "test-org-id"
-
-
-@pytest.fixture
-def mocked_org_id():
-    return MOCKED_ORG_ID
-
-
 @pytest.fixture
 def mock_auth_requests() -> Generator[requests_mock.Mocker, None, None]:
-    """Fixture to mock authentication and API requests."""
+    """Mock authentication and API requests."""
     get_provide_live_data_enabled_manager().disable()
     get_consume_live_data_enabled_manager().disable()
 
@@ -98,9 +119,35 @@ def mock_auth_requests() -> Generator[requests_mock.Mocker, None, None]:
 
 @pytest.fixture
 def mock_login(mock_auth_requests):
-    """Fixture to mock login."""
-    nc.login("test_api_key")
+    """Log in against the mocked authentication endpoints."""
+    nc.login(TEST_API_KEY)
     yield
+
+
+@pytest.fixture
+def reset_neuracore():
+    """Reset Neuracore global state between tests."""
+    original_auth = nc.core.auth._auth
+    global_state = GlobalSingleton()
+    original_active_robot = global_state._active_robot
+    original_active_dataset_id = global_state._active_dataset_id
+    original_has_validated_version = global_state._has_validated_version
+
+    nc.api._active_robot = None
+    nc.api._active_dataset_id = None
+    nc.api._active_recording_id = None
+    global_state._active_robot = None
+    global_state._active_dataset_id = None
+    global_state._has_validated_version = False
+
+    nc.core.auth._auth = nc.core.auth.Auth()
+
+    yield
+
+    nc.core.auth._auth = original_auth
+    global_state._active_robot = original_active_robot
+    global_state._active_dataset_id = original_active_dataset_id
+    global_state._has_validated_version = original_has_validated_version
 
 
 @pytest.fixture
@@ -160,33 +207,8 @@ def mock_model_mar(tmp_path):
 
 
 @pytest.fixture
-def reset_neuracore():
-    """Reset Neuracore global state between tests."""
-    original_auth = nc.core.auth._auth
-    global_state = GlobalSingleton()
-    original_active_robot = global_state._active_robot
-    original_active_dataset_id = global_state._active_dataset_id
-    original_has_validated_version = global_state._has_validated_version
-
-    nc.api._active_robot = None
-    nc.api._active_dataset_id = None
-    nc.api._active_recording_id = None
-    global_state._active_robot = None
-    global_state._active_dataset_id = None
-    global_state._has_validated_version = False
-
-    nc.core.auth._auth = nc.core.auth.Auth()
-
-    yield
-
-    nc.core.auth._auth = original_auth
-    global_state._active_robot = original_active_robot
-    global_state._active_dataset_id = original_active_dataset_id
-    global_state._has_validated_version = original_has_validated_version
-
-
-@pytest.fixture
 def mock_session():
+    """Return a MagicMock usable as a context-managed session."""
     session = MagicMock()
     session.__enter__.return_value = session
     session.__exit__.return_value = None
