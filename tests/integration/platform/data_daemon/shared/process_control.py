@@ -298,6 +298,18 @@ def stop_daemon(
         _remove_ipc_artefacts()
 
 
+def _parallel_startup_worker(
+    barrier: object, results: dict[int, int], index: int
+) -> None:
+    """Wait on the barrier then record the daemon PID for one parallel caller.
+
+    Module-level so it is picklable under the ``spawn`` start method
+    (the default on macOS).
+    """
+    barrier.wait()
+    results[index] = ensure_daemon_running()
+
+
 def collect_daemon_pids_from_parallel_startup(worker_count: int) -> list[int]:
     """Start ``worker_count`` daemon instances in parallel and collect their PIDs.
 
@@ -308,17 +320,15 @@ def collect_daemon_pids_from_parallel_startup(worker_count: int) -> list[int]:
         A list of the PID returned by each worker.
     """
 
-    def worker(barrier: object, results: dict[int, int], index: int) -> None:
-        barrier.wait()
-        results[index] = ensure_daemon_running()
-
     barrier = multiprocessing.Barrier(worker_count)
     manager = multiprocessing.Manager()
     results = manager.dict()
     processes = []
 
     for index in range(worker_count):
-        process = multiprocessing.Process(target=worker, args=(barrier, results, index))
+        process = multiprocessing.Process(
+            target=_parallel_startup_worker, args=(barrier, results, index)
+        )
         process.start()
         processes.append(process)
 
