@@ -710,18 +710,18 @@ def wait_for_dataset_ready(
 ) -> None:
     """Block until the named dataset contains the expected number of recordings.
 
-    Polls :func:`neuracore.get_dataset` until ``len(dataset) >=
+    Polls :func:`neuracore.get_dataset` until ``len(dataset) ==
     expected_recording_count``. Does not verify DB upload state or cloud
     finalization — those are separate concerns.
 
     Args:
         dataset_name: Name of the dataset to poll.
-        expected_recording_count: Minimum number of recordings to wait for.
+        expected_recording_count: Exact number of recordings to wait for.
         timeout_s: Maximum time to wait in seconds before raising.
         poll_interval_s: Seconds between successive polls.
 
     Raises:
-        TimeoutError: If the dataset does not reach ``expected_recording_count``
+        TimeoutError: If the dataset does not have ``expected_recording_count``
             recordings within ``timeout_s`` seconds.
     """
     wait_start = time.perf_counter()
@@ -732,7 +732,7 @@ def wait_for_dataset_ready(
         try:
             dataset = nc.get_dataset(dataset_name)
             recording_count = len(dataset)
-            if recording_count >= expected_recording_count:
+            if recording_count == expected_recording_count:
                 return
         except Exception as exc:  # noqa: BLE001
             last_error = exc

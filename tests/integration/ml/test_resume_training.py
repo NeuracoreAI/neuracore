@@ -19,22 +19,10 @@
 import logging
 
 import neuracore as nc
-from neuracore.core.auth import get_auth
-from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import Dataset
-from neuracore.core.data.recording import Recording
-from neuracore.core.utils.http_session import thread_local_session
-from tests.integration.ml.shared.constants import (
-    GRIPPER_NAMES,
-    INPUT_DATA_TYPES,
-    JOINT_NAMES,
-    LANGUAGE_LABEL,
-    NC_CAM_NAME,
-    OUTPUT_DATA_TYPES,
-    POSE_SENSOR_NAME,
-)
-from tests.integration.ml.shared.data_collection import (
+from tests.integration.ml.shared.dataset import (
     collect_demo_data,
+    delete_recording_from_dataset,
     wait_for_dataset_recording_count,
 )
 from tests.integration.ml.shared.training import (
@@ -51,7 +39,14 @@ from tests.integration.ml.shared.utils import (
 from tests.integration.ml.test_training_flow import (
     FLOW_COLLECTED_DATASET_PREFIX,
     FLOW_MERGED_DATASET_PREFIX,
+    GRIPPER_NAMES,
     INFERENCE_MODEL_TRAIN_RUN_PREFIX,
+    INPUT_DATA_TYPES,
+    JOINT_NAMES,
+    LANGUAGE_LABEL,
+    NC_CAM_NAME,
+    OUTPUT_DATA_TYPES,
+    POSE_SENSOR_NAME,
 )
 
 logging.basicConfig(
@@ -159,16 +154,6 @@ class TestResumeTraining:
             f"[STEP 2] [PASSED] Resumed Job Completed At Epoch"
             f" {resumed_data.get('epoch')}"
         )
-
-
-def delete_recording_from_dataset(dataset: Dataset, recording: Recording) -> None:
-    """Remove a recording from a dataset via the platform API."""
-    session = thread_local_session()
-    response = session.delete(
-        f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/{recording.id}",
-        headers=get_auth().get_headers(),
-    )
-    response.raise_for_status()
 
 
 class TestResumeTrainingAfterDataDeletion:

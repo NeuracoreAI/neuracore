@@ -1,13 +1,16 @@
 """Integration tests: dataset synchronization success / param-error / missing-data.
 
-Three independent tests drive a freshly collected dataset through
-synchronization to exercise the backend's permanent-failure handling:
+Four independent tests drive a freshly collected dataset through
+synchronization to exercise the backend's permanent-failure handling and
+post-mutation re-sync:
 
 * :func:`test_dataset_synchronization_success` — synchronization **succeeds**,
 * :func:`test_dataset_synchronization_param_error` — **fails on bad parameters**
   (``SynchronizationParameterError``), and
 * :func:`test_dataset_synchronization_missing_data` — **fails on missing data**
-  (``SynchronizationMissingDataError``).
+  (``SynchronizationMissingDataError``), and
+* :func:`test_dataset_synchronization_after_mutation` — **re-synchronizes** after
+  removing and replacing half the recordings.
 
 Each scenario drives the high-level ``Dataset.synchronize()``: success returns a
 ``SynchronizedDataset``, while the two failure classes raise a ``DatasetError``
@@ -48,6 +51,7 @@ from common.base_env import BimanualViperXTask
 from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
+from tests.integration.ml.shared.dataset import delete_recording_from_dataset
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
 )
@@ -69,6 +73,8 @@ logger = logging.getLogger(__name__)
 FREQUENCY = 20  # Hz the demo data is logged at.
 MAX_FRAMES = 30  # Truncate the rollout to keep recordings short.
 RECORDINGS_PER_DATASET = 10  # Recordings collected for each dataset.
+RECORDINGS_TO_REMOVE = 5  # Recordings removed during the mutation scenario.
+RECORDINGS_TO_ADD = 5  # Replacement recordings added after removal.
 NC_CAM_NAME = "rgb_angle"
 MJ_CAM_NAME = "angle"
 LANGUAGE_LABEL = "instruction"
@@ -148,7 +154,7 @@ def _record_one(robot_name: str, instance: int) -> None:
             robot_name=robot_name,
             instance=instance,
         )
-    nc.stop_recording(wait=False, robot_name=robot_name, instance=instance)
+    nc.stop_recording(wait=True, robot_name=robot_name, instance=instance)
 
 
 def _collect_dataset(robot_name: str, dataset_name: str, instance: int) -> Dataset:
@@ -181,6 +187,42 @@ def _collect_dataset(robot_name: str, dataset_name: str, instance: int) -> Datas
         poll_interval_s=PROGRESS_POLL_SECONDS,
     )
     return dataset
+
+
+def _add_recordings(
+    robot_name: str,
+    dataset_name: str,
+    instance: int,
+    count: int,
+    known_recording_ids: set[str],
+) -> set[str]:
+    """Append ``count`` scripted recordings to an existing dataset."""
+    new_ids: set[str] = set()
+    expected_count = len(known_recording_ids)
+
+    for _ in range(count):
+        _record_one(robot_name=robot_name, instance=instance)
+        expected_count += 1
+        wait_for_dataset_ready(
+            dataset_name,
+            expected_recording_count=expected_count,
+            timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
+            poll_interval_s=PROGRESS_POLL_SECONDS,
+        )
+        current_ids = {str(recording.id) for recording in nc.get_dataset(dataset_name)}
+        added = current_ids - known_recording_ids - new_ids
+        assert (
+            len(added) == 1
+        ), f"Expected exactly one new recording, got {sorted(added)}"
+        new_ids.add(added.pop())
+
+    wait_for_recordings_finalized(
+        dataset_name,
+        recording_ids=new_ids,
+        timeout_s=RECORDING_FINALIZE_TIMEOUT_SECONDS,
+        poll_interval_s=PROGRESS_POLL_SECONDS,
+    )
+    return new_ids
 
 
 def _assert_failure_with_reason(
@@ -278,3 +320,123 @@ def test_dataset_synchronization_missing_data() -> None:
                 cross_embodiment_union={"": {MISSING_DATA_TYPE: [MISSING_SENSOR_NAME]}},
             )
         _assert_failure_with_reason(excinfo, "No sensors found for data type")
+
+
+def test_dataset_synchronization_after_mutation() -> None:
+    """Synchronize, remove half the recordings, add replacements, re-synchronize."""
+    nc.login()
+    run_id = uuid.uuid4().hex[:8]
+    robot_name = f"sync_it_robot_{run_id}"
+    dataset_name = _unique_name("sync_it_mutation")
+    dataset: Dataset | None = None
+    sync_kwargs = {
+        "frequency": 10,
+        "allow_duplicates": True,
+        "max_delay_s": 1.0,
+        "cross_embodiment_union": None,
+    }
+    try:
+        with online_daemon_running():
+            assert_exactly_one_daemon_pid()
+
+            logger.info(
+                "[STEP 1] Collecting %d recordings into %r",
+                RECORDINGS_PER_DATASET,
+                dataset_name,
+            )
+            dataset = _collect_dataset(
+                robot_name=robot_name,
+                dataset_name=dataset_name,
+                instance=0,
+            )
+            logger.info(
+                "[STEP 1] [PASSED] Collected %d recordings into %r",
+                len(dataset),
+                dataset_name,
+            )
+
+            logger.info("[STEP 2] Synchronizing dataset (initial)")
+            synced_initial = dataset.synchronize(**sync_kwargs)
+            assert len(synced_initial) == RECORDINGS_PER_DATASET
+            logger.info(
+                "[STEP 2] [PASSED] Initial synchronization complete: "
+                "%d recordings synced",
+                len(synced_initial),
+            )
+
+            logger.info(
+                "[STEP 3] Removing %d recordings from %r",
+                RECORDINGS_TO_REMOVE,
+                dataset_name,
+            )
+            recordings_to_delete = [
+                dataset[index] for index in range(RECORDINGS_TO_REMOVE)
+            ]
+            deleted_ids = {str(recording.id) for recording in recordings_to_delete}
+            for recording in recordings_to_delete:
+                logger.info("[STEP 3] Deleting recording %s", recording.id)
+                delete_recording_from_dataset(dataset=dataset, recording=recording)
+
+            remaining = RECORDINGS_PER_DATASET - RECORDINGS_TO_REMOVE
+            wait_for_dataset_ready(
+                dataset_name,
+                expected_recording_count=remaining,
+                timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
+                poll_interval_s=PROGRESS_POLL_SECONDS,
+            )
+            dataset = nc.get_dataset(dataset_name)
+            surviving_ids = {str(recording.id) for recording in dataset}
+            assert deleted_ids.isdisjoint(surviving_ids)
+            assert len(surviving_ids) == remaining
+            logger.info(
+                "[STEP 3] [PASSED] Removed %d recordings; %d remaining",
+                RECORDINGS_TO_REMOVE,
+                len(surviving_ids),
+            )
+
+            logger.info(
+                "[STEP 4] Adding %d recordings to %r",
+                RECORDINGS_TO_ADD,
+                dataset_name,
+            )
+            new_ids = _add_recordings(
+                robot_name=robot_name,
+                dataset_name=dataset_name,
+                instance=0,
+                count=RECORDINGS_TO_ADD,
+                known_recording_ids=surviving_ids,
+            )
+            active_ids = surviving_ids | new_ids
+            wait_for_dataset_ready(
+                dataset_name,
+                expected_recording_count=RECORDINGS_PER_DATASET,
+                timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
+                poll_interval_s=PROGRESS_POLL_SECONDS,
+            )
+            dataset = nc.get_dataset(dataset_name)
+            assert len(active_ids) == RECORDINGS_PER_DATASET
+            assert deleted_ids.isdisjoint(active_ids)
+            assert new_ids <= active_ids
+            logger.info(
+                "[STEP 4] [PASSED] Added %d recordings; dataset has %d total",
+                len(new_ids),
+                len(dataset),
+            )
+
+            logger.info("[STEP 5] Re-synchronizing dataset after mutation")
+            synced_after = dataset.synchronize(**sync_kwargs)
+            assert len(synced_after) == RECORDINGS_PER_DATASET
+            assert {
+                str(recording.id) for recording in synced_after.dataset
+            } == active_ids
+            logger.info(
+                "[STEP 5] [PASSED] Re-synchronization complete: "
+                "%d recordings synced",
+                len(synced_after),
+            )
+    finally:
+        if dataset is not None:
+            try:
+                dataset.delete()
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to clean up dataset %s", dataset.id)
