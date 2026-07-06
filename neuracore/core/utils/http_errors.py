@@ -21,4 +21,4 @@ def extract_error_detail(response: requests.Response) -> str | None:
     if not isinstance(detail_payload, dict):
         return str(detail_payload)
 
-    return detail_payload.get("exception") or detail_payload.get("error")
+    return detail_payload.get("error")

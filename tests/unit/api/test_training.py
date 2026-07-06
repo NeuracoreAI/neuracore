@@ -684,6 +684,30 @@ def test_resume_training_run_server_error(
         nc.resume_training_run("train_job_123", additional_epochs=1)
 
 
+def test_resume_training_run_propagates_error_detail(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """The backend error detail appears in the raised ValueError message."""
+    nc.login("test_api_key")
+
+    backend_error = (
+        "Dataset 'my_dataset' with id dataset123 has been deleted"
+        " or no longer exists."
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs/train_job_123/resume/1",
+        status_code=404,
+        json={"detail": {"error": backend_error, "status": 404}},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        nc.resume_training_run("train_job_123", additional_epochs=1)
+
+    error_message = str(exc_info.value)
+    assert "Error resuming job train_job_123" in error_message
+    assert backend_error in error_message
+
+
 # ---------------------------------------------------------------------------
 # get_training_job_logs
 # ---------------------------------------------------------------------------
