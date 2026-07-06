@@ -49,7 +49,7 @@ jobs:
             interpreters: "3.10 3.11 3.12 3.13 3.14"
           # Apple Silicon only (no Intel); runs natively so the smoke test can
           # launch the arm64 binary.
-          - os: macos-15
+          - os: macos-26
             target: aarch64-apple-darwin
             interpreters: "python3.10 python3.11 python3.12 python3.13 python3.14"
             macos-deployment-target: "11.0"
@@ -118,7 +118,7 @@ jobs:
   # Install and launch the wheels on a DIFFERENT machine than the one that
   # built them — no checkout, no Rust toolchain, just the downloaded artefact.
   # This is what proves the wheels work outside the build environment: the
-  # macOS leg runs on a different OS image (macos-14) than the macos-15
+  # macOS leg runs on a different, older OS image (macos-15) than the macos-26
   # builder, so a signature that only validated on the build machine, a
   # deployment-target mismatch, or a glibc-floor problem fails here instead of
   # at a user's install.
@@ -132,7 +132,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
 
     steps:
