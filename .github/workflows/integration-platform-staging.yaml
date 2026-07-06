@@ -130,7 +130,7 @@ jobs:
         python -m pip install --no-cache-dir --upgrade pip
         # Install the locally-built merged wheel with test extras so the suite
         # runs against this leg's exact bundle, never a PyPI release.
-        pip install --no-cache-dir "$(ls dist/neuracore-*.whl)[dev,ml,examples]"
+        pip install --no-cache-dir "$(ls dist/neuracore-*.whl)[dev]"
 
     - name: Resolve test harness
       run: |
