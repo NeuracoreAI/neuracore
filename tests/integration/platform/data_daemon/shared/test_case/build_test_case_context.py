@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import random
 import threading
 import time
@@ -60,6 +61,15 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+
+# Optional suffix appended to generated robot names (e.g. the wheel name in
+# CI) so robots on the platform are traceable to the bundle that made them.
+ROBOT_NAME_SUFFIX_ENV = "TEST_ROBOT_SUFFIX"
+
+
+def _robot_name_suffix() -> str:
+    suffix = os.environ.get(ROBOT_NAME_SUFFIX_ENV, "").strip()
+    return f"_{suffix}" if suffix else ""
 
 
 def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
@@ -307,7 +317,7 @@ def build_context_specs(
                     timestamp_mode=case.timestamp_mode,
                 ),
                 context_index=context_index,
-                robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
+                robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}{_robot_name_suffix()}",
                 dataset_name=shared_dataset_name,
                 recordings_per_context=recordings_for_context,
                 expected_joint_frames=case.joint_fps * context_duration_sec,

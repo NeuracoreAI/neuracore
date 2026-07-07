@@ -131,7 +131,11 @@ jobs:
         python -m pip install --no-cache-dir --upgrade pip
         # Install the locally-built merged wheel with test extras so the suite
         # runs against this leg's exact bundle, never a PyPI release.
-        pip install --no-cache-dir "$(ls dist/neuracore-*.whl)[dev]"
+        wheel="$(ls dist/neuracore-*.whl)"
+        pip install --no-cache-dir "${wheel}[dev]"
+        # Suffix robots created by the daemon suite with this leg's wheel name
+        # so staging robots are traceable and avoid cross talk.
+        echo "TEST_ROBOT_SUFFIX=$(basename "$wheel" .whl)" >> "$GITHUB_ENV"
 
     - name: Resolve test harness
       run: |
