@@ -6,14 +6,29 @@ module-level ``requests.*`` helpers. The returned session is cached per OS
 thread and per process: forks get a fresh session (since urllib3 connection
 pools are not safe to share across forks), and threads do not share a session
 with one another.
+
+For the aiohttp stack, ``retry_stale_connection`` provides the equivalent
+policy as a client middleware: pass it via
+``ClientSession(middlewares=(retry_stale_connection,))``.
 """
 
+import asyncio
+import logging
 import os
 import threading
 
 import requests
+from aiohttp import (
+    ClientHandlerType,
+    ClientOSError,
+    ClientRequest,
+    ClientResponse,
+    ServerDisconnectedError,
+)
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
+
+logger = logging.getLogger(__name__)
 
 _RETRY = Retry(
     total=3,  # cap total retry attempts across all categories
@@ -45,3 +60,40 @@ def thread_local_session() -> requests.Session:
         _thread_local.pid = pid
 
     return session
+
+
+_STALE_CONNECTION_ATTEMPTS = 3
+
+
+async def retry_connection_failures(
+    request: ClientRequest, handler: ClientHandlerType
+) -> ClientResponse:
+    """Retry aiohttp requests that fail on a stale pooled keep-alive connection.
+
+    Args:
+        request: The outgoing client request.
+        handler: The next handler in the middleware chain.
+
+    Returns:
+        ClientResponse: The response from the first successful attempt.
+
+    Raises:
+        ServerDisconnectedError: If all attempts hit a closed connection.
+        ClientOSError: If all attempts fail at the socket level.
+    """
+    for attempt in range(_STALE_CONNECTION_ATTEMPTS):
+        try:
+            return await handler(request)
+        except (ServerDisconnectedError, ClientOSError) as e:
+            if attempt == _STALE_CONNECTION_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "Stale connection on %s %s (attempt %d/%d): %s",
+                request.method,
+                request.url,
+                attempt + 1,
+                _STALE_CONNECTION_ATTEMPTS,
+                e,
+            )
+            await asyncio.sleep(0.1 * 2**attempt)
+    raise AssertionError("unreachable")
