@@ -23,6 +23,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 // Only the Linux `sync_file_range` writeback hint needs the raw fd; gated to
 // avoid an unused-import warning on platforms without that syscall (e.g. macOS).
+use std::cell::RefCell;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
@@ -194,9 +195,6 @@ pub struct NutWriter {
     /// File offset up to which an async writeback hint has been issued. The
     /// next hint covers `[last_writeback_hint, bytes_written)`.
     last_writeback_hint: u64,
-    /// Reused PNG-encode scratch space (buffers + compressor); see
-    /// [`PngScratch`].
-    png: PngScratch,
 }
 
 /// Emit a new syncpoint when the bytes-since-last-syncpoint would exceed
@@ -286,7 +284,6 @@ impl NutWriter {
             logical_bytes: 0,
             last_syncpoint_offset: 0,
             last_writeback_hint: 0,
-            png: PngScratch::new(),
         };
         writer.write_headers()?;
         Ok(writer)
@@ -316,6 +313,12 @@ impl NutWriter {
     /// Append one frame at the supplied PTS (frame index in time-base ticks).
     /// The frame is supplied as packed RGB24 — exactly `width * height * 3`
     /// bytes — and stored as a per-frame lossless PNG.
+    ///
+    /// Compresses on the calling thread. The hot producer path instead
+    /// compresses on a worker pool and calls
+    /// [`write_frame_precompressed`](Self::write_frame_precompressed); this
+    /// wrapper is retained for the round-trip tests, which drive raw RGB
+    /// straight through.
     pub fn write_frame(&mut self, pts: u64, rgb_bytes: &[u8]) -> Result<(), NutError> {
         if rgb_bytes.len() != self.expected_frame_bytes {
             return Err(NutError::FrameSize {
@@ -323,14 +326,17 @@ impl NutWriter {
                 actual: rgb_bytes.len(),
             });
         }
+        let png = encode_png_frame(self.config.width, self.config.height, rgb_bytes);
+        self.write_frame_precompressed(pts, &png)
+    }
 
-        // The caller always supplies packed RGB24; we compress it to a per-frame
-        // PNG here, into the writer's reused scratch. `payload_len` is the length
-        // of the assembled PNG now sitting in `self.png.output` — the bytes that
-        // land in the NUT frame packet below.
-        let payload_len = self
-            .png
-            .encode(self.config.width, self.config.height, rgb_bytes);
+    /// Append one already-PNG-compressed frame (as produced by
+    /// [`encode_png_frame`]) at the supplied PTS. The writer thread's half of
+    /// the split: it only muxes the payload into the NUT chunk — the expensive
+    /// compression has already run on a pool worker — so the single writer keeps
+    /// up with multi-camera capture.
+    pub fn write_frame_precompressed(&mut self, pts: u64, png: &[u8]) -> Result<(), NutError> {
+        let payload_len = png.len();
 
         // Emit a periodic syncpoint before appending the frame so the gap
         // between consecutive syncpoints stays within the demuxer's reach.
@@ -385,7 +391,7 @@ impl NutWriter {
         header.extend_from_slice(&checksum.to_be_bytes());
 
         self.write_all(&header)?;
-        self.write_png_payload(payload_len)?;
+        self.write_all(png)?;
 
         // Track decoded-equivalent volume so chunk rolls track frame count, not
         // the (much smaller, content-dependent) compressed PNG size.
@@ -515,21 +521,6 @@ impl NutWriter {
                 source,
             })?;
         self.bytes_written = self.bytes_written.saturating_add(bytes.len() as u64);
-        Ok(())
-    }
-
-    /// Write the first `len` bytes of the reused `png.output` (the assembled PNG
-    /// payload). A dedicated method rather than `write_all(&self.png.output)` so
-    /// the borrow stays a disjoint `&mut self.writer` + `&self.png.output` rather
-    /// than the whole-`self` borrow a method argument would force.
-    fn write_png_payload(&mut self, len: usize) -> Result<(), NutError> {
-        self.writer
-            .write_all(&self.png.output[..len])
-            .map_err(|source| NutError::Write {
-                path: self.path.clone(),
-                source,
-            })?;
-        self.bytes_written = self.bytes_written.saturating_add(len as u64);
         Ok(())
     }
 
@@ -885,6 +876,27 @@ impl PngScratch {
         write_png_chunk(&mut self.output, b"IEND", &[]);
         self.output.len()
     }
+}
+
+thread_local! {
+    /// Per-thread PNG-encode scratch. Reused across calls on the same thread so
+    /// the compression workers don't reallocate their filter/compressor buffers
+    /// each frame. Thread-local (not a shared pool) because [`encode_png_frame`]
+    /// runs on multiple compression worker threads concurrently.
+    static ENCODE_SCRATCH: RefCell<PngScratch> = RefCell::new(PngScratch::new());
+}
+
+/// Compress one packed RGB24 frame to a standalone per-frame PNG, returning the
+/// owned bitstream. This is the CPU-heavy half of the old inline `write_frame`;
+/// running it on a pool worker rather than the single writer thread is what lets
+/// the producer keep up with multi-camera high-detail capture. The result is
+/// handed to [`NutWriter::write_frame_precompressed`], which only muxes it.
+pub fn encode_png_frame(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    ENCODE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let len = scratch.encode(width, height, rgb);
+        scratch.output[..len].to_vec()
+    })
 }
 
 /// Compress `input` as a zlib stream into `output`, reusing both `compressor`

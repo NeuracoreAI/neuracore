@@ -100,9 +100,29 @@ const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 ///
 /// Floor at 2 so single-core hosts still get a useful permit pool.
 pub(crate) fn default_ffmpeg_concurrency() -> usize {
+    (encode_host_cores() / ENCODE_THREADS_PER_OUTPUT).max(2)
+}
+
+/// Host parallelism (logical cores), floored at 1. Cached-cheap syscall; read
+/// once when the actor context is built.
+pub(crate) fn encode_host_cores() -> usize {
     std::thread::available_parallelism()
-        .map(|n| (n.get() / ENCODE_THREADS_PER_OUTPUT).max(2))
-        .unwrap_or(2)
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+/// libx264 threads for each output of an encode, given the host core count and
+/// how many transcodes are running right now. The permit pool caps concurrency
+/// at `cores / ENCODE_THREADS_PER_OUTPUT`; when fewer than that run (a few-camera
+/// load on a many-core host) the rest of the box is idle. `cores / active` keeps
+/// total encoder threads ≈ `2 × cores` at any concurrency — it collapses to
+/// [`ENCODE_THREADS_PER_OUTPUT`] at full load (the original fixed cap) and fills
+/// the idle cores otherwise.
+pub(crate) fn adaptive_encode_threads(cores: usize, active_encodes: usize) -> usize {
+    let cores = cores.max(1);
+    let active = active_encodes.max(1);
+    let ceiling = cores.max(ENCODE_THREADS_PER_OUTPUT);
+    (cores / active).clamp(ENCODE_THREADS_PER_OUTPUT, ceiling)
 }
 
 /// Shared context passed to every per-trace actor.
@@ -126,6 +146,14 @@ pub struct TraceActorContext {
     /// integration matrix's parallel encode storms don't fork-bomb the
     /// transcoder.
     pub ffmpeg_permits: Arc<Semaphore>,
+    /// Total permits in [`ffmpeg_permits`](Self::ffmpeg_permits), captured at
+    /// construction (before any are held). Subtracting the live
+    /// `available_permits()` yields how many transcodes are running right now,
+    /// which sizes each encode's thread pool (see [`adaptive_encode_threads`]).
+    pub ffmpeg_permit_total: usize,
+    /// Host parallelism, paired with the live permit count to scale each
+    /// encode's libx264 thread pool to the idle cores.
+    pub encode_cores: usize,
     /// Optional daemon event bus. When present, the trace actor publishes a
     /// [`crate::state::DaemonEvent::TraceWritten`] on finalise so the
     /// registration coordinator can wake immediately. Optional so unit tests
@@ -174,11 +202,15 @@ impl TraceActorContext {
         trace_writer: TraceWriteHandle,
         json_writer: JsonWriteHandle,
     ) -> Self {
+        // Captured before any permit is acquired, so this is the pool's total.
+        let ffmpeg_permit_total = ffmpeg_permits.available_permits();
         Self {
             recordings_root: Arc::new(recordings_root.into()),
             storage_budget,
             video_encoder,
             ffmpeg_permits,
+            ffmpeg_permit_total,
+            encode_cores: encode_host_cores(),
             event_bus: None,
             trace_writer,
             json_writer,
@@ -602,6 +634,8 @@ impl ActorState {
         // inbox immediately so a slow ffmpeg invocation cannot back-pressure
         // unrelated joint / scalar publishers sharing the commands service.
         let permits = context.ffmpeg_permits.clone();
+        let permit_total = context.ffmpeg_permit_total;
+        let encode_cores = context.encode_cores;
         let encoder = context.video_encoder.clone();
         let trace_id = self.identity.trace_id.clone();
         let chunks_dir_for_task = chunks_dir.clone();
@@ -611,9 +645,17 @@ impl ActorState {
             lossless_out: lossless_segment.clone(),
         };
         pending_encodes.spawn(async move {
-            // Acquire a permit, then encode. The permit lives only inside
-            // the task — dropping it releases the slot, even on panic.
-            let permit = match permits.acquire_owned().await {
+            // Acquire a permit before relinking + encoding. Gating the relink
+            // (which frees the producer's on-disk spool) on a permit is
+            // deliberate: it makes the fixed spool cap the backstop that bounds
+            // the un-encoded backlog. When the encoder can't keep up, chunks stay
+            // in the spool until a permit frees, the spool fills, and the
+            // *producer* back-pressures — rather than the daemon-side chunks dir
+            // growing without bound. Adaptive threading (below) keeps the encoder
+            // fast enough that this backstop rarely engages. Clone the `Arc` for
+            // the (consuming) acquire so `permits` stays live for the
+            // `available_permits()` read below.
+            let permit = match permits.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => {
                     return ChunkEncodeJobResult {
@@ -659,7 +701,14 @@ impl ActorState {
                     };
                 }
             }
-            let outcome = encoder.encode_chunk(&request).await;
+            // Size this encode's thread pool to the cores the rest of the fleet
+            // isn't using: with the permit held, `available_permits()` is the
+            // idle capacity, so `total - available` is how many encodes (incl.
+            // this one) are running now. Read after acquiring so we count
+            // ourselves.
+            let active_encodes = permit_total.saturating_sub(permits.available_permits());
+            let encode_threads = adaptive_encode_threads(encode_cores, active_encodes);
+            let outcome = encoder.encode_chunk(&request, encode_threads).await;
             drop(permit);
             match outcome {
                 Ok(encode) => {
@@ -1111,6 +1160,36 @@ mod tests {
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = crate::pipeline::json_writer::scalar_fallback_entry(123, &[0xFF, 0xFE]);
         assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
+    }
+
+    #[test]
+    fn adaptive_threads_fill_idle_cores_and_collapse_at_full_load() {
+        let cores = 14;
+        // Pool full (cores / 2 encodes running): each collapses to the floor,
+        // so total encoder threads stay ~= 2 * cores — the original behaviour.
+        let full = default_ffmpeg_concurrency_for(cores);
+        assert_eq!(
+            adaptive_encode_threads(cores, full),
+            ENCODE_THREADS_PER_OUTPUT
+        );
+        // One encode on an otherwise-idle host takes the whole box; two split it
+        // — total encoder threads still ~= 2 * cores at any concurrency.
+        assert_eq!(adaptive_encode_threads(cores, 1), cores);
+        assert_eq!(adaptive_encode_threads(cores, 2), cores / 2);
+        // Never below the floor even if the count is somehow over-subscribed,
+        // and degenerate inputs don't panic or divide by zero.
+        assert_eq!(
+            adaptive_encode_threads(cores, cores * 4),
+            ENCODE_THREADS_PER_OUTPUT
+        );
+        assert_eq!(adaptive_encode_threads(0, 0), ENCODE_THREADS_PER_OUTPUT);
+    }
+
+    /// Mirror of [`default_ffmpeg_concurrency`] for an explicit core count, so
+    /// the adaptive-threads test can assert the full-load boundary without
+    /// depending on the host's real parallelism.
+    fn default_ffmpeg_concurrency_for(cores: usize) -> usize {
+        (cores / ENCODE_THREADS_PER_OUTPUT).max(2)
     }
 
     #[tokio::test]
