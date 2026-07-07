@@ -9,37 +9,8 @@ on:
       - synchronize
       - reopened
       - labeled
-      - unlabeled     
+      - unlabeled
 
 jobs:
   check-version-label:
-    runs-on: ubuntu-24.04
-    
-    steps:
-    - name: Check for version label
-      uses: actions/github-script@v7
-      with:
-        script: |
-          const pr = context.payload.pull_request;
-          const labels = pr.labels.map(label => label.name);
-          
-          console.log('PR Labels:', labels);
-          
-          // Define valid version labels
-          const versionLabels = [
-            'version:major',
-            'version:minor', 
-            'version:patch',
-            'version:none'
-          ];
-
-          // Check for only one and return success or fail
-          const versionLabelCount = labels.filter(label => versionLabels.includes(label)).length;
-
-          if (versionLabelCount === 0) {
-            core.setFailed('PR is missing a version label. Please add one of: version:major, version:minor, version:patch, or version:none');
-          } else if (versionLabelCount > 1) {
-            core.setFailed('PR has multiple version labels. Please keep only one: version:major, version:minor, version:patch, or version:none');
-          } else {
-            console.log('✅ PR has a valid version label:', labels.filter(l => versionLabels.includes(l)));
-          }
+    uses: NeuracoreAI/shared-workflows/.github/workflows/pr-check-label.yaml@main
