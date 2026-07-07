@@ -298,6 +298,8 @@ Multihead
 multinode
 multirun
 muxer
+muxes
+muxing
 nans
 nbconvert
 nbformat

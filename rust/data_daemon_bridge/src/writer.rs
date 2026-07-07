@@ -517,8 +517,12 @@ fn writer_queue_global() -> Arc<FrameQueue> {
     let worker_queue = queue.clone();
     match std::thread::Builder::new()
         .name("nc-video-writer".to_string())
-        .spawn(move || writer_loop(&worker_queue))
-    {
+        .spawn(move || {
+            // The compression pool lives on (and is owned by) the writer thread,
+            // so a forked child rebuilds both together through the heal path.
+            let pool = CompressPool::new(compress_pool_size());
+            writer_loop(&worker_queue, &pool);
+        }) {
         Ok(_handle) => {
             reg.owner_pid = pid;
             reg.queue = Some(queue.clone());
@@ -561,9 +565,211 @@ extern "C" fn clear_queue_cache() {
     });
 }
 
+/// Cap on frames whose compression may be in flight on the pool ahead of the
+/// writer's in-order muxing. Bounds the pipeline's extra memory and, because the
+/// writer stops draining the queue once this many are outstanding, preserves the
+/// queue's admission backpressure (the writer never outruns the pool).
+const MAX_FRAMES_IN_FLIGHT: usize = 8;
+
+/// PNG-compression worker threads feeding the writer. Compression (~24 ms for a
+/// detailed 720p frame) — not the NUT muxing — is the pipeline's dominant cost,
+/// so a single thread can't keep up with two 30 fps cameras; a small pool can,
+/// while the writer thread still owns all chunk state and ordering. Capped so it
+/// doesn't oversubscribe a small host against the daemon's transcode fleet.
+fn compress_pool_size() -> usize {
+    std::thread::available_parallelism()
+        .map(|cores| (cores.get() / 2).clamp(2, 4))
+        .unwrap_or(2)
+}
+
+/// One-shot slot a pool worker fills with a frame's compressed PNG and the
+/// writer thread collects, in submission order. Hand-rolled (Mutex + Condvar)
+/// rather than a channel so the writer can both block on the next frame and poll
+/// whether it is ready yet.
+struct FrameResult {
+    png: Mutex<Option<Vec<u8>>>,
+    ready: Condvar,
+}
+
+impl FrameResult {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            png: Mutex::new(None),
+            ready: Condvar::new(),
+        })
+    }
+
+    /// Store the compressed frame and wake a writer blocked in [`wait`](Self::wait).
+    fn set(&self, png: Vec<u8>) {
+        *self.png.lock().unwrap_or_else(|p| p.into_inner()) = Some(png);
+        self.ready.notify_one();
+    }
+
+    /// Take the compressed frame if the worker has finished, without blocking.
+    fn try_take(&self) -> Option<Vec<u8>> {
+        self.png.lock().unwrap_or_else(|p| p.into_inner()).take()
+    }
+
+    /// Block until the worker has compressed the frame, then take it.
+    fn wait(&self) -> Vec<u8> {
+        let mut guard = self.png.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            if let Some(png) = guard.take() {
+                return png;
+            }
+            guard = self.ready.wait(guard).unwrap_or_else(|p| p.into_inner());
+        }
+    }
+}
+
+/// One frame submitted to the compression pool.
+struct CompressJob {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+    result: Arc<FrameResult>,
+}
+
+/// Fixed pool of PNG-compression worker threads shared by the writer loop.
+struct CompressPool {
+    work: Arc<(Mutex<VecDeque<CompressJob>>, Condvar)>,
+}
+
+impl CompressPool {
+    /// Spawn `workers` compression threads. They live for the process (like the
+    /// writer thread); a forked child re-creates the pool via the writer heal
+    /// path, so the parent's detached workers are never inherited.
+    fn new(workers: usize) -> Self {
+        let work = Arc::new((Mutex::new(VecDeque::new()), Condvar::new()));
+        for index in 0..workers {
+            let work = work.clone();
+            if let Err(error) = std::thread::Builder::new()
+                .name(format!("nc-png-compress-{index}"))
+                .spawn(move || compress_worker(&work))
+            {
+                tracing::warn!(%error, "failed to spawn PNG compression worker");
+            }
+        }
+        Self { work }
+    }
+
+    /// Queue a frame for compression and wake one idle worker.
+    fn submit(&self, job: CompressJob) {
+        let (lock, cond) = &*self.work;
+        lock.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push_back(job);
+        cond.notify_one();
+    }
+}
+
+/// Compression worker: pull frames FIFO and compress each to PNG, publishing the
+/// result into its one-shot slot. Compression is stateless per frame, so any
+/// worker can take any frame — the writer restores per-stream order on collect.
+fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
+    let (lock, cond) = work;
+    loop {
+        let job = {
+            let mut queue = lock.lock().unwrap_or_else(|p| p.into_inner());
+            loop {
+                if let Some(job) = queue.pop_front() {
+                    break job;
+                }
+                queue = cond.wait(queue).unwrap_or_else(|p| p.into_inner());
+            }
+        };
+        let png = crate::nut_writer::encode_png_frame(job.width, job.height, &job.rgb);
+        job.result.set(png);
+    }
+}
+
+/// A frame whose compression is in flight, awaiting in-order muxing by the
+/// writer thread. Carries the routing metadata the write phase needs (its raw
+/// pixels already moved into the pool job) plus the slot the pool fills.
+struct PendingFrame {
+    job: FrameJob,
+    result: Arc<FrameResult>,
+}
+
+/// Validate one frame and submit it to the compression pool, recording it in the
+/// in-order pipeline. A frame whose byte length disagrees with its geometry is
+/// dropped here (the pre-split inline encode rejected it the same way) rather
+/// than handed to a worker.
+fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut job: FrameJob) {
+    let expected = (job.width as usize)
+        .checked_mul(job.height as usize)
+        .and_then(|pixels| pixels.checked_mul(3));
+    if expected != Some(job.data.len()) {
+        tracing::warn!(
+            sensor_name = job.sensor_name,
+            ?expected,
+            actual = job.data.len(),
+            "video frame size disagrees with geometry; dropping frame"
+        );
+        return;
+    }
+    let result = FrameResult::new();
+    // Move the raw pixels into the compression job; the pending frame keeps only
+    // the routing metadata (its `data` is now empty and never read again).
+    let rgb = std::mem::take(&mut job.data);
+    pool.submit(CompressJob {
+        width: job.width,
+        height: job.height,
+        rgb,
+        result: result.clone(),
+    });
+    in_flight.push_back(PendingFrame { job, result });
+}
+
+/// Mux one already-compressed pending frame into its chunk (writer thread).
+fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
+    if let Err(error) = record_video_frame(
+        &pending.job.robot_id,
+        pending.job.robot_instance,
+        &pending.job.data_type,
+        &pending.job.sensor_name,
+        pending.job.width,
+        pending.job.height,
+        &png,
+        pending.job.timestamp_ns,
+        pending.job.timestamp_s,
+    ) {
+        tracing::warn!(%error, sensor_name = pending.job.sensor_name, "failed to spool video frame");
+    }
+}
+
+/// Mux every frame whose compression has already finished, front to back,
+/// stopping at the first still-compressing frame so per-stream order is kept.
+fn drain_ready(in_flight: &mut VecDeque<PendingFrame>) {
+    while let Some(front) = in_flight.front() {
+        match front.result.try_take() {
+            Some(png) => {
+                let pending = in_flight.pop_front().expect("front just observed");
+                write_pending_frame(pending, png);
+            }
+            None => break,
+        }
+    }
+}
+
+/// Block until the front frame is compressed, then mux it — used to make room
+/// when the pipeline is full and to drain it fully at a stop/cancel barrier.
+fn write_front(in_flight: &mut VecDeque<PendingFrame>) {
+    if let Some(pending) = in_flight.pop_front() {
+        let png = pending.result.wait();
+        write_pending_frame(pending, png);
+    }
+}
+
 /// The writer thread's run loop. Sole accessor of the in-progress chunk state
 /// and sole publisher of video chunk + stop/cancel envelopes for this process.
-fn writer_loop(queue: &FrameQueue) {
+///
+/// Frame compression is offloaded to `pool`; this thread submits each frame then
+/// muxes the results back into their chunks in strict submission order (which is
+/// per-stream FIFO). It only ever muxes — the expensive PNG encode runs on the
+/// pool — so it keeps up with multi-camera capture the single-thread inline
+/// encode could not.
+fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
     // With the spool cap disabled there is nothing to scan, so block on each
     // message indefinitely rather than waking on a timer.
     let bounded = queue.spool_max > 0;
@@ -571,6 +777,7 @@ fn writer_loop(queue: &FrameQueue) {
         // Prime the backlog estimate so the first frames see a real spool size.
         refresh_spool_backlog(queue);
     }
+    let mut in_flight: VecDeque<PendingFrame> = VecDeque::new();
     let mut last_scan = Instant::now();
     loop {
         let next = if bounded {
@@ -580,18 +787,12 @@ fn writer_loop(queue: &FrameQueue) {
         };
         match next {
             Some(WriterMsg::Frame(job)) => {
-                if let Err(error) = record_video_frame(
-                    &job.robot_id,
-                    job.robot_instance,
-                    &job.data_type,
-                    &job.sensor_name,
-                    job.width,
-                    job.height,
-                    &job.data,
-                    job.timestamp_ns,
-                    job.timestamp_s,
-                ) {
-                    tracing::warn!(%error, sensor_name = job.sensor_name, "failed to spool video frame");
+                submit_frame(pool, &mut in_flight, job);
+                // Cap outstanding compressions: block-mux the oldest until the
+                // pipeline has room. This doubles as the queue's backpressure —
+                // the writer stops popping while it waits here.
+                while in_flight.len() >= MAX_FRAMES_IN_FLIGHT {
+                    write_front(&mut in_flight);
                 }
             }
             Some(WriterMsg::FlushSource {
@@ -599,6 +800,12 @@ fn writer_loop(queue: &FrameQueue) {
                 robot_instance,
                 ack,
             }) => {
+                // The stop barrier must seal chunks that include every frame
+                // submitted before it, so finish all outstanding compressions and
+                // mux them before flushing the tail.
+                while !in_flight.is_empty() {
+                    write_front(&mut in_flight);
+                }
                 if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
                     tracing::warn!(%error, "failed to flush tail video chunks on stop");
                 }
@@ -609,6 +816,12 @@ fn writer_loop(queue: &FrameQueue) {
                 robot_instance,
                 ack,
             }) => {
+                // Mux outstanding frames before dropping so the pool never holds a
+                // slot for a stream we are about to remove; the dropped chunks are
+                // reclaimed by the daemon's cancel + recovery sweep regardless.
+                while !in_flight.is_empty() {
+                    write_front(&mut in_flight);
+                }
                 let prefix = source_prefix(&robot_id, robot_instance);
                 with_video_chunks(|streams| {
                     streams.retain(|key, _| !key.starts_with(&prefix));
@@ -618,6 +831,9 @@ fn writer_loop(queue: &FrameQueue) {
             // pop_timeout elapsed with no message: fall through to the rescan.
             None => {}
         }
+        // Mux whatever finished compressing, keeping spooling latency low without
+        // ever blocking on a slow frame.
+        drain_ready(&mut in_flight);
         // Refresh the backlog estimate on a coarse cadence so frame-admission
         // backpressure tracks the daemon draining the spool inbox.
         if bounded && last_scan.elapsed() >= SPOOL_SCAN_INTERVAL {
@@ -698,6 +914,9 @@ fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32) -> bool {
 /// crosses [`CHUNK_FLUSH_BYTES`] or [`MAX_VIDEO_CHUNK_FRAMES`]. Best-effort:
 /// NUT-write errors are logged and the frame dropped, never propagated to
 /// Python.
+///
+/// `png_payload` is the frame already compressed to a per-frame PNG by a pool
+/// worker (see [`submit_frame`]); this only muxes it into the chunk.
 #[allow(clippy::too_many_arguments)]
 fn record_video_frame(
     robot_id: &str,
@@ -706,7 +925,7 @@ fn record_video_frame(
     sensor_name: &str,
     width: u32,
     height: u32,
-    payload: &[u8],
+    png_payload: &[u8],
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Result<(), ProducerError> {
@@ -763,7 +982,7 @@ fn record_video_frame(
             sensor_name,
             width,
             height,
-            payload,
+            png_payload,
             timestamp_ns,
             timestamp_s,
         )
@@ -784,6 +1003,9 @@ fn record_video_frame(
 /// IPC — the caller publishes the returned envelopes outside the lock — which
 /// also makes the open/seal/roll logic unit-testable without a live daemon.
 /// Best-effort: a NUT open/write error logs and drops the frame.
+///
+/// `png_payload` is the frame already compressed to a per-frame PNG; this muxes
+/// it straight into the chunk.
 #[allow(clippy::too_many_arguments)]
 fn append_frame_locked(
     state: &mut VideoChunkState,
@@ -793,7 +1015,7 @@ fn append_frame_locked(
     sensor_name: &str,
     width: u32,
     height: u32,
-    payload: &[u8],
+    png_payload: &[u8],
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Vec<Envelope> {
@@ -876,7 +1098,7 @@ fn append_frame_locked(
     // [`should_flush_chunk`] for why.
     let logical_bytes_after_write = {
         let writer = state.nut_writer.as_mut().expect("opened immediately above");
-        if let Err(error) = writer.write_frame(pts, payload) {
+        if let Err(error) = writer.write_frame_precompressed(pts, png_payload) {
             tracing::warn!(
                 %error,
                 sensor_name,
@@ -1014,6 +1236,32 @@ mod tests {
             CHUNK_FLUSH_BYTES - 1,
             MAX_VIDEO_CHUNK_FRAMES - 1
         ));
+    }
+
+    #[test]
+    fn frame_result_is_ready_only_after_set_and_taken_once() {
+        let result = FrameResult::new();
+        assert!(result.try_take().is_none(), "empty slot must not be ready");
+        result.set(vec![1, 2, 3]);
+        assert_eq!(result.try_take(), Some(vec![1, 2, 3]));
+        assert!(
+            result.try_take().is_none(),
+            "the compressed frame is collected exactly once"
+        );
+    }
+
+    #[test]
+    fn frame_result_wait_wakes_on_a_late_set() {
+        // The writer thread blocks in `wait` until a pool worker publishes the
+        // compressed frame — the ordering guarantee the pipeline relies on.
+        let result = FrameResult::new();
+        let worker = result.clone();
+        let handle = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            worker.set(vec![7, 7, 7]);
+        });
+        assert_eq!(result.wait(), vec![7, 7, 7]);
+        handle.join().unwrap();
     }
 
     #[test]

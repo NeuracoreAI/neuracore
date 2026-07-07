@@ -48,7 +48,8 @@ pub const DEFAULT_FFMPEG_BINARY: &str = "ffmpeg";
 /// foreground logging threads while ffmpeg still consumes otherwise-idle CPU.
 const ENCODER_NICENESS: libc::c_int = 10;
 
-/// libx264 frame-thread cap applied to *each* encode output stream.
+/// Floor for the libx264 frame-thread count applied to *each* encode output —
+/// the value used when the transcode fleet is fully loaded.
 ///
 /// libx264 defaults to roughly one frame-thread per core. With the transcode
 /// concurrency permit pool also scaling with the core count, the two multiply:
@@ -61,7 +62,12 @@ const ENCODER_NICENESS: libc::c_int = 10;
 /// per output beat the uncapped default on both aggregate throughput and
 /// logging-thread jitter, so [`default_ffmpeg_concurrency`] divides by this.
 ///
+/// A *floor*, not a hard cap: [`adaptive_encode_threads`] gives each encode more
+/// threads (`cores / active`) when fewer are running, filling the idle cores
+/// while keeping the full-load thread total unchanged.
+///
 /// [`default_ffmpeg_concurrency`]: crate::pipeline::trace_actor::default_ffmpeg_concurrency
+/// [`adaptive_encode_threads`]: crate::pipeline::trace_actor::adaptive_encode_threads
 pub const ENCODE_THREADS_PER_OUTPUT: usize = 2;
 
 /// Height (in lines) the lossy *preview* proxy is downscaled to.
@@ -354,13 +360,21 @@ impl VideoEncoder {
 
     /// Transcode one NUT chunk into the configured per-chunk mp4 outputs.
     ///
+    /// `encode_threads` bounds each output's libx264 frame-thread pool; the
+    /// caller sizes it to the live transcode concurrency (see
+    /// [`adaptive_encode_threads`]) so a few-camera workload uses the otherwise
+    /// idle cores.
+    ///
     /// The source `raw.nut` is left in place — the caller is responsible for
     /// unlinking it after verifying both outputs landed (the per-trace actor
     /// drops the source as part of its envelope handling so a partial encode
     /// can be retried via the recovery sweep without needing to re-spool).
+    ///
+    /// [`adaptive_encode_threads`]: crate::pipeline::trace_actor::adaptive_encode_threads
     pub async fn encode_chunk(
         &self,
         request: &ChunkEncodeRequest,
+        encode_threads: usize,
     ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
         ensure_parent_dirs(&request.lossy_out)?;
         ensure_parent_dirs(&request.lossless_out)?;
@@ -393,10 +407,10 @@ impl VideoEncoder {
         // the encode with "Unrecognized option 'fps_mode'". `-vsync` is accepted
         // on both (only deprecated, not removed, on 5.1+). Two `-map 0:v -c:v ...`
         // blocks emit both outputs from a single demux pass.
-        // Bound each output's libx264 thread pool (see
-        // `ENCODE_THREADS_PER_OUTPUT`) so the transcode fleet doesn't
-        // oversubscribe the cores the logging threads need.
-        let encode_threads = ENCODE_THREADS_PER_OUTPUT.to_string();
+        // Bound each output's libx264 thread pool to the caller-sized value
+        // (see `adaptive_encode_threads`) so the transcode fleet fills idle
+        // cores at low concurrency without oversubscribing at high concurrency.
+        let encode_threads = encode_threads.to_string();
         // Downscale the lossy preview proxy (only) to keep the dominant pass
         // cheap at high resolution. The lossless output stays native.
         let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
@@ -925,7 +939,10 @@ mod tests {
             lossy_out: lossy.clone(),
             lossless_out: lossless.clone(),
         };
-        let outcome = encoder.encode_chunk(&request).await.expect("transcode");
+        let outcome = encoder
+            .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
+            .await
+            .expect("transcode");
 
         assert!(outcome.lossy_bytes > 0);
         assert!(outcome.lossless_bytes > 0);
@@ -981,11 +998,14 @@ mod tests {
 
         let encoder = VideoEncoder::new();
         encoder
-            .encode_chunk(&ChunkEncodeRequest {
-                raw_nut: raw,
-                lossy_out: lossy.clone(),
-                lossless_out: lossless.clone(),
-            })
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw,
+                    lossy_out: lossy.clone(),
+                    lossless_out: lossless.clone(),
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
             .await
             .expect("transcode");
 
@@ -1076,11 +1096,14 @@ mod tests {
                 .join(format!("chunk_{chunk_index:04}_lossless.mp4"));
             write_synthetic_nut(&ffmpeg, &raw, 4);
             encoder
-                .encode_chunk(&ChunkEncodeRequest {
-                    raw_nut: raw,
-                    lossy_out: lossy.clone(),
-                    lossless_out: lossless,
-                })
+                .encode_chunk(
+                    &ChunkEncodeRequest {
+                        raw_nut: raw,
+                        lossy_out: lossy.clone(),
+                        lossless_out: lossless,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
                 .await
                 .expect("transcode chunk");
             segments.push(lossy);
@@ -1137,7 +1160,7 @@ mod tests {
         };
         let encoder = VideoEncoder::new();
         let error = encoder
-            .encode_chunk(&request)
+            .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
             .await
             .expect_err("ffmpeg should fail");
         assert!(
@@ -1159,7 +1182,7 @@ mod tests {
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");
         let error = encoder
-            .encode_chunk(&request)
+            .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
             .await
             .expect_err("spawn should fail");
         match error {
