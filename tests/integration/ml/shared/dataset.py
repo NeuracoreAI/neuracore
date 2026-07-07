@@ -115,6 +115,7 @@ def collect_demo_data(
             overwrite=False,
         )
         dataset = nc.create_dataset(name=dataset_name)
+        initial_recording_count = len(dataset)
         for ep_idx in range(num_episodes):
             logger.info(f"Collecting episode {ep_idx + 1}/{num_episodes}")
             action_traj = rollout_policy()
@@ -212,7 +213,7 @@ def collect_demo_data(
             nc.stop_recording(wait=True, robot_name=robot_name, instance=instance_id)
             wait_for_dataset_ready(
                 dataset_name,
-                expected_recording_count=ep_idx + 1,
+                expected_recording_count=initial_recording_count + ep_idx + 1,
                 timeout_s=500,
                 poll_interval_s=5,
             )
