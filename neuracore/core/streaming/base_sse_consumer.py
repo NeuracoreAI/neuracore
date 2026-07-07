@@ -17,6 +17,7 @@ from neuracore.core.const import (
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
+from neuracore.core.utils.http_session import retry_connection_failures
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,9 @@ class BaseSSEConsumer(ABC):
         self.enabled_manager = enabled_manager or EnabledManager(True, loop=self.loop)
         self.enabled_manager.add_listener(EnabledManager.DISABLED, self._on_close)
         self.client_session = client_session or ClientSession(
-            timeout=ClientTimeout(sock_read=None, total=None), loop=self.loop
+            timeout=ClientTimeout(sock_read=None, total=None),
+            loop=self.loop,
+            middlewares=(retry_connection_failures,),
         )
         self.background_tracker = (
             background_coroutine_tracker or BackgroundCoroutineTracker(loop=self.loop)

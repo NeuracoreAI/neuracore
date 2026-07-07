@@ -191,6 +191,14 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         )
         self.track_metadata[track.id] = track
 
+        await self._post_track(track)
+
+    async def _post_track(self, track: RobotStreamTrack) -> None:
+        """Submit track metadata to the signalling server.
+
+        Args:
+            track: The track metadata to submit.
+        """
         await self.client_session.post(
             f"{API_URL}/org/{self.org_id}/signalling/track",
             headers=self.auth.get_headers(),
@@ -199,14 +207,13 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
 
     async def on_stream_resurrected(self) -> None:
         """Resubmit tracks to the signaling server."""
-        await asyncio.gather(*(
-            self.client_session.post(
-                f"{API_URL}/org/{self.org_id}/signalling/track",
-                headers=self.auth.get_headers(),
-                json=track.model_dump(mode="json"),
-            )
-            for track in self.track_metadata.values()
-        ))
+        results = await asyncio.gather(
+            *(self._post_track(track) for track in self.track_metadata.values()),
+            return_exceptions=True,
+        )
+        for track, result in zip(self.track_metadata.values(), results):
+            if isinstance(result, BaseException):
+                logger.warning("Failed to resubmit track %s: %s", track.id, result)
 
     async def create_new_connection(
         self,

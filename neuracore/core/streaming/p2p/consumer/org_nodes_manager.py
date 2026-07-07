@@ -251,13 +251,15 @@ class OrgNodesManager(BaseSSEConsumer):
                 connection.
             connection_request: the details of the connection to be opened.
         """
-        response = await self.client_session.post(
+        # The response is read within a context manager so the underlying
+        # connection is released back to the session pool.
+        async with self.client_session.post(
             url=f"{API_URL}/org/{self.org_id}/signalling/connection?signature=temp",
             json=connection_request.model_dump(mode="json"),
             headers=self.auth.get_headers(),
-        )
-        response.raise_for_status()
-        connection_message = HandshakeMessage.model_validate(await response.json())
+        ) as response:
+            response.raise_for_status()
+            connection_message = HandshakeMessage.model_validate(await response.json())
         assert connection_message.type == MessageType.OPEN_CONNECTION
 
         robot_identifier = RobotInstanceIdentifier(
