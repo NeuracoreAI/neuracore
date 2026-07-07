@@ -43,6 +43,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_ids,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    ContextSpec,
     build_context_specs,
     run_case_contexts,
 )
@@ -59,6 +60,15 @@ SIGKILL_EXIT_TIMEOUT_S = 5.0
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _run_recording_workload(case: DataDaemonTestCase, specs: list[ContextSpec]) -> None:
+    """Producer workload entry point for the SIGKILL worker child process.
+
+    Module-level so it is picklable under the ``spawn`` start method
+    (the default on macOS).
+    """
+    run_case_contexts(case, specs=specs)
 
 
 def _single_runner_pid() -> int:
@@ -390,12 +400,13 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
         pid_first = assert_exactly_one_daemon_pid()
         specs = build_context_specs(case=case)
 
-        def _run() -> None:
-            run_case_contexts(case, specs=specs)
-
         # Run the producer workload in a child process so a SIGKILL at any point
         # cannot leave an uninterruptible background thread in this test process.
-        worker = multiprocessing.Process(target=_run, name="sigkill-recording-worker")
+        worker = multiprocessing.Process(
+            target=_run_recording_workload,
+            args=(case, specs),
+            name="sigkill-recording-worker",
+        )
         worker.start()
         # The point of this test is restartability after an unclean daemon death;
         # the kill may land during setup, active logging, or stop cleanup.
