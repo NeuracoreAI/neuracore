@@ -1316,3 +1316,71 @@ class TestDatasetCopyAndPickle:
         assert state["_page_lock"] is None
         assert state["_recordings_cache"] is not dataset._recordings_cache
         assert state["_recordings_cache"] == dataset._recordings_cache
+
+
+def _register_dataset_delete(mock_data_requests, dataset_dict):
+    mock_data_requests.delete(
+        f"{API_URL}/org/{dataset_dict['org_id']}/datasets/{dataset_dict['id']}",
+        status_code=200,
+    )
+
+
+@pytest.fixture
+def deleted_dataset(dataset_dict, mock_data_requests, mock_login):
+    """A Dataset that has already been deleted."""
+    _register_dataset_delete(mock_data_requests, dataset_dict)
+    dataset = Dataset(**dataset_dict)
+    dataset.delete()
+    return dataset
+
+
+@pytest.mark.usefixtures("mock_login")
+class TestDatasetDeletion:
+    """Tests for delete invalidating the in-memory Dataset object."""
+
+    def test_deleted_false_before_delete(self, dataset_dict):
+        """A live dataset reports deleted as False."""
+        dataset = Dataset(**dataset_dict)
+
+        assert dataset.deleted is False
+
+    def test_delete_calls_api(self, dataset_dict, mock_data_requests):
+        """delete issues the DELETE request to the datasets endpoint."""
+        _register_dataset_delete(mock_data_requests, dataset_dict)
+        dataset = Dataset(**dataset_dict)
+
+        dataset.delete()
+
+        last = mock_data_requests.request_history[-1]
+        assert last.method == "DELETE"
+        assert last.url.endswith(f"/datasets/{dataset_dict['id']}")
+
+    def test_deleted_true_after_delete(self, deleted_dataset):
+        """After delete, deleted reports True."""
+        assert deleted_dataset.deleted is True
+
+    def test_deleted_dataset_is_still_a_dataset(self, deleted_dataset):
+        """A deleted dataset keeps its Dataset type for isinstance checks."""
+        assert isinstance(deleted_dataset, Dataset)
+
+    def test_attribute_access_after_delete_raises(self, deleted_dataset):
+        """Reading any attribute of a deleted dataset raises DatasetError."""
+        with pytest.raises(DatasetError, match="deleted"):
+            _ = deleted_dataset.name
+
+    def test_method_call_after_delete_raises(self, deleted_dataset):
+        """Calling any method of a deleted dataset raises DatasetError."""
+        with pytest.raises(DatasetError, match="deleted"):
+            deleted_dataset.get_robot_names()
+
+    def test_delete_releases_recording_cache(
+        self, dataset_dict, recordings_list, mock_data_requests
+    ):
+        """delete clears the recording cache so its memory is reclaimable."""
+        _register_dataset_delete(mock_data_requests, dataset_dict)
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+
+        dataset.delete()
+
+        with pytest.raises(DatasetError, match="deleted"):
+            _ = dataset._recordings_cache

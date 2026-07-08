@@ -42,6 +42,8 @@ logger = logging.getLogger(__name__)
 class Dataset:
     """Class representing a dataset in Neuracore."""
 
+    deleted = False
+
     def __init__(
         self,
         id: str,
@@ -444,13 +446,20 @@ class Dataset:
         )
 
     def delete(self) -> None:
-        """Delete this dataset from Neuracore."""
+        """Delete this dataset from Neuracore and invalidate this object.
+
+        After a successful delete the recording cache is released and the
+        object is turned into a tombstone, so any further attribute or method
+        access raises DatasetError.
+        """
         session = thread_local_session()
         response = session.delete(
             f"{API_URL}/org/{self.org_id}/datasets/{self.id}",
             headers=get_auth().get_headers(),
         )
         response.raise_for_status()
+        self.__dict__.clear()
+        self.__class__ = _DeletedDataset
 
     def _synchronize(
         self,
@@ -847,3 +856,13 @@ class Dataset:
                 name=self.name, description=self.description, tags=self.tags + [tag]
             )
         )
+
+
+class _DeletedDataset(Dataset):
+    """Tombstone for a deleted Dataset. Any attribute access raises."""
+
+    def __getattribute__(self, name: str) -> object:
+        """Raise on every access except the deleted flag."""
+        if name == "deleted":
+            return True
+        raise DatasetError("Dataset has been deleted and can no longer be used.")
