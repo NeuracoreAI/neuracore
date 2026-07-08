@@ -416,6 +416,24 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
     return min(MAX_DATASET_READY_TIMEOUT_S, timeout_s)
 
 
+def case_wall_timeout_seconds(case: DataDaemonTestCase) -> float:
+    """Upper bound on the recording phase's wall time across all contexts.
+
+    Used to bound waits on context workers (and, with upload margins added,
+    per-test deadlines) so a hung worker fails the test in minutes instead of
+    stalling CI until the job-level timeout.  Sized for the sequential worst
+    case — every recording runs back-to-back — with a 2x margin that covers
+    variable-duration cases (max factor 1.25), staggered start delays, and
+    stop-recording upload waits.
+    """
+    recording_wall_s = (
+        2.0 * case.duration_sec * (case.recording_count + case.parallel_contexts)
+    )
+    per_recording_overhead_s = 10.0 * case.recording_count
+    startup_slack_s = 120.0
+    return recording_wall_s + per_recording_overhead_s + startup_slack_s
+
+
 # ---------------------------------------------------------------------------
 # Analysis / reporting
 # ---------------------------------------------------------------------------

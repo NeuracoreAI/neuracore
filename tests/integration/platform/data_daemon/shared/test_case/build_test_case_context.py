@@ -29,6 +29,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     camera_names,
     case_id,
+    case_wall_timeout_seconds,
     generate_joint_values,
     joint_names_for_count,
 )
@@ -943,6 +944,64 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         _cleanup_test_worker_robot(robot)
 
 
+def _run_pooled_context_workers(
+    case: DataDaemonTestCase,
+    *,
+    specs: list[ContextSpec],
+) -> list[ContextResult]:
+    """Run context workers in a multiprocessing pool bounded by a case deadline."""
+    pool_timeout_s = case_wall_timeout_seconds(case)
+    deadline = time.monotonic() + pool_timeout_s
+    results: list[ContextResult] = []
+    outcomes: list[str] = []
+    errors: list[BaseException] = []
+    with multiprocessing.Pool(case.parallel_contexts) as pool:
+        async_results = [
+            (spec, pool.apply_async(_subprocess_context_worker, (spec,)))
+            for spec in specs
+        ]
+        for spec, async_result in async_results:
+            label = f"ctx[{spec.context_index}]"
+            try:
+                # A finished worker returns even with 0s remaining; only
+                # genuinely unfinished workers are reported as hung.
+                results.append(
+                    async_result.get(timeout=max(0.0, deadline - time.monotonic()))
+                )
+                outcomes.append(f"{label}: completed")
+            except multiprocessing.TimeoutError:
+                outcomes.append(
+                    f"{label}: no result within the {pool_timeout_s:.0f}s"
+                    " case budget; worker likely hung (will be terminated)"
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+                outcomes.append(f"{label}: {type(exc).__name__}: {exc}")
+    if len(results) < len(specs):
+        _raise_pooled_context_failure(
+            case, specs=specs, results=results, outcomes=outcomes, errors=errors
+        )
+    return results
+
+
+def _raise_pooled_context_failure(
+    case: DataDaemonTestCase,
+    *,
+    specs: list[ContextSpec],
+    results: list[ContextResult],
+    outcomes: list[str],
+    errors: list[BaseException],
+) -> None:
+    """Raise the most informative error for an incomplete pooled run."""
+    if len(errors) == 1 and len(results) == len(specs) - 1:
+        raise errors[0]
+    outcome_lines = "\n  ".join(outcomes)
+    raise RuntimeError(
+        f"Context workers for case '{case_id(case)}' did not all"
+        f" complete:\n  {outcome_lines}"
+    ) from (errors[0] if errors else None)
+
+
 def run_case_contexts(
     case: DataDaemonTestCase,
     *,
@@ -983,10 +1042,7 @@ def run_case_contexts(
     if case.parallel_contexts == 1:
         results = [context_worker(specs[0])]
     else:
-        with multiprocessing.Pool(case.parallel_contexts) as pool:
-            results = list(  # type: ignore[return-value]
-                pool.map(_subprocess_context_worker, specs)
-            )
+        results = _run_pooled_context_workers(case, specs=specs)
         for result in results:
             Timer.merge_stats(result.timer_stats)
 

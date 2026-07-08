@@ -17,6 +17,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     SESSION_RUNS,
     DataDaemonTestCase,
     _format_timer_stats_line,
+    case_timeout_seconds,
+    case_wall_timeout_seconds,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     ContextResult,
@@ -30,10 +32,36 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
-# cspell:ignore nodeid getfixturevalue
+# cspell:ignore nodeid getfixturevalue modifyitems callspec
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
+
+# Backstop timeout for suite tests that are not parametrized over a case.
+DEFAULT_TEST_TIMEOUT_S = 600.0
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Give every test in this suite a fail-fast deadline (pytest-timeout).
+
+    Hung client calls inside context workers have previously stalled a test
+    silently until the 6h CI job limit.  Case-parametrized tests get a budget
+    derived from the case's workload (recording wall time plus upload/ready
+    and verification waits, which are each bounded by ``case_timeout_seconds``);
+    everything else gets ``DEFAULT_TEST_TIMEOUT_S``.  Explicit ``timeout``
+    markers are left untouched.
+    """
+    for item in items:
+        if item.get_closest_marker("timeout") is not None:
+            continue
+        case = getattr(getattr(item, "callspec", None), "params", {}).get("case")
+        if isinstance(case, DataDaemonTestCase):
+            timeout_s = (
+                case_wall_timeout_seconds(case) + 2 * case_timeout_seconds(case) + 300.0
+            )
+        else:
+            timeout_s = DEFAULT_TEST_TIMEOUT_S
+        item.add_marker(pytest.mark.timeout(timeout_s))
 
 
 @pytest.fixture(autouse=True)
