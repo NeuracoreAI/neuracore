@@ -324,10 +324,13 @@ fn run_daemon(
         // are gone at shutdown.
         let (json_write_handle, _json_writer_owner) = crate::pipeline::json_writer::spawn();
 
-        // Seed the config watch channel with the launch-resolved config; the
-        // watcher (spawned below) refreshes it. `_config_rx` is held only to keep
-        // the channel open until consumers are wired up in a follow-up change.
-        let (config_tx, _config_rx) = watch::channel(config_for_runtime.clone());
+        // In-memory daemon config: seed the watch channel with the
+        // launch-resolved effective config so its value is available before the
+        // watcher's first tick, then let the config watcher (spawned below, once
+        // the shutdown broadcaster exists) refresh it on an interval and on
+        // demand. The trace actors and registration coordinator read the codec
+        // from this channel instead of re-parsing the profile YAML per trace.
+        let (config_tx, config_rx) = watch::channel(config_for_runtime.clone());
         let (config_refresh_tx, config_refresh_rx) =
             mpsc::channel::<ConfigRefreshRequest>(CONFIG_REFRESH_CHANNEL_CAPACITY);
 
@@ -339,7 +342,8 @@ fn run_daemon(
                 trace_write_handle.clone(),
                 json_write_handle,
             )
-            .with_event_bus(event_bus.clone()),
+            .with_event_bus(event_bus.clone())
+            .with_config_rx(config_rx.clone()),
         );
 
         // Run the wait loop in a nested block so the state store can be
@@ -368,8 +372,13 @@ fn run_daemon(
             let org_id = read_org_id_from_config(&config_path)
                 .or_else(|| config_for_runtime.current_org_id.clone());
 
-            // Spawn the daemon-config watcher unconditionally: offline mode skips
-            // the cloud coordinators, but per-trace actors still need the live codec.
+            // Spawn the daemon-config watcher. Unconditional — offline mode
+            // skips the cloud coordinators, but the per-trace actors still need
+            // the live codec, so the watcher must run regardless. It owns
+            // `config_tx` / `config_refresh_rx`; the seeded `config_rx` is
+            // already wired into the actor context and, below, the registration
+            // coordinator, and `config_refresh_tx` goes to the dispatcher for
+            // the `RefreshConfig` command path.
             let config_watcher = spawn_config_watcher(
                 Some(profile.clone()),
                 None,
@@ -401,6 +410,7 @@ fn run_daemon(
                         config_path.clone(),
                         org_id.clone(),
                         shutdown_tx.clone(),
+                        config_rx.clone(),
                     )),
                     Err(error) => {
                         tracing::warn!(%error, "failed to build API client; cloud uploads disabled");

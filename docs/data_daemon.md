@@ -312,6 +312,57 @@ export NEURACORE_DAEMON_RECORDINGS_ROOT=/workspaces/neuracore/recordings
 
 ---
 
+## Video encoding options
+
+By default every RGB camera is uploaded twice: a **lossless** archive
+(`lossless.mp4`, used for training) and a small **lossy** preview
+(`lossy.mp4`). For long recordings the lossless archive dominates upload size,
+disk, and CPU.
+
+Selecting the `h264_medium` codec switches RGB cameras to a single
+full-resolution **libx264 CRF 23** video (`lossy.mp4`) and **drops the lossless
+archive**. That one video is used for both preview and training, trading a
+little image fidelity for much smaller uploads. Depth cameras always keep their
+lossless storage (their lossy proxy is a visualisation, not precise depth).
+
+This is **irreversible for recordings made under it**: the lossless archive is
+never written, so switching back to `h264_lossless` only affects *future*
+recordings — it cannot restore lossless data for episodes already captured in
+lossy-only mode.
+
+The setting is **global** (it applies to every camera) and lives in the daemon
+profile, so it persists and is picked up for the next recording. The two codecs
+are `h264_lossless` (the default) and `h264_medium` (lossy-only). Set it three
+ways, exactly like the other profile options:
+
+- **From the SDK** (writes the active profile):
+
+  ```python
+  import neuracore as nc
+
+  nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)    # lossy-only
+  nc.start_recording()
+  # ... log frames ...
+  nc.stop_recording()
+
+  nc.set_video_encoding_options(codec=nc.Codec.H264_LOSSLESS)  # back to default
+  ```
+
+- **With the CLI**, via `profile update`:
+
+  ```bash
+  neuracore data-daemon profile update --video-codec h264_medium
+  neuracore data-daemon profile update --video-codec h264_lossless
+  ```
+
+- **With an environment variable**: `export NCD_VIDEO_CODEC=h264_medium`
+  (overrides the profile value).
+
+The daemon re-reads the codec at the start of each recording, so a change takes
+effect for the next recording without restarting the daemon.
+
+---
+
 ## CLI reference
 
 ### `neuracore data-daemon profile create`

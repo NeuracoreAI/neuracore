@@ -7,7 +7,7 @@ import logging
 import pathlib
 import struct
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -16,6 +16,7 @@ from neuracore.core.utils.depth_utils import (
     depth_to_rgb_storage,
     depth_to_rgb_visualization,
 )
+from neuracore.core.video_encoding import Libx264Options
 from neuracore.data_daemon.recording_encoding_disk_manager.encoding.disk_video_encoder import (  # noqa: E501
     BaseDiskVideoEncoder,
     DiskVideoEncoder,
@@ -43,6 +44,7 @@ class VideoTrace:
         chunk_size: int = CHUNK_SIZE,
         lossy_name: str = LOSSY_VIDEO_NAME,
         lossless_name: str = LOSSLESS_VIDEO_NAME,
+        codec_option_overrides: Libx264Options | None = None,
     ) -> None:
         """Initialise a video trace writer.
 
@@ -51,6 +53,8 @@ class VideoTrace:
             chunk_size: Buffered write chunk size for video outputs.
             lossy_name: Filename for the lossy MP4 output.
             lossless_name: Filename for the lossless MP4 output.
+            codec_option_overrides: When provided, encode a single video with these
+                    codec-context options and skip the lossless archive.
 
         Returns:
             None
@@ -63,6 +67,7 @@ class VideoTrace:
         self.trace_path = self.output_dir / TRACE_FILE
 
         self.chunk_size = chunk_size
+        self._codec_option_overrides = codec_option_overrides
 
         self.width: int | None = None
         self.height: int | None = None
@@ -216,6 +221,21 @@ class VideoTrace:
                 "VideoTrace needs width/height before frames. Send metadata first."
             )
 
+        if self._codec_option_overrides is not None:
+            if self._lossy_encoder is None:
+                self._lossy_encoder = DiskVideoEncoder(
+                    filepath=self.lossy_path,
+                    width=self.width,
+                    height=self.height,
+                    codec="libx264",
+                    pixel_format="yuv420p",
+                    codec_context_options=cast(
+                        "dict[str, str]", self._codec_option_overrides
+                    ),
+                    chunk_size=self.chunk_size,
+                )
+            return
+
         if self._lossless_encoder is None:
             self._lossless_encoder = DiskVideoEncoder(
                 filepath=self.lossless_path,
@@ -253,7 +273,10 @@ class VideoTrace:
             raise RuntimeError(
                 "VideoTrace missing width/height after encoder initialisation"
             )
-        if self._lossless_encoder is None or self._lossy_encoder is None:
+        lossless_required = self._codec_option_overrides is None
+        if self._lossy_encoder is None or (
+            lossless_required and self._lossless_encoder is None
+        ):
             raise RuntimeError(
                 "VideoTrace encoders unexpectedly None after initialisation"
             )
@@ -298,9 +321,10 @@ class VideoTrace:
         self._expected_raw_frame_bytes_total += len(frame_bytes)
 
         timestamp_value = self._get_frame_timestamp()
-        self._lossless_encoder.add_frame(
-            timestamp=timestamp_value, np_frame=np_frame_lossless
-        )
+        if self._lossless_encoder is not None:
+            self._lossless_encoder.add_frame(
+                timestamp=timestamp_value, np_frame=np_frame_lossless
+            )
         self._lossy_encoder.add_frame(
             timestamp=timestamp_value, np_frame=np_frame_lossy
         )

@@ -12,6 +12,8 @@ import pytest
 import pytest_asyncio
 from neuracore_types import DataType
 
+from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
+from neuracore.data_daemon.config_manager.daemon_config import DaemonConfig
 from neuracore.data_daemon.models import CompleteMessage
 
 
@@ -234,6 +236,7 @@ async def make_worker(tmp_path: Path, patched_modules, fake_emitter: _FakeEmitte
         filesystem=filesystem,
         abort_trace=abort_trace,
         emitter=fake_emitter,
+        config_watcher=ConfigWatcher(initial_config=DaemonConfig()),
     )
     worker = worker_module._BatchEncoderWorker(
         filesystem=filesystem,

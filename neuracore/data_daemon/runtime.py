@@ -217,6 +217,7 @@ class DaemonRuntime:
                 loop_manager=loop_manager,
                 emitter=emitter,
                 recordings_root=config.path_to_store_record,
+                config_watcher=services.config_watcher,
             )
             logger.debug("       _RawBatchWriter: scheduled on General Loop")
             logger.debug("       _BatchEncoderWorker: scheduled on Encoder Loop")

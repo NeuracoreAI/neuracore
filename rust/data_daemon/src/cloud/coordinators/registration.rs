@@ -24,7 +24,8 @@ use tokio::time::{interval, MissedTickBehavior};
 use crate::api::models::RegisterTraceRequest;
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::cloud_file_list;
-use crate::cloud::OrgIdRx;
+use crate::cloud::{ConfigRx, OrgIdRx};
+use crate::encoding::video_encoder::LossyVideoCodec;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::store::TraceUpdate;
 use crate::state::{
@@ -66,6 +67,7 @@ pub fn spawn_registration(
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    config_rx: ConfigRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> RegistrationHandle {
     let mut subscriber = bus.subscribe();
@@ -90,7 +92,7 @@ pub fn spawn_registration(
                 event = subscriber.recv() => {
                     match event {
                         Ok(DaemonEvent::TraceWritten { .. }) => {
-                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
+                            drain_once(&store, &bus, &client, &org_rx, &config_rx, MAX_WAIT, &mut registration_attempts).await;
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -99,13 +101,13 @@ pub fn spawn_registration(
                                 "registration coordinator missed bus events; \
                                 falling back to a drain"
                             );
-                            drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
+                            drain_once(&store, &bus, &client, &org_rx, &config_rx, MAX_WAIT, &mut registration_attempts).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
                 _ = ticker.tick() => {
-                    drain_once(&store, &bus, &client, &org_rx, MAX_WAIT, &mut registration_attempts).await;
+                    drain_once(&store, &bus, &client, &org_rx, &config_rx, MAX_WAIT, &mut registration_attempts).await;
                 }
             }
         }
@@ -118,6 +120,7 @@ async fn drain_once(
     bus: &EventBus,
     client: &Arc<ApiClient>,
     org_rx: &OrgIdRx,
+    config_rx: &ConfigRx,
     max_wait: Duration,
     registration_attempts: &mut HashMap<String, u32>,
 ) {
@@ -141,7 +144,16 @@ async fn drain_once(
         return;
     }
     tracing::debug!(count = claimed.len(), "claimed traces for registration");
-    submit_batch(store, bus, client, org_rx, claimed, registration_attempts).await;
+    submit_batch(
+        store,
+        bus,
+        client,
+        org_rx,
+        config_rx,
+        claimed,
+        registration_attempts,
+    )
+    .await;
     publish_ready_traces(store, bus).await;
 }
 
@@ -150,6 +162,7 @@ async fn submit_batch(
     bus: &EventBus,
     client: &Arc<ApiClient>,
     org_rx: &OrgIdRx,
+    config_rx: &ConfigRx,
     traces: Vec<TraceRecord>,
     registration_attempts: &mut HashMap<String, u32>,
 ) {
@@ -201,16 +214,29 @@ async fn submit_batch(
             continue;
         };
 
+        // Read the global video codec from the in-memory config the watcher
+        // keeps current. Registration runs while the recording is still writing,
+        // so we can't probe the (not-yet-written) files on disk; instead derive
+        // the lossy-only decision from the same codec source and predicate the
+        // encoder uses (`LossyVideoCodec::for_trace`). The codec is fixed for a
+        // recording (set before start), so this matches what the encoder writes.
+        let codec_value = config_rx.borrow().video_codec.clone();
         let payload: Vec<RegisterTraceRequest> = traces
             .iter()
-            .map(|trace| RegisterTraceRequest {
-                recording_id: cloud_id.clone(),
-                data_type: trace.data_type.clone().unwrap_or_default(),
-                trace_id: trace.trace_id.clone(),
-                cloud_files: cloud_file_list(
-                    trace.data_type.as_deref().unwrap_or(""),
-                    trace.data_type_name.as_deref(),
-                ),
+            .map(|trace| {
+                let data_type = trace.data_type.as_deref().unwrap_or("");
+                let lossy_only =
+                    LossyVideoCodec::for_trace(data_type, codec_value.as_deref()).is_lossy_only();
+                RegisterTraceRequest {
+                    recording_id: cloud_id.clone(),
+                    data_type: trace.data_type.clone().unwrap_or_default(),
+                    trace_id: trace.trace_id.clone(),
+                    cloud_files: cloud_file_list(
+                        data_type,
+                        trace.data_type_name.as_deref(),
+                        lossy_only,
+                    ),
+                }
             })
             .collect();
 
@@ -390,6 +416,7 @@ mod tests {
     use super::*;
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
+    use crate::config::DaemonConfig;
     use crate::state::store::TraceUpdate;
     use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
     use std::time::Duration;
@@ -412,6 +439,18 @@ mod tests {
         let (org_tx, org_rx) = tokio::sync::watch::channel(org.map(str::to_string));
         Box::leak(Box::new(org_tx));
         org_rx
+    }
+
+    /// A seeded [`ConfigRx`] carrying the given codec. Leaks the sender so the
+    /// channel stays open and `borrow()` keeps returning the seeded value,
+    /// mirroring [`org_rx`].
+    fn config_rx(video_codec: Option<&str>) -> ConfigRx {
+        let (config_tx, config_rx) = tokio::sync::watch::channel(DaemonConfig {
+            video_codec: video_codec.map(str::to_string),
+            ..DaemonConfig::default()
+        });
+        Box::leak(Box::new(config_tx));
+        config_rx
     }
 
     /// Seed a recording plus a single written trace under it, returning the
@@ -504,6 +543,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
@@ -573,6 +613,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
@@ -627,6 +668,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(None),
+            &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
@@ -672,6 +714,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
@@ -728,6 +771,7 @@ mod tests {
                 &bus,
                 &api,
                 &org_rx(Some("org-1")),
+                &config_rx(None),
                 claimed,
                 &mut attempts,
             )
@@ -750,6 +794,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             claimed,
             &mut attempts,
         )
@@ -795,6 +840,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             claimed,
             &mut HashMap::new(),
         )
@@ -839,6 +885,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             Duration::from_secs(0),
             &mut HashMap::new(),
         )
@@ -883,6 +930,7 @@ mod tests {
             &bus,
             &api,
             &org_rx(Some("org-1")),
+            &config_rx(None),
             Duration::from_secs(0),
             &mut HashMap::new(),
         )

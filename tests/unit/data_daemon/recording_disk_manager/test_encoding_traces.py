@@ -84,6 +84,7 @@ def test_json_trace_preserves_unicode_when_ensure_ascii_false(tmp_path: Path) ->
 class _FakeDiskVideoEncoder:
     def __init__(self, *, filepath: Path, **kwargs: Any) -> None:
         self.filepath = filepath
+        self.codec_context_options = kwargs.get("codec_context_options")
         self.calls: list[tuple[float, tuple[int, ...]]] = []
         self._finished = False
         self.filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -151,6 +152,17 @@ def test_video_trace_accepts_metadata_list(tmp_path: Path, patched_video_trace) 
 
     frame = bytes([10, 20, 30] * (w * h))
     vt.add_payload(frame)
+    assert vt._lossless_encoder is not None
+    assert vt._lossless_encoder.codec_context_options == {
+        "crf": "0",
+        "preset": "ultrafast",
+    }
+    assert vt._lossy_encoder is not None
+    assert vt._lossy_encoder.codec_context_options == {
+        "qp": "23",
+        "preset": "ultrafast",
+    }
+
     vt.finish()
 
     assert (out_dir / "lossy.mp4").is_file()
@@ -164,6 +176,34 @@ def test_video_trace_accepts_metadata_list(tmp_path: Path, patched_video_trace) 
     assert trace[0]["height"] == h
     assert trace[0]["frame_idx"] == 0
     assert trace[1]["frame_idx"] == 1
+
+
+def test_video_trace_lossy_only_skips_lossless_and_uses_options(
+    tmp_path: Path, patched_video_trace
+) -> None:
+    pytest.importorskip("numpy")
+
+    VideoTrace = patched_video_trace.VideoTrace
+    out_dir = tmp_path / "video"
+    vt = VideoTrace(
+        output_dir=out_dir,
+        codec_option_overrides={"crf": "23", "preset": "medium"},
+    )
+
+    w, h = 4, 3
+    meta: dict[str, Any] = {"width": w, "height": h, "timestamp": 1.0}
+    vt.add_payload(json.dumps(meta).encode("utf-8"))
+    frame = bytes([10, 20, 30] * (w * h))
+    vt.add_payload(frame)
+
+    assert vt._lossless_encoder is None
+    assert vt._lossy_encoder is not None
+    assert vt._lossy_encoder.codec_context_options == {"crf": "23", "preset": "medium"}
+
+    vt.finish()
+    assert (out_dir / "lossy.mp4").is_file()
+    assert not (out_dir / "lossless.mp4").exists()
+    assert (out_dir / "trace.json").is_file()
 
 
 def test_video_trace_validates_frame_size(tmp_path: Path, patched_video_trace) -> None:
