@@ -25,6 +25,7 @@ from neuracore.data_daemon.const import (
     DEFAULT_SHARED_MEMORY_SIZE,
     DEFAULT_VIDEO_SLOT_COUNT,
     DEFAULT_VIDEO_SLOT_SIZE,
+    active_profile_name,
 )
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.event_loop_manager import EventLoopManager
@@ -148,9 +149,7 @@ class DaemonRuntime:
     def _resolve_configuration(self) -> DaemonConfig | None:
         """Resolve daemon configuration from profiles, env, and CLI."""
         try:
-            profile_name = (
-                os.environ.get("NEURACORE_DAEMON_PROFILE") or DEFAULT_PROFILE_NAME
-            )
+            profile_name = active_profile_name()
 
             profile_manager = ProfileManager()
 

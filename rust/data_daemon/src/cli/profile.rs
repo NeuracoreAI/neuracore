@@ -32,6 +32,7 @@ pub fn run(command: ProfileCommand) {
             online,
             api_key,
             current_org_id,
+            video_codec,
         } => {
             let updates = DaemonConfig {
                 storage_limit,
@@ -43,6 +44,7 @@ pub fn run(command: ProfileCommand) {
                 offline: tristate(offline, online),
                 api_key,
                 current_org_id,
+                video_codec,
             };
             update(&profiles, name.as_deref(), &updates);
         }
