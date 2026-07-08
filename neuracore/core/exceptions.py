@@ -1,5 +1,7 @@
 """Exceptions for Neuracore."""
 
+from typing import Any
+
 
 class EncodingError(Exception):
     """Raised for issues with encoding video."""
@@ -11,6 +13,31 @@ class EndpointError(Exception):
 
 class AuthenticationError(Exception):
     """Raised for authentication-related errors."""
+
+    def __init__(
+        self, message: str = "", *, response_payload: dict[str, Any] | None = None
+    ):
+        """Create an authentication error.
+
+        Args:
+            message: User-facing error message.
+            response_payload: Optional structured backend response body.
+        """
+        super().__init__(message)
+        self.response_payload = response_payload or {}
+
+    @property
+    def required_version(self) -> str | None:
+        """Backend-required client version, if the response included one."""
+        required_version = self.response_payload.get("required_version")
+
+        detail = self.response_payload.get("detail")
+        if required_version is None and isinstance(detail, dict):
+            required_version = detail.get("required_version")
+
+        if isinstance(required_version, str):
+            return required_version
+        return None
 
 
 class ValidationError(Exception):

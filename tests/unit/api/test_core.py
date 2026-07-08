@@ -1,11 +1,14 @@
 import json
 
+import pytest
+import requests
 import requests_mock
 
 import neuracore as nc
 from neuracore.api import core as api_core
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import AuthenticationError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -102,6 +105,56 @@ def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
     # Logout
     nc.logout()
     assert not auth.is_authenticated
+
+
+def test_login_version_mismatch_surfaces_backend_versions(
+    temp_config_dir, monkeypatch, reset_neuracore, capsys
+):
+    """Test version validation shows the backend-provided mismatch details."""
+    expected_message = (
+        "Neuracore client version mismatch, client version: 1.2.3, "
+        "required version: 2.0.0"
+    )
+
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            json={
+                "detail": expected_message,
+                "client_version": "1.2.3",
+                "required_version": "2.0.0",
+            },
+            status_code=400,
+        )
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            nc.login("test_api_key")
+
+    captured = capsys.readouterr()
+
+    assert str(exc_info.value) == expected_message
+    assert exc_info.value.required_version == "2.0.0"
+    assert exc_info.value.response_payload["required_version"] == "2.0.0"
+    assert expected_message in captured.err
+
+
+def test_login_version_check_connection_error_surfaces_cleanly(
+    monkeypatch, reset_neuracore
+):
+    def raise_connection_error(*args, **kwargs):
+        raise requests.exceptions.ConnectionError(
+            "Connection reset by peer during verify-version"
+        )
+
+    monkeypatch.setattr(
+        "neuracore.core.auth.thread_local_session",
+        lambda: type("_Session", (), {"get": raise_connection_error})(),
+    )
+
+    with pytest.raises(AuthenticationError) as exc_info:
+        nc.login("test_api_key")
+
+    assert "Connection reset by peer during verify-version" in str(exc_info.value)
 
 
 def test_connect_robot(
