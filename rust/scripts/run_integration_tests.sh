@@ -301,7 +301,6 @@ main() {
   check_installed_bundle
   stop_daemon
   cleanup_state
-  materialize_artefacts
 
   set +e
   run_tests
