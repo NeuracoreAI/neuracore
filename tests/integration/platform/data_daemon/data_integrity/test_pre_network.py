@@ -15,6 +15,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_disk_recording_properties,
+    assert_lossy_only_video_artifacts,
 )
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
@@ -84,6 +85,8 @@ def test_disk_db_data_integrity(
                 results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
+                if case.lossy_only:
+                    assert_lossy_only_video_artifacts()
 
         finally:
             set_case_analysis_report(

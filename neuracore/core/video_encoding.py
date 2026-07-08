@@ -16,8 +16,10 @@ visualisation, not precise depth, so it is never a valid training source.
 
 from __future__ import annotations
 
+import copy
 import enum
 import logging
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,14 @@ class Codec(str, enum.Enum):
     H264_MEDIUM = "h264_medium"
 
 
-_LOSSY_CODEC_OPTIONS: dict[Codec, dict[str, str]] = {
+class Libx264Options(TypedDict, total=False):
+    """libx264 codec-context options for the lossy RGB encoder."""
+
+    crf: str
+    preset: str
+
+
+_LOSSY_CODEC_OPTIONS: dict[Codec, Libx264Options] = {
     Codec.H264_MEDIUM: {"crf": "23", "preset": "medium"},
 }
 
@@ -72,7 +81,7 @@ def resolve_codec(value: str | None) -> Codec | None:
         return None
 
 
-def codec_option_overrides(value: str | None) -> dict[str, str] | None:
+def codec_option_overrides(value: str | None) -> Libx264Options | None:
     """Return the lossy-only libx264 options for a codec string, or ``None``.
 
     ``None`` selects the default lossless-plus-preview encoders; a dict selects a
@@ -89,4 +98,4 @@ def codec_option_overrides(value: str | None) -> dict[str, str] | None:
     if codec is None:
         return None
     options = _LOSSY_CODEC_OPTIONS.get(codec)
-    return dict(options) if options is not None else None
+    return copy.copy(options) if options is not None else None

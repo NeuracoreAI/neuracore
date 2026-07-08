@@ -15,7 +15,7 @@ use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
     spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
     spawn_recording_start_notifier, spawn_recording_stop_notifier, spawn_registration,
-    spawn_status_updater, spawn_uploader, OrgWatcherHandle, StatusUpdate,
+    spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle, StatusUpdate,
 };
 use crate::connection::spawn_connection_monitor;
 use crate::state::{EventBus, SqliteStateStore, TraceWriteHandle};
@@ -71,6 +71,7 @@ pub(crate) fn spawn_cloud_coordinators(
     config_path: PathBuf,
     fallback_org_id: Option<String>,
     shutdown_tx: crate::lifecycle::shutdown::ShutdownBroadcaster,
+    config_rx: ConfigRx,
 ) -> CloudHandles {
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
     // Watch the SDK config for the current org; every coordinator reads the
@@ -88,6 +89,7 @@ pub(crate) fn spawn_cloud_coordinators(
         event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
+        config_rx,
         shutdown_tx.subscribe(),
     );
     let uploader = spawn_uploader(

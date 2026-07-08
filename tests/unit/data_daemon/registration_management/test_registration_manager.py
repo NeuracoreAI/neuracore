@@ -48,12 +48,14 @@ def _make_candidate(
     recording_id: str = "r1",
     data_type: DataType = DataType.JOINT_POSITIONS,
     data_type_name: str = "joints",
+    path: str | None = None,
 ) -> RegistrationCandidate:
     return RegistrationCandidate(
         trace_id=trace_id,
         recording_id=recording_id,
         data_type=data_type,
         data_type_name=data_type_name,
+        path=path,
     )
 
 
@@ -94,6 +96,26 @@ class TestGetCloudFileList:
             },
         ]
 
+    def test_rgb_lossy_only_dir_omits_lossless(self, tmp_path) -> None:
+        (tmp_path / "lossy.mp4").write_bytes(b"x")
+        files = get_cloud_file_list(DataType.RGB_IMAGES, "cam_front", str(tmp_path))
+        paths = [f["filepath"] for f in files]
+        assert paths == [
+            "RGB_IMAGES/cam_front/lossy.mp4",
+            "RGB_IMAGES/cam_front/trace.json",
+        ]
+
+    def test_rgb_with_lossless_on_disk_lists_both(self, tmp_path) -> None:
+        (tmp_path / "lossy.mp4").write_bytes(b"x")
+        (tmp_path / "lossless.mp4").write_bytes(b"x")
+        files = get_cloud_file_list(DataType.RGB_IMAGES, "cam_front", str(tmp_path))
+        paths = {f["filepath"] for f in files}
+        assert paths == {
+            "RGB_IMAGES/cam_front/lossy.mp4",
+            "RGB_IMAGES/cam_front/lossless.mp4",
+            "RGB_IMAGES/cam_front/trace.json",
+        }
+
 
 class TestBatchRegistration:
     """Tests for the batch registration HTTP call and outcome handling."""
@@ -121,6 +143,32 @@ class TestBatchRegistration:
         assert trace_entry["cloud_files"] == get_cloud_file_list(
             DataType.RGB_IMAGES, "cam"
         )
+
+    @pytest.mark.asyncio
+    async def test_lossy_only_candidate_payload_omits_lossless(
+        self, mock_auth, state_api, emitter, tmp_path
+    ) -> None:
+        (tmp_path / "lossy.mp4").write_bytes(b"x")
+        session = _mock_http_session({
+            "registered_traces": [{"trace_id": "t1", "upload_session_uris": {}}],
+            "failed_traces": [],
+        })
+        candidate = _make_candidate(
+            data_type=DataType.RGB_IMAGES, data_type_name="cam", path=str(tmp_path)
+        )
+
+        mgr = RegistrationManager(
+            client_session=session,
+            state_api=state_api,
+            emitter=emitter,
+            batch_size=10,
+        )
+        await mgr._register_data_trace_batch([candidate])
+
+        payload = session.post.call_args.kwargs["json"]
+        cloud_files = payload["traces"][0]["cloud_files"]
+        paths = [entry["filepath"] for entry in cloud_files]
+        assert paths == ["RGB_IMAGES/cam/lossy.mp4", "RGB_IMAGES/cam/trace.json"]
 
     @pytest.mark.asyncio
     async def test_session_uris_forwarded_to_state_api(

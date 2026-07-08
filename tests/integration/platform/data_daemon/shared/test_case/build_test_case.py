@@ -162,6 +162,11 @@ class DataDaemonTestCase:
             long-running workloads that the Python daemon cannot sustain use
             this flag so they still exercise the Rust daemon in CI without
             failing the legacy suite.
+        video_codec: When set (e.g. ``"h264_medium"``), the case selects that
+            global video codec via ``nc.set_video_encoding_options`` before
+            recording, so RGB cameras upload a single lossy CRF-23 video and the
+            lossless archive is dropped.  ``None`` keeps the default
+            lossless+lossy behaviour.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -191,11 +196,17 @@ class DataDaemonTestCase:
     timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
     skip: bool = False
     requires_rust_daemon: bool = False
+    video_codec: str | None = None
 
     @property
     def has_video(self) -> bool:
         """Return True when this case logs at least one camera stream."""
         return self.video_count > 0
+
+    @property
+    def lossy_only(self) -> bool:
+        """Return True when the case drops the lossless archive for RGB video."""
+        return self.video_codec == "h264_medium"
 
     @property
     def expected_joint_frames(self) -> int:
@@ -308,6 +319,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append(f"{case.image_width}x{case.image_height}")
         if case.video_fps != DataDaemonTestCase.video_fps:
             parts.append(f"{case.video_fps}hz")
+        if case.video_codec is not None:
+            parts.append(case.video_codec)
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:
