@@ -779,6 +779,38 @@ def test_deploy_model_failure(
         )
 
 
+def test_deploy_model_endpoint_name_conflict_shows_backend_detail(
+    temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
+):
+    """Deployment name conflicts should surface a clear terminal error."""
+    nc.login(TEST_API_KEY)
+
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/deploy",
+        status_code=409,
+        json={
+            "detail": {
+                "error": "Endpoint with name test_endpoint already exists",
+            }
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Error deploying model: Endpoint with name test_endpoint already exists",
+    ):
+        nc.deploy_model(
+            job_id="job_123",
+            name="test_endpoint",
+            input_embodiment_description={
+                DataType.RGB_IMAGES: _indexed_names(["top_camera"]),
+            },
+            output_embodiment_description={
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(["joint1"]),
+            },
+        )
+
+
 def test_deploy_model_loads_embodiments_from_job_metadata_for_robot_id(
     temp_config_dir, mock_auth_requests, reset_neuracore, mocked_org_id
 ):

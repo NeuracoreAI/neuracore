@@ -7,6 +7,7 @@ including deployment, status monitoring, and deletion operations.
 
 import logging
 
+import requests
 from neuracore_types import (
     DeploymentConfig,
     DeploymentRequest,
@@ -32,6 +33,7 @@ from neuracore.core.get_latest_sync_point import (
 from neuracore.core.utils.embodiment_description_utils import (
     resolve_embodiment_descriptions_with_override,
 )
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 
 logger = logging.getLogger(__name__)
@@ -284,8 +286,16 @@ def deploy_model(
         )
         response.raise_for_status()
         return response.json()
+    except requests.exceptions.HTTPError as e:
+        detail = None
+        if e.response is not None:
+            detail = extract_error_detail(e.response)
+            if e.response.status_code == 409:
+                detail = detail or f"Endpoint with name {name} already exists"
+                raise ValueError(f"Error deploying model: {detail}") from e
+        raise ValueError(f"Error deploying model: {detail or e}") from e
     except Exception as e:
-        raise ValueError(f"Error deploying model: {e}")
+        raise ValueError(f"Error deploying model: {e}") from e
 
 
 def get_endpoint_status(endpoint_id: str) -> str:
