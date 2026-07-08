@@ -70,6 +70,12 @@ const IDLE_REAP: Duration = Duration::from_secs(30);
 /// negligible against the holdback.
 const HOUSEKEEP_INTERVAL: Duration = Duration::from_millis(25);
 
+/// Upper bound on how long a `RefreshConfig` may park the dispatcher loop
+/// waiting for the watcher's ack. The refresh is a fast `spawn_blocking` profile
+/// read, so this only guards against a stalled watcher wedging the hot path; on
+/// timeout we proceed and let the periodic poll pick the change up.
+const REFRESH_CONFIG_ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Bounded per-trace queue size. A smaller cap acts as a forced flush throttle;
 /// 256 absorbs the high-dimensionality burst at the cost of ~10 KiB of message
 /// headers per trace.
@@ -111,6 +117,11 @@ impl DispatcherHandle {
 pub struct DispatcherContext {
     /// Daemon event bus, used to publish recording/trace lifecycle events.
     pub event_bus: Option<crate::state::EventBus>,
+    /// Refresh-request sender to the config watcher, used to service a
+    /// `RefreshConfig` command (see [`Dispatcher::handle_refresh_config`]).
+    /// `None` in tests / when no watcher is wired, where `RefreshConfig` is a
+    /// no-op.
+    pub config_refresh_tx: Option<tokio::sync::mpsc::Sender<crate::cloud::ConfigRefreshRequest>>,
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -441,6 +452,31 @@ impl Dispatcher {
                     },
                 });
             }
+            Envelope::RefreshConfig {} => self.handle_refresh_config().await,
+        }
+    }
+
+    /// Force the config watcher to re-resolve the profile and wait for it to
+    /// finish before handling the next envelope, so the SDK's ordered
+    /// `set_video_encoding_options → start_recording` sequence never races the
+    /// async refresh (see [`crate::cloud::watchers::config_watcher`] for the
+    /// full rationale). The wait is bounded by [`REFRESH_CONFIG_ACK_TIMEOUT`] so
+    /// a stalled watcher can't wedge the routing loop. A missing sender (tests /
+    /// no watcher) or a closed channel (watcher gone at shutdown) is a no-op.
+    async fn handle_refresh_config(&self) {
+        let Some(refresh_tx) = self.context.config_refresh_tx.as_ref() else {
+            return;
+        };
+        let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        if refresh_tx.send(ack_tx).await.is_err() {
+            tracing::debug!("config watcher gone; ignoring RefreshConfig");
+            return;
+        }
+        if tokio::time::timeout(REFRESH_CONFIG_ACK_TIMEOUT, ack_rx)
+            .await
+            .is_err()
+        {
+            tracing::warn!("config refresh ack timed out; proceeding (poll will catch up)");
         }
     }
 
@@ -1029,13 +1065,14 @@ fn remove_spool_nut(path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cloud::ConfigRefreshRequest;
     use crate::encoding::video_encoder::VideoEncoder;
     use crate::state::{SqliteStateStore, TraceWriteStatus};
     use crate::storage::budget::{StorageBudget, StoragePolicy};
     use crate::storage::paths::TracePath;
     use std::path::PathBuf;
     use tempfile::TempDir;
-    use tokio::sync::broadcast;
+    use tokio::sync::{broadcast, mpsc};
     use tokio::time::{timeout, Duration};
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
@@ -1117,6 +1154,76 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_config_forwards_to_watcher_and_awaits_ack() {
+        // The RefreshConfig arm must hand a refresh request to the config
+        // watcher and await its ack. Because the commands channel is in-order
+        // and the dispatcher processes envelopes sequentially, awaiting here is
+        // what guarantees the in-memory config is updated before a following
+        // StartRecording / VideoChunkReady resolves its codec. A stand-in
+        // watcher acks the request; the test proves the request is delivered and
+        // the dispatcher keeps running after the ack.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (refresh_tx, mut refresh_rx) = mpsc::channel::<ConfigRefreshRequest>(4);
+        let dispatcher_context = DispatcherContext {
+            event_bus: None,
+            config_refresh_tx: Some(refresh_tx),
+        };
+        let (tx, handle) =
+            spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
+
+        // Stand-in watcher: ack the first refresh request it receives.
+        let watcher = tokio::spawn(async move {
+            match refresh_rx.recv().await {
+                Some(ack) => ack.send(()).is_ok(),
+                None => false,
+            }
+        });
+
+        tx.send(Envelope::RefreshConfig {}).await.unwrap();
+        let acked = timeout(Duration::from_secs(5), watcher)
+            .await
+            .expect("watcher observed the refresh within 5s")
+            .expect("watcher task joined");
+        assert!(
+            acked,
+            "dispatcher must forward RefreshConfig to the watcher"
+        );
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+    }
+
+    #[tokio::test]
+    async fn refresh_config_without_watcher_is_noop() {
+        // With no `config_refresh_tx` wired (tests / no watcher) a RefreshConfig
+        // must be a harmless no-op: the dispatcher neither blocks nor dies, and
+        // keeps routing afterwards.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let dispatcher_context = DispatcherContext {
+            event_bus: None,
+            config_refresh_tx: None,
+        };
+        let (tx, handle) =
+            spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
+
+        timeout(Duration::from_secs(5), tx.send(Envelope::RefreshConfig {}))
+            .await
+            .expect("send did not block")
+            .expect("dispatcher accepted the envelope");
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+    }
+
+    #[tokio::test]
     async fn routes_data_into_its_window_by_timestamp() {
         fast_holdback();
         let (store, dir) = open_store().await;
@@ -1125,6 +1232,7 @@ mod tests {
         let bus = crate::state::EventBus::new();
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1411,6 +1519,7 @@ mod tests {
         let mut sub = bus.subscribe();
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1463,6 +1572,7 @@ mod tests {
             context,
             DispatcherContext {
                 event_bus: Some(bus.clone()),
+                config_refresh_tx: None,
             },
         );
 

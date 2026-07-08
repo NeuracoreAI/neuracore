@@ -11,10 +11,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use tokio::sync::{mpsc, watch};
 
 use crate::cli::coordinators::{build_api_client, spawn_cloud_coordinators};
 use crate::cli::launch_logging::{init_tracing, log_path_for, report_failure};
-use crate::cloud::{read_org_id_from_config, spawn_recording_reaper};
+use crate::cloud::{
+    read_org_id_from_config, spawn_config_watcher, spawn_recording_reaper, ConfigRefreshRequest,
+};
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
 use crate::config::{resolve_effective_config, DaemonConfig, DEFAULT_PROFILE_NAME};
@@ -36,6 +39,9 @@ use crate::storage::budget::{StorageBudget, StoragePolicy};
 /// timeout exists so a future bug that lets the listener exit without a
 /// shutdown signal degrades to a `?signal=sigterm` log rather than a hang.
 const SIGNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Buffer for dispatcher → config-watcher refresh requests (rare, drained promptly).
+const CONFIG_REFRESH_CHANNEL_CAPACITY: usize = 8;
 
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
@@ -76,6 +82,7 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
             DaemonizeOutcome::Child(reporter) => run_daemon(
                 runtime_env,
                 config,
+                selected_profile,
                 effective_debug,
                 Some(reporter),
                 Some(log_path),
@@ -83,7 +90,14 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
         }
     } else {
         print_preflight(&runtime_env, &config, &selected_profile);
-        run_daemon(runtime_env, config, effective_debug, None, None)
+        run_daemon(
+            runtime_env,
+            config,
+            selected_profile,
+            effective_debug,
+            None,
+            None,
+        )
     }
 }
 
@@ -115,6 +129,7 @@ fn handle_parent_readiness(reader: crate::lifecycle::daemonize::ReadinessReader)
 fn run_daemon(
     runtime_env: RuntimeEnv,
     config: DaemonConfig,
+    profile: String,
     debug: bool,
     reporter: Option<ReadinessReporter>,
     log_file: Option<PathBuf>,
@@ -308,6 +323,14 @@ fn run_daemon(
         // once the dispatcher and every actor (the last `JsonWriteHandle` holders)
         // are gone at shutdown.
         let (json_write_handle, _json_writer_owner) = crate::pipeline::json_writer::spawn();
+
+        // Seed the config watch channel with the launch-resolved config; the
+        // watcher (spawned below) refreshes it. `_config_rx` is held only to keep
+        // the channel open until consumers are wired up in a follow-up change.
+        let (config_tx, _config_rx) = watch::channel(config_for_runtime.clone());
+        let (config_refresh_tx, config_refresh_rx) =
+            mpsc::channel::<ConfigRefreshRequest>(CONFIG_REFRESH_CHANNEL_CAPACITY);
+
         let actor_context = Arc::new(
             TraceActorContext::new(
                 recordings_root.clone(),
@@ -344,6 +367,16 @@ fn run_daemon(
                 .unwrap_or_else(|| std::path::PathBuf::from(".neuracore/config.json"));
             let org_id = read_org_id_from_config(&config_path)
                 .or_else(|| config_for_runtime.current_org_id.clone());
+
+            // Spawn the daemon-config watcher unconditionally: offline mode skips
+            // the cloud coordinators, but per-trace actors still need the live codec.
+            let config_watcher = spawn_config_watcher(
+                Some(profile.clone()),
+                None,
+                config_tx,
+                config_refresh_rx,
+                shutdown_tx.subscribe(),
+            );
 
             // Spawn the cloud-side coordinators *before* the dispatcher so
             // they have an active subscription to the event bus by the time
@@ -391,6 +424,7 @@ fn run_daemon(
 
             let dispatcher_context = DispatcherContext {
                 event_bus: Some(event_bus.clone()),
+                config_refresh_tx: Some(config_refresh_tx),
             };
             let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
                 state_store.clone(),
@@ -456,6 +490,10 @@ fn run_daemon(
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
             }
+            // The dispatcher (the last `config_refresh_tx` holder) is gone, so
+            // the watcher's refresh branch has closed; it exits on the shutdown
+            // broadcast.
+            config_watcher.join().await;
             if let Some(handle) = wakelock_handle {
                 handle.join().await;
             }

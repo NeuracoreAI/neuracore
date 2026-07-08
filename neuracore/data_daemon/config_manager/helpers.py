@@ -89,6 +89,7 @@ def collect_config_updates(
     offline: bool | None,
     api_key: str | None,
     current_org_id: str | None,
+    video_codec: str | None = None,
 ) -> dict[str, Any]:
     """Normalize CLI inputs into validated daemon config updates."""
     raw_config_values = {
@@ -101,6 +102,7 @@ def collect_config_updates(
         "offline": offline,
         "api_key": api_key,
         "current_org_id": current_org_id,
+        "video_codec": video_codec,
     }
     return extract_config_updates(raw_config_values)
 

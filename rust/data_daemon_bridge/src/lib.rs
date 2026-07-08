@@ -426,6 +426,22 @@ fn get_recording_id(
     })
 }
 
+/// Ask the running daemon to reload its profile config immediately (see
+/// [`Envelope::RefreshConfig`]). Published on the caller thread's command port
+/// so it is strictly ordered ahead of a subsequent `start_recording` from the
+/// same thread.
+///
+/// Best-effort: the SDK caller ignores failures. With no daemon running the
+/// command reaches zero subscribers (a no-op); the profile write already
+/// persisted, so the daemon picks it up on its next poll or at launch.
+#[pyfunction]
+fn refresh_config(py: Python<'_>) -> PyResult<()> {
+    py.detach(|| -> PyResult<()> {
+        publish(&Envelope::RefreshConfig {})?;
+        Ok(())
+    })
+}
+
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -436,5 +452,6 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
+    module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
     Ok(())
 }

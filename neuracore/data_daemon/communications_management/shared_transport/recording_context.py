@@ -40,6 +40,19 @@ def _load_native() -> ModuleType:
     return _DATA_BRIDGE_MODULE
 
 
+def notify_daemon_config_changed() -> None:
+    """Try ask a running Rust daemon to reload its profile immediately.
+
+    This is a no-op under the legacy Python producer.
+    """
+    if not is_rust_daemon_enabled():
+        return
+    try:
+        _load_native().refresh_config()
+    except Exception as error:  # noqa: BLE001 - best-effort, never fatal
+        logger.debug("Could not notify the daemon of a config change: %s", error)
+
+
 class RecordingContext:
     """Recording-scoped interface to the data daemon.
 

@@ -50,8 +50,10 @@ impl ProfileManager {
         }
     }
 
-    /// Create a `ProfileManager` rooted at an explicit home directory.
-    #[cfg(test)]
+    /// Create a `ProfileManager` rooted at an explicit home directory. Used to
+    /// resolve against an injected root (the config watcher's tests, and any
+    /// test avoiding the developer's real profiles); production uses `new`,
+    /// which resolves the real home.
     pub fn with_home(home: PathBuf) -> Self {
         ProfileManager { home }
     }

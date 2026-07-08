@@ -211,6 +211,7 @@ These are the supported settings:
 | `offline` | If enabled, uploading is disabled and data is only stored locally. |
 | `api_key` | API key used for authenticating the daemon. |
 | `current_org_id` | Which organisation the daemon should operate under. |
+| `video_codec` |  Video encoding for RGB cameras. `h264_lossless` (default)/ `h264_medium` . |
 
 ---
 
@@ -262,6 +263,7 @@ Supported environment variables:
 | `offline` | `NCD_OFFLINE` |
 | `api_key` | `NCD_API_KEY` |
 | `current_org_id` | `NEURACORE_ORG_ID` (shared with the SDK) |
+| `video_codec` | `NCD_VIDEO_CODEC` |
 
 Note on `NEURACORE_ORG_ID`: the daemon uses it only as a fallback while
 `~/.neuracore/config.json` has no organization set. The config file is watched
@@ -329,19 +331,21 @@ neuracore data-daemon profile create laptop
 Update a named profile:
 
 ```bash
-neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
+neuracore data-daemon profile update <name> [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium>]
 ```
 
 Update the default profile:
 
 ```bash
-neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>]
+neuracore data-daemon profile update [--storage-limit <bytes|unit>] [--bandwidth-limit <bytes|unit>] [--spool-limit <bytes|unit>] [--storage-path <path>] [--num-threads <n>] [--wakelock|--no-wakelock] [--offline|--online] [--api-key <key>] [--current-org-id <org_id>] [--video-codec <h264_lossless|h264_medium>]
 ```
 
 Example:
 
 ```bash
 neuracore data-daemon profile update laptop --storage-limit 2gb --offline
+neuracore data-daemon profile update laptop --video-codec h264_medium  # lossy-only uploads
+neuracore data-daemon profile update laptop --video-codec h264_lossless # back to the default
 ```
 
 ### `neuracore data-daemon profile get`
