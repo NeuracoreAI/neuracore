@@ -32,6 +32,7 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.signalling_events_consumer import (
     SignallingEventsConsumer,
 )
+from neuracore.core.utils.http_session import retry_connection_failures
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
 
@@ -77,7 +78,9 @@ class StreamManagerOrchestrator(
         self.auth = auth or get_auth()
         self.loop = loop or get_running_loop()
         self.client_session = client_session or ClientSession(
-            timeout=ClientTimeout(sock_read=None, total=None), loop=self.loop
+            timeout=ClientTimeout(sock_read=None, total=None),
+            loop=self.loop,
+            middlewares=(retry_connection_failures,),
         )
 
         self.signalling_consumer = SignallingEventsConsumer(

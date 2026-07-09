@@ -132,14 +132,15 @@ class SignallingEventsConsumer(BaseSSEConsumer):
 
     async def on_heartbeat(self) -> None:
         """Handle heartbeat events by keeping the connection alive."""
-        response = await self.client_session.post(
+        # The response is read within a context manager so the underlying
+        # connection is released back to the session pool.
+        async with self.client_session.post(
             f"{API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
             data="pong",
-        )
-        response.raise_for_status()
-        response = await response.json()
-        response = StreamAliveResponse.model_validate(response)
+        ) as raw_response:
+            raw_response.raise_for_status()
+            response = StreamAliveResponse.model_validate(await raw_response.json())
 
         if response.resurrected:
             for manager in self.connection_managers.values():

@@ -130,13 +130,14 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         if self.ice_config is not None:
             return self.ice_config
 
-        response = await self.client_session.get(
+        # The response is read within a context manager so the underlying
+        # connection is released back to the session pool.
+        async with self.client_session.get(
             f"{API_URL}/org/{self.org_id}/signalling/turn_servers/{self.local_stream_id}",
             headers=self.auth.get_headers(),
-        )
-        self.ice_config = IceConfig.model_validate(await response.json())
-
-        return self.ice_config
+        ) as response:
+            self.ice_config = IceConfig.model_validate(await response.json())
+            return self.ice_config
 
     def get_latest_data(self) -> SynchronizedPoint:
         """Gets a sync point consisting of the latest data from all connections.

@@ -222,7 +222,9 @@ class PeerToPeerProviderConnection:
         Raises:
             ConfigError: If there is an error trying to get the current org
         """
-        await self.client_session.post(
+        # The response body is ignored; the context manager ensures the
+        # connection is released back to the session pool.
+        async with self.client_session.post(
             f"{API_URL}/org/{self.org_id}/signalling/message/submit",
             headers=self.auth.get_headers(),
             json=HandshakeMessage(
@@ -232,7 +234,8 @@ class PeerToPeerProviderConnection:
                 type=message_type,
                 data=content,
             ).model_dump(mode="json"),
-        )
+        ):
+            pass
 
     def fix_mid_ordering(self, when: str = "offer") -> None:
         """Fix media ID ordering for transceivers.
