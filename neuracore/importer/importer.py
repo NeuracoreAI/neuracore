@@ -203,6 +203,7 @@ def _run_import(
                 "deleting existing dataset.",
                 dataset_name,
             )
+            deleted_dataset_id = dataset.id
             try:
                 dataset.delete()
             except Exception as exc:  # noqa: BLE001 - preserve traceback for user
@@ -210,7 +211,6 @@ def _run_import(
                     f"Failed to delete dataset '{dataset_name}': {exc}"
                 ) from exc
             logger.info("Deleting existing dataset '%s'.", dataset_name)
-            deleted_dataset_id = dataset.id
             dataset = None
         else:
             logger.warning(
