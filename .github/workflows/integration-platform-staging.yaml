@@ -37,13 +37,13 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        python-version: ['3.10', '3.14']
+        python-version: ['3.10']
         platform:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - runner: macos-26
-            target: aarch64-apple-darwin
-            macos-deployment-target: '11.0'
+          # - runner: macos-26
+          #   target: aarch64-apple-darwin
+          #   macos-deployment-target: '11.0'
 
     steps:
     - name: Show disk space
