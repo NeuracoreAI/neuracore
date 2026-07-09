@@ -47,6 +47,7 @@ _CASE = DataDaemonTestCase(
     video_count=1,
     image_width=64,
     image_height=64,
+    wait=True,
 )
 
 
@@ -145,7 +146,7 @@ def test_shared_slot_reopen_after_stalled_descriptor_uploads_next_recording(
                     always_log=True,
                     assert_deadline=False,
                 ):
-                    nc.stop_recording(robot_name=robot_name, wait=True)
+                    nc.stop_recording(robot_name=robot_name, wait=case.wait)
                 wall_stopped_at = time.time()
 
                 results = [
