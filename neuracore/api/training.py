@@ -20,6 +20,7 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.training_input_args_validation import (
     _get_data_types_for_algorithms,
@@ -210,9 +211,9 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
         dict: Training job data including job ID and status
 
     Raises:
-        ValueError: If the job is not found or there is an error accessing the job
-        requests.exceptions.HTTPError: If the API request returns an error code
-        requests.exceptions.RequestException: If there is a problem with the request
+        ValueError: If the request cannot reach the backend or the backend
+            responds with an error status. The message carries the error
+            detail reported by the backend when one is available.
     """
     auth = get_auth()
     org_id = get_current_org()
@@ -222,10 +223,13 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
             headers=auth.get_headers(),
         )
-        response.raise_for_status()
-        return response.json()
     except Exception as e:
-        raise ValueError(f"Error resuming job {job_id}: {e}")
+        raise ValueError(f"Error resuming job {job_id}: {e}") from e
+    if not response.ok:
+        detail = extract_error_detail(response)
+        error_message = detail or f"{response.status_code} {response.reason}"
+        raise ValueError(f"Error resuming job {job_id}: {error_message}")
+    return response.json()
 
 
 def get_training_jobs() -> list[dict]:
