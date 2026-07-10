@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -38,16 +39,16 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 # Multiprocessing children under spawn (the macOS default) and forkserver (the
 # Linux default from Python 3.14) are fresh interpreters that must re-import
-# the `tests` package to unpickle pool tasks. Only the parent's in-process
-# sys.path (set up by pytest) knows the repo root, so without this every pool
-# worker dies with ModuleNotFoundError before its first task and the pool
-# hangs forever. PYTHONPATH is inherited by child processes; fork is
-# unaffected either way.
+# the `tests` package to unpickle pool tasks. multiprocessing propagates the
+# PARENT's sys.path to those children (spawn's prepare() replaces the child's
+# sys.path wholesale, so PYTHONPATH cannot help), and under
+# --import-mode=importlib pytest never puts the repo root on sys.path — so
+# without this every pool worker dies with ModuleNotFoundError while
+# unpickling its first task, the pool respawns it forever, and the case hangs.
+# fork is unaffected either way.
 _REPO_ROOT = str(Path(__file__).resolve().parents[4])
-if _REPO_ROOT not in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-    os.environ["PYTHONPATH"] = os.pathsep.join(
-        filter(None, [_REPO_ROOT, os.environ.get("PYTHONPATH")])
-    )
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 # Enable faulthandler at interpreter startup in every child process, so a
 # worker wedged before it can run any Python of ours (e.g. during spawn
