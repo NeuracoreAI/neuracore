@@ -378,6 +378,7 @@ pyinstrument
 pymodule
 pyquaternion
 pytest
+PYTHONFAULTHANDLER
 pyyaml
 pyzmq
 Qbcaa
@@ -436,6 +437,7 @@ setpriority
 setsid
 setuptools
 shadowsize
+SIGABRT
 siglip
 Siglip
 SIGLIP

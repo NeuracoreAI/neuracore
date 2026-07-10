@@ -49,6 +49,12 @@ if _REPO_ROOT not in os.environ.get("PYTHONPATH", "").split(os.pathsep):
         filter(None, [_REPO_ROOT, os.environ.get("PYTHONPATH")])
     )
 
+# Enable faulthandler at interpreter startup in every child process, so a
+# worker wedged before it can run any Python of ours (e.g. during spawn
+# bootstrap imports) still dumps all thread stacks to captured stderr when the
+# pool timeout sends it SIGABRT (see _dump_pool_worker_stacks).
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
+
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
 

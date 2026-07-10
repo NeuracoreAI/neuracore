@@ -13,6 +13,7 @@ import logging
 import multiprocessing
 import os
 import random
+import signal
 import threading
 import time
 import uuid
@@ -976,6 +977,31 @@ def _init_pool_worker() -> None:
     faulthandler.dump_traceback_later(WORKER_STACK_DUMP_INTERVAL_S, repeat=True)
 
 
+def _dump_pool_worker_stacks(pool: multiprocessing.pool.Pool) -> None:
+    """Make every live pool worker dump its thread stacks to captured stderr.
+
+    Workers inherit ``PYTHONFAULTHANDLER=1`` (exported by conftest), so
+    faulthandler is enabled from interpreter startup and SIGABRT prints every
+    thread's stack before the process dies. Unlike the initializer-armed
+    periodic dumps, this also reaches workers wedged during spawn bootstrap —
+    before any of our Python code has run.
+    """
+    workers = list(getattr(pool, "_pool", None) or [])
+    for proc in workers:
+        if proc.pid is None or not proc.is_alive():
+            continue
+        logger.warning("Dumping stacks of hung pool worker pid=%d", proc.pid)
+        try:
+            os.kill(proc.pid, signal.SIGABRT)
+        except OSError:
+            logger.warning(
+                "Failed to signal hung pool worker pid=%d", proc.pid, exc_info=True
+            )
+    # Give the dying workers a moment to flush their stack dumps into the
+    # fd-captured stderr before pool teardown reaps them.
+    time.sleep(2.0)
+
+
 def _run_pooled_context_workers(
     case: DataDaemonTestCase,
     *,
@@ -994,6 +1020,7 @@ def _run_pooled_context_workers(
             (spec, pool.apply_async(_subprocess_context_worker, (spec,)))
             for spec in specs
         ]
+        timed_out = False
         for spec, async_result in async_results:
             label = f"ctx[{spec.context_index}]"
             try:
@@ -1004,6 +1031,7 @@ def _run_pooled_context_workers(
                 )
                 outcomes.append(f"{label}: completed")
             except multiprocessing.TimeoutError:
+                timed_out = True
                 outcomes.append(
                     f"{label}: no result within the {pool_timeout_s:.0f}s"
                     " case budget; worker likely hung (will be terminated)"
@@ -1011,6 +1039,8 @@ def _run_pooled_context_workers(
             except Exception as exc:  # noqa: BLE001
                 errors.append(exc)
                 outcomes.append(f"{label}: {type(exc).__name__}: {exc}")
+        if timed_out:
+            _dump_pool_worker_stacks(pool)
     if len(results) < len(specs):
         _raise_pooled_context_failure(
             case, specs=specs, results=results, outcomes=outcomes, errors=errors
