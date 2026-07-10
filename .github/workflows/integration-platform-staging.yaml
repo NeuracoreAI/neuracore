@@ -171,7 +171,7 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
       # --import-mode=importlib keeps the repo root off sys.path
-      run: pytest -o log_cli=true --log-cli-level=INFO --import-mode=importlib tests/integration/platform/data_daemon/
+      run: pytest -o log_cli=true --log-cli-level=INFO -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s" --import-mode=importlib tests/integration/platform/data_daemon/
 
     - name: Run Consume Stream Integration Test
       env:

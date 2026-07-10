@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
+from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
     harness_db_path,
@@ -185,7 +186,7 @@ def delete_cloud_dataset(dataset_name: str) -> None:
         dataset_name: Name of the cloud dataset to delete.
     """
     try:
-        nc.login()
+        ensure_login()
         nc.get_dataset(dataset_name).delete()
         logger.info(
             "Deleted cloud dataset %r (storage_state_action=delete)", dataset_name

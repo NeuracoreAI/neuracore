@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 import pytest
 
-import neuracore as nc
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     NETWORK_PERFORMANCE_CASES,
 )
@@ -60,7 +59,6 @@ def test_cloud_upload_and_readiness_performance(
       timing budget (``case_timeout_seconds``)
     - asserts the expected number of recordings are present in the dataset
     """
-    nc.login()
     if not has_configured_org():
         pytest.skip(
             "Online performance tests require NEURACORE_ORG_ID"

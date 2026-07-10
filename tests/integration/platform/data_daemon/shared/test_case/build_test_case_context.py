@@ -20,10 +20,14 @@ import numpy as np
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
+from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
     assert_on_schedule,
+    init_worker_logging,
+    relayed_worker_logs,
+    surface_worker_errors,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
@@ -716,24 +720,36 @@ def log_frames(
     return [marker_name]
 
 
-def _bind_worker_dataset(*, dataset_name: str) -> None:
-    """Poll until the worker pool-shared dataset is visible to this worker."""
+def _bind_worker_dataset(spec: ContextSpec) -> None:
+    """Poll until the worker pool-shared dataset is visible to this worker.
+
+    The timeout RuntimeError is raised inside the Timer block on purpose:
+    ``Timer.__exit__`` skips its deadline assertion when an exception is in
+    flight, so the real ``nc.get_dataset`` error (chained via ``last_error``)
+    propagates instead of being masked by the Timer's own AssertionError.
+    """
     last_error: Exception | None = None
     deadline = time.time() + MAX_TIME_TO_START_S
-    with Timer(MAX_TIME_TO_START_S, label="nc.get_dataset", always_log=True):
+    with Timer(
+        MAX_TIME_TO_START_S,
+        label="nc.get_dataset",
+        always_log=True,
+        assert_deadline=spec.assert_deadline,
+    ):
         while time.time() < deadline:
             try:
-                nc.get_dataset(dataset_name)
+                nc.get_dataset(spec.dataset_name)
                 return
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
                 time.sleep(DATASET_POLL_INTERVAL_S)
 
-    raise RuntimeError(
-        f"Timed out waiting for shared dataset '{dataset_name}' to exist"
-    ) from last_error
+        raise RuntimeError(
+            f"Timed out waiting for shared dataset '{spec.dataset_name}' to exist"
+        ) from last_error
 
 
+@surface_worker_errors
 def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     """Subprocess wrapper for context_worker used by multiprocessing.Pool.
 
@@ -742,10 +758,20 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     timers and the parent's pre-fork timers (e.g. nc.login) are not
     double-counted when stats are merged back. The stochastic-timestamp RNG
     is reseeded per-context so parallel workers produce independent jitter
-    sequences instead of replaying the parent's seed.
+    sequences instead of replaying the parent's seed. Spawned workers
+    (macOS) additionally re-authenticate, as they do not inherit the
+    parent's in-process auth state.
+
+    The process is renamed to ``ctx-<context_index>`` so relayed log lines
+    and worker failure messages carry the semantic context identity instead
+    of a start-method-specific pool slot name (``SpawnPoolWorker-3`` /
+    ``ForkPoolWorker-3`` / ``ForkServerPoolWorker-3``), making them uniform
+    across platforms and joinable against the case's context specs.
     """
+    multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
     STOCHASTIC_TIMESTAMP_RANDOM.seed(1 + spec.context_index)
+    ensure_login()
     return context_worker(spec)
 
 
@@ -773,8 +799,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     wall_stopped_at: float = 0.0
 
     try:
-        _bind_worker_dataset(dataset_name=spec.dataset_name)
-        with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
+        _bind_worker_dataset(spec)
+        with Timer(
+            MAX_TIME_TO_START_S,
+            label="nc.connect_robot",
+            always_log=True,
+            assert_deadline=spec.assert_deadline,
+        ):
             robot = nc.connect_robot(spec.robot_name, overwrite=False)
 
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
@@ -968,6 +999,8 @@ def run_case_contexts(
     Returns:
         List of result dicts from each context worker, one per spec.
     """
+    ensure_login()
+
     if specs is None:
         specs = build_context_specs(case)
 
@@ -983,10 +1016,15 @@ def run_case_contexts(
     if case.parallel_contexts == 1:
         results = [context_worker(specs[0])]
     else:
-        with multiprocessing.Pool(case.parallel_contexts) as pool:
-            results = list(  # type: ignore[return-value]
-                pool.map(_subprocess_context_worker, specs)
-            )
+        with relayed_worker_logs() as log_queue:
+            with multiprocessing.Pool(
+                case.parallel_contexts,
+                initializer=init_worker_logging,
+                initargs=(log_queue, logging.getLogger().getEffectiveLevel()),
+            ) as pool:
+                results = list(  # type: ignore[return-value]
+                    pool.map(_subprocess_context_worker, specs)
+                )
         for result in results:
             Timer.merge_stats(result.timer_stats)
 
