@@ -443,15 +443,6 @@ def log_run_analysis(
 ) -> str:
     """Log a detailed analysis of a test run for diagnostics."""
 
-    def _format_recording_ids(recording_ids: list[str], *, max_items: int = 6) -> str:
-        cleaned = [recording_id for recording_id in recording_ids if recording_id]
-        if not cleaned:
-            return "[none]"
-        if len(cleaned) <= max_items:
-            return ", ".join(cleaned)
-        shown = ", ".join(cleaned[:max_items])
-        return f"{shown}, ... (+{len(cleaned) - max_items} more)"
-
     display_case_id = (
         f"{label_prefix}-{case_id(case)}" if label_prefix else case_id(case)
     )
@@ -497,9 +488,6 @@ def log_run_analysis(
             lines.append(
                 f"    ctx[{result.context_index}]: {wall_s:.1f}s total,"
                 f" {avg_per_recording:.1f}s avg per recording"
-            )
-            lines.append(
-                "      recordings: " f"{_format_recording_ids(result.recording_ids)}"
             )
     else:
         lines.append(
@@ -558,5 +546,5 @@ def log_run_analysis(
 
     lines.append(separator)
     report = "\n".join(lines)
-    logger.info(report)
+    logger.info("\n%s", report)
     return report

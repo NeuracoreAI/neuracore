@@ -1,16 +1,20 @@
 from __future__ import annotations
 
+import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import pytest
 
+import neuracore as nc
 from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.const import active_profile_name
 from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
+from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
@@ -30,10 +34,30 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
-# cspell:ignore nodeid getfixturevalue
+# cspell:ignore nodeid getfixturevalue modifyitems callspec
+
+# Add the repo root to the path so sub workers on macos can unpickle pool tasks
+# correctly. pytest --import-mode=importlib imports tests files without touching the
+# sys.path. So this is to compensate. Repo root at the front would shadow the installed
+# neuracore wheel so the path is appended rather than prepended.
+_REPO_ROOT = str(Path(__file__).resolve().parents[4])
+if _REPO_ROOT not in sys.path:
+    sys.path.append(_REPO_ROOT)
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
+
+
+@pytest.fixture(autouse=True)
+def login_parent_process() -> Iterator[None]:
+    """Authenticate the parent pytest process for each test.
+
+    Logs in during setup and logs out during teardown, so every test
+    performs (and times) a real login against a clean environment.
+    """
+    ensure_login()
+    yield
+    nc.logout()
 
 
 @pytest.fixture(autouse=True)

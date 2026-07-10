@@ -219,6 +219,7 @@ imread
 imshow
 inertiafromgeom
 inertiagrouprange
+initargs
 inproc
 inspectable
 ipython
@@ -258,6 +259,7 @@ libglib
 libosmesa
 libx
 linalg
+lineno
 listconfig
 llava
 Llava
@@ -401,6 +403,7 @@ renice
 renicing
 reqwest
 reraises
+respawns
 restartability
 resumably
 RETRYABLE

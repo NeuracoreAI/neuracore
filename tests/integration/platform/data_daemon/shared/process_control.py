@@ -8,13 +8,19 @@ here without cycles.
 
 from __future__ import annotations
 
+import functools
 import logging
+import logging.handlers
 import multiprocessing
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+import traceback
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 
 from neuracore.data_daemon.const import SOCKET_PATH
@@ -167,6 +173,71 @@ def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
         f"{label} fired at wrong moment: "
         f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
     )
+
+
+def surface_worker_errors(fn):
+    """Wrap a subprocess worker entry point so failures survive pickling.
+
+    Exceptions raised in a ``multiprocessing.Pool`` worker are pickled back to
+    the parent, which drops the traceback and ``__cause__`` chain and fails
+    outright for exceptions that are not picklable. Re-raise as a plain
+    ``RuntimeError`` whose message embeds the worker's full formatted
+    traceback (chained causes included) so the parent's failure report shows
+    the real error. The message names the worker process to match the
+    ``processName`` column of the relayed live-log lines, so a failure can
+    be joined against the worker's log output.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            raise RuntimeError(
+                f"Worker {fn.__name__} "
+                f"({multiprocessing.current_process().name}, pid {os.getpid()}) "
+                f"failed with the traceback below\n{traceback.format_exc()}"
+            ) from None
+
+    return wrapper
+
+
+def init_worker_logging(log_queue: multiprocessing.Queue, level: int) -> None:
+    """Route a pool worker's log records to the parent process.
+
+    Pool initializer. Spawned workers (macOS) start with no logging
+    configuration, so their INFO records — Timer lines included — are
+    silently dropped; forked workers (Linux) inherit pytest's handlers and
+    write into its captured streams from another process. Replacing the
+    root handlers with a ``QueueHandler`` ships every record to the parent
+    instead, where :func:`relayed_worker_logs` replays them through the
+    parent's handlers so worker Timer lines appear in the live log exactly
+    like single-context runs.
+    """
+    root = logging.getLogger()
+    root.handlers[:] = [logging.handlers.QueueHandler(log_queue)]
+    root.setLevel(level)
+
+
+@contextmanager
+def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
+    """Replay pool-worker log records through this process's handlers."""
+    log_queue: multiprocessing.Queue = multiprocessing.Queue()
+
+    def _relay() -> None:
+        while True:
+            record = log_queue.get()
+            if record is None:
+                return
+            logging.getLogger(record.name).handle(record)
+
+    thread = threading.Thread(target=_relay, name="worker-log-relay", daemon=True)
+    thread.start()
+    try:
+        yield log_queue
+    finally:
+        log_queue.put(None)
+        thread.join(timeout=5.0)
 
 
 # ---------------------------------------------------------------------------
