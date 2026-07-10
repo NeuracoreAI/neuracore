@@ -11,15 +11,12 @@ from neuracore.core.video_encoding import Libx264Options, codec_option_overrides
 from neuracore.data_daemon.config_manager.config_watcher import ConfigWatcher
 from neuracore.data_daemon.event_emitter import Emitter
 from neuracore.data_daemon.models import get_content_type
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
-    JsonTrace,
-)
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace import (
-    VideoTrace,
-)
 
 from ..core.trace_filesystem import _TraceFilesystem
 from ..core.types import TraceKey
+from ..encoding.json_trace import JsonTrace
+from ..encoding.point_cloud_trace import PointCloudTrace
+from ..encoding.video_trace import VideoTrace
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +53,7 @@ class _EncoderManager:
         self._abort_trace = abort_trace
         self._config_watcher = config_watcher
 
-        self._encoders: dict[TraceKey, JsonTrace | VideoTrace] = {}
+        self._encoders: dict[TraceKey, JsonTrace | VideoTrace | PointCloudTrace] = {}
 
         self._emitter = emitter
         self._emitter.on(Emitter.TRACE_ABORTED, self._on_trace_aborted)
@@ -76,7 +73,9 @@ class _EncoderManager:
                     "Encoder finish failed during abort for trace %s", trace_key
                 )
 
-    def _get_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace:
+    def _get_encoder(
+        self, trace_key: TraceKey
+    ) -> JsonTrace | VideoTrace | PointCloudTrace:
         """Get or create the encoder instance for a trace.
 
         Args:
@@ -91,7 +90,7 @@ class _EncoderManager:
 
         trace_dir = self._filesystem.trace_dir_for(trace_key)
         content_kind = get_content_type(trace_key.data_type)
-        created_encoder: JsonTrace | VideoTrace
+        created_encoder: JsonTrace | VideoTrace | PointCloudTrace
 
         try:
             if content_kind == "RGB":
@@ -101,6 +100,8 @@ class _EncoderManager:
                         trace_key.data_type
                     ),
                 )
+            elif content_kind == "POINT_CLOUD":
+                created_encoder = PointCloudTrace(output_dir=trace_dir)
             else:
                 created_encoder = JsonTrace(output_dir=trace_dir)
         except Exception:
@@ -122,7 +123,9 @@ class _EncoderManager:
         self._config_watcher.refresh_now()
         return codec_option_overrides(self._config_watcher.video_codec())
 
-    def safe_get_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace | None:
+    def safe_get_encoder(
+        self, trace_key: TraceKey
+    ) -> JsonTrace | VideoTrace | PointCloudTrace | None:
         """Get or create an encoder for a trace, converting failures into a trace abort.
 
         Args:
@@ -137,7 +140,9 @@ class _EncoderManager:
             self._abort_trace(trace_key)
             return None
 
-    def pop_encoder(self, trace_key: TraceKey) -> JsonTrace | VideoTrace | None:
+    def pop_encoder(
+        self, trace_key: TraceKey
+    ) -> JsonTrace | VideoTrace | PointCloudTrace | None:
         """Remove and return an encoder for a trace if present.
 
         Args:
@@ -148,7 +153,9 @@ class _EncoderManager:
         """
         return self._encoders.pop(trace_key, None)
 
-    def clear_all_encoders(self) -> list[tuple[TraceKey, JsonTrace | VideoTrace]]:
+    def clear_all_encoders(
+        self,
+    ) -> list[tuple[TraceKey, JsonTrace | VideoTrace | PointCloudTrace]]:
         """Remove and return all active encoders.
 
         Returns:

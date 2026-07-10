@@ -420,6 +420,7 @@ rtype
 rustls
 rustup
 Safetensors
+savez
 scanline
 scanlines
 schematypens

@@ -16,15 +16,12 @@ from neuracore.data_daemon.models import CompleteMessage
 from neuracore.data_daemon.recording_encoding_disk_manager.core.storage_budget import (
     StorageBudget,
 )
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.json_trace import (
-    JsonTrace,
-)
-from neuracore.data_daemon.recording_encoding_disk_manager.encoding.video_trace import (
-    VideoTrace,
-)
 
 from ..core.trace_filesystem import _TraceFilesystem
 from ..core.types import BatchJob, RGBSpoolJob, TraceKey
+from ..encoding.json_trace import JsonTrace
+from ..encoding.point_cloud_trace import PointCloudTrace
+from ..encoding.video_trace import VideoTrace
 from ..lifecycle.encoder_manager import _EncoderManager
 
 logger = logging.getLogger(__name__)
@@ -380,7 +377,7 @@ class _BatchEncoderWorker:
     async def _process_batch_into_encoder(
         self,
         batch_job: BatchJob,
-        encoder: JsonTrace | VideoTrace,
+        encoder: JsonTrace | VideoTrace | PointCloudTrace,
     ) -> bool:
         """Decode one raw batch file and feed its payloads into the provided encoder.
 
@@ -416,6 +413,8 @@ class _BatchEncoderWorker:
 
                     if isinstance(encoder, VideoTrace):
                         encoder.add_payload(payload)
+                    elif isinstance(encoder, PointCloudTrace):
+                        encoder.add_payload(payload)
                     else:
                         decoded = json.loads(payload.decode("utf-8"))
                         if isinstance(decoded, list):
@@ -447,7 +446,7 @@ class _BatchEncoderWorker:
     async def _process_rgb_spool_into_encoder(
         self,
         batch_job: RGBSpoolJob,
-        encoder: JsonTrace | VideoTrace,
+        encoder: JsonTrace | VideoTrace | PointCloudTrace,
     ) -> bool:
         """Read ordered RGB frame refs from disk and feed them into `VideoTrace`."""
         if not isinstance(encoder, VideoTrace):
@@ -508,7 +507,7 @@ class _BatchEncoderWorker:
     def _finalise_trace_encoder(
         self,
         trace_key: TraceKey,
-        encoder: JsonTrace | VideoTrace,
+        encoder: JsonTrace | VideoTrace | PointCloudTrace,
     ) -> None:
         """Finish a trace encoder, enforce storage limits, and emit TRACE_WRITTEN.
 
