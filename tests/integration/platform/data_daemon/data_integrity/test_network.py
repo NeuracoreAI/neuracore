@@ -109,7 +109,7 @@ def test_cloud_data_integrity(
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
 
-    with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_storage_state(case, specs=specs):
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()

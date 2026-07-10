@@ -11,7 +11,7 @@ import logging
 import os
 import sqlite3
 import sys
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
+from neuracore.core.robot import Robot, get_robot_id_from_name
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
     harness_db_path,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case import build_test_case
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
+        ContextSpec,
     )
 
     DataDaemonTestCase = build_test_case.DataDaemonTestCase
@@ -101,21 +103,20 @@ def setup_per_test_artifact_dirs(
 def scoped_storage_state(
     case: DataDaemonTestCase,
     *,
-    dataset_name: str | None = None,
+    specs: Sequence[ContextSpec] = (),
 ) -> Generator[None]:
     """Apply storage cleanup before and after the block.
 
-    ``"delete"`` removes the DB file, recordings folder, and the cloud dataset
-    (when ``dataset_name`` is provided).  ``"empty"`` clears DB tables and
-    deletes recordings folder contents.  ``"preserve"`` leaves all storage
-    untouched.
+    ``"delete"`` removes the DB file and recordings folder.  ``"empty"`` clears
+    DB tables and deletes recordings folder contents.  ``"preserve"`` leaves all
+    local storage untouched.  The cloud dataset and robots named by ``specs``
+    are deleted on exit, independently of the local storage action.
 
     Does **not** start, stop, or signal any daemon process.
 
     Args:
-        case: Test case whose ``storage_state_action`` controls cleanup.
-        dataset_name: Optional cloud dataset name to delete when
-            ``storage_state_action`` is ``"delete"``.
+        case: Test case whose ``storage_state_action`` controls local cleanup.
+        specs: Context specs naming the cloud dataset and robots to delete.
 
     Yields:
         ``None``.
@@ -125,11 +126,7 @@ def scoped_storage_state(
         yield
     finally:
         apply_storage_state_action(case.storage_state_action)
-        if (
-            dataset_name is not None
-            and case.storage_state_action == STORAGE_STATE_DELETE
-        ):
-            delete_cloud_dataset(dataset_name)
+        delete_cloud_resources(specs)
         assert_post_test_storage_state(
             storage_state_action=case.storage_state_action,
         )
@@ -179,7 +176,7 @@ def apply_storage_state_action(storage_state_action: str) -> None:
 
 
 def delete_cloud_dataset(dataset_name: str) -> None:
-    """Delete a cloud dataset when the storage action demands it.
+    """Delete a cloud dataset, logging a warning when the delete fails.
 
     Args:
         dataset_name: Name of the cloud dataset to delete.
@@ -187,11 +184,38 @@ def delete_cloud_dataset(dataset_name: str) -> None:
     try:
         nc.login()
         nc.get_dataset(dataset_name).delete()
-        logger.info(
-            "Deleted cloud dataset %r (storage_state_action=delete)", dataset_name
-        )
+        logger.info("Deleted cloud dataset %r", dataset_name)
     except Exception:  # noqa: BLE001
         logger.warning("Failed to delete cloud dataset %r", dataset_name, exc_info=True)
+
+
+def delete_cloud_robot(robot_name: str) -> None:
+    """Delete a cloud robot by name, logging a warning when the delete fails.
+
+    Args:
+        robot_name: Name of the cloud robot to delete.
+    """
+    try:
+        nc.login()
+        robot = Robot(robot_name, instance=0)
+        robot.id = get_robot_id_from_name(robot_name)
+        robot.delete()
+        logger.info("Deleted cloud robot %r", robot_name)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to delete cloud robot %r", robot_name, exc_info=True)
+
+
+def delete_cloud_resources(specs: Sequence[ContextSpec]) -> None:
+    """Delete the cloud dataset and robots named by the context specs.
+
+    Args:
+        specs: Context specs naming the cloud dataset and robots to delete.
+    """
+    if not specs:
+        return
+    delete_cloud_dataset(specs[0].dataset_name)
+    for spec in specs:
+        delete_cloud_robot(spec.robot_name)
 
 
 # ---------------------------------------------------------------------------

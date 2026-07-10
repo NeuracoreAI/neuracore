@@ -57,7 +57,7 @@ def test_disk_db_write_performance(
 
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
-    with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_storage_state(case, specs=specs):
         with offline_daemon_running():
             results = []
             try:

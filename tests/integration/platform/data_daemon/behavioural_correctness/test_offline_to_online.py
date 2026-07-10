@@ -78,7 +78,7 @@ def test_offline_pending_data_recovers_when_online(
     results: list[ContextResult] = []
 
     try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_storage_state(case, specs=specs):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)

@@ -78,7 +78,7 @@ def test_disk_db_data_integrity(
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
-    with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_storage_state(case, specs=specs):
         try:
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
