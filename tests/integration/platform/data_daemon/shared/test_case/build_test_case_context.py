@@ -944,6 +944,22 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         _cleanup_test_worker_robot(robot)
 
 
+def _configure_worker_logging() -> None:
+    """Make pool-worker log output visible under spawn/forkserver.
+
+    Under fork (the Linux default before Python 3.14) workers inherit the
+    parent's logging config, so their Timer lines reach the test output.
+    Under spawn (macOS) and forkserver (Linux on Python 3.14+) workers start
+    with no handlers and INFO logs are dropped, leaving no trace of where a
+    worker got to when it hangs. basicConfig is a no-op when handlers are
+    already configured, so this is safe under fork.
+    """
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(processName)s %(name)s:%(lineno)d %(message)s",
+    )
+
+
 def _run_pooled_context_workers(
     case: DataDaemonTestCase,
     *,
@@ -955,7 +971,9 @@ def _run_pooled_context_workers(
     results: list[ContextResult] = []
     outcomes: list[str] = []
     errors: list[BaseException] = []
-    with multiprocessing.Pool(case.parallel_contexts) as pool:
+    with multiprocessing.Pool(
+        case.parallel_contexts, initializer=_configure_worker_logging
+    ) as pool:
         async_results = [
             (spec, pool.apply_async(_subprocess_context_worker, (spec,)))
             for spec in specs
