@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +35,19 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
 # cspell:ignore nodeid getfixturevalue modifyitems callspec
+
+# Multiprocessing children under spawn (the macOS default) and forkserver (the
+# Linux default from Python 3.14) are fresh interpreters that must re-import
+# the `tests` package to unpickle pool tasks. Only the parent's in-process
+# sys.path (set up by pytest) knows the repo root, so without this every pool
+# worker dies with ModuleNotFoundError before its first task and the pool
+# hangs forever. PYTHONPATH is inherited by child processes; fork is
+# unaffected either way.
+_REPO_ROOT = str(Path(__file__).resolve().parents[4])
+if _REPO_ROOT not in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+    os.environ["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [_REPO_ROOT, os.environ.get("PYTHONPATH")])
+    )
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
