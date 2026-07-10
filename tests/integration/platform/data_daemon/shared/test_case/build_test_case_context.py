@@ -8,8 +8,10 @@ Configuration dataclasses and the matrix builder live in
 
 from __future__ import annotations
 
+import faulthandler
 import logging
 import multiprocessing
+import os
 import random
 import threading
 import time
@@ -61,6 +63,12 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+
+# How often a pool worker dumps all thread stacks to stderr while alive; the
+# dumps surface in the pytest failure report when a hung worker's case times
+# out. Short enough to catch a wedge within one case budget, long enough to
+# stay readable.
+WORKER_STACK_DUMP_INTERVAL_S = 60.0
 
 
 def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
@@ -944,8 +952,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         _cleanup_test_worker_robot(robot)
 
 
-def _configure_worker_logging() -> None:
-    """Make pool-worker log output visible under spawn/forkserver.
+def _init_pool_worker() -> None:
+    """Make pool workers observable when they hang under spawn/forkserver.
 
     Under fork (the Linux default before Python 3.14) workers inherit the
     parent's logging config, so their Timer lines reach the test output.
@@ -953,11 +961,19 @@ def _configure_worker_logging() -> None:
     with no handlers and INFO logs are dropped, leaving no trace of where a
     worker got to when it hangs. basicConfig is a no-op when handlers are
     already configured, so this is safe under fork.
+
+    Worker stderr is fd-captured by pytest and only surfaces in the
+    "Captured stderr" section of a *failed* test, so on top of logging this
+    arms a periodic all-thread stack dump: when a worker wedges, its stacks
+    are dumped every WORKER_STACK_DUMP_INTERVAL_S and appear in the failure
+    report once the case budget timeout fires.
     """
     logging.basicConfig(
         level=logging.INFO,
         format="%(levelname)s %(processName)s %(name)s:%(lineno)d %(message)s",
     )
+    logger.info("pool worker initialized pid=%d", os.getpid())
+    faulthandler.dump_traceback_later(WORKER_STACK_DUMP_INTERVAL_S, repeat=True)
 
 
 def _run_pooled_context_workers(
@@ -972,7 +988,7 @@ def _run_pooled_context_workers(
     outcomes: list[str] = []
     errors: list[BaseException] = []
     with multiprocessing.Pool(
-        case.parallel_contexts, initializer=_configure_worker_logging
+        case.parallel_contexts, initializer=_init_pool_worker
     ) as pool:
         async_results = [
             (spec, pool.apply_async(_subprocess_context_worker, (spec,)))
