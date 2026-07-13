@@ -36,6 +36,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.train import (
     _resolve_recording_cache_dir,
+    _serialize_cross_embodiment_description,
     assert_valid_batch_size,
     determine_optimal_batch_size,
     get_model_and_algorithm_config,
@@ -898,6 +899,27 @@ class TestResolveRecordingCacheDir:
         custom_dir = tmp_path / "recordings"
         cfg = OmegaConf.create({"recording_cache_dir": str(custom_dir)})
         assert _resolve_recording_cache_dir(cfg) == custom_dir
+
+
+class TestSerializeCrossEmbodimentDescription:
+    def test_preserves_indexed_name_mappings(self):
+        result = _serialize_cross_embodiment_description({
+            "robot-id-1": {
+                DataType.JOINT_POSITIONS: {
+                    1: "joint_2",
+                    0: "joint_1",
+                },
+            },
+        })
+
+        assert result == {
+            "robot-id-1": {
+                "JOINT_POSITIONS": {
+                    0: "joint_1",
+                    1: "joint_2",
+                },
+            },
+        }
 
 
 class TestResolveCrossEmbodimentDescription:

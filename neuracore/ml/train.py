@@ -77,16 +77,16 @@ def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
 
 def _serialize_cross_embodiment_description(
     cross_embodiment_description: CrossEmbodimentDescription,
-) -> dict[str, dict[str, list[str]]]:
-    """Convert a cross-embodiment description to JSON-serializable name lists."""
-    serializable: dict[str, dict[str, list[str]]] = {}
+) -> dict[str, dict[str, dict[int, str]]]:
+    """Convert a cross-embodiment description to data type name keys."""
+    serializable: dict[str, dict[str, dict[int, str]]] = {}
     for robot_id, data_types in cross_embodiment_description.items():
         serializable[robot_id] = {}
         for data_type, indexed_names in data_types.items():
             key = data_type.name if hasattr(data_type, "name") else str(data_type)
-            serializable[robot_id][key] = [
-                indexed_names[index] for index in sorted(indexed_names)
-            ]
+            serializable[robot_id][key] = {
+                index: indexed_names[index] for index in sorted(indexed_names)
+            }
     return serializable
 
 

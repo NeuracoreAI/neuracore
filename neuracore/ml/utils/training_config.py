@@ -367,10 +367,10 @@ def build_cross_embodiment_description_from_data_types(
     return cross_embodiment_description
 
 
-def _normalize_cross_embodiment_description(
+def normalize_cross_embodiment_description(
     cross_embodiment_cfg: Any,
 ) -> CrossEmbodimentDescription:
-    """Convert config data type keys to DataType enums."""
+    """Convert config data type keys and item indexes to runtime types."""
     result: CrossEmbodimentDescription = {}
     for embodiment, embodiment_values in cross_embodiment_cfg.items():
         result[embodiment] = {}
@@ -386,7 +386,9 @@ def _normalize_cross_embodiment_description(
                     f"Invalid data type '{data_type}' for robot '{embodiment}'. "
                     f"Expected one of {[item.value for item in DataType]}."
                 )
-            result[embodiment][data_type_enum] = dict(item_names)
+            result[embodiment][data_type_enum] = {
+                int(index): name for index, name in item_names.items()
+            }
     return result
 
 
@@ -398,7 +400,7 @@ def _resolve_cross_embodiment_description(
 ) -> CrossEmbodimentDescription:
     """Resolve an explicit cross-embodiment config or build one from data types."""
     if _is_provided(cross_embodiment_description_cfg):
-        return _normalize_cross_embodiment_description(cross_embodiment_description_cfg)
+        return normalize_cross_embodiment_description(cross_embodiment_description_cfg)
     if not _is_provided(data_types_cfg):
         raise ValueError(f"Either '{field_name}' or data types must be provided.")
     return build_cross_embodiment_description_from_data_types(
