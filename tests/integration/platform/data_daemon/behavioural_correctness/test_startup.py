@@ -7,7 +7,6 @@ These tests force online mode so startup never inherits an offline profile.
 
 import psutil
 
-import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_pid_path
 from neuracore.data_daemon.lifecycle.daemon_os_control import pid_is_running
 from tests.integration.platform.data_daemon.shared.process_control import (
@@ -25,8 +24,6 @@ def test_ensure_single_daemon_process() -> None:
     same PID, the PID file must exist and agree with that PID, the process
     must actually be running, and there must be exactly one runner subprocess.
     """
-    nc.login()
-
     worker_count = psutil.cpu_count(logical=False) or 4
     with online_daemon_running():
         pids = collect_daemon_pids_from_parallel_startup(worker_count)

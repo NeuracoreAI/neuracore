@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 import pytest
 
-import neuracore as nc
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     NETWORK_PERFORMANCE_CASES,
 )
@@ -60,14 +59,13 @@ def test_cloud_upload_and_readiness_performance(
       timing budget (``case_timeout_seconds``)
     - asserts the expected number of recordings are present in the dataset
     """
-    nc.login()
     if not has_configured_org():
         pytest.skip(
             "Online performance tests require NEURACORE_ORG_ID"
             " or a saved current organization."
         )
     dataset_name = create_testing_dataset_name(case)
-    specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=False)
+    specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
     results: list[ContextResult] = []
     with scoped_storage_state(case, dataset_name=dataset_name):
         try:
