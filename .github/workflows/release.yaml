@@ -478,7 +478,9 @@ jobs:
         run: |
           ls -l dist/
           [ "$(ls dist/*.whl | wc -l)" -eq 10 ] || { echo "expected 10 wheels"; exit 1; }
-          python -m pip install --upgrade twine
+          # packaging>=24.2 is required for twine to parse maturin's
+          # Metadata-Version 2.4 License-File field; the runner ships an older one.
+          python -m pip install --upgrade twine "packaging>=24.2"
           twine upload --skip-existing dist/*.whl
 
   dry-run-summary:
