@@ -153,6 +153,7 @@ class ContextCaseSpec:
     video_fps: int
     wait: bool
     timestamp_mode: str
+    parallel_contexts: int
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -165,8 +166,11 @@ class ContextCaseSpec:
         (``duration_sec * joint_count * joint_fps``) and total video pixels
         (``duration_sec * video_fps * video_count * image_width *
         image_height``), each times an observed per-unit upload cost. The
-        budget is floored at the duration-based overhead so short or
-        low-volume recordings keep a sane minimum.
+        per-unit costs are observed with a single uploading context; with
+        ``wait=True`` every parallel context drains its backlog through the
+        shared uplink at roughly the same time, so the budget is scaled by
+        ``parallel_contexts``. The budget is floored at the duration-based
+        overhead so short or low-volume recordings keep a sane minimum.
         """
         if not self.wait:
             return STOP_RECORDING_NO_WAIT_SLA_S
@@ -187,7 +191,9 @@ class ContextCaseSpec:
                 * self.image_height
                 * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
             )
-        return max(duration_floor, joint_budget + video_budget)
+        return max(
+            duration_floor, (joint_budget + video_budget) * self.parallel_contexts
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +315,7 @@ def build_context_specs(
                     video_fps=case.video_fps,
                     wait=case.wait,
                     timestamp_mode=case.timestamp_mode,
+                    parallel_contexts=case.parallel_contexts,
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
