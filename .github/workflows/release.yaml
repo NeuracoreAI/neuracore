@@ -55,32 +55,24 @@ jobs:
 
         echo "✓ $COMMITS_SINCE new commits on main since ${{ steps.get_tag.outputs.latest_tag }}"
 
-    - name: Get PRs merged to main since last release
-      id: get_prs
+    - name: Get commit SHAs since last release
+      id: get_commits
       if: ${{ !inputs.emergency_deploy }}
       run: |
         TAG="${{ steps.get_tag.outputs.latest_tag }}"
 
-        echo "Finding PRs in git history since tag: $TAG"
+        echo "Finding commits in git history since tag: $TAG"
 
-        PR_NUMBERS=$(
-          git log "$TAG..HEAD" --pretty=format:%s |
-          grep -oE '\(#[0-9]+\)' |
-          grep -oE '[0-9]+' |
-          sort -n |
-          uniq |
-          jq -R . |
-          jq -s -c .
-        )
+        SHAS=$(git log "$TAG..HEAD" --pretty=format:%H | jq -R . | jq -s -c .)
 
-        echo "Found PRs: $PR_NUMBERS"
-        echo "pr_numbers=$PR_NUMBERS" >> "$GITHUB_OUTPUT"
+        echo "Found commits: $SHAS"
+        echo "commit_shas=$SHAS" >> "$GITHUB_OUTPUT"
 
     - name: Fetch PR data and determine version bump
       id: analyze
       uses: actions/github-script@v7
       env:
-        PR_NUMBERS: ${{ steps.get_prs.outputs.pr_numbers || '[]' }}
+        COMMIT_SHAS: ${{ steps.get_commits.outputs.commit_shas || '[]' }}
         EMERGENCY: ${{ inputs.emergency_deploy }}
       with:
         script: |
@@ -92,7 +84,23 @@ jobs:
             return;
           }
 
-          const prNumbers = JSON.parse(process.env.PR_NUMBERS);
+          // Resolve commit SHAs -> unique merged PR numbers via the GitHub API.
+          // This is independent of merge method (squash/rebase/merge-commit), unlike
+          // parsing the "(#N)" marker that only "Squash and merge" stamps into subjects.
+          const shas = JSON.parse(process.env.COMMIT_SHAS || '[]');
+          const prNumberSet = new Set();
+          for (const sha of shas) {
+            const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: sha,
+            });
+            for (const pr of prs) {
+              // Only PRs actually merged into the release branch
+              if (pr.merged_at && pr.base.ref === 'main') prNumberSet.add(pr.number);
+            }
+          }
+          const prNumbers = [...prNumberSet];
           const versionLabels = ['version:major', 'version:minor', 'version:patch', 'version:none'];
           const versionPriority = { 'major': 4, 'minor': 3, 'patch': 2, 'none': 1 };
 
