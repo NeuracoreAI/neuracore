@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 from neuracore import __version__
 from neuracore.core.cli.app import app
 from neuracore.core.cli.cache_commands import _directory_size
-from neuracore.core.exceptions import AuthenticationError
+from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
 from neuracore.core.organizations import Organization
 
 runner = CliRunner()
@@ -268,7 +268,12 @@ def test_neuracore_login_works_regardless_of_torch(
 ) -> None:
     """Test that login works with or without torch available."""
 
+    class DummyAuth:
+        def validate_version(self):
+            pass
+
     # Setup mocks for auth
+    monkeypatch.setattr("neuracore.core.auth.get_auth", lambda: DummyAuth())
     monkeypatch.setattr(
         "neuracore.core.cli.generate_api_key.generate_api_key",
         lambda email=None, password=None: "test_api_key",
@@ -320,14 +325,16 @@ def test_neuracore_select_org_works_regardless_of_torch(
     assert result.exit_code == 0
 
 
-def test_select_org_auth_version_mismatch_uses_required_version(monkeypatch) -> None:
+def test_select_org_version_mismatch_is_echoed(monkeypatch) -> None:
     class DummyAuth:
         is_authenticated = False
 
         def login(self, api_key=None):
-            raise AuthenticationError(
-                "Please upgrade the client",
-                response_payload={"required_version": "2.0.0"},
+            raise VersionMismatchError(
+                "Neuracore client version mismatch",
+                response_payload={
+                    "detail": {"error": "Neuracore client version mismatch"}
+                },
             )
 
     monkeypatch.setattr(
@@ -342,34 +349,25 @@ def test_select_org_auth_version_mismatch_uses_required_version(monkeypatch) -> 
     )
 
     assert result.exit_code == 1
-    assert "Please upgrade the client" not in result.output
+    assert "Neuracore client version mismatch" in result.stderr
 
 
-def test_select_org_auth_version_mismatch_uses_nested_required_version(
-    monkeypatch,
-) -> None:
+def test_login_version_mismatch_fails(monkeypatch) -> None:
     class DummyAuth:
-        is_authenticated = False
+        def validate_version(self):
+            raise VersionMismatchError("Neuracore client version mismatch")
 
-        def login(self, api_key=None):
-            raise AuthenticationError(
-                "Please upgrade the client",
-                response_payload={"detail": {"required_version": "2.0.0"}},
-            )
-
-    monkeypatch.setattr(
-        "neuracore.core.cli.select_current_org.get_auth", lambda: DummyAuth()
-    )
+    monkeypatch.setattr("neuracore.core.auth.get_auth", lambda: DummyAuth())
 
     result = runner.invoke(
         app,
-        ["select-org"],
+        ["login", "--email", "user@example.com", "--password", "pw"],
         color=False,
         env={"TERM": "dumb", "NO_COLOR": "1", "RICH_DISABLE": "1"},
     )
 
     assert result.exit_code == 1
-    assert "Please upgrade the client" not in result.output
+    assert "Neuracore client version mismatch" in result.stderr
 
 
 def test_select_org_auth_error_without_required_version_is_echoed(monkeypatch) -> None:

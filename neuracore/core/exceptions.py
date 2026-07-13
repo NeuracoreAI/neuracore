@@ -40,6 +40,10 @@ class AuthenticationError(Exception):
         return None
 
 
+class VersionMismatchError(AuthenticationError):
+    """Raised when the client version is incompatible with the server."""
+
+
 class ValidationError(Exception):
     """Raised when input validation fails."""
 

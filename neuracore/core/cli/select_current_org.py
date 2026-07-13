@@ -11,7 +11,12 @@ import typer
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.config_manager import get_config_manager
-from neuracore.core.exceptions import AuthenticationError, InputError, OrganizationError
+from neuracore.core.exceptions import (
+    AuthenticationError,
+    InputError,
+    OrganizationError,
+    VersionMismatchError,
+)
 from neuracore.core.organizations import Organization, list_my_orgs
 
 from ..const import MAX_INPUT_ATTEMPTS, REJECTION_INPUT
@@ -119,13 +124,14 @@ def run(
         config_manager.config.current_org_id = organization.id
         config_manager.save_config()
 
+    except VersionMismatchError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     except AuthenticationError as exc:
-        error_message = str(exc)
-        if exc.required_version is None:
-            typer.echo(
-                error_message or "Failed to Authenticate, please try again",
-                err=True,
-            )
+        typer.echo(
+            str(exc) or "Failed to Authenticate, please try again",
+            err=True,
+        )
         raise typer.Exit(code=1)
     except OrganizationError:
         typer.echo("Failed to select organization, please try again", err=True)
