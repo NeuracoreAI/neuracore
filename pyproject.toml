@@ -12,7 +12,7 @@ name = "neuracore"
 # resolve to the last pure release. neuracore/__init__.py re-derives
 # __version__ from the installed metadata, so this is the single source of
 # truth.
-version = "13.3.0"
+version = "13.4.0"
 description = "Neuracore Client Library"
 readme = "README.md"
 requires-python = ">=3.10"
