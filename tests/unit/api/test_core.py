@@ -107,35 +107,24 @@ def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
     assert not auth.is_authenticated
 
 
-def test_login_version_mismatch_surfaces_backend_versions(
-    temp_config_dir, monkeypatch, reset_neuracore, capsys
+def test_login_version_mismatch_surfaces_installed_version(
+    temp_config_dir, reset_neuracore
 ):
-    """Test version validation shows the backend-provided mismatch details."""
-    expected_message = (
-        "Neuracore client version mismatch, client version: 1.2.3, "
-        "required version: 2.0.0"
-    )
-
+    """Test version validation surfaces the installed version and mitigation steps."""
     with requests_mock.Mocker() as m:
         m.get(
             f"{API_URL}/auth/verify-version",
-            json={
-                "detail": expected_message,
-                "client_version": "1.2.3",
-                "required_version": "2.0.0",
-            },
+            json={"detail": {"error": "Neuracore client version mismatch"}},
             status_code=400,
         )
 
         with pytest.raises(AuthenticationError) as exc_info:
             nc.login("test_api_key")
 
-    captured = capsys.readouterr()
-
-    assert str(exc_info.value) == expected_message
-    assert exc_info.value.required_version == "2.0.0"
-    assert exc_info.value.response_payload["required_version"] == "2.0.0"
-    assert expected_message in captured.err
+    message = str(exc_info.value)
+    assert "Neuracore client version mismatch" in message
+    assert f"Installed version: {nc.__version__}" in message
+    assert "pip install --upgrade neuracore" in message
 
 
 def test_login_version_check_connection_error_surfaces_cleanly(

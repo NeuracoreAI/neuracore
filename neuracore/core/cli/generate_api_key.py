@@ -13,7 +13,11 @@ from pydantic import BaseModel, ValidationError
 
 from neuracore.core.cli.get_user_confirmation import get_user_confirmation
 from neuracore.core.config.config_manager import get_config_manager
-from neuracore.core.exceptions import AuthenticationError, InputError
+from neuracore.core.exceptions import (
+    AuthenticationError,
+    InputError,
+    VersionMismatchError,
+)
 from neuracore.core.utils.http_session import thread_local_session
 
 from ..const import API_URL, MAX_INPUT_ATTEMPTS
@@ -144,8 +148,14 @@ def run(
     ),
 ) -> None:
     """Generate a new API key for access to the neuracore platform."""
+    from neuracore.core.auth import get_auth
+
     try:
+        get_auth().validate_version()
         generate_api_key(email=email, password=password)
+    except VersionMismatchError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1)
     except AuthenticationError:
         typer.echo("Failed to generate API key, please try again later", err=True)
         raise typer.Exit(code=1)
