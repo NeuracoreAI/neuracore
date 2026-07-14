@@ -139,6 +139,9 @@ pub fn env_config_overrides() -> DaemonConfig {
     if let Some(value) = env_var("NCD_OFFLINE") {
         config.offline = Some(is_truthy(&value));
     }
+    if let Some(value) = env_var("NCD_RECORDING_REAPER") {
+        config.recording_reaper = Some(is_truthy(&value));
+    }
     if let Some(value) = env_var("NCD_API_KEY") {
         config.api_key = Some(value);
     }
@@ -297,6 +300,7 @@ mod tests {
         "NCD_NUM_THREADS",
         "NCD_KEEP_WAKELOCK_WHILE_UPLOAD",
         "NCD_OFFLINE",
+        "NCD_RECORDING_REAPER",
         "NCD_API_KEY",
         "NEURACORE_ORG_ID",
         "NCD_VIDEO_CODEC",
@@ -321,6 +325,7 @@ mod tests {
         std::env::set_var("NCD_NUM_THREADS", "4");
         std::env::set_var("NCD_KEEP_WAKELOCK_WHILE_UPLOAD", "yes");
         std::env::set_var("NCD_OFFLINE", "1");
+        std::env::set_var("NCD_RECORDING_REAPER", "0");
         std::env::set_var("NCD_API_KEY", "secret-key");
         std::env::set_var("NEURACORE_ORG_ID", "org-42");
         std::env::set_var("NCD_VIDEO_CODEC", "h264_medium");
@@ -337,6 +342,11 @@ mod tests {
         assert_eq!(config.num_threads, Some(4));
         assert_eq!(config.keep_wakelock_while_upload, Some(true));
         assert_eq!(config.offline, Some(true));
+        assert_eq!(
+            config.recording_reaper,
+            Some(false),
+            "a non-truthy value maps to an explicit disable"
+        );
         assert_eq!(config.api_key.as_deref(), Some("secret-key"));
         assert_eq!(config.current_org_id.as_deref(), Some("org-42"));
         assert_eq!(config.video_codec.as_deref(), Some("h264_medium"));
@@ -372,6 +382,7 @@ mod tests {
         assert_eq!(config.num_threads, None);
         assert_eq!(config.keep_wakelock_while_upload, None);
         assert_eq!(config.offline, None);
+        assert_eq!(config.recording_reaper, None);
         assert_eq!(config.api_key, None);
         assert_eq!(config.current_org_id, None);
         assert_eq!(config.video_codec, None);

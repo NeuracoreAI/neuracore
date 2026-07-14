@@ -65,6 +65,9 @@ pub struct DaemonConfig {
     pub keep_wakelock_while_upload: Option<bool>,
     /// When true, disable uploads and only store data locally.
     pub offline: Option<bool>,
+    /// Whether to reap fully-uploaded/cancelled recordings' local files and
+    /// DB rows. Defaults to enabled when unset.
+    pub recording_reaper: Option<bool>,
     /// Neuracore API key for authentication.
     pub api_key: Option<String>,
     /// Organisation ID for the authenticated user.
@@ -99,6 +102,9 @@ impl DaemonConfig {
         }
         if other.offline.is_some() {
             self.offline = other.offline;
+        }
+        if other.recording_reaper.is_some() {
+            self.recording_reaper = other.recording_reaper;
         }
         if other.api_key.is_some() {
             self.api_key = other.api_key.clone();
@@ -138,6 +144,7 @@ pub fn build_default_daemon_config() -> std::io::Result<DaemonConfig> {
         num_threads: Some(1),
         keep_wakelock_while_upload: Some(false),
         offline: Some(false),
+        recording_reaper: Some(true),
         api_key: None,
         current_org_id: None,
         video_codec: None,
@@ -250,6 +257,7 @@ mod tests {
             num_threads: Some(1),
             keep_wakelock_while_upload: Some(false),
             offline: Some(false),
+            recording_reaper: Some(true),
             api_key: None,
             current_org_id: None,
             video_codec: None,
@@ -270,6 +278,7 @@ mod tests {
                 "num_threads",
                 "keep_wakelock_while_upload",
                 "offline",
+                "recording_reaper",
                 "api_key",
                 "current_org_id",
                 "video_codec",

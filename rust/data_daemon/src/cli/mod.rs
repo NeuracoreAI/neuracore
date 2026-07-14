@@ -115,6 +115,12 @@ enum ProfileCommand {
         /// Run in online mode.
         #[arg(long = "online", overrides_with = "offline")]
         online: bool,
+        /// Reap fully-uploaded/cancelled recordings' local files and DB rows.
+        #[arg(long = "reaper", overrides_with = "no_reaper")]
+        reaper: bool,
+        /// Do not reap recordings; retain local files and DB rows.
+        #[arg(long = "no-reaper", overrides_with = "reaper")]
+        no_reaper: bool,
         /// API key used for authenticating the daemon.
         #[arg(long = "api-key", visible_alias = "api_key")]
         api_key: Option<String>,
