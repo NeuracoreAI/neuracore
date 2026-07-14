@@ -29,10 +29,8 @@ from neuracore.core.const import (
 )
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
-from neuracore.ml.utils.preprocessing_utils import (
-    PreprocessingConfiguration,
-    resolve_preprocessing_config,
-)
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
 
 logger = logging.getLogger(__name__)
 

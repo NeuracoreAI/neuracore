@@ -37,3 +37,32 @@ class PreprocessingMethod(ABC):
             params[param_name] = getattr(self, param_name, None)
 
         return {"_target_": target_name, **params}
+
+    def __str__(self) -> str:
+        """Return a human-readable representation of the preprocessing method."""
+        params = {k: v for k, v in self.to_dict().items() if k != "_target_"}
+        param_str = ", ".join(f"{name}={value!r}" for name, value in params.items())
+        return f"{self.__class__.__name__}({param_str})"
+
+    def __repr__(self) -> str:
+        """Return a human-readable representation for debugging."""
+        return self.__str__()
+
+
+class PreprocessingConfiguration(dict[DataType, list[PreprocessingMethod]]):
+    """Runtime preprocessing pipeline keyed by data type."""
+
+    def __str__(self) -> str:
+        """Return a human-readable representation of the preprocessing pipeline."""
+        if not self:
+            return "PreprocessingConfiguration({})"
+        lines = []
+        for data_type in sorted(self, key=lambda dt: dt.value):
+            methods = self[data_type]
+            method_strs = ", ".join(str(method) for method in methods)
+            lines.append(f"  {data_type.value}: [{method_strs}]")
+        return "PreprocessingConfiguration({\n" + "\n".join(lines) + "\n})"
+
+    def __repr__(self) -> str:
+        """Return a human-readable representation for debugging."""
+        return self.__str__()

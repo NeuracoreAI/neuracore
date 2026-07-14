@@ -27,9 +27,9 @@ from torch.utils.data import DataLoader
 
 import neuracore as nc
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
 from neuracore.ml.utils.device_utils import get_default_device
-from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 
 from ..core.ml_types import BatchedTrainingOutputs, BatchedTrainingSamples
 from ..datasets.pytorch_dummy_dataset import MAX_LEN_PER_DATA_TYPE, PytorchDummyDataset
@@ -150,14 +150,18 @@ def run_validation(
         logger.info(f"Supported output data types: {supported_output_data_types}")
 
         # Build validation preprocessing configuration
-        input_preprocessing_config: PreprocessingConfiguration = {
-            DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
-            DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
-        }
-        output_preprocessing_config: PreprocessingConfiguration = {
-            DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
-            DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
-        }
+        input_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration({
+                DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
+                DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
+            })
+        )
+        output_preprocessing_config: PreprocessingConfiguration = (
+            PreprocessingConfiguration({
+                DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
+                DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
+            })
+        )
 
         # Create dummy cross-embodiment descriptions
         input_cross_embodiment_description = {

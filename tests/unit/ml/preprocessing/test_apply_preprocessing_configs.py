@@ -3,7 +3,7 @@ import torch
 from neuracore_types import BatchedNCData, BatchedRGBData, DataType
 
 from neuracore.ml.preprocessing.base import PreprocessingMethod
-from neuracore.ml.utils.preprocessing_utils import (
+from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
     validate_preprocessing_configuration,
 )

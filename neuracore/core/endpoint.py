@@ -33,8 +33,8 @@ from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
 from neuracore.core.utils.download import download_with_progress
 from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
-from neuracore.ml.utils.preprocessing_utils import PreprocessingConfiguration
 
 from .auth import get_auth
 from .const import API_URL, PING_ENDPOINT, PREDICT_ENDPOINT, SET_CHECKPOINT_ENDPOINT
