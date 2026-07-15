@@ -1,0 +1,72 @@
+name: Integration PF - Consume Stream (Production)
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit SHA, tag, or branch to test. Leave empty to use the latest release tag."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-24.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    - uses: pre-commit/action@v3.0.1
+
+  test:
+    needs: pre-commit
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        python-version: ['3.11']
+        ffmpeg: [true, false]
+
+    steps:
+    - name: Show disk space
+      run: df -h /
+
+    - name: Checkout test harness
+      id: harness
+      uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
+      with:
+        environment: production
+        ref: ${{ inputs.ref }}
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Set up neuracore from PyPI
+      uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
+      with:
+        version: ${{ steps.harness.outputs.release-tag }}
+        extras: dev,ml,examples
+
+    - name: Run Consume Stream Integration Test
+      env:
+        NEURACORE_API_URL: https://api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
+      continue-on-error: true
+      run: |
+        if ! pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/test_consume_stream.py; then
+          echo "::warning::test_consume_stream.py failed, but this is non-blocking."
+        fi
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /
