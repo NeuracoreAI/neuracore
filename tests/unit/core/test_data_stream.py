@@ -4,9 +4,14 @@ import json
 import struct
 
 import numpy as np
-from neuracore_types import DataType
+import pytest
+from neuracore_types import DataType, JointData
 
-from neuracore.core.streaming.data_stream import DataRecordingContext, RGBDataStream
+from neuracore.core.streaming.data_stream import (
+    DataRecordingContext,
+    JointDataStream,
+    RGBDataStream,
+)
 from neuracore.data_daemon.communications_management.producer.producer_channel import (
     producer_transport_args_for_data_type,
 )
@@ -255,3 +260,90 @@ def test_rgb_stream_owns_no_channel_under_rust_daemon(monkeypatch) -> None:
     stream.stop_recording(stop_cutoff_sequence_number=0)
     assert stream.is_recording() is False
     assert stream.get_recording_context() is None
+
+
+def _use_rust_daemon(monkeypatch) -> None:
+    """Route streams through the rust daemon so log() needs no legacy channel."""
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
+        lambda: True,
+    )
+
+
+def test_video_stream_rejects_non_increasing_timestamp(monkeypatch) -> None:
+    _use_rust_daemon(monkeypatch)
+    stream = RGBDataStream("front_camera", width=4, height=3)
+    stream.start_recording(_context())
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+
+    stream.log(_DummyCameraData(timestamp=1.0), frame)
+    stream.log(_DummyCameraData(timestamp=2.0), frame)
+
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        stream.log(_DummyCameraData(timestamp=2.0), frame)
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        stream.log(_DummyCameraData(timestamp=1.5), frame)
+
+
+def test_joint_stream_record_scalar_rejects_non_increasing_timestamp(
+    monkeypatch,
+) -> None:
+    _use_rust_daemon(monkeypatch)
+    stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
+    stream.start_recording(_context())
+
+    stream.record_scalar(1.0, 0.5)
+    stream.record_scalar(2.0, 0.6)
+
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        stream.record_scalar(2.0, 0.7)
+
+
+def test_joint_stream_log_rejects_non_increasing_timestamp(monkeypatch) -> None:
+    _use_rust_daemon(monkeypatch)
+    stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
+    stream.start_recording(_context())
+
+    stream.log(JointData(timestamp=1.0, value=0.5))
+
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        stream.log(JointData(timestamp=0.9, value=0.6))
+
+
+def test_monotonic_check_is_per_stream(monkeypatch) -> None:
+    """Each stream keeps its own timeline — sharing a timestamp is fine."""
+    _use_rust_daemon(monkeypatch)
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+    front = RGBDataStream("front_camera", width=4, height=3)
+    wrist = RGBDataStream("wrist_camera", width=4, height=3)
+    front.start_recording(_context())
+    wrist.start_recording(_context())
+
+    front.log(_DummyCameraData(timestamp=1.0), frame)
+    wrist.log(_DummyCameraData(timestamp=1.0), frame)
+    front.log(_DummyCameraData(timestamp=2.0), frame)
+    wrist.log(_DummyCameraData(timestamp=2.0), frame)
+
+
+def test_monotonic_check_skipped_when_not_recording(monkeypatch) -> None:
+    """Outside a recording there is no timeline to enforce."""
+    _use_rust_daemon(monkeypatch)
+    stream = RGBDataStream("front_camera", width=4, height=3)
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+
+    stream.log(_DummyCameraData(timestamp=5.0), frame)
+    stream.log(_DummyCameraData(timestamp=1.0), frame)
+
+
+def test_start_recording_resets_monotonic_timeline(monkeypatch) -> None:
+    """A new recording is an independent timeline that may restart lower."""
+    _use_rust_daemon(monkeypatch)
+    stream = RGBDataStream("front_camera", width=4, height=3)
+    frame = np.zeros((3, 4, 3), dtype=np.uint8)
+
+    stream.start_recording(_context("rec-1"))
+    stream.log(_DummyCameraData(timestamp=5.0), frame)
+    stream.stop_recording(stop_cutoff_sequence_number=0)
+
+    stream.start_recording(_context("rec-2"))
+    stream.log(_DummyCameraData(timestamp=1.0), frame)

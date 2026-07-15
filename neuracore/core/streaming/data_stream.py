@@ -73,6 +73,7 @@ class DataStream(ABC):
         self._stream_name = stream_name
         self._producer_channel: ProducerChannel | None = None
         self._use_data_bridge = is_rust_daemon_enabled()
+        self._last_logged_timestamp: float | None = None
 
     @property
     def data_type(self) -> DataType:
@@ -96,6 +97,7 @@ class DataStream(ABC):
                 stop_cutoff_sequence_number=stop_cutoff_sequence_number,
             )
         self._recording = True
+        self._last_logged_timestamp = None
         self._context = context
         self._handle_ensure_producer_channel(context)
 
@@ -200,6 +202,33 @@ class DataStream(ABC):
         """Return the active recording context for this stream, if present."""
         return self._context
 
+    def _enforce_monotonic_timestamp(self, timestamp: float) -> None:
+        """Reject a timestamp that does not strictly increase within a recording.
+
+        Tracked per stream and only while recording; the previous value is
+        cleared when a recording starts (see :meth:`start_recording`) so each
+        recording is an independent, strictly increasing timeline. A no-op when
+        the stream is not recording.
+
+        Args:
+            timestamp: Capture timestamp, in seconds, of the sample being logged.
+
+        Raises:
+            ValueError: If ``timestamp`` is not strictly greater than the last
+                timestamp logged to this stream during the current recording.
+        """
+        if not self._recording:
+            return
+        last_logged_timestamp = self._last_logged_timestamp
+        if last_logged_timestamp is not None and timestamp <= last_logged_timestamp:
+            raise ValueError(
+                f"Non-monotonic timestamp for '{self._stream_name}' "
+                f"({self._data_type.value}): {timestamp} is not greater than the "
+                f"previous timestamp {last_logged_timestamp}. Logged timestamps "
+                "must be strictly increasing within a recording."
+            )
+        self._last_logged_timestamp = timestamp
+
     def _send_to_daemon(self, data: bytes) -> None:
         """Send data to the daemon via the legacy producer channel.
 
@@ -268,6 +297,7 @@ class JsonDataStream(DataStream):
             data: Data object implementing NCData interface
             send_to_daemon: Whether to forward the serialized payload to the daemon
         """
+        self._enforce_monotonic_timestamp(data.timestamp)
         self._latest_data = data
         if not self.is_recording() or not send_to_daemon:
             return
@@ -313,6 +343,7 @@ class JointDataStream(JsonDataStream):
         atomically), but it never raises and never returns a partially
         constructed ``JointData``.
         """
+        self._enforce_monotonic_timestamp(timestamp)
         self._pending_timestamp = timestamp
         self._pending_value = value
         self._has_pending_latest = True
@@ -350,6 +381,7 @@ class PointCloudDataStream(DataStream):
         Args:
             data: Point cloud data to log
         """
+        self._enforce_monotonic_timestamp(data.timestamp)
         self._latest_data = data
         if not self.is_recording():
             return
@@ -395,6 +427,7 @@ class VideoDataStream(DataStream):
             metadata: Camera metadata including timestamp and calibration
             frame: Video frame as numpy array
         """
+        self._enforce_monotonic_timestamp(metadata.timestamp)
         metadata.frame = frame
         self._latest_data = metadata
         if not self.is_recording():
