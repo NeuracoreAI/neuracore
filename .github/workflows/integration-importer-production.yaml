@@ -42,51 +42,14 @@ jobs:
       - name: Show disk space
         run: df -h /
 
-      - name: Checkout repository metadata
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Resolve latest release tag
-        id: release-tag
-        run: |
-          latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
-          if [ -z "$latest_release_tag" ]; then
-            echo "::error::No release tag matching v* found"
-            exit 1
-          fi
-          echo "latest_release_tag=$latest_release_tag" >> "$GITHUB_OUTPUT"
-          echo "Latest release tag: $latest_release_tag"
-
-      - name: Resolve test harness ref
-        id: harness-ref
-        env:
-          INPUT_REF: ${{ inputs.ref }}
-          RELEASE_TAG: ${{ steps.release-tag.outputs.latest_release_tag }}
-        run: |
-          if [ -n "$INPUT_REF" ]; then
-            harness_ref="$INPUT_REF"
-          else
-            harness_ref="$RELEASE_TAG"
-          fi
-          echo "harness_ref=$harness_ref" >> "$GITHUB_OUTPUT"
-          echo "Resolved test harness ref: $harness_ref"
-
+      # Ref resolution (explicit input override, else the latest v* release
+      # tag, verified after checkout) + checkout + harness summary.
       - name: Checkout test harness
-        uses: actions/checkout@v4
+        id: harness
+        uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
         with:
-          ref: ${{ steps.harness-ref.outputs.harness_ref }}
-          fetch-depth: 0
-
-      - name: Verify production test harness ref
-        if: ${{ inputs.ref == '' }}
-        run: |
-          checked_out_ref="$(git describe --tags --exact-match HEAD)"
-          expected_ref="${{ steps.release-tag.outputs.latest_release_tag }}"
-          if [ "$checked_out_ref" != "$expected_ref" ]; then
-            echo "::error::Expected production test harness ref $expected_ref, got $checked_out_ref"
-            exit 1
-          fi
+          environment: production
+          ref: ${{ inputs.ref }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
@@ -135,24 +98,12 @@ jobs:
           echo "Importer datasets ref: ${IMPORTER_DATASETS_REF}"
           echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
 
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --no-cache-dir --upgrade pip
-          VERSION="${{ steps.release-tag.outputs.latest_release_tag }}"
-          pip install --no-cache-dir "neuracore[dev,import]==${VERSION#v}" \
-            --extra-index-url https://download.pytorch.org/whl/cpu
-
-      - name: Resolve test harness
-        run: |
-          echo "Test harness environment: production"
-          echo "Test harness ref: ${{ steps.harness-ref.outputs.harness_ref }}"
-          echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py"
-          python - << 'EOF'
-          import neuracore
-
-          print(f"Installed neuracore version: {neuracore.__version__}")
-          EOF
+      - name: Set up neuracore from PyPI
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
+        with:
+          version: ${{ steps.harness.outputs.release-tag }}
+          extras: dev,import
+          pytorch-cpu: "true"
 
       - name: Run Importer Integration Tests
         env:
