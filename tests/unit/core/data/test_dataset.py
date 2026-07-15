@@ -1135,41 +1135,43 @@ class TestDatasetSynchronization:
         assert progress_matcher.call_count >= 3
 
     @pytest.mark.usefixtures("mock_login")
-    def test_synchronize_propagates_dataset_error_on_failure(
+    def test_synchronize_surfaces_recording_name_on_failure(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
-        """synchronize() propagates the DatasetError from progress polling."""
+        """synchronize() surfaces the recording name supplied by the backend."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         error = (
-            "Synchronization failed for recording: rec1. "
+            "Synchronization failed for recording: Calm Falcon. "
             "Reason: No sensors found for data type DEPTH_IMAGES"
         )
         mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
+            f"{API_URL}/org/{mocked_org_id}/synchronize/"
+            "synchronization-progress/synced_dataset_123",
             json={"detail": {"error": error, "status": 422}},
             status_code=422,
         )
 
-        with pytest.raises(DatasetError, match="No sensors found for data type"):
+        with pytest.raises(DatasetError, match="Calm Falcon"):
             dataset.synchronize(frequency=30)
 
     @pytest.mark.usefixtures("mock_login")
-    def test_get_synchronization_progress_surfaces_detail_on_422(
+    def test_get_synchronization_progress_surfaces_backend_detail_verbatim(
         self, mock_data_requests, dataset_dict, recordings_list, mocked_org_id
     ):
         """A failure response surfaces the backend detail verbatim."""
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
         error = (
-            "Synchronization failed for recording: rec1. "
+            "Synchronization failed for recording: Calm Falcon. "
             "Reason: No sensors found for data type DEPTH_IMAGES"
         )
         mock_data_requests.get(
-            f"{API_URL}/org/{mocked_org_id}/synchronize/synchronization-progress/synced_dataset_123",
+            f"{API_URL}/org/{mocked_org_id}/synchronize/"
+            "synchronization-progress/synced_dataset_123",
             json={"detail": {"error": error, "status": 422}},
             status_code=422,
         )
 
-        with pytest.raises(DatasetError, match=error):
+        with pytest.raises(DatasetError, match=re.escape(error)):
             dataset._get_synchronization_progress("synced_dataset_123")
 
 
