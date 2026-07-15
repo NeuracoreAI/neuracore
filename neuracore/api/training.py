@@ -155,6 +155,16 @@ def start_training_run(
             algorithm_jsons=algorithm_jsons,
         )
     )
+
+    # Validate that the machine size is large enough for the dataset.
+    dataset_size_gb = dataset.size_bytes / 1_000_000_000
+    if disk_size_gb <= dataset_size_gb:
+        raise ValueError(
+            f"Dataset {dataset_name} is {dataset_size_gb:.2f} GB, "
+            f"but selected VM disk is {disk_size_gb} GB. "
+            "Please increase disk_size_gb."
+        )
+
     validate_training_params(
         dataset,
         dataset_name,
