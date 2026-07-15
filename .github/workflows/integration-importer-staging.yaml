@@ -42,30 +42,13 @@ jobs:
       - name: Show disk space
         run: df -h /
 
-      - name: Checkout repository metadata
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Resolve test harness ref
-        id: harness-ref
-        env:
-          INPUT_REF: ${{ inputs.ref }}
-          BRANCH_REF: ${{ github.ref_name }}
-        run: |
-          if [ -n "$INPUT_REF" ]; then
-            harness_ref="$INPUT_REF"
-          else
-            harness_ref="$BRANCH_REF"
-          fi
-          echo "harness_ref=$harness_ref" >> "$GITHUB_OUTPUT"
-          echo "Resolved test harness ref: $harness_ref"
-
+      # Ref resolution (explicit input override, else the caller's branch) +
+      # checkout + harness summary.
       - name: Checkout test harness
-        uses: actions/checkout@v4
+        uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
         with:
-          ref: ${{ steps.harness-ref.outputs.harness_ref }}
-          fetch-depth: 0
+          environment: staging
+          ref: ${{ inputs.ref }}
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v4
@@ -111,24 +94,12 @@ jobs:
           echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
 
       - name: Set up neuracore with Rust data daemon
-        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-daemon-from-source@main
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
         with:
           checkout: "false"
           path: "."
           extras: dev,import
           pytorch-cpu: "true"
-
-      - name: Resolve test harness
-        run: |
-          echo "Test harness environment: staging"
-          echo "Test harness ref: ${{ steps.harness-ref.outputs.harness_ref }}"
-          echo "Test harness commit: $(git rev-parse HEAD)"
-          echo "Test harness path: tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py"
-          python - << 'EOF'
-          import neuracore
-
-          print(f"Installed neuracore version: {neuracore.__version__}")
-          EOF
 
       - name: Run Importer Integration Tests
         env:

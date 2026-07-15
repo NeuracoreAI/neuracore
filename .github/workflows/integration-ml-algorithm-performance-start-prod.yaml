@@ -95,11 +95,11 @@ jobs:
       with:
         python-version: ${{ matrix.python-version }}
 
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --no-cache-dir --upgrade pip
-        VERSION="${{ needs.discover-algorithms.outputs.latest_release_tag }}"
-        pip install --no-cache-dir "neuracore[dev,ml,examples]==${VERSION#v}"
+    - name: Set up neuracore from PyPI
+      uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
+      with:
+        version: ${{ needs.discover-algorithms.outputs.latest_release_tag }}
+        extras: dev,ml,examples
 
     - name: Resolve test harness
       run: |
