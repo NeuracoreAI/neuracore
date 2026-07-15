@@ -261,6 +261,7 @@ Supported environment variables:
 | `num_threads` | `NCD_NUM_THREADS` |
 | `keep_wakelock_while_upload` | `NCD_KEEP_WAKELOCK_WHILE_UPLOAD` |
 | `offline` | `NCD_OFFLINE` |
+| `recording_reaper` | `NCD_RECORDING_REAPER` (Rust daemon only; on by default) |
 | `api_key` | `NCD_API_KEY` |
 | `current_org_id` | `NEURACORE_ORG_ID` (shared with the SDK) |
 | `video_codec` | `NCD_VIDEO_CODEC` |

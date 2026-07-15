@@ -443,15 +443,20 @@ fn run_daemon(
                 shutdown_tx.subscribe(),
             );
 
-            // Reclaim fully-uploaded recordings' files + rows. Spawned
-            // regardless of `offline` so a daemon restarted offline still
-            // reaps recordings that completed in a prior online session; it
-            // only ever acts on recordings the backend already holds in full.
-            let reaper_handle = spawn_recording_reaper(
-                state_store.clone(),
-                Arc::new(recordings_root.clone()),
-                shutdown_tx.subscribe(),
-            );
+            // Reclaim fully-uploaded recordings' files + rows. On by default
+            // (opt out via the `recording_reaper` profile field or
+            // NCD_RECORDING_REAPER=0).
+            let reaper_enabled = config_for_runtime.recording_reaper.unwrap_or(true);
+            if !reaper_enabled {
+                tracing::info!("recording reaper disabled by configuration");
+            }
+            let reaper_handle = reaper_enabled.then(|| {
+                spawn_recording_reaper(
+                    state_store.clone(),
+                    Arc::new(recordings_root.clone()),
+                    shutdown_tx.subscribe(),
+                )
+            });
 
             // Capture the actual shutdown signal in a spawned task so we
             // can log which signal triggered the exit *after* the listener
@@ -496,7 +501,9 @@ fn run_daemon(
             // can be produced. Drain + flush the write-behind's final batch
             // before the store closes so finalise/failed states are durable.
             trace_writer.shutdown().await;
-            reaper_handle.join().await;
+            if let Some(handle) = reaper_handle {
+                handle.join().await;
+            }
             if let Some(handles) = cloud_handles {
                 handles.join_all().await;
             }
