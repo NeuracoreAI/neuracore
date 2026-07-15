@@ -899,6 +899,78 @@ def test_start_training_run_sends_disk_size_gb(
     assert post_request.json()["disk_size_gb"] == 1000
 
 
+def test_start_training_run_raises_when_disk_size_too_small(
+    mock_auth_requests,
+    algorithm_list_response,
+    mocked_org_id,
+):
+    """start_training_run rejects disks that cannot fit the dataset."""
+    nc.login("test_api_key")
+    dataset_id = "dataset123"
+    dataset_response = Dataset(
+        id=dataset_id,
+        name="test_dataset",
+        created_at=0.0,
+        modified_at=0.0,
+        description="A test dataset",
+        size_bytes=2_000_000_000,
+        tags=[],
+        is_shared=False,
+        num_demonstrations=20,
+        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
+        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
+        json=dataset_response.model_dump(mode="json"),
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/algorithms",
+        json=algorithm_list_response,
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
+        json=[],
+        status_code=200,
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/training/jobs",
+        json={"id": "should_not_create"},
+        status_code=200,
+    )
+
+    expected_message = (
+        "Dataset test_dataset is 2.00 GB, but selected VM disk is 1 GB. "
+        "Please increase disk_size_gb."
+    )
+    with pytest.raises(ValueError, match=expected_message):
+        nc.start_training_run(
+            name="small_disk_run",
+            dataset_name="test_dataset",
+            algorithm_name="cnnmlp",
+            algorithm_config={"hidden_dim": 64},
+            gpu_type=GPUType.NVIDIA_TESLA_T4,
+            num_gpus=1,
+            frequency=10,
+            disk_size_gb=1,
+            input_cross_embodiment_description={
+                TEST_ROBOT_ID: {DataType.RGB_IMAGES: {0: "angle"}}
+            },
+            output_cross_embodiment_description={
+                TEST_ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: {0: "joint1"}}
+            },
+        )
+
+    training_job_requests = [
+        r
+        for r in mock_auth_requests.request_history
+        if r.method == "POST" and r.url.endswith("/training/jobs")
+    ]
+    assert training_job_requests == []
+
+
 def test_start_training_run_default_disk_size_gb(
     mock_auth_requests,
     training_job_response,
