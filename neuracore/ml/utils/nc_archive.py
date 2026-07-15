@@ -23,6 +23,7 @@ from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.json_serialization import to_json_serializable
 from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
+from neuracore.ml.utils.training_config import normalize_cross_embodiment_description
 
 logger = logging.getLogger(__name__)
 
@@ -303,11 +304,15 @@ def load_cross_embodiment_descriptions_from_nc_archive(
         with open(
             _archive_path(extracted_files, "input_cross_embodiment_description")
         ) as f:
-            input_cross_embodiment_description = json.load(f)
+            input_cross_embodiment_description = normalize_cross_embodiment_description(
+                json.load(f)
+            )
         with open(
             _archive_path(extracted_files, "output_cross_embodiment_description")
         ) as f:
-            output_cross_embodiment_description = json.load(f)
+            output_cross_embodiment_description = (
+                normalize_cross_embodiment_description(json.load(f))
+            )
         return input_cross_embodiment_description, output_cross_embodiment_description
     finally:
         if use_temp_dir and temp_dir_context:
@@ -378,13 +383,17 @@ def load_model_from_nc_archive(
             with open(
                 _archive_path(extracted_files, "input_cross_embodiment_description")
             ) as f:
-                input_cross_embodiment_description = json.load(f)
+                input_cross_embodiment_description = (
+                    normalize_cross_embodiment_description(json.load(f))
+                )
         output_cross_embodiment_description = {}
         if "output_cross_embodiment_description" in extracted_files:
             with open(
                 _archive_path(extracted_files, "output_cross_embodiment_description")
             ) as f:
-                output_cross_embodiment_description = json.load(f)
+                output_cross_embodiment_description = (
+                    normalize_cross_embodiment_description(json.load(f))
+                )
         input_preprocessing_config: PreprocessingConfiguration = (
             PreprocessingConfiguration()
         )
