@@ -52,6 +52,10 @@ class RobotError(Exception):
     """Raised for robot-related errors."""
 
 
+class RecordingError(Exception):
+    """Raised for recording lifecycle errors."""
+
+
 class DatasetError(Exception):
     """Exception raised for errors in the dataset module."""
 

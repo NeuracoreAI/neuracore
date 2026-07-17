@@ -8,7 +8,7 @@ synchronized datasets.
 import base64
 import hashlib
 
-from neuracore_types import DataType, RecordingDataTrace
+from neuracore_types import DataType, Recording, RecordingDataTrace
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -43,6 +43,32 @@ def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
     response.raise_for_status()
     data = response.json() or []
     return [RecordingDataTrace.model_validate(item) for item in data]
+
+
+def get_recording(recording_id: str) -> Recording | None:
+    """Get a finalized recording by id.
+
+    Args:
+        recording_id: Unique identifier for the recording to fetch.
+
+    Returns:
+        The Recording once the backend has finalized it, or None while it
+        is still pending, discarded, or unknown.
+
+    Raises:
+        requests.HTTPError: If the API request fails.
+        ConfigError: If there is an error trying to get the current org.
+    """
+    org_id = get_current_org()
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{org_id}/recording/{recording_id}",
+        headers=get_auth().get_headers(),
+    )
+    if response.status_code == 404:
+        return None
+    response.raise_for_status()
+    return Recording.model_validate(response.json())
 
 
 def synced_dataset_key(sync_freq: int, data_types: list[DataType]) -> str:

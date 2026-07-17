@@ -10,6 +10,8 @@ import logging
 import time
 from warnings import warn
 
+from neuracore_types import RecordingNotificationType
+
 from neuracore.core.config.config_manager import get_config_manager
 from neuracore.core.organizations import list_my_orgs
 from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
@@ -18,19 +20,25 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.streaming.recording_state_manager import (
+    RecordingStateManager,
+    get_recording_state_manager,
+)
 from neuracore.core.utils import backend_utils
 from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
-from ..core.exceptions import DatasetError, RobotError
+from ..core.exceptions import DatasetError, RecordingError, RobotError
 from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
 
 logger = logging.getLogger(__name__)
+
+RECORDING_SAVE_TIMEOUT_S = 100.0
+RECORDING_SAVE_POLL_INTERVAL_S = 5.0
 
 
 def _get_robot(robot_name: str | None, instance: int) -> Robot:
@@ -305,24 +313,30 @@ def stop_recording(
     instance: int = 0,
     wait: bool = False,
     timestamp: float | None = None,
+    timeout_s: float | None = RECORDING_SAVE_TIMEOUT_S,
 ) -> None:
     """Stop recording data for a specific robot.
 
     Ends the current recording session for the specified robot. Optionally
-    waits for all data streams to finish uploading before returning.
+    waits until the backend has finalized the recording, meaning every data
+    trace finished uploading and the recording was saved.
 
     Args:
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
-        wait: Whether to block until all data streams have finished uploading
-            to the backend storage.
+        wait: Whether to block until the backend has saved the recording.
         timestamp: Optional capture time (Unix seconds) for the recording's
             stop, matching the ``log_*`` methods. When omitted, the current
             time is captured.
+        timeout_s: Maximum seconds to wait for the backend to save the
+            recording. Only used when wait is True. When None, waits
+            indefinitely.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
+        RecordingError: If wait is True and the recording was discarded or
+            was not saved within timeout_s.
     """
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
@@ -334,30 +348,74 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
+
     if is_rust_daemon_enabled():
-        cloud_recording_id = robot.get_cloud_recording_id() if wait else None
-        robot.stop_recording(
-            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
-        )
-        if not wait or not cloud_recording_id:
-            return
-        recording_id = cloud_recording_id
+        save_recording_id = robot.get_cloud_recording_id() if wait else None
     else:
+        save_recording_id = recording_id
+
+    manager = get_recording_state_manager()
+    watched_id = save_recording_id if wait and save_recording_id is not None else None
+    if watched_id is not None:
+        manager.start_tracking_recording(watched_id)
+    try:
         robot.stop_recording(
             recording_id, wait_for_producer_drain=wait, timestamp=timestamp
         )
         if not wait:
             return
+        if save_recording_id is None:
+            warn(
+                "Could not resolve the cloud recording id; returning without "
+                "waiting for the recording to be saved."
+            )
+            return
+        _wait_for_recording_saved(manager, save_recording_id, timeout_s)
+    finally:
+        if watched_id is not None:
+            manager.stop_tracking_recording(watched_id)
 
-    # TODO: We need to instead check that the specific recording is complete
-    is_traces_registered = False
-    while True:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
-        if len(data_traces) > 0:
-            is_traces_registered = True
-        elif len(data_traces) == 0 and is_traces_registered:
-            break
-        time.sleep(0.2)
+
+def _wait_for_recording_saved(
+    manager: RecordingStateManager, recording_id: str, timeout_s: float | None
+) -> None:
+    """Block until the backend has saved a recording.
+
+    The backend GET is the source of truth for whether a recording was saved.
+    The SAVED notification only wakes this early, so a dropped notification
+    still resolves on the next poll. A DISCARDED notification fails fast.
+
+    Args:
+        manager: The recording state manager consuming backend notifications.
+        recording_id: Unique identifier for the recording session.
+        timeout_s: Maximum seconds to wait. When None, waits indefinitely.
+
+    Raises:
+        RecordingError: If the recording was discarded or was not saved
+            within timeout_s.
+    """
+    deadline = None if timeout_s is None else time.monotonic() + timeout_s
+    while deadline is None or time.monotonic() < deadline:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        interval = (
+            RECORDING_SAVE_POLL_INTERVAL_S
+            if remaining is None
+            else min(RECORDING_SAVE_POLL_INTERVAL_S, remaining)
+        )
+        notification = manager.wait_for_terminal_notification(
+            recording_id, timeout_s=interval
+        )
+        if notification == RecordingNotificationType.DISCARDED:
+            raise RecordingError(
+                f"Recording {recording_id} was discarded by the backend"
+            )
+        if notification == RecordingNotificationType.SAVED:
+            return
+        if backend_utils.get_recording(recording_id) is not None:
+            return
+    raise RecordingError(
+        f"Recording {recording_id} was not saved within the wait timeout"
+    )
 
 
 def get_cloud_recording_id(

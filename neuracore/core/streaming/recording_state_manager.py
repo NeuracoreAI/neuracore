@@ -115,6 +115,9 @@ class RecordingStateManager(BaseSSEConsumer):
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
         self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
+        self._finalized_condition = threading.Condition()
+        self._watched_recording_ids: set[str] = set()
+        self._terminal_notifications: dict[str, RecordingNotificationType] = {}
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
@@ -352,6 +355,64 @@ class RecordingStateManager(BaseSSEConsumer):
                 recording_id=recording_id,
             )
 
+    def start_tracking_recording(self, recording_id: str) -> None:
+        """Start tracking a recording's terminal notification.
+
+        Call before stopping so a notification that arrives during drain is
+        captured. Only watched recordings are stored, bounding memory to the
+        recordings actively awaited rather than every recording in the org.
+
+        Args:
+            recording_id: Unique identifier for the recording session
+        """
+        with self._finalized_condition:
+            self._watched_recording_ids.add(recording_id)
+
+    def stop_tracking_recording(self, recording_id: str) -> None:
+        """Stop tracking a recording and drop any stored notification.
+
+        Args:
+            recording_id: Unique identifier for the recording session
+        """
+        with self._finalized_condition:
+            self._watched_recording_ids.discard(recording_id)
+            self._terminal_notifications.pop(recording_id, None)
+
+    def _record_terminal_notification(
+        self, recording_id: str, notification: RecordingNotificationType
+    ) -> None:
+        """Record a watched recording's terminal notification and wake waiters.
+
+        Args:
+            recording_id: Unique identifier for the recording session
+            notification: The terminal notification type, SAVED or DISCARDED.
+        """
+        with self._finalized_condition:
+            if recording_id not in self._watched_recording_ids:
+                return
+            self._terminal_notifications[recording_id] = notification
+            self._finalized_condition.notify_all()
+
+    def wait_for_terminal_notification(
+        self, recording_id: str, timeout_s: float | None = None
+    ) -> RecordingNotificationType | None:
+        """Wait for a recording's terminal notification from the backend.
+
+        Args:
+            recording_id: Unique identifier for the recording session
+            timeout_s: Maximum seconds to wait for a terminal notification.
+                When None, waits indefinitely.
+
+        Returns:
+            SAVED or DISCARDED once the matching notification has arrived,
+            or None if neither arrived within the timeout.
+        """
+        with self._finalized_condition:
+            self._finalized_condition.wait_for(
+                lambda: recording_id in self._terminal_notifications, timeout=timeout_s
+            )
+            return self._terminal_notifications.get(recording_id)
+
     def register_connected_robot(self, robot_id: str) -> None:
         """Register the robot that this client is connected to.
 
@@ -403,6 +464,18 @@ class RecordingStateManager(BaseSSEConsumer):
             RecordingNotificationType.EXPIRED,
         ):
             self.updated_recording_state(is_recording=False, details=message.payload)
+            if (
+                message.type == RecordingNotificationType.DISCARDED
+                and message.payload.recording_id is not None
+            ):
+                self._record_terminal_notification(
+                    message.payload.recording_id, message.type
+                )
+        elif message.type == RecordingNotificationType.SAVED:
+            if message.payload.recording_id is not None:
+                self._record_terminal_notification(
+                    message.payload.recording_id, message.type
+                )
         elif message.type == RecordingNotificationType.INIT:
             for recording in message.payload:
                 self.updated_recording_state(is_recording=True, details=recording)

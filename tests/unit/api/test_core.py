@@ -1,14 +1,17 @@
 import json
+import time
+from unittest import mock
 
 import pytest
 import requests
 import requests_mock
+from neuracore_types import RecordingNotificationType
 
 import neuracore as nc
 from neuracore.api import core as api_core
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
-from neuracore.core.exceptions import AuthenticationError
+from neuracore.core.exceptions import AuthenticationError, RecordingError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -206,39 +209,107 @@ def test_update_robot_name_forwards_arguments(monkeypatch):
     assert robot_id == "robot_id_123"
 
 
-def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
-    calls: list[tuple[str, bool]] = []
-    active_trace_rows = iter(([{"id": "trace-1"}], []))
-
-    class _FakeRobot:
-        def is_recording(self) -> bool:
-            return True
-
-        def get_current_recording_id(self) -> str:
-            return "rec-123"
-
-        def stop_recording(
-            self,
-            recording_id: str,
-            *,
-            wait_for_producer_drain: bool = True,
-            timestamp: float | None = None,
-        ) -> None:
-            calls.append((recording_id, wait_for_producer_drain))
-
-    monkeypatch.setattr(
-        api_core, "_get_robot", lambda robot_name, instance: _FakeRobot()
-    )
-    monkeypatch.setattr(
-        api_core.backend_utils,
-        "get_active_data_traces",
-        lambda recording_id: next(active_trace_rows),
-    )
+def test_stop_recording_no_wait_forwards_flag_and_skips_tracking(monkeypatch) -> None:
+    robot = mock.Mock()
+    robot.is_recording.return_value = True
+    robot.get_current_recording_id.return_value = "rec-123"
+    manager = mock.Mock()
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: robot)
+    monkeypatch.setattr(api_core, "get_recording_state_manager", lambda: manager)
+    monkeypatch.setattr(api_core, "is_rust_daemon_enabled", lambda: False)
 
     nc.stop_recording(wait=False)
-    nc.stop_recording(wait=True)
 
-    assert calls == [
-        ("rec-123", False),
-        ("rec-123", True),
-    ]
+    robot.stop_recording.assert_called_once_with(
+        "rec-123", wait_for_producer_drain=False, timestamp=None
+    )
+    manager.start_tracking_recording.assert_not_called()
+    manager.wait_for_terminal_notification.assert_not_called()
+
+
+def test_stop_recording_wait_returns_on_saved_notification(monkeypatch) -> None:
+    robot = mock.Mock()
+    robot.is_recording.return_value = True
+    robot.get_current_recording_id.return_value = "rec-123"
+    manager = mock.Mock()
+    manager.wait_for_terminal_notification.return_value = (
+        RecordingNotificationType.SAVED
+    )
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: robot)
+    monkeypatch.setattr(api_core, "get_recording_state_manager", lambda: manager)
+    monkeypatch.setattr(api_core, "is_rust_daemon_enabled", lambda: False)
+
+    def fail_if_called(recording_id: str) -> object:
+        raise AssertionError("backend lookup should be skipped on SAVED")
+
+    monkeypatch.setattr(api_core.backend_utils, "get_recording", fail_if_called)
+
+    nc.stop_recording(wait=True, timeout_s=17.0)
+
+    robot.stop_recording.assert_called_once_with(
+        "rec-123", wait_for_producer_drain=True, timestamp=None
+    )
+    manager.start_tracking_recording.assert_called_once_with("rec-123")
+    manager.stop_tracking_recording.assert_called_once_with("rec-123")
+    manager.wait_for_terminal_notification.assert_called_once_with(
+        "rec-123", timeout_s=api_core.RECORDING_SAVE_POLL_INTERVAL_S
+    )
+
+
+def test_stop_recording_wait_raises_and_stops_tracking_on_discarded(
+    monkeypatch,
+) -> None:
+    robot = mock.Mock()
+    robot.is_recording.return_value = True
+    robot.get_current_recording_id.return_value = "rec-123"
+    manager = mock.Mock()
+    manager.wait_for_terminal_notification.return_value = (
+        RecordingNotificationType.DISCARDED
+    )
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: robot)
+    monkeypatch.setattr(api_core, "get_recording_state_manager", lambda: manager)
+    monkeypatch.setattr(api_core, "is_rust_daemon_enabled", lambda: False)
+
+    with pytest.raises(RecordingError, match="discarded"):
+        nc.stop_recording(wait=True)
+
+    manager.stop_tracking_recording.assert_called_once_with("rec-123")
+
+
+def test_stop_recording_wait_falls_back_to_backend_lookup(monkeypatch) -> None:
+    robot = mock.Mock()
+    robot.is_recording.return_value = True
+    robot.get_current_recording_id.return_value = "rec-123"
+    manager = mock.Mock()
+    manager.wait_for_terminal_notification.return_value = None
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: robot)
+    monkeypatch.setattr(api_core, "get_recording_state_manager", lambda: manager)
+    monkeypatch.setattr(api_core, "is_rust_daemon_enabled", lambda: False)
+    monkeypatch.setattr(
+        api_core.backend_utils, "get_recording", lambda recording_id: object()
+    )
+
+    nc.stop_recording(wait=True, timeout_s=0.05)
+
+
+def test_stop_recording_wait_raises_on_timeout(monkeypatch) -> None:
+    robot = mock.Mock()
+    robot.is_recording.return_value = True
+    robot.get_current_recording_id.return_value = "rec-123"
+    manager = mock.Mock()
+
+    def wait_out_interval(recording_id: str, timeout_s: float | None = None) -> None:
+        if timeout_s:
+            time.sleep(timeout_s)
+        return None
+
+    manager.wait_for_terminal_notification.side_effect = wait_out_interval
+    monkeypatch.setattr(api_core, "_get_robot", lambda robot_name, instance: robot)
+    monkeypatch.setattr(api_core, "get_recording_state_manager", lambda: manager)
+    monkeypatch.setattr(api_core, "is_rust_daemon_enabled", lambda: False)
+    monkeypatch.setattr(
+        api_core.backend_utils, "get_recording", lambda recording_id: None
+    )
+
+    with pytest.raises(RecordingError, match="not saved within"):
+        nc.stop_recording(wait=True, timeout_s=0.05)
