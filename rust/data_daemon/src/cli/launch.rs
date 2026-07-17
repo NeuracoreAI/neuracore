@@ -234,14 +234,6 @@ fn run_daemon(
         }
     };
 
-    // Signal readiness to the launcher *before* the main loop blocks so the
-    // user's shell prompt returns as soon as the daemon is actually up.
-    if let Some(reporter) = reporter {
-        if let Err(error) = reporter.ready(std::process::id()) {
-            tracing::warn!(%error, "failed to report readiness to launcher (continuing)");
-        }
-    }
-
     let db_path = runtime_env.db_path.clone();
     let recordings_root = runtime_env.recordings_root.clone();
     // The recordings root is shared with the data bridge, which lives in a
@@ -475,6 +467,12 @@ fn run_daemon(
             // Drain the primary handler-installed receiver so it doesn't
             // accumulate broadcasts behind our back; we no longer need it.
             drop(shutdown_rx);
+
+            if let Some(reporter) = reporter {
+                if let Err(error) = reporter.ready(std::process::id()) {
+                    tracing::warn!(%error, "failed to report readiness to launcher (continuing)");
+                }
+            }
 
             tracing::info!(?org_id, "daemon ready; awaiting shutdown signal");
             listener::run(

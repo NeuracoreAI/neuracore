@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import signal
 import subprocess
@@ -10,7 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import FrameType
-from typing import IO, cast
+from typing import IO, Any, cast
 
 import filelock
 
@@ -48,6 +49,25 @@ def read_pid_from_file(pid_path: Path) -> int | None:
         return None
 
     return pid_value if pid_value > 0 else None
+
+
+def _rust_daemon_ready(pid_path: Path, *, timeout_s: float = 0.0) -> bool:
+    """Return True once the Rust daemon answers an IPC health probe."""
+    pid_value = read_pid_from_file(pid_path)
+    if pid_value is None or not pid_is_running(pid_value):
+        return False
+    try:
+        data_bridge = cast(
+            Any, importlib.import_module("neuracore.data_daemon._data_bridge")
+        )
+    except (ImportError, OSError):
+        return False
+
+    try:
+        ready_pid = data_bridge.wait_until_ready(timeout_s)
+    except (AttributeError, RuntimeError):
+        return False
+    return ready_pid == pid_value
 
 
 def _is_zombie(pid_value: int) -> bool:
@@ -146,7 +166,7 @@ def _build_daemon_launch_env(
     environment = os.environ.copy()
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
-    if not is_rust_daemon_enabled():
+    if not (is_rust_daemon_enabled() and rust_daemon_binary_path() is not None):
         environment["NEURACORE_DAEMON_MANAGE_PID"] = "0"
     if env_overrides:
         environment.update(env_overrides)
@@ -310,13 +330,12 @@ def launch_daemon_subprocess(
     """Launch the daemon runner subprocess and poll until it is ready.
 
     Readiness signal differs by backend: the Python daemon publishes a Unix
-    socket the SDK connects to, while the Rust daemon never opens one (its IPC
-    is iceoryx2 shared memory) — so under ``NCD_RUST_DAEMON`` we instead wait
-    for the daemon to write its PID file. The Rust binary also acquires the
-    PID file itself, so the parent must not overwrite it.
+    socket the SDK connects to, while the Rust daemon answers a side-effect-free
+    iceoryx2 health query once its IPC listener and dispatcher are live. The
+    Rust binary still owns the PID file, so the parent must not overwrite it.
     """
     pid_path.parent.mkdir(parents=True, exist_ok=True)
-
+    rust_mode = is_rust_daemon_enabled() and rust_daemon_binary_path() is not None
     process, daemon_log_path = _start_daemon_subprocess(
         pid_path=pid_path,
         db_path=db_path,
@@ -327,16 +346,14 @@ def launch_daemon_subprocess(
     )
     poll_interval_s = 0.05
     daemon_startup_timeout_s = time.monotonic() + timeout_s
-    rust_mode = is_rust_daemon_enabled() and rust_daemon_binary_path() is not None
 
     def _ready() -> bool:
         if rust_mode:
-            existing = read_pid_from_file(pid_path)
-            return existing is not None and pid_is_running(existing)
+            return _rust_daemon_ready(pid_path, timeout_s=0.0)
         return SOCKET_PATH.exists()
 
     readiness_target = (
-        "pid file " + str(pid_path) if rust_mode else "socket " + str(SOCKET_PATH)
+        "Rust daemon IPC health probe" if rust_mode else "socket " + str(SOCKET_PATH)
     )
 
     while time.monotonic() < daemon_startup_timeout_s:
@@ -412,8 +429,16 @@ def ensure_daemon_running(
 
     with filelock.FileLock(pid_file_lock):
         existing_pid = read_pid_from_file(pid_path)
+        rust_mode = is_rust_daemon_enabled() and rust_daemon_binary_path() is not None
         if existing_pid is not None and pid_is_running(existing_pid):
-            return existing_pid
+            if not rust_mode:
+                return existing_pid
+            if _rust_daemon_ready(pid_path, timeout_s=timeout_s):
+                return existing_pid
+            raise DaemonLifecycleError(
+                f"Daemon process is running (pid={existing_pid}) but did not "
+                "become ready to accept IPC commands."
+            )
 
         cleanup_stale_client_state(
             pid_path=pid_path,

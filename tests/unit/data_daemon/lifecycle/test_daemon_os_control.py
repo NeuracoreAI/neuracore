@@ -31,6 +31,10 @@ class _FakePopen:
     def poll(self) -> int | None:
         return self._poll_value
 
+    def terminate(self) -> None:
+        self.returncode = -15
+        self._poll_value = -15
+
 
 def test_acquire_pid_file_rejects_running_pid(tmp_path: Path) -> None:
     pid_path = tmp_path / "daemon.pid"
@@ -55,6 +59,100 @@ def test_remove_pid_file_removes(tmp_path: Path) -> None:
     remove_pid_file(pid_path)
 
     assert not pid_path.exists()
+
+
+def test_rust_launch_waits_for_ipc_health_not_pid_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    fake_pid = os.getpid()
+    readiness_checks = iter([False, True])
+    captured: dict[str, object] = {}
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
+        captured["command"] = command
+        captured.update(kwargs)
+        pid_path.write_text(str(fake_pid), encoding="utf-8")
+        return _FakePopen(pid=fake_pid, poll_value=None)
+
+    monkeypatch.setattr(daemon_os_control, "is_rust_daemon_enabled", lambda: True)
+    monkeypatch.setattr(
+        daemon_os_control, "rust_daemon_binary_path", lambda: tmp_path / "data-daemon"
+    )
+    monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon_os_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(
+        daemon_os_control,
+        "_rust_daemon_ready",
+        lambda _pid_path, *, timeout_s=0.0: next(readiness_checks),
+    )
+
+    proc = launch_daemon_subprocess(
+        pid_path=pid_path,
+        db_path=db_path,
+        background=True,
+    )
+
+    assert proc.pid == fake_pid
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert "NEURACORE_DAEMON_MANAGE_PID" not in env
+
+
+def test_rust_launch_times_out_when_only_pid_appears(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    fake_pid = os.getpid()
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
+        pid_path.write_text(str(fake_pid), encoding="utf-8")
+        return _FakePopen(pid=fake_pid, poll_value=None)
+
+    monkeypatch.setattr(daemon_os_control, "is_rust_daemon_enabled", lambda: True)
+    monkeypatch.setattr(
+        daemon_os_control, "rust_daemon_binary_path", lambda: tmp_path / "data-daemon"
+    )
+    monkeypatch.setattr(daemon_os_control.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        daemon_os_control, "_rust_daemon_ready", lambda *_args, **_kwargs: False
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        launch_daemon_subprocess(
+            pid_path=pid_path,
+            db_path=db_path,
+            background=True,
+            timeout_s=0.0,
+        )
+
+    assert "Rust daemon IPC health probe" in str(exc_info.value)
+
+
+def test_ensure_daemon_running_existing_rust_pid_waits_for_health(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    pid_path.write_text(str(os.getpid()), encoding="utf-8")
+    calls: list[float] = []
+
+    def fake_ready(_pid_path: Path, *, timeout_s: float = 0.0) -> bool:
+        calls.append(timeout_s)
+        return True
+
+    monkeypatch.setattr(daemon_os_control, "get_daemon_pid_path", lambda: pid_path)
+    monkeypatch.setattr(daemon_os_control, "get_daemon_db_path", lambda: db_path)
+    monkeypatch.setattr(daemon_os_control, "is_rust_daemon_enabled", lambda: True)
+    monkeypatch.setattr(
+        daemon_os_control, "rust_daemon_binary_path", lambda: tmp_path / "data-daemon"
+    )
+    monkeypatch.setattr(daemon_os_control, "_rust_daemon_ready", fake_ready)
+
+    assert daemon_os_control.ensure_daemon_running(timeout_s=2.5) == os.getpid()
+    assert calls == [2.5]
 
 
 def test_launch_daemon_subprocess_redirects_stdio_in_background(

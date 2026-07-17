@@ -13,12 +13,14 @@
 //! backpressure on the dispatcher send propagate to iceoryx2 without keeping
 //! the subscriber locked across the await. (`Send` is not actually required
 //! here — `run` is awaited inline under `block_on`, never `tokio::spawn`'d, and
-//! the later `serve_queries` borrow is itself held across an await.)
+//! the later `serve_recording_id_queries` borrow is itself held across an await.)
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use data_daemon_shared::{Envelope, RecordingIdQuery, RecordingIdReply};
+use data_daemon_shared::{
+    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply,
+};
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
@@ -71,7 +73,8 @@ pub async fn run(
 ) {
     tracing::info!(
         commands = data_daemon_shared::service_name::COMMANDS,
-        queries = data_daemon_shared::service_name::QUERIES,
+        recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
+        health = data_daemon_shared::service_name::HEALTH,
         "ipc listener started"
     );
 
@@ -106,12 +109,18 @@ pub async fn run(
             }
         }
 
+        // -- Answer readiness probes --------------------------------------------
+        // A health reply is the SDK launcher's readiness contract: reaching this
+        // point proves the daemon has opened IPC, spawned the dispatcher, and
+        // entered the listener loop that drains commands.
+        serve_health(transport.health_server());
+
         // -- Answer recording-id queries ----------------------------------------
-        // Each request is resolved against the daemon's own store (a single
+        // Each recording-id request is resolved against the daemon's own store (a single
         // `.await`) while holding the iceoryx2 `ActiveRequest` to reply on. That
         // borrow makes this future `!Send`, which is fine: `run` is awaited
         // inline under `block_on`, never `tokio::spawn`'d.
-        serve_queries(transport.queries_server(), &store).await;
+        serve_recording_id_queries(transport.recording_id_server(), &store).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -132,21 +141,60 @@ pub async fn run(
     }
 }
 
+/// Drain every pending health query, answering each with this daemon's PID.
+fn serve_health(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "health server receive failed");
+                return;
+            }
+        };
+
+        let request = match HealthRequest::decode(active.payload()) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed health query");
+                continue;
+            }
+        };
+
+        let reply = HealthReply {
+            pid: std::process::id(),
+            nonce: request.nonce,
+        };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send health reply");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to loan health reply sample"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode health reply"),
+        }
+    }
+}
+
 /// Drain every pending recording-id query, answering each from the daemon's
 /// own store.
 ///
 /// The SDK resolves a recording's cloud id by asking the daemon over the
-/// `queries` request-response service instead of reading the daemon's private
+/// `recording_ids` request-response service instead of reading the daemon's private
 /// SQLite DB directly. Requests are cheap and infrequent (one per
 /// `get_recording_id` poll), so a malformed request or store error is logged
 /// and the next request is served rather than aborting the loop.
 ///
-/// The per-tick request volume is bounded rather than unbounded: each query
+/// The per-tick request volume is bounded rather than unbounded: each recording-id
 /// client keeps at most one request in flight (it awaits the reply before
 /// sending the next), so a single drain serves at most one request per
-/// connected client (≤ `MAX_QUERY_CLIENTS_PER_SERVICE`) before `receive`
+/// connected request-response client (≤ `MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE`) before `receive`
 /// returns `None` and the loop hands the next tick back to the commands drain.
-async fn serve_queries(
+async fn serve_recording_id_queries(
     server: &Server<ipc::Service, [u8], (), [u8], ()>,
     store: &Arc<SqliteStateStore>,
 ) {
@@ -155,7 +203,7 @@ async fn serve_queries(
             Ok(Some(active)) => active,
             Ok(None) => return,
             Err(error) => {
-                tracing::warn!(%error, "queries server receive failed");
+                tracing::warn!(%error, "recording-id server receive failed");
                 return;
             }
         };
