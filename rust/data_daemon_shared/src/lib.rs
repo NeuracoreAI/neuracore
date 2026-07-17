@@ -172,6 +172,16 @@ pub mod service_name {
     /// the cliff entirely.
     pub const MAX_NODES_PER_SERVICE: usize = 512;
 
+    /// Request-response service the SDK uses to probe daemon readiness.
+    ///
+    /// A successful health reply proves the daemon has opened IPC and entered
+    /// the listener loop, so launchers can wait on this service instead of
+    /// treating the PID file as readiness.
+    pub const HEALTH: &str = "neuracore/data_daemon/health";
+
+    /// Maximum size of a single health-service sample.
+    pub const HEALTH_MAX_PAYLOAD_BYTES: usize = 1024;
+
     /// Request-response service the SDK uses to resolve a recording's
     /// daemon-owned cloud `recording_id`.
     ///
@@ -181,20 +191,20 @@ pub mod service_name {
     /// daemon answers authoritatively from its own state. A request carries the
     /// source + the recording's capture marker; the reply carries the id once
     /// minted (or "not yet"). See [`crate::RecordingIdQuery`] / [`crate::RecordingIdReply`].
-    pub const QUERIES: &str = "neuracore/data_daemon/queries";
+    pub const RECORDING_IDS: &str = "neuracore/data_daemon/recording_ids";
 
-    /// Maximum size of a single `queries`-service sample. Both the request and
+    /// Maximum size of a single `recording_ids` service sample. Both the request and
     /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
-    pub const QUERIES_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+    pub const RECORDING_ID_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
-    /// Maximum number of concurrent query clients. Mirrors
+    /// Maximum number of concurrent request-response clients. Mirrors
     /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
     /// per OS thread (iceoryx2 ports are `!Sync`), so the cap must cover the
     /// integration matrix's full thread fan-out.
-    pub const MAX_QUERY_CLIENTS_PER_SERVICE: usize = 128;
+    pub const MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE: usize = 128;
 
-    /// Maximum number of concurrent query servers. The daemon opens exactly one.
-    pub const MAX_QUERY_SERVERS_PER_SERVICE: usize = 1;
+    /// Maximum number of concurrent request-response servers. The daemon opens exactly one.
+    pub const MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE: usize = 1;
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -454,7 +464,7 @@ pub enum EnvelopeCodecError {
     Decode(#[source] postcard::Error),
 }
 
-/// Request sent by the SDK on the [`service_name::QUERIES`] service to resolve a
+/// Request sent by the SDK on the [`service_name::RECORDING_IDS`] service to resolve a
 /// recording's daemon-owned cloud `recording_id`.
 ///
 /// The recording is identified exactly the way the daemon stored it: the
@@ -481,25 +491,65 @@ pub struct RecordingIdReply {
     pub recording_id: Option<String>,
 }
 
+/// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthRequest {
+    /// Caller-generated token echoed by the reply.
+    pub nonce: u64,
+}
+
+/// Reply to a [`HealthRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthReply {
+    /// PID of the daemon process that answered.
+    pub pid: u32,
+    /// Echo of [`HealthRequest::nonce`].
+    pub nonce: u64,
+}
+
 impl RecordingIdQuery {
-    /// Encode as a postcard byte vector for a `queries`-service request sample.
+    /// Encode as a postcard byte vector for a `recording_ids` service request sample.
     pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
         encode_postcard(self)
     }
 
-    /// Decode from the byte slice carried in a `queries`-service request sample.
+    /// Decode from the byte slice carried in a `recording_ids` service request sample.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
         decode_postcard(bytes)
     }
 }
 
 impl RecordingIdReply {
-    /// Encode as a postcard byte vector for a `queries`-service response sample.
+    /// Encode as a postcard byte vector for a `recording_ids` service response sample.
     pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
         encode_postcard(self)
     }
 
-    /// Decode from the byte slice carried in a `queries`-service response sample.
+    /// Decode from the byte slice carried in a `recording_ids` service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl HealthRequest {
+    /// Encode as a postcard byte vector for a health-service request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a health-service request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl HealthReply {
+    /// Encode as a postcard byte vector for a health-service response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a health-service response sample.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
         decode_postcard(bytes)
     }
@@ -508,6 +558,24 @@ impl RecordingIdReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn health_request_and_reply_round_trip() {
+        let request = HealthRequest { nonce: 42 };
+        assert_eq!(
+            HealthRequest::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+
+        let reply = HealthReply {
+            pid: 1234,
+            nonce: 42,
+        };
+        assert_eq!(
+            HealthReply::decode(&reply.encode().unwrap()).unwrap(),
+            reply
+        );
+    }
 
     #[test]
     fn start_recording_round_trips_through_postcard() {

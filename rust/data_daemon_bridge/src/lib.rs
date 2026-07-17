@@ -53,7 +53,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::publisher::{now_ns, publish, publisher_tx, ProducerError, PublishMsg};
-use crate::query::resolve_recording_id;
+use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
 use crate::writer::{writer_queue, FrameJob, WriterMsg};
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
@@ -426,6 +426,13 @@ fn get_recording_id(
     })
 }
 
+/// Wait until the Rust daemon answers a side-effect-free IPC health probe.
+#[pyfunction]
+#[pyo3(signature = (timeout_s))]
+fn wait_until_ready(py: Python<'_>, timeout_s: f64) -> PyResult<Option<u32>> {
+    py.detach(|| -> PyResult<Option<u32>> { Ok(wait_until_ready_impl(timeout_s)?) })
+}
+
 /// Ask the running daemon to reload its profile config immediately (see
 /// [`Envelope::RefreshConfig`]). Published on the caller thread's command port
 /// so it is strictly ordered ahead of a subsequent `start_recording` from the
@@ -452,6 +459,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
+    module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
     Ok(())
 }

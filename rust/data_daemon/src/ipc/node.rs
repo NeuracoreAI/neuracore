@@ -11,9 +11,10 @@
 //! [`Envelope::VideoChunkReady`]: data_daemon_shared::Envelope::VideoChunkReady
 
 use data_daemon_shared::service_name::{
-    COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
-    MAX_QUERY_CLIENTS_PER_SERVICE, MAX_QUERY_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE,
-    QUERIES, QUERIES_MAX_PAYLOAD_BYTES,
+    COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
+    MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
+    MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS,
+    RECORDING_ID_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::server::Server;
@@ -90,11 +91,16 @@ pub struct IpcTransport {
     /// Service handle held alongside the subscriber so port discovery doesn't
     /// race the service handle going out of scope.
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
-    /// Request-response server on `neuracore/data_daemon/queries` that answers
+    /// Request-response server on `neuracore/data_daemon/recording_ids` that answers
     /// SDK recording-id lookups.
-    queries_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    recording_id_server: Server<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the server, as for the commands service.
-    _queries_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    _recording_id_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response server on `neuracore/data_daemon/health` that answers
+    /// side-effect-free readiness probes.
+    health_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the health server.
+    _health_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
 }
 
 impl IpcTransport {
@@ -118,14 +124,19 @@ impl IpcTransport {
         let (commands_service, commands_subscriber) =
             open_subscriber(&node, COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)?;
 
-        let (queries_service, queries_server) = open_query_server(&node, QUERIES)?;
+        let (recording_id_service, recording_id_server) =
+            open_query_server(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
+        let (health_service, health_server) =
+            open_query_server(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
 
         Ok(IpcTransport {
             _node: node,
             commands_subscriber,
             _commands_service: commands_service,
-            queries_server,
-            _queries_service: queries_service,
+            recording_id_server,
+            _recording_id_service: recording_id_service,
+            health_server,
+            _health_service: health_service,
         })
     }
 
@@ -134,9 +145,14 @@ impl IpcTransport {
         &self.commands_subscriber
     }
 
-    /// Borrow the `queries` request-response server port.
-    pub fn queries_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
-        &self.queries_server
+    /// Borrow the `recording_ids` request-response server port.
+    pub fn recording_id_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.recording_id_server
+    }
+
+    /// Borrow the `health` request-response server port.
+    pub fn health_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.health_server
     }
 }
 
@@ -201,10 +217,11 @@ type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
 ///
 /// The SDK opens client ports on the same service (one per OS thread, like the
 /// `commands` publisher), so the caps mirror the publisher topology. Requests
-/// and responses are both small postcard blobs ([`QUERIES_MAX_PAYLOAD_BYTES`]).
+/// and responses are both small postcard blobs ([`RECORDING_ID_MAX_PAYLOAD_BYTES`]).
 fn open_query_server(
     node: &Node<ipc::Service>,
     name: &str,
+    max_slice_len: usize,
 ) -> Result<(ByteSliceQueryFactory, ByteSliceServer), IpcSetupError> {
     let service_name = name
         .try_into()
@@ -215,8 +232,8 @@ fn open_query_server(
     let service = node
         .service_builder(&service_name)
         .request_response::<[u8], [u8]>()
-        .max_clients(MAX_QUERY_CLIENTS_PER_SERVICE)
-        .max_servers(MAX_QUERY_SERVERS_PER_SERVICE)
+        .max_clients(MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE)
+        .max_servers(MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE)
         .max_nodes(MAX_NODES_PER_SERVICE)
         .open_or_create()
         .map_err(|error| IpcSetupError::ServiceOpen {
@@ -225,7 +242,7 @@ fn open_query_server(
         })?;
     let server = service
         .server_builder()
-        .initial_max_slice_len(QUERIES_MAX_PAYLOAD_BYTES)
+        .initial_max_slice_len(max_slice_len)
         .create()
         .map_err(|error| IpcSetupError::ServerCreate {
             name: name.to_string(),

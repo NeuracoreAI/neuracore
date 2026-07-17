@@ -36,9 +36,10 @@ use std::sync::{LazyLock, Mutex, Once};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use data_daemon_shared::service_name::{
-    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE,
-    MAX_PUBLISHERS_PER_SERVICE, MAX_QUERY_CLIENTS_PER_SERVICE, MAX_QUERY_SERVERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE, QUERIES, QUERIES_MAX_PAYLOAD_BYTES,
+    COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
+    LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
+    MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
+    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -93,12 +94,17 @@ pub(crate) struct ProducerState {
     _node: Node<ipc::Service>,
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
     commands_publisher: Publisher<ipc::Service, [u8], ()>,
-    /// Service handle held alongside the query client so port discovery doesn't
+    /// Service handle held alongside the recording-id client so port discovery doesn't
     /// race the handle going out of scope.
-    _queries_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    _recording_id_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response client used by `get_recording_id` to ask the daemon
     /// for a recording's cloud id.
-    pub(crate) queries_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    pub(crate) recording_id_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the health client so port discovery doesn't
+    /// race the handle going out of scope.
+    _health_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used by launch readiness probes.
+    pub(crate) health_client: Client<ipc::Service, [u8], (), [u8], ()>,
 }
 
 /// Work item for the publisher thread.
@@ -320,18 +326,23 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         COMMANDS_MAX_PAYLOAD_BYTES,
     )?;
 
-    let (queries_service, queries_client) = open_query_client(&node, QUERIES)?;
+    let (recording_id_service, recording_id_client) =
+        open_query_client(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
+    let (health_service, health_client) =
+        open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
 
     Ok(ProducerState {
         _node: node,
         _commands_service: commands_service,
         commands_publisher,
-        _queries_service: queries_service,
-        queries_client,
+        _recording_id_service: recording_id_service,
+        recording_id_client,
+        _health_service: health_service,
+        health_client,
     })
 }
 
-/// Open (or attach to) the `[u8]` request-response `queries` service off `node`
+/// Open (or attach to) the `[u8]` request-response `recording_ids` service off `node`
 /// and build a client on it. Config mirrors the daemon's `open_query_server`
 /// so `open_or_create` reconciles to the same service attributes regardless of
 /// which side comes up first.
@@ -339,6 +350,7 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
 fn open_query_client(
     node: &Node<ipc::Service>,
     service_name: &str,
+    max_slice_len: usize,
 ) -> Result<
     (
         QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
@@ -352,14 +364,14 @@ fn open_query_client(
     let service = node
         .service_builder(&parsed_name)
         .request_response::<[u8], [u8]>()
-        .max_clients(MAX_QUERY_CLIENTS_PER_SERVICE)
-        .max_servers(MAX_QUERY_SERVERS_PER_SERVICE)
+        .max_clients(MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE)
+        .max_servers(MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE)
         .max_nodes(MAX_NODES_PER_SERVICE)
         .open_or_create()
         .map_err(|error| ProducerError::ServiceOpen(error.to_string()))?;
     let client = service
         .client_builder()
-        .initial_max_slice_len(QUERIES_MAX_PAYLOAD_BYTES)
+        .initial_max_slice_len(max_slice_len)
         .create()
         .map_err(|error| ProducerError::PublisherCreate(error.to_string()))?;
     Ok((service, client))

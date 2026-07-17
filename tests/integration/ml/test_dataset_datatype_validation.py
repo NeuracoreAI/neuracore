@@ -83,8 +83,13 @@ CNNMLP_CONFIG = {
 
 def _record_episode(data_types: set[DataType]) -> None:
     """Record one episode logging only the given data types."""
-    t = time.time()
-    nc.start_recording(robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
+    start_time = time.time()
+    t = start_time
+    nc.start_recording(
+        robot_name=ROBOT_NAME,
+        instance=ROBOT_INSTANCE,
+        timestamp=start_time,
+    )
     for _ in range(EPISODE_STEPS):
         t += 1.0 / FREQUENCY
         if DataType.JOINT_POSITIONS in data_types:
@@ -109,7 +114,12 @@ def _record_episode(data_types: set[DataType]) -> None:
                 instance=ROBOT_INSTANCE,
                 timestamp=t,
             )
-    nc.stop_recording(wait=True, robot_name=ROBOT_NAME, instance=ROBOT_INSTANCE)
+    nc.stop_recording(
+        wait=True,
+        robot_name=ROBOT_NAME,
+        instance=ROBOT_INSTANCE,
+        timestamp=t + 1.0 / FREQUENCY,
+    )
 
 
 def _missing_recordings_from_error(error_msg: str) -> dict[str, set[str]]:
@@ -148,8 +158,9 @@ class TestDatasetDatatypeValidation:
     all_steps_passed: bool = True
     dataset_name: str
     dataset: Dataset | None = None
-    # recording id -> data types logged for that episode in step 1
+    # recording name -> data types logged for that episode in step 1
     recording_data_types: dict[str, set[DataType]]
+    seen_recording_ids: set[str]
 
     @classmethod
     def setup_class(cls) -> None:
@@ -157,6 +168,7 @@ class TestDatasetDatatypeValidation:
         cls.dataset_name = unique_name(prefix="datatype_validation")
         cls.dataset = None
         cls.recording_data_types = {}
+        cls.seen_recording_ids = set()
         nc.login()
 
     @classmethod
@@ -198,15 +210,19 @@ class TestDatasetDatatypeValidation:
                     timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
                     poll_interval_s=RECORDING_POLL_SECONDS,
                 )
-                current_ids = {
-                    str(r.id) for r in nc.get_dataset(name=self.dataset_name)
+                recordings_by_id = {
+                    str(r.id): r for r in nc.get_dataset(name=self.dataset_name)
                 }
-                new_ids = current_ids - set(self.recording_data_types)
+                new_ids = set(recordings_by_id) - self.seen_recording_ids
                 assert len(new_ids) == 1, (
                     f"Expected exactly one new recording after episode "
                     f"{ep_idx + 1}, got {sorted(new_ids)}"
                 )
-                self.recording_data_types[new_ids.pop()] = data_types
+                recording_id = new_ids.pop()
+                self.seen_recording_ids.add(recording_id)
+                self.recording_data_types[recordings_by_id[recording_id].name] = (
+                    data_types
+                )
                 logger.info(f"Episode {ep_idx + 1} ready.")
 
         self.__class__.dataset = nc.get_dataset(name=self.dataset_name)
@@ -244,15 +260,15 @@ class TestDatasetDatatypeValidation:
         )
         expected_missing = {
             data_type.value: {
-                recording_id
-                for recording_id, logged_types in self.recording_data_types.items()
+                recording_name
+                for recording_name, logged_types in self.recording_data_types.items()
                 if data_type not in logged_types
             }
             for data_type in REQUESTED_TYPES
         }
         complete_recordings = {
-            recording_id
-            for recording_id, logged_types in self.recording_data_types.items()
+            recording_name
+            for recording_name, logged_types in self.recording_data_types.items()
             if logged_types == REQUESTED_TYPES
         }
         assert len(complete_recordings) == COMPLETE_RECORDINGS, (
@@ -289,9 +305,9 @@ class TestDatasetDatatypeValidation:
             f"Grouped error does not match the per-episode ground truth.\n"
             f"Expected: {expected_missing}\nFull message:\n{error_msg}"
         )
-        for recording_id in complete_recordings:
-            assert recording_id not in error_msg, (
-                f"Fully-typed recording {recording_id} must not appear in the "
+        for recording_name in complete_recordings:
+            assert recording_name not in error_msg, (
+                f"Fully-typed recording {recording_name} must not appear in the "
                 f"error.\nGot: {error_msg}"
             )
 
