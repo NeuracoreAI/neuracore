@@ -1,12 +1,13 @@
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import yaml
 
 # Resolve neuracore from the installed wheel before repo_root joins sys.path.
-import neuracore  # noqa: F401
+import neuracore as nc
 
 ROBOTS_REPO_URL = "https://github.com/NeuracoreAI/neuracore_robots.git"
 ROBOTS_REPO_COMMIT = "c3d17b303296686ceb9a2fcddea06af95a88fe4f"
@@ -19,6 +20,14 @@ CONFIG_DIR = THIS_DIR / "config"
 RLDS_CONFIGS_FILE = CONFIG_DIR / "rlds_importer_datasets.yaml"
 LEROBOT_CONFIGS_FILE = CONFIG_DIR / "lerobot_importer_datasets.yaml"
 MCAP_CONFIGS_FILE = CONFIG_DIR / "mcap_importer_datasets.yaml"
+
+
+@pytest.fixture(autouse=True)
+def login_parent_process() -> Iterator[None]:
+    """Authenticate the pytest process around each importer test."""
+    nc.login()
+    yield
+    nc.logout()
 
 
 def _load_configs(config_path: Path) -> list[dict]:
