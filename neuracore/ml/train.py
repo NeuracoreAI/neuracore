@@ -397,6 +397,24 @@ def run_training(
         train_split = 1 - cfg.validation_split
         train_size = int(train_split * dataset_size)
         val_size = dataset_size - train_size
+        if train_size == 0 and val_size == 0:
+            raise ValueError(
+                "The training and validation sets are both empty. "
+                "Try adding more recordings to the dataset, "
+                "or changing the validation split."
+            )
+        if train_size == 0:
+            raise ValueError(
+                "The training set is empty. "
+                "Try adding more recordings to the dataset, "
+                "or changing the validation split."
+            )
+        if val_size == 0:
+            raise ValueError(
+                "The validation set is empty. "
+                "Try adding more recordings to the dataset, "
+                "or changing the validation split."
+            )
 
         # Use random split with fixed seed for deterministic behavior
         generator = torch.Generator().manual_seed(cfg.seed)

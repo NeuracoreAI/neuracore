@@ -1958,6 +1958,44 @@ class TestRunTraining:
             20,
         ]  # train_size=80, val_size=20 for 100 samples with 0.2 split
 
+    @pytest.mark.parametrize(
+        ("dataset_size", "validation_split", "expected_message"),
+        [
+            (0, 0.2, "training and validation sets are both empty"),
+            (1, 0.2, "training set is empty"),
+            (3, 0.0, "validation set is empty"),
+        ],
+    )
+    def test_run_training_raises_when_train_or_val_split_is_empty(
+        self,
+        mock_cfg_training,
+        mock_dataset,
+        model_init_description,
+        mock_model_class,
+        monkeypatch,
+        dataset_size,
+        validation_split,
+        expected_message,
+    ):
+        mock_cfg_training.validation_split = validation_split
+        mock_dataset.__len__ = Mock(return_value=dataset_size)
+
+        setup = RunTrainingTestSetup(
+            monkeypatch,
+            model_init_description,
+            mock_model_class,
+        )
+        setup.setup_mocks()
+
+        mock_random_split = Mock()
+        monkeypatch.setattr("neuracore.ml.train.random_split", mock_random_split)
+
+        with pytest.raises(ValueError, match=expected_message):
+            setup.call_run_training(mock_cfg_training, mock_dataset)
+
+        mock_random_split.assert_not_called()
+        setup.mock_trainer_class.assert_not_called()
+
     def test_autotune_and_training_use_same_dataloader_worker_counts(
         self,
         mock_cfg_training,
