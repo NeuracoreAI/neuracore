@@ -137,6 +137,7 @@ jobs:
                 author: pr.data.user.login,
                 url: pr.data.html_url,
                 bump_type: bumpType,
+                hotfix: labels.includes('type:hotfix'),
                 labels: labels,
                 body: pr.data.body || ''
               });
@@ -278,7 +279,7 @@ jobs:
           if (groups.breaking.length > 0) {
             changelog += `## Breaking Changes\n\n`;
             for (const pr of groups.breaking.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}\n`;
+              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
             }
             changelog += '\n';
           }
@@ -286,7 +287,7 @@ jobs:
           if (groups.features.length > 0) {
             changelog += `## Features\n\n`;
             for (const pr of groups.features.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}\n`;
+              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
             }
             changelog += '\n';
           }
@@ -294,7 +295,7 @@ jobs:
           if (groups.fixes.length > 0) {
             changelog += `## Bug Fixes\n\n`;
             for (const pr of groups.fixes.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}\n`;
+              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
             }
             changelog += '\n';
           }
@@ -302,7 +303,7 @@ jobs:
           if (groups.other.length > 0) {
             changelog += `## Other Changes\n\n`;
             for (const pr of groups.other.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}\n`;
+              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
             }
             changelog += '\n';
           }
