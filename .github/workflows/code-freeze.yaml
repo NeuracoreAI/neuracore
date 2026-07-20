@@ -1,0 +1,28 @@
+name: Code Freeze
+
+on:
+  pull_request:
+    branches:
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+      - unlabeled
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: code-freeze-${{ github.event.pull_request.number || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  code-freeze:
+    uses: NeuracoreAI/shared-workflows/.github/workflows/code-freeze-gate.yaml@main
+    permissions:
+      statuses: write
+      pull-requests: write
+    secrets:
+      actions-read-token: ${{ secrets.INTEGRATION_STATUS_READ_TOKEN }}
