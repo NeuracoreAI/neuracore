@@ -87,7 +87,7 @@ jobs:
       run: git lfs pull
 
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
+      uses: actions/setup-python@v6
       id: setup-python
       with:
         python-version: ${{ matrix.python-version }}
