@@ -134,7 +134,7 @@ def test_shared_slot_reopen_after_stalled_descriptor_uploads_next_recording(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
                     nc.start_recording(robot_name=robot_name)
-                resumed_recording_id = robot.get_current_recording_id()
+                resumed_recording_id = robot.get_cloud_recording_id()
                 assert resumed_recording_id is not None
 
                 log_frames(spec, recording_index=0, marker_name="marker_reopen")
