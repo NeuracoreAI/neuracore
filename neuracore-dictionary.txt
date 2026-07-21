@@ -380,6 +380,7 @@ pyinstrument
 pymodule
 pyquaternion
 pytest
+pytestmark
 pyyaml
 pyzmq
 Qbcaa
