@@ -1,8 +1,14 @@
-name: Integration PF - Importer (Staging)
+name: Cougar Tracing - Importer (Staging)
+run-name: "Cougar Tracing run — importer (${{ github.ref_name }})"
+
+# TEMPORARY tracing branch (ci/cougar-tracing-run). The NORMAL nightly
+# importer integration suite (all three importers, full test files, single
+# pass) plus the diagnostic capture layer: RUST_LOG=trace daemon logs,
+# continuous log streams + state.db snapshots, everything uploaded as
+# artifacts, and job/faulthandler timeouts so a wedge is diagnosable.
+# Do not merge to main.
 
 on:
-  schedule:
-    - cron: "0 0 * * *"
   workflow_dispatch:
     inputs:
       ref:
@@ -18,19 +24,7 @@ env:
   IMPORTER_DATASETS_CACHE_SUBDIR: importer
 
 jobs:
-  pre-commit:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.11"
-      - uses: pre-commit/action@v3.0.1
-
   test:
-    needs: pre-commit
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -42,8 +36,6 @@ jobs:
       - name: Show disk space
         run: df -h /
 
-      # Ref resolution (explicit input override, else the caller's branch) +
-      # checkout + harness summary.
       - name: Checkout test harness
         uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
         with:
@@ -90,8 +82,6 @@ jobs:
           echo "IMPORTER_LEROBOT_CACHE_DIR=${cache_root}" >> "$GITHUB_ENV"
           echo "IMPORTER_MCAP_CACHE_DIR=${cache_root}" >> "$GITHUB_ENV"
           echo "Importer dataset cache root: ${cache_root}"
-          echo "Importer datasets ref: ${IMPORTER_DATASETS_REF}"
-          echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
 
       - name: Set up neuracore with Rust data daemon
         uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
@@ -101,23 +91,144 @@ jobs:
           extras: dev,import
           pytorch-cpu: "true"
 
-      - name: Run Importer Integration Tests
+      - name: Start state snapshotter
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p tracing-artifacts/snapshots
+          cat > "${RUNNER_TEMP}/snapshotter.sh" <<'SNAP'
+          #!/usr/bin/env bash
+          # Continuous capture so daemon evidence is never lost:
+          #  - logstreams/: one `tail -F` per discovered daemon.log — survives
+          #    truncation and per-test daemon restarts, so the full log history
+          #    always exists even though the harness reuses/wipes the file.
+          #  - dblatest/ + dbarchive/: every state.db is backed up each tick;
+          #    when a db path disappears (harness cleanup) its last copy is
+          #    moved to dbarchive/ permanently.
+          #  - snapshots/: 10s point-in-time ring (last 40) for state evolution.
+          set -u
+          roots=(".data_daemon_test_state" "${HOME}/.neuracore/data_daemon")
+          base="tracing-artifacts"
+          mkdir -p "${base}/logstreams" "${base}/dblatest" "${base}/dbarchive" \
+            "${base}/snapshots" "${base}/.watch"
+          while true; do
+            ts="$(date +%Y%m%d_%H%M%S)"
+            out="${base}/snapshots/${ts}"
+            mkdir -p "${out}"
+            for root in "${roots[@]}"; do
+              [ -d "${root}" ] || continue
+              while IFS= read -r lg; do
+                key="cap_$(echo "${lg}" | tr '/ ' '__')"
+                if [ ! -e "${base}/.watch/log_${key}" ]; then
+                  printf '%s\n' "${lg}" > "${base}/.watch/log_${key}"
+                  nohup tail -n +1 -F "${lg}" \
+                    >> "${base}/logstreams/${key}" 2>/dev/null &
+                fi
+                cp "${lg}" "${out}/${key}" 2>/dev/null || true
+              done < <(find "${root}" -name 'daemon.log' 2>/dev/null)
+              while IFS= read -r db; do
+                key="cap_$(echo "${db}" | tr '/ ' '__')"
+                printf '%s\n' "${db}" > "${base}/.watch/db_${key}"
+                sqlite3 "${db}" ".backup '${base}/dblatest/${key}'" 2>/dev/null \
+                  || cp "${db}" "${base}/dblatest/${key}" 2>/dev/null || true
+                cp "${base}/dblatest/${key}" "${out}/${key}" 2>/dev/null || true
+              done < <(find "${root}" -name 'state.db' 2>/dev/null)
+            done
+            for marker in "${base}"/.watch/db_cap_*; do
+              [ -e "${marker}" ] || continue
+              src="$(cat "${marker}")"
+              key="$(basename "${marker}")"; key="${key#db_}"
+              if [ ! -e "${src}" ] && [ -e "${base}/dblatest/${key}" ]; then
+                mv "${base}/dblatest/${key}" "${base}/dbarchive/${key}.${ts}" \
+                  2>/dev/null || true
+                rm -f "${marker}"
+              fi
+            done
+            { df -h /; echo; ps aux | grep -Ei 'data-daemon|neuracore|pytest|ffmpeg' | grep -v grep; } \
+              > "${out}/system.txt" 2>/dev/null || true
+            ls -1dt "${base}"/snapshots/*/ 2>/dev/null | tail -n +41 \
+              | while IFS= read -r old; do rm -rf "${old}"; done
+            sleep 10
+          done
+          SNAP
+          chmod +x "${RUNNER_TEMP}/snapshotter.sh"
+          nohup "${RUNNER_TEMP}/snapshotter.sh" > tracing-artifacts/snapshotter.log 2>&1 &
+          echo "$!" > "${RUNNER_TEMP}/snapshotter.pid"
+          echo "snapshotter pid $(cat "${RUNNER_TEMP}/snapshotter.pid")"
+
+      - name: Run Importer Integration Tests (full suite, trace capture)
+        # Historic passing suites finish in 15-25 min; the bound converts any
+        # residual hang into a diagnosable failure (faulthandler dumps stacks
+        # at 900s) instead of a 6h burn.
+        timeout-minutes: 90
         env:
           NEURACORE_API_URL: https://staging.api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
           NCD_RUST_DAEMON: "1"
           NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
           NEURACORE_ENDPOINT_TIMEOUT: 30
+          RUST_LOG: "data_daemon=trace,data_daemon_bridge=trace,data_daemon_shared=trace,data_daemon_ipc=trace,info"
+          NDD_DEBUG: "1"
+          PYTHONFAULTHANDLER: "1"
+        shell: bash
         run: |
-          set -euo pipefail
-          pytest_args=(
-            -o log_cli=true
-            --log-cli-level=INFO
-            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s"
-            --log-cli-date-format="%H:%M:%S"
-            -v
-          )
-          pytest "${pytest_args[@]}" "tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py"
+          set -uo pipefail
+          mkdir -p tracing-artifacts
+          pytest \
+            -o log_cli=true --log-cli-level=INFO \
+            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
+            --log-cli-date-format="%H:%M:%S" \
+            -o faulthandler_timeout=900 \
+            -v \
+            "tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py" \
+            2>&1 | tee "tracing-artifacts/pytest-${{ matrix.suite }}.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Collect final daemon state
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p tracing-artifacts/final
+          for root in ".data_daemon_test_state" "${HOME}/.neuracore/data_daemon"; do
+            [ -d "${root}" ] || continue
+            find "${root}" \( -name 'daemon.log' -o -name 'state.db' -o -name 'state.db-*' \) \
+              -exec sh -c 'cp "$2" "$1/cap_$(echo "$2" | tr "/ " "__")" 2>/dev/null || true' _ "tracing-artifacts/final" {} \; || true
+            du -ak "${root}" 2>/dev/null | sort -rn > "tracing-artifacts/final/manifest_$(echo "${root}" | tr '/ ' '__').txt" || true
+          done
+
+      - name: Stop capture and compress log streams
+        if: always()
+        # The snapshotter and tail followers must be dead before
+        # upload-artifact zips the directory — files mutating mid-zip make the
+        # upload fail with "error creating zip".
+        run: |
+          kill "$(cat "${RUNNER_TEMP}/snapshotter.pid" 2>/dev/null)" 2>/dev/null || true
+          pkill -f 'tail.*daemon.log' 2>/dev/null || true
+          sleep 2
+          gzip -f tracing-artifacts/logstreams/* 2>/dev/null || true
+
+      - name: Upload tracing artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cougar-tracing-importer-${{ matrix.suite }}-py${{ matrix.python-version }}
+          path: |
+            tracing-artifacts/
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
+
+      - name: Upload recordings tree (best-effort, may be large)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cougar-tracing-importer-recordings-${{ matrix.suite }}-py${{ matrix.python-version }}
+          path: |
+            .data_daemon_test_state/**/recordings/**
+          if-no-files-found: warn
+          include-hidden-files: true
+          retention-days: 7
 
       - name: Show disk space after tests
         if: always()

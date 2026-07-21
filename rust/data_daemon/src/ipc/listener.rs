@@ -262,6 +262,92 @@ struct LoopCounters {
 /// invalidate the next one) and the only path that escalates to a listener
 /// exit is the dispatcher-receiver-closed branch, which is handled in
 /// [`run`].
+/// Trace-level receive forensics: one line per envelope in the exact order
+/// the dispatcher will process them, carrying the producer's publish clock so
+/// a lifecycle ordering inversion (Start received before the prior Stop) is
+/// directly visible in the log.
+fn trace_envelope_received(envelope: &Envelope) {
+    match envelope {
+        Envelope::StartRecording {
+            robot_id,
+            robot_instance,
+            publish_timestamp_ns,
+            ..
+        } => tracing::trace!(
+            kind = "start",
+            %robot_id,
+            robot_instance = *robot_instance,
+            publish_timestamp_ns = *publish_timestamp_ns,
+            "ipc envelope received"
+        ),
+        Envelope::StopRecording {
+            robot_id,
+            robot_instance,
+            publish_timestamp_ns,
+            ..
+        } => tracing::trace!(
+            kind = "stop",
+            %robot_id,
+            robot_instance = *robot_instance,
+            publish_timestamp_ns = *publish_timestamp_ns,
+            "ipc envelope received"
+        ),
+        Envelope::CancelRecording {
+            robot_id,
+            robot_instance,
+            ..
+        } => tracing::trace!(
+            kind = "cancel",
+            %robot_id,
+            robot_instance = *robot_instance,
+            "ipc envelope received"
+        ),
+        Envelope::Data {
+            robot_id,
+            robot_instance,
+            data_type,
+            ..
+        } => tracing::trace!(
+            kind = "data",
+            %robot_id,
+            robot_instance = *robot_instance,
+            %data_type,
+            "ipc envelope received"
+        ),
+        Envelope::BatchedData {
+            robot_id,
+            robot_instance,
+            data_type,
+            publish_timestamp_ns,
+            ..
+        } => tracing::trace!(
+            kind = "batched_data",
+            %robot_id,
+            robot_instance = *robot_instance,
+            %data_type,
+            publish_timestamp_ns = *publish_timestamp_ns,
+            "ipc envelope received"
+        ),
+        Envelope::VideoChunkReady {
+            robot_id,
+            robot_instance,
+            data_type,
+            publish_timestamp_ns,
+            ..
+        } => tracing::trace!(
+            kind = "video_chunk",
+            %robot_id,
+            robot_instance = *robot_instance,
+            %data_type,
+            publish_timestamp_ns = *publish_timestamp_ns,
+            "ipc envelope received"
+        ),
+        Envelope::RefreshConfig {} => {
+            tracing::trace!(kind = "refresh_config", "ipc envelope received")
+        }
+    }
+}
+
 fn drain_subscriber(
     subscriber: &Subscriber<ipc::Service, [u8], ()>,
     batch: &mut Vec<Envelope>,
@@ -274,7 +360,10 @@ fn drain_subscriber(
                 // released as a single unit by the dispatcher (all its items
                 // share one timestamp, so they belong to one window) and
                 // expanded into per-sensor routes only at release time.
-                Ok(envelope) => batch.push(envelope),
+                Ok(envelope) => {
+                    trace_envelope_received(&envelope);
+                    batch.push(envelope);
+                }
                 Err(error) => {
                     counters.decode_failures = counters.decode_failures.saturating_add(1);
                     tracing::warn!(

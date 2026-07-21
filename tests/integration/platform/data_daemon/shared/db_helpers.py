@@ -728,6 +728,7 @@ def wait_for_dataset_ready(
     wait_start = time.perf_counter()
     last_error: Exception | None = None
     recording_count: int | None = None
+    last_recording_ids: list[str] | None = None
     while True:
         elapsed_s = time.perf_counter() - wait_start
         try:
@@ -735,6 +736,16 @@ def wait_for_dataset_ready(
             recording_count = len(dataset)
             if recording_count == expected_recording_count:
                 return
+            recording_ids = _returned_recording_ids(dataset)
+            if recording_ids is not None and recording_ids != last_recording_ids:
+                logger.info(
+                    "dataset '%s' has %s/%s recording(s); backend returned ids: %s",
+                    dataset_name,
+                    recording_count,
+                    expected_recording_count,
+                    recording_ids,
+                )
+                last_recording_ids = recording_ids
         except Exception as exc:  # noqa: BLE001
             last_error = exc
 
@@ -743,10 +754,28 @@ def wait_for_dataset_ready(
                 f"Timed out waiting for dataset '{dataset_name}' to have "
                 f"{expected_recording_count} recording(s) after {timeout_s}s. "
                 f"Has {recording_count if recording_count is not None else 0} "
-                f"recording(s)."
+                f"recording(s). Last returned recording ids: {last_recording_ids}"
             ) from last_error
 
         time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed_s)))
+
+
+def _returned_recording_ids(dataset: Any) -> list[str] | None:
+    """Best-effort sorted list of the recording ids the backend returned.
+
+    Names the exact recording missing from a short dataset count, so a
+    backend-side visibility gap can be attributed to a specific recording.
+
+    Args:
+        dataset: Dataset whose recordings to enumerate.
+
+    Returns:
+        Sorted recording ids, or ``None`` if enumeration failed.
+    """
+    try:
+        return sorted(recording.id for recording in dataset)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def wait_for_recordings_finalized(
