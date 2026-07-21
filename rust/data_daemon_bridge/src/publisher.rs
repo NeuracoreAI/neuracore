@@ -31,6 +31,7 @@
 //! few hundred small items.
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{LazyLock, Mutex, Once};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -70,6 +71,16 @@ pub(crate) enum ProducerError {
     /// Failed to send the loaned sample.
     #[error("failed to send sample: {0}")]
     Send(String),
+    /// iceoryx2 completed the send, but no daemon subscriber received it.
+    #[error(
+        "iceoryx2 delivered the command to zero subscribers on service '{service}'; \
+         the daemon command channel is disconnected (the cached producer may be stale \
+         after a daemon restart)"
+    )]
+    NoSubscribers {
+        /// Name of the publish/subscribe service with no connected subscriber.
+        service: &'static str,
+    },
     /// Failed to encode the envelope.
     #[error(transparent)]
     Encode(#[from] data_daemon_shared::EnvelopeCodecError),
@@ -91,6 +102,9 @@ impl From<ProducerError> for PyErr {
 
 /// Per-thread iceoryx2 state.
 pub(crate) struct ProducerState {
+    /// Monotonic process-local identifier used to prove whether a cached
+    /// producer survived across daemon process generations in CI diagnostics.
+    diagnostic_generation: u64,
     _node: Node<ipc::Service>,
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
     commands_publisher: Publisher<ipc::Service, [u8], ()>,
@@ -293,6 +307,9 @@ thread_local! {
     static PRODUCER: RefCell<Option<ProducerState>> = const { RefCell::new(None) };
 }
 
+/// Assign a visible generation to each producer built in this SDK process.
+static NEXT_PRODUCER_GENERATION: AtomicU64 = AtomicU64::new(1);
+
 /// Run `f` against this thread's producer state, lazily building it on first
 /// use.
 pub(crate) fn with_producer<R>(
@@ -332,6 +349,7 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
 
     Ok(ProducerState {
+        diagnostic_generation: NEXT_PRODUCER_GENERATION.fetch_add(1, Ordering::Relaxed),
         _node: node,
         _commands_service: commands_service,
         commands_publisher,
@@ -487,6 +505,12 @@ fn clock_fallback_ns() -> i64 {
 /// Encode `envelope` and publish it on the commands service.
 pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
+    let lifecycle_kind = match envelope {
+        Envelope::StartRecording { .. }
+        | Envelope::StopRecording { .. }
+        | Envelope::CancelRecording { .. } => Some(envelope.kind()),
+        _ => None,
+    };
     if bytes.len() > COMMANDS_MAX_PAYLOAD_BYTES {
         return Err(ProducerError::PayloadTooLarge {
             actual: bytes.len(),
@@ -499,9 +523,28 @@ pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
             .loan_slice_uninit(bytes.len())
             .map_err(|error| ProducerError::Loan(error.to_string()))?;
         let sample = sample.write_from_slice(&bytes);
-        sample
+        let recipients = sample
             .send()
             .map_err(|error| ProducerError::Send(error.to_string()))?;
+        if let Some(kind) = lifecycle_kind {
+            // Use stderr deliberately: pytest's fd capture includes this in a
+            // failed CI case even when no Rust tracing subscriber is installed.
+            eprintln!(
+                "RUST_DAEMON_IPC_DIAGNOSTIC command={kind} recipients={recipients} \
+                 sdk_pid={} producer_generation={}",
+                std::process::id(),
+                state.diagnostic_generation,
+            );
+        }
+        // `SampleMut::send` succeeding only means iceoryx2 completed the send
+        // operation. Its return value is the number of subscribers that
+        // actually received the sample, and zero is not an iceoryx2 error.
+        // Lifecycle callers must not report success in that case: otherwise a
+        // stale producer surviving a daemon restart turns into a much later
+        // SQLite timeout with the causal IPC failure hidden.
+        if recipients == 0 {
+            return Err(ProducerError::NoSubscribers { service: COMMANDS });
+        }
         Ok(())
     })
 }

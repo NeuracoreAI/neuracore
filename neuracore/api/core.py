@@ -108,6 +108,19 @@ def logout() -> None:
     GlobalSingleton()._has_validated_version = False
 
 
+def clear_session() -> None:
+    """Reset in-memory session state without deleting saved credentials.
+
+    The next authenticated operation must log in again, but the persisted API
+    key and selected organization remain available for that login.
+    """
+    get_auth().clear_session()
+    GlobalSingleton()._active_robot = None
+    GlobalSingleton()._active_dataset_id = None
+    GlobalSingleton()._active_dataset = None
+    GlobalSingleton()._has_validated_version = False
+
+
 def set_organization(id_or_name: str) -> None:
     """Set the current organization based upon its name or id.
 

@@ -8,6 +8,7 @@ used by every test suite.
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
@@ -26,6 +27,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -72,7 +75,10 @@ def offline_daemon_running() -> Generator[None]:
         try:
             stop_daemon()
             assert_daemon_cleanup()
-            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
+            daemon_pid = ensure_daemon_running(
+                timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
+            )
+            logger.info("DATA DAEMON PROCESS STARTED: mode=offline pid=%s", daemon_pid)
             yield
         finally:
             stop_daemon()
@@ -97,7 +103,10 @@ def online_daemon_running() -> Generator[None]:
         try:
             stop_daemon()
             assert_daemon_cleanup()
-            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
+            daemon_pid = ensure_daemon_running(
+                timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
+            )
+            logger.info("DATA DAEMON PROCESS STARTED: mode=online pid=%s", daemon_pid)
             yield
         finally:
             stop_daemon()

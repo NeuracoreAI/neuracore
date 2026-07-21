@@ -1,8 +1,12 @@
+import logging
 from collections.abc import Callable
 
 import pytest
 
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
+from neuracore.data_daemon.rust_selection import (
+    is_rust_daemon_enabled,
+    rust_daemon_binary_path,
+)
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     verify_cloud_results,
@@ -33,6 +37,8 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
     set_case_analysis_report,
 )
+
+logger = logging.getLogger(__name__)
 
 _CASES = DataDaemonTestBatch(
     cases=(
@@ -67,6 +73,16 @@ def test_offline_pending_data_recovers_when_online(
     - waits for every recording to reach ``upload_complete`` in the daemon DB
     - performs structural and per-episode frame verification via the cloud
     """
+    if is_rust_daemon_enabled():
+        binary_path = rust_daemon_binary_path()
+        assert binary_path is not None, (
+            "NCD_RUST_DAEMON selects the Rust daemon, but the compiled "
+            "data-daemon binary is missing."
+        )
+        logger.info("DATA DAEMON BACKEND: Rust (%s)", binary_path)
+    else:
+        logger.info("DATA DAEMON BACKEND: legacy Python")
+
     if not has_configured_org():
         pytest.skip(
             "Offline-to-online behavioural tests require NEURACORE_ORG_ID"

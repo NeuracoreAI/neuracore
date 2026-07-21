@@ -157,6 +157,15 @@ class Auth(metaclass=SingletonMetaclass):
         config_manager.config.current_org_id = None
         config_manager.save_config()
 
+    def clear_session(self) -> None:
+        """Clear only the in-memory authentication session.
+
+        Unlike :meth:`logout`, this preserves the saved API key and current
+        organization. It is intended for callers that need the next operation
+        to perform a fresh login without signing the user out persistently.
+        """
+        self._access_token = None
+
     def validate_version(self) -> None:
         """Validate client version compatibility with the Neuracore server.
 

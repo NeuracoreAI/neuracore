@@ -52,12 +52,13 @@ _BATCH_START_CLEANED_NODEIDS: set[str] = set()
 def login_parent_process() -> Iterator[None]:
     """Authenticate the parent pytest process for each test.
 
-    Logs in during setup and logs out during teardown, so every test
-    performs (and times) a real login against a clean environment.
+    Logs in during setup and clears only in-memory session state during
+    teardown, so every test performs (and times) a real login without deleting
+    the developer's saved API key and organization.
     """
     ensure_login()
     yield
-    nc.logout()
+    nc.clear_session()
 
 
 @pytest.fixture(autouse=True)

@@ -78,6 +78,30 @@ jobs:
         --import-mode=importlib
         tests/integration/platform/data_daemon/
 
+    - name: Show Rust daemon diagnostics
+      if: always()
+      shell: bash
+      run: |
+        echo "===== .data_daemon_test_state/daemon.log ====="
+        if [[ -f .data_daemon_test_state/daemon.log ]]; then
+          tail -n 500 .data_daemon_test_state/daemon.log
+        else
+          echo "No daemon log was created."
+        fi
+        echo "===== remaining daemon processes ====="
+        ps -ef | grep -E '[n]c-data-daemon|[d]ata-daemon' || true
+
+    - name: Upload Rust daemon diagnostics
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: rust-daemon-${{ matrix.os }}-py${{ matrix.python-version }}
+        path: |
+          .data_daemon_test_state/daemon.log
+          .data_daemon_test_state/state.db
+          .data_daemon_test_state/artifacts/
+        if-no-files-found: warn
+
     - name: Show disk space after tests
       if: always()
       run: df -h /

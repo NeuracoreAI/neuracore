@@ -107,6 +107,24 @@ def test_login_logout(temp_config_dir, mock_auth_requests, reset_neuracore):
     assert not auth.is_authenticated
 
 
+def test_clear_session_preserves_saved_credentials(
+    temp_config_dir, mock_auth_requests, reset_neuracore
+):
+    """Clearing a session must not persistently log out the user."""
+    nc.login("test_api_key")
+    config_manager = api_core.get_config_manager()
+    config_manager.config.current_org_id = "test-org-id"
+    config_manager.save_config()
+
+    nc.clear_session()
+
+    assert not get_auth().is_authenticated
+    with open(temp_config_dir / "config.json") as f:
+        config = json.load(f)
+    assert config["api_key"] == "test_api_key"
+    assert config["current_org_id"] == "test-org-id"
+
+
 def test_login_version_mismatch_surfaces_installed_version(
     temp_config_dir, reset_neuracore
 ):
