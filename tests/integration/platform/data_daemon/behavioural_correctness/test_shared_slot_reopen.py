@@ -9,6 +9,7 @@ from collections.abc import Callable
 import pytest
 
 import neuracore as nc
+from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     assert_post_test_storage_state,
@@ -39,6 +40,11 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 logger = logging.getLogger(__name__)
+
+pytestmark = pytest.mark.skipif(
+    is_rust_daemon_enabled(),
+    reason="Shared-slot reopen applies only to the legacy Python daemon",
+)
 
 
 _CASE = DataDaemonTestCase(

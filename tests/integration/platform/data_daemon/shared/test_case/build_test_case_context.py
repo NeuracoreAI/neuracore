@@ -819,6 +819,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 else recording_capture_start_s + case.duration_sec
             )
 
+            start_call_wall_ns = time.time_ns()
             with Timer(
                 MAX_TIME_TO_START_S,
                 label="nc.start_recording",
@@ -828,6 +829,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 nc.start_recording(
                     robot_name=spec.robot_name, timestamp=recording_capture_start_s
                 )
+            start_returned_wall_ns = time.time_ns()
             if wall_started_at is None:
                 wall_started_at = time.time()
 
@@ -838,6 +840,35 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     source[1],
                     after_index=previous_index,
                     timeout_s=MAX_TIME_TO_START_S,
+                    diagnostic_context={
+                        "recording_ordinal": recording_ordinal,
+                        "robot_name": spec.robot_name,
+                        "timestamp_mode": case.timestamp_mode,
+                        "caller_capture_timestamp_ns": (
+                            None
+                            if recording_capture_start_s is None
+                            else int(recording_capture_start_s * 1_000_000_000)
+                        ),
+                        "sdk_call_started_wall_ns": start_call_wall_ns,
+                        "sdk_call_returned_wall_ns": start_returned_wall_ns,
+                        "sdk_call_duration_ms": round(
+                            (start_returned_wall_ns - start_call_wall_ns) / 1_000_000,
+                            3,
+                        ),
+                        "capture_minus_call_start_ms": (
+                            None
+                            if recording_capture_start_s is None
+                            else round(
+                                (
+                                    int(recording_capture_start_s * 1_000_000_000)
+                                    - start_call_wall_ns
+                                )
+                                / 1_000_000,
+                                3,
+                            )
+                        ),
+                        "previous_recording_index": previous_index,
+                    },
                 )
                 recording_indexes.append(daemon_recording_index)
 

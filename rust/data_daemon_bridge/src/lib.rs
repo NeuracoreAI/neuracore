@@ -52,7 +52,9 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::publisher::{now_ns, publish, publisher_tx, ProducerError, PublishMsg};
+use crate::publisher::{
+    last_control_diagnostic, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
+};
 use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
 use crate::writer::{writer_queue, FrameJob, WriterMsg};
 
@@ -433,6 +435,12 @@ fn wait_until_ready(py: Python<'_>, timeout_s: f64) -> PyResult<Option<u32>> {
     py.detach(|| -> PyResult<Option<u32>> { Ok(wait_until_ready_impl(timeout_s)?) })
 }
 
+/// Return the last lifecycle/config send diagnostic from this Python thread.
+#[pyfunction]
+fn get_last_control_diagnostic() -> Option<String> {
+    last_control_diagnostic()
+}
+
 /// Ask the running daemon to reload its profile config immediately (see
 /// [`Envelope::RefreshConfig`]). Published on the caller thread's command port
 /// so it is strictly ordered ahead of a subsequent `start_recording` from the
@@ -460,6 +468,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
+    module.add_function(wrap_pyfunction!(get_last_control_diagnostic, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
     Ok(())
 }

@@ -90,6 +90,17 @@ async fn sweep_once(store: &Arc<SqliteStateStore>, recordings_root: &Arc<PathBuf
         }
     };
     for recording in recordings {
+        tracing::info!(
+            recording_index = recording.recording_index,
+            robot_id = ?recording.robot_id,
+            robot_instance = ?recording.robot_instance,
+            stopped_at = ?recording.stopped_at,
+            cancelled_at = ?recording.cancelled_at,
+            backend_stop_notified_at = ?recording.backend_stop_notified_at,
+            backend_cancel_notified_at = ?recording.backend_cancel_notified_at,
+            expected_trace_count = ?recording.expected_trace_count,
+            "recording selected for reclaim"
+        );
         reclaim(store, recordings_root, &recording).await;
     }
 }

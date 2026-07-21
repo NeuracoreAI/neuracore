@@ -293,15 +293,21 @@ def _collect_candidate_pids() -> set[int]:
     return pids
 
 
-def _send_initial_stop(method: str, candidate_pids: set[int]) -> None:
-    """Deliver the initial stop signal or CLI command for ``method``."""
+def _send_initial_stop(method: str, candidate_pids: set[int]) -> str:
+    """Deliver the initial stop signal or CLI command and summarize its result."""
     if method == STOP_METHOD_CLI:
-        subprocess.run(
+        completed = subprocess.run(
             [sys.executable, "-m", "neuracore.data_daemon", "stop"],
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
+        output = " ".join(
+            part.strip()
+            for part in (completed.stdout, completed.stderr)
+            if part.strip()
+        )
+        return f"cli_returncode={completed.returncode}, output={output[-500:]!r}"
     elif method == STOP_METHOD_SIGTERM:
         for pid in sorted(candidate_pids):
             if pid_is_running(pid):
@@ -319,6 +325,7 @@ def _send_initial_stop(method: str, candidate_pids: set[int]) -> None:
                 force_kill(pid)
     else:
         raise ValueError(f"Unknown stop method: {method!r}")
+    return f"signal={method}"
 
 
 def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -> None:
@@ -327,6 +334,12 @@ def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -
         if not pid_is_running(pid):
             continue
         if not wait_for_exit(pid, timeout_s=graceful_timeout_s):
+            logger.warning(
+                "DAEMON STOP graceful timeout: pid=%d timeout_s=%.3f; "
+                "escalating to SIGKILL",
+                pid,
+                graceful_timeout_s,
+            )
             with Timer(5.0, label="stop_daemon_escalated", assert_deadline=False):
                 force_kill(pid)
                 wait_for_exit(pid, timeout_s=5.0)
@@ -360,13 +373,36 @@ def stop_daemon(
     """
     with Timer(15.0, label=f"stop_daemon[{method}]", assert_deadline=False):
         candidate_pids = _collect_candidate_pids()
-        _send_initial_stop(method, candidate_pids)
+        logger.info(
+            "DAEMON STOP begin: method=%s candidate_pids=%s",
+            method,
+            sorted(candidate_pids),
+        )
+        initial_stop_started = time.monotonic()
+        initial_stop_result = _send_initial_stop(method, candidate_pids)
+        initial_stop_ms = (time.monotonic() - initial_stop_started) * 1_000.0
+        live_after_initial = sorted(
+            pid for pid in candidate_pids if pid_is_running(pid)
+        )
+        logger.info(
+            "DAEMON STOP initial delivery finished: method=%s elapsed_ms=%.3f "
+            "live_pids=%s result=%s",
+            method,
+            initial_stop_ms,
+            live_after_initial,
+            initial_stop_result,
+        )
         if method == STOP_METHOD_SIGKILL:
             for pid in sorted(candidate_pids):
                 wait_for_exit(pid, timeout_s=5.0)
         else:
             _wait_and_escalate(candidate_pids, graceful_timeout_s=graceful_timeout_s)
         _remove_ipc_artefacts()
+        logger.info(
+            "DAEMON STOP complete: method=%s remaining_live_pids=%s",
+            method,
+            sorted(pid for pid in candidate_pids if pid_is_running(pid)),
+        )
 
 
 def _parallel_startup_worker(
@@ -457,8 +493,9 @@ def wait_for_daemon_shutdown(
                 details.append(f"PID file still present: {pid_path}")
             if not socket_gone:
                 details.append(f"socket still present: {socket_path}")
+            detail = ", ".join(details)
             raise TimeoutError(
-                f"Daemon did not shut down within {timeout_s}s — " + ", ".join(details)
+                f"Daemon did not shut down within {timeout_s}s — {detail}"
             )
 
         time.sleep(poll_interval_s)

@@ -1514,11 +1514,18 @@ impl StateStore for SqliteStateStore {
             .execute(&mut *tx)
             .await?
             .rows_affected();
-        sqlx::query("DELETE FROM recordings WHERE recording_index = ?1")
+        let recordings_deleted = sqlx::query("DELETE FROM recordings WHERE recording_index = ?1")
             .bind(recording_index)
             .execute(&mut *tx)
-            .await?;
+            .await?
+            .rows_affected();
         tx.commit().await?;
+        tracing::info!(
+            recording_index,
+            traces_deleted,
+            recordings_deleted,
+            "recording rows deleted from state store"
+        );
         Ok(traces_deleted)
     }
 }

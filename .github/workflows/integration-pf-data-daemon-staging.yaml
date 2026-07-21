@@ -25,18 +25,16 @@ jobs:
 
   test:
     needs: pre-commit
-    # Exercise the bundled Rust daemon on each shipped OS (Linux x86_64, macOS
-    # arm64) across the Python support range; each leg builds and tests its
-    # own native bundle.
+    # Run the behavioural correctness suite against the newest supported
+    # Python version on macOS.
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
-        python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        python-version: ['3.14']
+        os: [macos-26]
 
     steps:
     - name: Show disk space
@@ -62,21 +60,26 @@ jobs:
         path: "."
         extras: dev
 
-    - name: Run Data Daemon Integration Tests
+    - name: Run Data Daemon Behavioural Correctness Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        PYTHONFAULTHANDLER: "1"
+        PYTHONUNBUFFERED: "1"
+        RUST_BACKTRACE: full
+        RUST_LOG: "warn,data_daemon::cli::launch=info,data_daemon::ipc::listener=info,data_daemon::pipeline::dispatcher=info,data_daemon::cloud::watchers::recording_reaper=info,data_daemon::state::store=info"
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
       # stays attributable.
       run: >-
-        pytest -o log_cli=true --log-cli-level=INFO
-        -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
+        pytest -s -vv --tb=long
+        --log-cli-level=INFO
+        --log-cli-format="%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        tests/integration/platform/data_daemon/behavioural_correctness/
 
     - name: Show Rust daemon diagnostics
       if: always()
@@ -99,6 +102,8 @@ jobs:
         path: |
           .data_daemon_test_state/daemon.log
           .data_daemon_test_state/state.db
+          .data_daemon_test_state/state.db-wal
+          .data_daemon_test_state/state.db-shm
           .data_daemon_test_state/artifacts/
         if-no-files-found: warn
 

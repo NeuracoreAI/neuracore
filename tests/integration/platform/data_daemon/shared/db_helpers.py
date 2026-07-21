@@ -25,10 +25,16 @@ Contents:
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import logging
+import os
+import shutil
 import sqlite3
+import subprocess
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import closing
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -39,7 +45,7 @@ if TYPE_CHECKING:
     )
 
 import neuracore as nc
-from neuracore.data_daemon.helpers import get_daemon_db_path
+from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
 from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_EXPECTED_TRACE_COUNT,
@@ -86,10 +92,15 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DATA_DAEMON_TEST_ARTIFACTS_DIR,
     MAX_TIME_TO_START_S,
 )
 
 logger = logging.getLogger(__name__)
+
+_DAEMON_LOG_DIAGNOSTIC_BYTES = 128 * 1024
+_DAEMON_LOG_DIAGNOSTIC_LINES = 30
+_RECORDING_DIAGNOSTIC_ROWS = 8
 
 
 def _recording_correlation_column() -> str:
@@ -131,13 +142,13 @@ class DaemonDbStore:
     def fetch_all_rows(self, table: str) -> list[dict[str, Any]]:
         """Return every row from the named table in the daemon state DB."""
         table_name = self._table_name(table)
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()  # noqa: S608
         return [dict(row) for row in rows]
 
     def list_tables(self) -> set[str]:
         """Return the names of all user tables currently present in the daemon DB."""
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
@@ -173,7 +184,7 @@ class DaemonDbStore:
         ``recording_id`` (TEXT) under the legacy Python daemon.
         """
         correlation_column = _recording_correlation_column()
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             row = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {correlation_column} = ?",
                 (recording_key,),
@@ -192,7 +203,7 @@ class DaemonDbStore:
         correlate a worker's recordings to daemon-minted ``recording_index``
         values without seeing the local handle.
         """
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} "
                 f"WHERE {COLUMN_ROBOT_ID} = ? AND {COLUMN_ROBOT_INSTANCE} = ? "
@@ -214,7 +225,7 @@ class DaemonDbStore:
         under the legacy Python daemon.
         """
         correlation_column = _recording_correlation_column()
-        with self.connect_read_only() as conn:
+        with closing(self.connect_read_only()) as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
 
@@ -306,6 +317,328 @@ def fetch_all_traces(
     return _TEST_STORE.fetch_all_traces(recording_key, columns=columns)
 
 
+def _daemon_log_tail_for_recording_start(robot_id: str) -> list[str]:
+    """Return a small, relevant tail of the current daemon log.
+
+    The integration daemon runs in the background, so its tracing output lands
+    beside the state DB rather than in pytest's captured stderr. Read only a
+    bounded tail and keep lifecycle/IPC/database lines so a failed start does
+    not dump per-frame trace logging into the test report.
+    """
+    log_path = Path(get_daemon_db_path()).parent / "daemon.log"
+    try:
+        with log_path.open("rb") as log_file:
+            log_file.seek(0, 2)
+            size = log_file.tell()
+            log_file.seek(max(0, size - _DAEMON_LOG_DIAGNOSTIC_BYTES))
+            text = log_file.read().decode(errors="replace")
+    except OSError as error:
+        return [f"daemon_log={log_path} unavailable: {error}"]
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    keywords = (
+        robot_id.lower(),
+        "recording",
+        "ipc",
+        "dispatcher",
+        "config refresh",
+        "state store",
+        "sqlite",
+        "database",
+        "error",
+        "warn",
+        "panic",
+    )
+    relevant = [
+        line for line in lines if any(word in line.lower() for word in keywords)
+    ]
+    selected = (relevant or lines)[-_DAEMON_LOG_DIAGNOSTIC_LINES:]
+    if not selected:
+        return [f"daemon_log={log_path} is empty"]
+    return [f"daemon_log={log_path} (filtered tail):", *selected]
+
+
+def _native_bridge_start_diagnostics(expected_daemon_pid: int | None) -> list[str]:
+    """Probe producer state and daemon health through the same native bridge."""
+    try:
+        bridge = importlib.import_module("neuracore.data_daemon._data_bridge")
+    except (ImportError, OSError) as error:
+        return [f"native_bridge: unavailable={error!r}"]
+
+    try:
+        last_control = bridge.get_last_control_diagnostic()
+    except (AttributeError, RuntimeError) as error:
+        last_control = f"unavailable ({error!r})"
+
+    health_started = time.monotonic()
+    try:
+        ready_pid = bridge.wait_until_ready(0.25)
+    except (AttributeError, RuntimeError) as error:
+        health = f"error={error!r}"
+    else:
+        health = (
+            f"ready_pid={ready_pid!r}, expected_pid={expected_daemon_pid!r}, "
+            f"matches={ready_pid == expected_daemon_pid}"
+        )
+    health_elapsed_ms = (time.monotonic() - health_started) * 1_000.0
+    return [
+        f"native_last_control: {last_control!r}",
+        f"daemon_health_probe: {health}, elapsed_ms={health_elapsed_ms:.3f}",
+    ]
+
+
+def _sqlite_start_diagnostics(db_path: Path) -> list[str]:
+    """Return bounded SQLite/WAL health details without mutating daemon state."""
+    file_parts: list[str] = []
+    for candidate in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm")):
+        try:
+            stat = candidate.stat()
+            file_parts.append(
+                f"{candidate.name}={stat.st_size}B(dev={stat.st_dev},ino={stat.st_ino})"
+            )
+        except OSError:
+            file_parts.append(f"{candidate.name}=missing")
+
+    try:
+        absolute_path = db_path.absolute()
+        resolved_path = db_path.resolve(strict=True)
+    except OSError as error:
+        path_detail = f"absolute={db_path.absolute()}, resolve_error={error!r}"
+    else:
+        path_detail = f"absolute={absolute_path}, resolved={resolved_path}"
+
+    lines = [
+        f"sqlite_path_identity: configured={db_path}, {path_detail}",
+        f"sqlite_files: {', '.join(file_parts)}",
+    ]
+    try:
+        connection = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0.25)
+        with closing(connection):
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            quick_check = connection.execute("PRAGMA quick_check").fetchone()[0]
+            transaction_open = connection.in_transaction
+    except sqlite3.Error as error:
+        lines.append(f"sqlite_health: error={error!r}")
+    else:
+        lines.append(
+            "sqlite_health: "
+            f"journal_mode={journal_mode!r}, quick_check={quick_check!r}, "
+            f"test_connection_in_transaction={transaction_open}"
+        )
+    return lines
+
+
+def _daemon_open_file_diagnostics(daemon_pid: int | None, db_path: Path) -> list[str]:
+    """Describe the daemon's cwd and open SQLite files without changing state."""
+    if daemon_pid is None:
+        return ["daemon_open_files: unavailable (no daemon PID)"]
+
+    # macOS CI has lsof but no /proc. Its field mode is compact and stable:
+    # each record starts with `f`, with `D`/`i`/`n` carrying device, inode and
+    # path. Keep only cwd and files whose names contain the configured DB name.
+    lsof = shutil.which("lsof")
+    if lsof is not None:
+        try:
+            completed = subprocess.run(
+                [lsof, "-a", "-p", str(daemon_pid), "-F", "fDin"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            return [f"daemon_open_files: lsof_error={error!r}"]
+
+        records: list[list[str]] = []
+        current: list[str] = []
+        for line in completed.stdout.splitlines():
+            if line.startswith("f"):
+                if current:
+                    records.append(current)
+                current = [line]
+            elif current:
+                current.append(line)
+        if current:
+            records.append(current)
+        selected = [
+            record
+            for record in records
+            if any(
+                line == "fcwd" or (line.startswith("n") and db_path.name in line)
+                for line in record
+            )
+        ]
+        rendered = [" ".join(record) for record in selected[:8]]
+        if not rendered:
+            detail = completed.stderr.strip() or "no matching cwd/SQLite descriptors"
+            return [
+                f"daemon_open_files: lsof_rc={completed.returncode}, detail={detail!r}"
+            ]
+        return [f"daemon_open_file: {record}" for record in rendered]
+
+    # Linux/local fallback. Resolve only the bounded set of descriptors whose
+    # symlink target mentions the DB filename.
+    proc_root = Path("/proc") / str(daemon_pid)
+    lines: list[str] = []
+    try:
+        lines.append(f"daemon_cwd: {os.readlink(proc_root / 'cwd')}")
+    except OSError as error:
+        lines.append(f"daemon_cwd: unavailable={error!r}")
+    try:
+        fd_paths = list((proc_root / "fd").iterdir())
+    except OSError as error:
+        lines.append(f"daemon_open_files: unavailable={error!r}")
+        return lines
+    matches: list[str] = []
+    for fd_path in fd_paths:
+        try:
+            target = os.readlink(fd_path)
+        except OSError:
+            continue
+        if db_path.name in target:
+            matches.append(f"fd={fd_path.name} target={target}")
+    lines.extend(
+        [f"daemon_open_file: {match}" for match in matches[:8]]
+        or ["daemon_open_files: no matching SQLite descriptors"]
+    )
+    return lines
+
+
+def _persist_recording_start_timeout_artifacts(report: str, db_path: Path) -> str:
+    """Best-effort snapshot before later daemon launches overwrite evidence."""
+    snapshot_dir = (
+        DATA_DAEMON_TEST_ARTIFACTS_DIR
+        / "recording_start_timeouts"
+        / f"{time.time_ns()}-{os.getpid()}"
+    )
+    try:
+        snapshot_dir.mkdir(parents=True, exist_ok=False)
+        (snapshot_dir / "diagnostic.txt").write_text(report, encoding="utf-8")
+        candidates = (
+            db_path.parent / "daemon.log",
+            db_path,
+            Path(f"{db_path}-wal"),
+            Path(f"{db_path}-shm"),
+        )
+        for source in candidates:
+            if source.is_file():
+                shutil.copy2(source, snapshot_dir / source.name)
+    except OSError as error:
+        return f"artifact_snapshot: failed={error!r}"
+    return f"artifact_snapshot: {snapshot_dir}"
+
+
+def _recording_start_timeout_diagnostics(
+    robot_id: str,
+    robot_instance: int,
+    *,
+    diagnostic_context: Mapping[str, Any] | None,
+    db_error_count: int,
+    last_db_error: str | None,
+) -> str:
+    """Build a bounded snapshot that identifies where a start disappeared."""
+    db_path = Path(get_daemon_db_path())
+    daemon_pid: int | None = None
+    lines = ["Recording-start diagnostic snapshot:"]
+    if diagnostic_context:
+        rendered = ", ".join(
+            f"{key}={value!r}" for key, value in diagnostic_context.items()
+        )
+        lines.append(f"  sdk_call: {rendered}")
+    lines.append(
+        f"  expected_source: robot_id={robot_id!r}, robot_instance={robot_instance}"
+    )
+    try:
+        stat = db_path.stat()
+        lines.append(f"  state_db: path={db_path}, bytes={stat.st_size}")
+    except OSError as error:
+        lines.append(f"  state_db: path={db_path}, unavailable={error}")
+    if db_error_count:
+        lines.append(
+            f"  polling_db_errors: count={db_error_count}, last={last_db_error!r}"
+        )
+    try:
+        pid_text = Path(get_daemon_pid_path()).read_text(encoding="utf-8").strip()
+    except OSError as error:
+        lines.append(f"  daemon_pid: unavailable={error}")
+    else:
+        try:
+            daemon_pid = int(pid_text)
+            os.kill(daemon_pid, 0)
+        except (ValueError, ProcessLookupError):
+            pid_alive = False
+        except PermissionError:
+            pid_alive = True
+        else:
+            pid_alive = True
+        lines.append(
+            f"  daemon_pid: {pid_text or '<empty pid file>'}, alive={pid_alive}"
+        )
+    lines.append(
+        "  rust_logging: "
+        f"RUST_LOG={os.environ.get('RUST_LOG')!r}, "
+        f"NDD_DEBUG={os.environ.get('NDD_DEBUG')!r}"
+    )
+    lines.extend(f"  {line}" for line in _native_bridge_start_diagnostics(daemon_pid))
+    lines.extend(f"  {line}" for line in _sqlite_start_diagnostics(db_path))
+    lines.extend(
+        f"  {line}" for line in _daemon_open_file_diagnostics(daemon_pid, db_path)
+    )
+
+    try:
+        all_rows = fetch_all_rows(RECORDINGS_TABLE)
+    except (OSError, sqlite3.Error) as error:
+        lines.append(f"  recordings_table: unreadable={error!r}")
+    else:
+        lines.append(
+            f"  recordings_table: total_rows={len(all_rows)}, "
+            f"showing_latest={min(len(all_rows), _RECORDING_DIAGNOSTIC_ROWS)}"
+        )
+        diagnostic_columns = (
+            COLUMN_RECORDING_INDEX,
+            COLUMN_ROBOT_ID,
+            COLUMN_ROBOT_INSTANCE,
+            "dataset_id",
+            "start_timestamp_ns",
+            "stop_timestamp_ns",
+            "created_at",
+            COLUMN_LAST_UPDATED,
+        )
+        for row in all_rows[-_RECORDING_DIAGNOSTIC_ROWS:]:
+            summary = {key: row.get(key) for key in diagnostic_columns if key in row}
+            lines.append(f"    {summary!r}")
+
+    lines.extend(f"  {line}" for line in _daemon_log_tail_for_recording_start(robot_id))
+    lines.append(
+        "  stage_guide: when IPC/dispatcher INFO logging is enabled, producer "
+        "recipients>0 but no 'ipc lifecycle received' means the command "
+        "disappeared before listener decode; receipt without 'recording started' "
+        "or 'failed to create recording row' isolates the dispatcher; a started "
+        "row under another source isolates correlation."
+    )
+    lines.append(
+        "  sequence_guide: config refresh begin without finish isolates the "
+        "config watcher; listener receipt without 'control queued' isolates the "
+        "dispatcher channel; queued start without 'recording start dispatch begin' "
+        "means the dispatcher is blocked on an earlier command; dispatch begin "
+        "without a DB result isolates create_recording/SQLite."
+    )
+    lines.append(
+        "  transport_guide: last control recipients>0 plus a matching health PID "
+        "but no listener receipt isolates a stale/misdirected commands publisher; "
+        "a live PID with a failed health probe means the daemon listener is "
+        "stalled or has exited while the process remains alive."
+    )
+    lines.append(
+        "  clock_guide: capture_timestamp_ns is stored/backend metadata and does "
+        "not gate row creation; publish_timestamp_ns defines recording-window "
+        "ordering and should increase across start/stop commands."
+    )
+    report = "\n".join(lines)
+    artifact_status = _persist_recording_start_timeout_artifacts(report, db_path)
+    return f"{report}\n  {artifact_status}"
+
+
 def wait_for_recording_index_for_source(
     robot_id: str,
     robot_instance: int,
@@ -313,6 +646,7 @@ def wait_for_recording_index_for_source(
     after_index: int = 0,
     timeout_s: float = 30.0,
     poll_interval_s: float = 0.1,
+    diagnostic_context: Mapping[str, Any] | None = None,
 ) -> int:
     """Block until the daemon assigns a recording with index > ``after_index``.
 
@@ -335,22 +669,34 @@ def wait_for_recording_index_for_source(
     """
     deadline = time.monotonic() + timeout_s
     newest: int | None = None
+    db_error_count = 0
+    last_db_error: str | None = None
     while True:
         try:
             rows = fetch_recordings_for_source(robot_id, robot_instance)
-        except sqlite3.OperationalError:
+        except sqlite3.OperationalError as error:
             # Daemon has created the DB file but not yet the schema; retry.
             rows = []
+            db_error_count += 1
+            last_db_error = str(error)
         indices = [int(row[COLUMN_RECORDING_INDEX]) for row in rows]
         newest = max(indices) if indices else None
         if newest is not None and newest > after_index:
             return newest
         if time.monotonic() >= deadline:
-            raise TimeoutError(
+            summary = (
                 "Daemon did not assign a new recording_index for source "
                 f"({robot_id}, {robot_instance}); expected an index greater than "
                 f"{after_index}, newest seen {newest} after {timeout_s}s."
             )
+            diagnostics = _recording_start_timeout_diagnostics(
+                robot_id,
+                robot_instance,
+                diagnostic_context=diagnostic_context,
+                db_error_count=db_error_count,
+                last_db_error=last_db_error,
+            )
+            raise TimeoutError(f"{summary}\n{diagnostics}")
         time.sleep(poll_interval_s)
 
 

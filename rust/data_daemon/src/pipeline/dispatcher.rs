@@ -464,19 +464,41 @@ impl Dispatcher {
     /// a stalled watcher can't wedge the routing loop. A missing sender (tests /
     /// no watcher) or a closed channel (watcher gone at shutdown) is a no-op.
     async fn handle_refresh_config(&self) {
+        let started = Instant::now();
+        tracing::info!("config refresh dispatch begin");
         let Some(refresh_tx) = self.context.config_refresh_tx.as_ref() else {
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                outcome = "no_watcher",
+                "config refresh dispatch finished"
+            );
             return;
         };
         let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
         if refresh_tx.send(ack_tx).await.is_err() {
-            tracing::debug!("config watcher gone; ignoring RefreshConfig");
+            tracing::warn!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                outcome = "watcher_channel_closed",
+                "config refresh dispatch finished"
+            );
             return;
         }
-        if tokio::time::timeout(REFRESH_CONFIG_ACK_TIMEOUT, ack_rx)
-            .await
-            .is_err()
-        {
-            tracing::warn!("config refresh ack timed out; proceeding (poll will catch up)");
+        match tokio::time::timeout(REFRESH_CONFIG_ACK_TIMEOUT, ack_rx).await {
+            Ok(Ok(())) => tracing::info!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                outcome = "acknowledged",
+                "config refresh dispatch finished"
+            ),
+            Ok(Err(_)) => tracing::warn!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                outcome = "ack_sender_dropped",
+                "config refresh dispatch finished"
+            ),
+            Err(_) => tracing::warn!(
+                elapsed_ms = started.elapsed().as_secs_f64() * 1_000.0,
+                outcome = "timed_out",
+                "config refresh dispatch finished; periodic poll will catch up"
+            ),
         }
     }
 
@@ -501,6 +523,13 @@ impl Dispatcher {
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
+        tracing::info!(
+            robot_id = source.0,
+            robot_instance = source.1,
+            publish_timestamp_ns,
+            capture_timestamp_ns = timestamp_ns,
+            "recording start dispatch begin"
+        );
         // Insert the recording row synchronously: cloud notifiers react to the
         // `RecordingStarted` event by reading this row, and `cancel_recording`
         // burns it by index, so the row must exist before either runs. After the
@@ -515,14 +544,31 @@ impl Dispatcher {
             dataset_id: dataset_id.as_deref(),
             start_timestamp_ns: timestamp_ns,
         };
+        let db_insert_started = Instant::now();
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
             Err(error) => {
-                tracing::warn!(%error, robot_id = source.0, "failed to create recording row");
+                tracing::warn!(
+                    %error,
+                    robot_id = source.0,
+                    robot_instance = source.1,
+                    publish_timestamp_ns,
+                    capture_timestamp_ns = timestamp_ns,
+                    db_insert_ms = db_insert_started.elapsed().as_secs_f64() * 1_000.0,
+                    "failed to create recording row"
+                );
                 return;
             }
         };
-        tracing::info!(recording_index, robot_id = source.0, "recording started");
+        tracing::info!(
+            recording_index,
+            robot_id = source.0,
+            robot_instance = source.1,
+            publish_timestamp_ns,
+            capture_timestamp_ns = timestamp_ns,
+            db_insert_ms = db_insert_started.elapsed().as_secs_f64() * 1_000.0,
+            "recording started"
+        );
 
         let entry = self.windows.entry(source).or_default();
         entry.last_seen = Some(recv_at);

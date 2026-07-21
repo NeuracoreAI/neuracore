@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
 
@@ -271,7 +274,41 @@ fn run_daemon(
         let state_store = SqliteStateStore::open(&db_path)
             .await
             .with_context(|| format!("failed to open state store at {}", db_path.display()))?;
-        tracing::info!(path = %db_path.display(), "state store ready");
+        let absolute_db_path = if db_path.is_absolute() {
+            db_path.clone()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&db_path))
+                .unwrap_or_else(|_| db_path.clone())
+        };
+        let canonical_db_path = std::fs::canonicalize(&db_path).unwrap_or(absolute_db_path);
+        #[cfg(unix)]
+        match std::fs::metadata(&db_path) {
+            Ok(metadata) => tracing::info!(
+                configured_path = %db_path.display(),
+                canonical_path = %canonical_db_path.display(),
+                device = metadata.dev(),
+                inode = metadata.ino(),
+                bytes = metadata.len(),
+                daemon_pid = std::process::id(),
+                "state store ready"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                configured_path = %db_path.display(),
+                canonical_path = %canonical_db_path.display(),
+                daemon_pid = std::process::id(),
+                "state store ready but database identity is unavailable"
+            ),
+        }
+        #[cfg(not(unix))]
+        tracing::info!(
+            configured_path = %db_path.display(),
+            canonical_path = %canonical_db_path.display(),
+            bytes = std::fs::metadata(&db_path).map(|metadata| metadata.len()).ok(),
+            daemon_pid = std::process::id(),
+            "state store ready"
+        );
         crate::lifecycle::recovery::run_startup_sweeps(&state_store, &recordings_root).await;
         let storage_budget = Arc::new(StorageBudget::new(&recordings_root, storage_policy));
         // Reconcile the storage budget (directory scan + `statvfs`) on a

@@ -16,7 +16,7 @@
 //! the later `serve_recording_id_queries` borrow is itself held across an await.)
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
     Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply,
@@ -100,12 +100,69 @@ pub async fn run(
         // -- Async forward ------------------------------------------------------
         for envelope in batch.drain(..) {
             let kind = envelope.kind();
+            let control_command = matches!(
+                &envelope,
+                Envelope::StartRecording { .. }
+                    | Envelope::StopRecording { .. }
+                    | Envelope::CancelRecording { .. }
+                    | Envelope::RefreshConfig {}
+            );
+            match &envelope {
+                Envelope::StartRecording {
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                    ..
+                }
+                | Envelope::StopRecording {
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                } => tracing::info!(
+                    command = kind,
+                    daemon_pid = std::process::id(),
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    capture_timestamp_ns = timestamp_ns,
+                    "ipc lifecycle received"
+                ),
+                Envelope::CancelRecording {
+                    robot_id,
+                    robot_instance,
+                    timestamp_ns,
+                } => tracing::info!(
+                    command = kind,
+                    daemon_pid = std::process::id(),
+                    robot_id,
+                    robot_instance,
+                    capture_timestamp_ns = timestamp_ns,
+                    "ipc lifecycle received"
+                ),
+                Envelope::RefreshConfig {} => tracing::info!(
+                    command = kind,
+                    daemon_pid = std::process::id(),
+                    "ipc config refresh received"
+                ),
+                _ => {}
+            }
+            let queue_started = Instant::now();
             if dispatcher_tx.send(envelope).await.is_err() {
-                tracing::debug!(
-                    envelope = kind,
-                    "ipc listener stopping: dispatcher receiver dropped"
+                tracing::warn!(
+                    command = kind,
+                    queue_wait_ms = queue_started.elapsed().as_secs_f64() * 1_000.0,
+                    "ipc envelope could not be queued: dispatcher receiver dropped"
                 );
                 return;
+            }
+            if control_command {
+                tracing::info!(
+                    command = kind,
+                    queue_wait_ms = queue_started.elapsed().as_secs_f64() * 1_000.0,
+                    "ipc control queued for dispatcher"
+                );
             }
         }
 

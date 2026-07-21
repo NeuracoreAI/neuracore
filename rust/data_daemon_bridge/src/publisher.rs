@@ -305,10 +305,19 @@ thread_local! {
     /// is a plain TLS load — required for the `pthread_atfork` child handler to
     /// access it without invoking a lazy initializer in a post-fork context.
     static PRODUCER: RefCell<Option<ProducerState>> = const { RefCell::new(None) };
+    /// Last control-plane send observed on this caller thread. Exposed to the
+    /// Python integration diagnostics so the timeout itself carries producer
+    /// delivery evidence instead of relying on a detached stderr line.
+    static LAST_CONTROL_DIAGNOSTIC: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Assign a visible generation to each producer built in this SDK process.
 static NEXT_PRODUCER_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Return the last lifecycle/config send diagnostic for this caller thread.
+pub(crate) fn last_control_diagnostic() -> Option<String> {
+    LAST_CONTROL_DIAGNOSTIC.with(|cell| cell.borrow().clone())
+}
 
 /// Run `f` against this thread's producer state, lazily building it on first
 /// use.
@@ -505,10 +514,11 @@ fn clock_fallback_ns() -> i64 {
 /// Encode `envelope` and publish it on the commands service.
 pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
-    let lifecycle_kind = match envelope {
+    let diagnostic_kind = match envelope {
         Envelope::StartRecording { .. }
         | Envelope::StopRecording { .. }
-        | Envelope::CancelRecording { .. } => Some(envelope.kind()),
+        | Envelope::CancelRecording { .. }
+        | Envelope::RefreshConfig {} => Some(envelope.kind()),
         _ => None,
     };
     if bytes.len() > COMMANDS_MAX_PAYLOAD_BYTES {
@@ -526,15 +536,52 @@ pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
         let recipients = sample
             .send()
             .map_err(|error| ProducerError::Send(error.to_string()))?;
-        if let Some(kind) = lifecycle_kind {
+        if let Some(kind) = diagnostic_kind {
             // Use stderr deliberately: pytest's fd capture includes this in a
             // failed CI case even when no Rust tracing subscriber is installed.
-            eprintln!(
-                "RUST_DAEMON_IPC_DIAGNOSTIC command={kind} recipients={recipients} \
-                 sdk_pid={} producer_generation={}",
-                std::process::id(),
-                state.diagnostic_generation,
-            );
+            let diagnostic = match envelope {
+                Envelope::StartRecording {
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                    ..
+                }
+                | Envelope::StopRecording {
+                    robot_id,
+                    robot_instance,
+                    publish_timestamp_ns,
+                    timestamp_ns,
+                } => format!(
+                    "RUST_DAEMON_IPC_DIAGNOSTIC command={kind} recipients={recipients} \
+                     source=({robot_id},{robot_instance}) publish_timestamp_ns={publish_timestamp_ns} \
+                     capture_timestamp_ns={timestamp_ns} sdk_pid={} producer_generation={}",
+                    std::process::id(),
+                    state.diagnostic_generation,
+                ),
+                Envelope::CancelRecording {
+                    robot_id,
+                    robot_instance,
+                    timestamp_ns,
+                } => format!(
+                    "RUST_DAEMON_IPC_DIAGNOSTIC command={kind} recipients={recipients} \
+                     source=({robot_id},{robot_instance}) capture_timestamp_ns={timestamp_ns} \
+                     sdk_pid={} producer_generation={}",
+                    std::process::id(),
+                    state.diagnostic_generation,
+                ),
+                Envelope::RefreshConfig {} => format!(
+                    "RUST_DAEMON_IPC_DIAGNOSTIC command={kind} recipients={recipients} \
+                     sdk_pid={} producer_generation={}",
+                    std::process::id(),
+                    state.diagnostic_generation,
+                ),
+                _ => unreachable!("diagnostic_kind is only set for control envelopes"),
+            };
+            eprintln!("{diagnostic}");
+            LAST_CONTROL_DIAGNOSTIC.with(|cell| {
+                cell.replace(Some(diagnostic));
+            });
         }
         // `SampleMut::send` succeeding only means iceoryx2 completed the send
         // operation. Its return value is the number of subscribers that

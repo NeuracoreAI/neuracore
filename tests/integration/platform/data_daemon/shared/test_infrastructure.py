@@ -20,6 +20,9 @@ import pytest
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
+from tests.integration.platform.data_daemon.shared.process_control import (
+    get_runner_pids,
+)
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
     harness_db_path,
@@ -147,6 +150,38 @@ def apply_storage_state_action(storage_state_action: str) -> None:
     db_path = harness_db_path()
     recordings_root = harness_recordings_root()
 
+    def file_identity(path: Path) -> str:
+        try:
+            stat = path.stat()
+        except OSError:
+            return "missing"
+        return f"{stat.st_size}B/dev={stat.st_dev}/ino={stat.st_ino}"
+
+    daemon_pids = sorted(get_runner_pids())
+    sqlite_paths = (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"))
+    before = ",".join(f"{path.name}:{file_identity(path)}" for path in sqlite_paths)
+
+    destructive_actions = {STORAGE_STATE_EMPTY, STORAGE_STATE_DELETE}
+    if storage_state_action in destructive_actions and daemon_pids:
+        raise RuntimeError(
+            f"Refusing {storage_state_action!r} storage cleanup while daemon "
+            f"processes are alive: {daemon_pids}"
+        )
+
+    checkpoint_summary = "not_run"
+
+    def checkpoint(connection: sqlite3.Connection) -> None:
+        nonlocal checkpoint_summary
+        result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if result is None or int(result[0]) != 0:
+            raise AssertionError(
+                f"SQLite WAL checkpoint remained busy for {db_path}: {result!r}"
+            )
+        checkpoint_summary = (
+            f"busy={int(result[0])},wal_frames={int(result[1])},"
+            f"checkpointed_frames={int(result[2])}"
+        )
+
     if storage_state_action == STORAGE_STATE_EMPTY:
         if db_path.exists():
             connection = sqlite3.connect(str(db_path))
@@ -157,13 +192,19 @@ def apply_storage_state_action(storage_state_action: str) -> None:
                     except sqlite3.OperationalError:
                         pass
                 connection.commit()
-                connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                checkpoint(connection)
             finally:
                 connection.close()
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)
         recordings_root.mkdir(parents=True, exist_ok=True)
     elif storage_state_action == STORAGE_STATE_DELETE:
+        if db_path.exists():
+            connection = sqlite3.connect(str(db_path))
+            try:
+                checkpoint(connection)
+            finally:
+                connection.close()
         try:
             db_path.unlink(missing_ok=True)
         except OSError:
@@ -171,12 +212,26 @@ def apply_storage_state_action(storage_state_action: str) -> None:
         if recordings_root.exists():
             shutil.rmtree(recordings_root, ignore_errors=True)
 
-    if storage_state_action in {STORAGE_STATE_EMPTY, STORAGE_STATE_DELETE}:
+    if storage_state_action == STORAGE_STATE_DELETE:
         for suffix in ("-shm", "-wal"):
             try:
                 Path(str(db_path) + suffix).unlink(missing_ok=True)
             except OSError:
                 pass
+
+    after = ",".join(f"{path.name}:{file_identity(path)}" for path in sqlite_paths)
+    log = logger.warning if daemon_pids else logger.info
+    log(
+        "STORAGE CLEANUP action=%s daemon_pids_before=%s db=%s absolute=%s "
+        "checkpoint=[%s] sqlite_before=[%s] sqlite_after=[%s]",
+        storage_state_action,
+        daemon_pids,
+        db_path,
+        db_path.absolute(),
+        checkpoint_summary,
+        before,
+        after,
+    )
 
 
 def delete_cloud_dataset(dataset_name: str) -> None:
