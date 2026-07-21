@@ -576,23 +576,56 @@ impl Dispatcher {
             return;
         };
         entry.last_seen = Some(recv_at);
-        let Some(mut window) = entry.live.take() else {
+
+        // A stop whose publish timestamp belongs to the live window closes the
+        // live recording normally. If its timestamp predates the live window,
+        // it is a delayed stop for one of the recently-closing recordings.
+        let recording_index = if entry
+            .live
+            .as_ref()
+            .is_some_and(|window| window.contains(publish_timestamp_ns))
+        {
+            let mut window = entry
+                .live
+                .take()
+                .expect("live window was checked immediately above");
+
+            window.stopped_at_ns = Some(publish_timestamp_ns);
+            window.stop_recv_at = Some(recv_at);
+
+            let recording_index = window.recording_index;
+            entry.closing.push(window);
+            recording_index
+        } else if let Some(position) = entry
+            .closing
+            .iter()
+            .rposition(|window| window.contains(publish_timestamp_ns))
+        {
+            let window = &mut entry.closing[position];
+
+            // Replace the provisional boundary installed by handle_start() with
+            // the delayed stop's real publish-clock boundary.
+            window.stopped_at_ns = Some(publish_timestamp_ns);
+            window.stop_recv_at = Some(recv_at);
+
+            tracing::debug!(
+                recording_index = window.recording_index,
+                robot_id = source.0,
+                "matched delayed stop to closing recording"
+            );
+
+            window.recording_index
+        } else {
             tracing::debug!(
                 robot_id = source.0,
-                "stop with no active recording; ignoring"
+                publish_timestamp_ns,
+                "stop does not belong to any retained recording window; ignoring"
             );
             return;
         };
-        // The window closes on the publish clock; the row's `stop_timestamp_ns`
-        // (→ backend `end_time`) is the caller's capture time.
-        window.stopped_at_ns = Some(publish_timestamp_ns);
-        window.stop_recv_at = Some(recv_at);
-        let recording_index = window.recording_index;
-        entry.closing.push(window);
 
-        // Persist `stopped_at` before publishing the event: the cloud
-        // stop-notifier reads this row on `RecordingStopped`, so the timestamp
-        // must be on disk first.
+        // SQLite uses COALESCE here, so processing the same stop twice cannot
+        // overwrite an already-persisted stop timestamp.
         if let Err(error) = self
             .store
             .mark_recording_stopped(recording_index, timestamp_ns)
@@ -1316,6 +1349,52 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
         assert_eq!(a, serde_json::json!([{"i": 1}]));
+    }
+
+    #[tokio::test]
+    async fn late_stop_for_previous_recording_does_not_close_new_live_window() {
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context, shutdown_rx);
+
+        // A starts first. B then starts before A's delayed stop arrives.
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(start("robot-1", 200)).await.unwrap();
+
+        // This stop was published while A was active, but arrives after B's start.
+        tx.send(stop("robot-1", 150)).await.unwrap();
+
+        // B must remain open and receive this datum.
+        tx.send(datum("robot-1", 250, 2)).await.unwrap();
+        tx.send(stop("robot-1", 300)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+
+        let first = &recordings[0];
+        let second = &recordings[1];
+
+        let second_traces = store
+            .list_traces_for_recording(second.recording_index)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (
+                first.stopped_at.is_some(),
+                second.stopped_at.is_some(),
+                second_traces.len(),
+            ),
+            (true, true, 1),
+            "late stop must finalize A without closing B"
+        );
     }
 
     /// Announce a finished video chunk whose open time is `publish_ts`. The
