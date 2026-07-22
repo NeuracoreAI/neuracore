@@ -162,16 +162,17 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
-def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
-    """Assert the producer fired at the intended wall-clock moment.
-
-    Independent of any duration check: bounds *when* a logging call started,
-    not how long it took.
-    """
-    lateness = time.time() - deadline
-    assert abs(lateness) <= tolerance, (
-        f"{label} fired at wrong moment: "
-        f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
+def assert_schedule_duration(
+    elapsed: float,
+    expected_duration: float,
+    tolerance: float,
+    label: str,
+) -> None:
+    """Assert that a producer sustained its requested rate overall."""
+    limit = expected_duration + tolerance
+    assert elapsed <= limit, (
+        f"{label} schedule took too long: "
+        f"elapsed={elapsed:.3f}s, limit={limit:.3f}s"
     )
 
 

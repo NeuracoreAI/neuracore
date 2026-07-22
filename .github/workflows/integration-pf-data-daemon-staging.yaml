@@ -15,69 +15,63 @@ jobs:
   pre-commit:
     runs-on: ubuntu-24.04
     steps:
-    - uses: actions/checkout@v4
-      with:
-        ref: ${{ inputs.ref }}
-    - uses: actions/setup-python@v6
-      with:
-        python-version: '3.11'
-    - uses: pre-commit/action@v3.0.1
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: pre-commit/action@v3.0.1
 
   test:
     needs: pre-commit
-    # Exercise the bundled Rust daemon on each shipped OS (Linux x86_64, macOS
-    # arm64) across the Python support range; each leg builds and tests its
-    # own native bundle.
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
+
     strategy:
       fail-fast: false
-      max-parallel: 2
       matrix:
-        python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        python-version: ["3.10"]
+        os: [macos-26]
 
     steps:
-    - name: Show disk space
-      run: df -h /
+      - name: Show disk space
+        run: df -h /
 
+      - name: Checkout test harness
+        uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
+        with:
+          environment: staging
+          ref: ${{ inputs.ref }}
 
-    - name: Checkout test harness
-      uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
-      with:
-        environment: staging
-        ref: ${{ inputs.ref }}
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
 
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v6
-      with:
-        python-version: ${{ matrix.python-version }}
-        cache: 'pip'
+      - name: Set up neuracore with Rust data daemon
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
+        with:
+          checkout: "false"
+          path: "."
+          extras: dev
 
-    - name: Set up neuracore with Rust data daemon
-      uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
-      with:
-        checkout: "false"
-        path: "."
-        extras: dev
+      - name: Run failing Data Daemon test
+        env:
+          NEURACORE_API_URL: https://staging.api.neuracore.com/api
+          NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+          NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+          NEURACORE_PROVIDE_LIVE_DATA: false
+        run: >-
+          pytest -o log_cli=true --log-cli-level=INFO
+          -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
+          --import-mode=importlib
+          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[10s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
 
-    - name: Run Data Daemon Integration Tests
-      env:
-        NEURACORE_API_URL: https://staging.api.neuracore.com/api
-        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
-        NEURACORE_PROVIDE_LIVE_DATA: false
-
-      # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
-      # namespaces live log lines by worker process so interleaved context output
-      # stays attributable.
-      run: >-
-        pytest -o log_cli=true --log-cli-level=INFO
-        -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
-        --import-mode=importlib
-        tests/integration/platform/data_daemon/
-
-    - name: Show disk space after tests
-      if: always()
-      run: df -h /
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /

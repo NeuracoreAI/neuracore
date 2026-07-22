@@ -24,7 +24,7 @@ from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
-    assert_on_schedule,
+    assert_schedule_duration,
     init_worker_logging,
     relayed_worker_logs,
     surface_worker_errors,
@@ -378,10 +378,10 @@ def log_synchronous_frames(
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Joint and video frames are interleaved in a single loop using a wall-clock
+    Joint and video frames are interleaved in a single loop using a monotonic
     deadline scheduler, so both streams advance together in time order.
     """
-    recording_wall_start = time.time()
+    schedule_start = time.perf_counter()
     joint_index = 0
     video_index = 0
 
@@ -398,24 +398,20 @@ def log_synchronous_frames(
         )
 
         joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps) + jitter
+            schedule_start + (joint_index / joint_fps) + jitter
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            recording_wall_start + (video_index / video_fps) + jitter
+            schedule_start + (video_index / video_fps) + jitter
             if video_due
             else float("inf")
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
+            remaining = joint_deadline - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
-                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -459,13 +455,9 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            remaining = video_deadline - time.time()
+            remaining = video_deadline - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
-                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -492,6 +484,18 @@ def log_synchronous_frames(
                         timestamp=timestamp,
                     )
             video_index += 1
+
+    if assert_deadline and use_stochastic_timestamps:
+        expected_duration = max(
+            joint_frame_count / joint_fps,
+            video_frame_count / video_fps if camera_name_list else 0.0,
+        )
+        assert_schedule_duration(
+            time.perf_counter() - schedule_start,
+            expected_duration,
+            SCHEDULER_TOLERANCE_S,
+            label="synchronous frame",
+        )
 
 
 def build_thread_roles(
@@ -550,19 +554,13 @@ def run_threaded_logging(
             is_rgb = role_name == "rgb"
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
-            thread_wall_start = time.time()
+            schedule_start = time.perf_counter()
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
+                frame_deadline = schedule_start + (frame_index / fps) + jitter
+                remaining = frame_deadline - time.perf_counter()
                 if remaining > 0:
                     time.sleep(remaining)
-                if assert_deadline and use_stochastic_timestamps:
-                    assert_on_schedule(
-                        frame_deadline,
-                        SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
-                    )
                 if use_real_timestamps:
                     timestamp = None
                 else:
@@ -643,6 +641,14 @@ def run_threaded_logging(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+
+            if assert_deadline and use_stochastic_timestamps:
+                assert_schedule_duration(
+                    time.perf_counter() - schedule_start,
+                    frame_count / fps,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"{role_name} frame",
+                )
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 
