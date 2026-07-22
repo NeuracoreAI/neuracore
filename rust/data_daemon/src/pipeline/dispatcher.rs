@@ -544,10 +544,17 @@ impl Dispatcher {
         // A well-behaved producer stops before starting; if a live window is
         // somehow still open, retire it to `closing` bounded at the new start's
         // publish time so it stops catching data published after this point.
+        // This also happens under an inverted start/stop pair (a slow stop
+        // reaching the daemon after the next start), so persist the retired
+        // recording's stop here — using the new start's publish time as the
+        // exclusive upper bound of its membership range — rather than leaving
+        // its row open. A later stolen stop refines the exact boundary.
+        let mut retired: Option<i64> = None;
         if let Some(mut previous) = entry.live.take() {
             if previous.stopped_at_ns.is_none() {
                 previous.stopped_at_ns = Some(publish_timestamp_ns);
                 previous.stop_recv_at = Some(recv_at);
+                retired = Some(previous.recording_index);
             }
             entry.closing.push(previous);
         }
@@ -558,6 +565,23 @@ impl Dispatcher {
             stop_recv_at: None,
             traces: HashMap::new(),
         });
+
+        if let Some(retired_index) = retired {
+            tracing::warn!(
+                recording_index = retired_index,
+                successor_index = recording_index,
+                "start arrived with prior recording still live; closing it"
+            );
+            // Persist the retired recording's stop so it reaches a terminal,
+            // notifiable state even if its own (late) stop never arrives.
+            if let Err(error) = self
+                .store
+                .mark_recording_stopped(retired_index, publish_timestamp_ns)
+                .await
+            {
+                tracing::warn!(%error, recording_index = retired_index, "failed to mark superseded recording stopped");
+            }
+        }
 
         if let Some(bus) = self.context.event_bus.as_ref() {
             bus.publish(DaemonEvent::RecordingStarted { recording_index });
@@ -576,34 +600,97 @@ impl Dispatcher {
             return;
         };
         entry.last_seen = Some(recv_at);
-        let Some(mut window) = entry.live.take() else {
+
+        // A stop whose publish time falls inside the live window closes the live
+        // recording normally. A stop that predates the live window is a delayed
+        // stop for a recording `handle_start` already retired (an inverted
+        // start/stop pair) — it is matched against the closing windows instead.
+        // Both paths converge on the shared post-persist tail below, so a
+        // retired recording also becomes notifiable (fires `RecordingStopped`).
+        let recording_index = if entry
+            .live
+            .as_ref()
+            .is_some_and(|window| window.contains(publish_timestamp_ns))
+        {
+            let mut window = entry
+                .live
+                .take()
+                .expect("live window was checked immediately above");
+            // The window closes on the publish clock; the row's
+            // `stop_timestamp_ns` (→ backend `end_time`) is the caller's capture
+            // time.
+            window.stopped_at_ns = Some(publish_timestamp_ns);
+            window.stop_recv_at = Some(recv_at);
+            let recording_index = window.recording_index;
+            entry.closing.push(window);
+            // Persist `stopped_at` before publishing the event: the cloud
+            // stop-notifier reads this row on `RecordingStopped`, so the
+            // timestamp must be on disk first.
+            if let Err(error) = self
+                .store
+                .mark_recording_stopped(recording_index, timestamp_ns)
+                .await
+            {
+                tracing::warn!(%error, recording_index, "failed to mark recording stopped");
+                return;
+            }
+            recording_index
+        } else if let Some(position) = entry
+            .closing
+            .iter()
+            .rposition(|window| window.contains(publish_timestamp_ns))
+        {
+            let window = &mut entry.closing[position];
+            let recording_index = window.recording_index;
+            // Deliberately DO NOT narrow the window's in-memory `stopped_at_ns`
+            // to this true (earlier) stop. `handle_start` set it to the
+            // successor recording's start time so the two consecutive windows
+            // tile the publish-clock line with no gap. Rewinding it to the real
+            // stop would re-open a no-window interval `(true stop, successor
+            // start)`; a tail video chunk whose NUT open time lands in that gap
+            // — the writer is mid-flush at exactly that moment — would then find
+            // no window and be dropped as an orphan. Only the retired
+            // recording's own producer can stamp data in that interval, so
+            // keeping the boundary at the successor start mis-routes nothing.
+            //
+            // Refresh the closing-retention deadline so the extra late tail data
+            // this delayed stop implies still has a window to land in.
+            window.stop_recv_at = Some(recv_at);
+            tracing::warn!(
+                robot_id = source.0,
+                recording_index,
+                "stop arrived after a later recording started; refining the retired recording's stop"
+            );
+            // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
+            // this true capture stop. `handle_start` already marked the row with
+            // the successor start's time, and `mark_recording_stopped` is
+            // COALESCE-idempotent, so a plain re-mark would no-op — a forced
+            // overwrite is required, and correct because `stop < successor
+            // start`.
+            if let Err(error) = self
+                .store
+                .refine_recording_stop(recording_index, timestamp_ns)
+                .await
+            {
+                tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
+                return;
+            }
+            recording_index
+        } else {
             tracing::debug!(
                 robot_id = source.0,
-                "stop with no active recording; ignoring"
+                publish_timestamp_ns,
+                "stop does not belong to any retained recording window; ignoring"
             );
             return;
         };
-        // The window closes on the publish clock; the row's `stop_timestamp_ns`
-        // (→ backend `end_time`) is the caller's capture time.
-        window.stopped_at_ns = Some(publish_timestamp_ns);
-        window.stop_recv_at = Some(recv_at);
-        let recording_index = window.recording_index;
-        entry.closing.push(window);
 
-        // Persist `stopped_at` before publishing the event: the cloud
-        // stop-notifier reads this row on `RecordingStopped`, so the timestamp
-        // must be on disk first.
-        if let Err(error) = self
-            .store
-            .mark_recording_stopped(recording_index, timestamp_ns)
-            .await
-        {
-            tracing::warn!(%error, recording_index, "failed to mark recording stopped");
-        } else {
-            tracing::info!(recording_index, "recording stopped");
-            if let Some(bus) = self.context.event_bus.as_ref() {
-                bus.publish(DaemonEvent::RecordingStopped { recording_index });
-            }
+        // Shared post-persist tail. A retired recording never fired
+        // `RecordingStopped` at retire time (only its row was marked), so this
+        // is where it — like a normally-closed recording — becomes notifiable.
+        tracing::info!(recording_index, "recording stopped");
+        if let Some(bus) = self.context.event_bus.as_ref() {
+            bus.publish(DaemonEvent::RecordingStopped { recording_index });
         }
     }
 
@@ -1316,6 +1403,125 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
         assert_eq!(a, serde_json::json!([{"i": 1}]));
+    }
+
+    #[tokio::test]
+    async fn inverted_stop_after_next_start_preserves_both_recordings() {
+        // A slow stop can reach the daemon after the next recording's start
+        // (start/stop inversion). Listener order here is:
+        //   start(A, t1=100) -> data(A) -> start(B, t3=200)
+        //   -> stop(t2=150) -> data(B) -> stop(t4=300)
+        // with t1 < t2 < t3 < t4. The dispatcher must: close A (stopped_at set,
+        // refined to the true stop 150) with its data; keep B alive through
+        // t2's stolen stop, closing it only at t4 (300) with its data; drop
+        // nothing as an orphan (both traces exist); and fire RecordingStopped
+        // for BOTH recordings (the retired one must still become notifiable).
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let mut sub = bus.subscribe();
+        let dispatcher_context = DispatcherContext {
+            event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(datum("robot-1", 110, 1)).await.unwrap();
+        tx.send(start("robot-1", 200)).await.unwrap();
+        // The stolen stop: its publish time (150) predates B's open (200).
+        tx.send(stop("robot-1", 150)).await.unwrap();
+        tx.send(datum("robot-1", 210, 2)).await.unwrap();
+        tx.send(stop("robot-1", 300)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+        let recording_a = &recordings[0];
+        let recording_b = &recordings[1];
+
+        assert!(
+            recording_a.stopped_at.is_some(),
+            "recording A must be closed when the next start supersedes it"
+        );
+        assert_eq!(
+            recording_a.stop_timestamp_ns,
+            Some(150),
+            "recording A's stop must be refined to the true (earlier) stop"
+        );
+        assert!(
+            recording_b.stopped_at.is_some(),
+            "recording B must be closed by its own stop"
+        );
+        assert_eq!(
+            recording_b.stop_timestamp_ns,
+            Some(300),
+            "the stolen stop at 150 must not close B; only t4 does"
+        );
+
+        let a_traces = store
+            .list_traces_for_recording(recording_a.recording_index)
+            .await
+            .unwrap();
+        let b_traces = store
+            .list_traces_for_recording(recording_b.recording_index)
+            .await
+            .unwrap();
+        assert_eq!(a_traces.len(), 1, "A keeps its datum (ts=110)");
+        assert_eq!(
+            b_traces.len(),
+            1,
+            "B keeps its datum (ts=210), not orphaned"
+        );
+
+        let a_dir = TracePath::new(
+            recording_a.recording_index.to_string(),
+            "joints",
+            a_traces[0].trace_id.clone(),
+        )
+        .directory(context.recordings_root.as_path());
+        let a: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
+        assert_eq!(a, serde_json::json!([{"i": 1}]));
+
+        let b_dir = TracePath::new(
+            recording_b.recording_index.to_string(),
+            "joints",
+            b_traces[0].trace_id.clone(),
+        )
+        .directory(context.recordings_root.as_path());
+        let b: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(b_dir.join("trace.json")).unwrap()).unwrap();
+        assert_eq!(b, serde_json::json!([{"i": 2}]));
+
+        // Both recordings must fire RecordingStopped — the retired recording A
+        // (via the delayed-stop fall-through) as well as the normally-closed B —
+        // so the cloud stop-notifier fires for each.
+        let mut stopped: Vec<i64> = Vec::new();
+        while let Ok(event) = sub.try_recv() {
+            if let DaemonEvent::RecordingStopped { recording_index } = event {
+                stopped.push(recording_index);
+            }
+        }
+        assert!(
+            stopped.contains(&recording_a.recording_index),
+            "RecordingStopped must fire for the retired recording A"
+        );
+        assert!(
+            stopped.contains(&recording_b.recording_index),
+            "RecordingStopped must fire for the normally-closed recording B"
+        );
     }
 
     /// Announce a finished video chunk whose open time is `publish_ts`. The
