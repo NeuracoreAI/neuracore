@@ -18,13 +18,18 @@
 //! `StopRecording` published from the writer's port instead, it could be
 //! reordered against the next recording's `StartRecording` on the main port —
 //! the daemon then sees a start while the prior window is still live and drops
-//! the overlapping window's data.) The stop/cancel paths only *barrier* on the
-//! writer — seal + announce (or drop) the source's tail chunks, ack — and then
-//! publish the lifecycle envelope themselves. Chunk-before-stop ordering is not
-//! a same-port guarantee here but is safe anyway: the daemon holds every
-//! `VideoChunkReady` back (`NCD_HOLDBACK_MS`, default 500 ms) and retains a
-//! just-closed window, so a tail chunk announced just before the stop still
-//! routes into the (closing) window by its in-window open timestamp.
+//! the overlapping window's data.) `stop_recording` publishes its
+//! `StopRecording` *before* it waits on the writer flush barrier, so a slow
+//! flush can never hold the stop behind the next recording's `StartRecording`;
+//! the tail chunks are sealed + announced during the barrier and land just
+//! after the stop. `cancel_recording` keeps the opposite order — it waits on
+//! the writer barrier to drop the source's in-progress chunks *before*
+//! publishing `CancelRecording`, so no tail chunk is ever announced after the
+//! daemon tears the window down. Chunk-before-stop ordering is not a same-port
+//! guarantee here but is safe anyway: the daemon holds every `VideoChunkReady`
+//! back (`NCD_HOLDBACK_MS`, default 500 ms) and retains a just-closed window,
+//! so a tail chunk announced just after the stop still routes into the
+//! (closing) window by its in-window open timestamp.
 //!
 //! ## Fork safety
 //!
