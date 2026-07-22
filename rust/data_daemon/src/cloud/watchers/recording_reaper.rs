@@ -169,6 +169,17 @@ mod tests {
     /// Drive a stopped recording with one fully-uploaded trace through every
     /// notify + progress gate so the server-side reclaim filter reports it.
     async fn seed_reclaimable_stopped(store: &SqliteStateStore, instance: i64) -> i64 {
+        let index = seed_stopped_unreported(store, instance).await;
+        store
+            .mark_traces_completion_reported(&[format!("t-{instance}")])
+            .await
+            .unwrap();
+        index
+    }
+
+    /// Same as [`seed_reclaimable_stopped`] but the trace's `UPLOAD_COMPLETE`
+    /// has not yet been acknowledged by the backend.
+    async fn seed_stopped_unreported(store: &SqliteStateStore, instance: i64) -> i64 {
         let index = store
             .create_recording(new_recording(instance))
             .await
@@ -206,6 +217,36 @@ mod tests {
             .await
             .unwrap();
         index
+    }
+
+    /// The `bbe50b98` incident shape: everything settled locally, but the
+    /// status coordinator has not yet flushed the trace's `UPLOAD_COMPLETE`
+    /// to the backend. The sweep must leave the recording alone.
+    #[tokio::test]
+    async fn sweep_spares_a_recording_with_an_unacknowledged_completion() {
+        let (store, _db_dir) = open_store().await;
+        let root_dir = TempDir::new().unwrap();
+        let root = Arc::new(root_dir.path().to_path_buf());
+        let index = seed_stopped_unreported(&store, 0).await;
+
+        let dir = recording_dir(&root, index);
+        std::fs::create_dir_all(&dir).unwrap();
+        touch(&dir.join("trace.json"));
+
+        sweep_once(&Arc::new(store.clone()), &root).await;
+
+        assert!(dir.exists(), "files survive until the completion is acked");
+        assert!(
+            store.get_recording(index).await.unwrap().is_some(),
+            "the recording row survives until the completion is acked"
+        );
+
+        store
+            .mark_traces_completion_reported(&["t-0".to_string()])
+            .await
+            .unwrap();
+        sweep_once(&Arc::new(store.clone()), &root).await;
+        assert!(!dir.exists(), "acked completion unblocks the reclaim");
     }
 
     /// A cancelled recording whose backend cancel has been notified — the
