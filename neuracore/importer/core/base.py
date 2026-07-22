@@ -110,6 +110,7 @@ class NeuracoreDatasetImporter(ABC):
     """Importer workflow that manages workers and Neuracore session setup."""
 
     DISK_CHECK_INTERVAL_SECS: float = 10.0
+    _instance_base: int = 0
 
     def __init__(
         self,
@@ -190,8 +191,14 @@ class NeuracoreDatasetImporter(ABC):
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int = -1
+        self._instance_base: int = random.randrange(1_000, 1_000_000)
         self._error_queue: mp.Queue[WorkerError] | None = None
         self.completed_items_file = self._resolve_completed_items_file()
+        self.logger.debug("Importer robot instance base: %d", self._instance_base)
+
+    def robot_instance(self, worker_id: int) -> int:
+        """Robot instance for a worker, disjoint from other importer runs."""
+        return self._instance_base + max(0, worker_id)
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -756,6 +763,7 @@ class NeuracoreDatasetImporter(ABC):
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
+        instance = self.robot_instance(self._worker_id)
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
                 name=name,
@@ -763,7 +771,7 @@ class NeuracoreDatasetImporter(ABC):
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -774,7 +782,7 @@ class NeuracoreDatasetImporter(ABC):
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -785,7 +793,7 @@ class NeuracoreDatasetImporter(ABC):
                 extrinsics=extrinsics,
                 intrinsics=intrinsics,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -794,7 +802,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 language=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -805,7 +813,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -814,7 +822,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 velocity=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -823,7 +831,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 torque=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -835,7 +843,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 target_position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -844,7 +852,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 position=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -853,7 +861,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -862,7 +870,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 value=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -872,7 +880,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -881,7 +889,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 pose=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -890,7 +898,7 @@ class NeuracoreDatasetImporter(ABC):
                 name=name,
                 data=transformed_data,
                 robot_name=self.dataset_config.robot.name,
-                instance=self._worker_id,
+                instance=instance,
                 timestamp=timestamp,
                 dry_run=self.dry_run,
             )
@@ -900,7 +908,11 @@ class NeuracoreDatasetImporter(ABC):
     ) -> None:
         """Log in and connect to Neuracore dataset for the worker."""
         nc.login()
-        nc.connect_robot(self.robot_name, instance=worker_id, shared=self.shared)
+        nc.connect_robot(
+            self.robot_name,
+            instance=self.robot_instance(worker_id),
+            shared=self.shared,
+        )
         nc.get_dataset(id=self.output_dataset_id)
         if self.urdf_path is not None:
             urdf_packages_dir = os.path.dirname(self.urdf_path)
@@ -1208,7 +1220,10 @@ class NeuracoreDatasetImporter(ABC):
             self.import_item(item)
         except Exception as exc:  # noqa: BLE001 - keep traceback for summary
             if not self.dry_run:
-                nc.cancel_recording(robot_name=self.robot_name, instance=worker_id)
+                nc.cancel_recording(
+                    robot_name=self.robot_name,
+                    instance=self.robot_instance(worker_id),
+                )
             tb = traceback.format_exc()
             if self.skip_on_error == "episode":
                 error_queue.put(
