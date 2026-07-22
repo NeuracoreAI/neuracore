@@ -76,7 +76,7 @@ jobs:
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        tests/integration/platform/data_daemon/behavioural_correctness/
 
     - name: Show disk space after tests
       if: always()
