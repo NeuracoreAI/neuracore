@@ -175,6 +175,18 @@ pub trait StateStore: Send + Sync {
         stop_timestamp_ns: i64,
     ) -> Result<RecordingRow, StateStoreError>;
 
+    /// Refine a retired recording's `stop_timestamp_ns` to the true stop that
+    /// arrived after a later recording had already started (an inverted
+    /// start/stop pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
+    /// this overwrites `stop_timestamp_ns` even when already set, because the
+    /// stop that superseded it was the *earlier*, accurate one; `stopped_at`
+    /// (wall clock, already set when the recording was retired) is preserved.
+    async fn refine_recording_stop(
+        &self,
+        recording_index: i64,
+        stop_timestamp_ns: i64,
+    ) -> Result<RecordingRow, StateStoreError>;
+
     /// Stamp `backend_stop_notified_at = now` after the recording-stop
     /// notifier successfully POSTed `/recording/stop`. Idempotent: a second
     /// call leaves the existing timestamp untouched.
@@ -1065,6 +1077,35 @@ impl StateStore for SqliteStateStore {
             "UPDATE recordings \
                 SET stopped_at = COALESCE(stopped_at, ?2), \
                     stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?3), \
+                    last_updated = ?2 \
+              WHERE recording_index = ?1",
+        )
+        .bind(recording_index)
+        .bind(now)
+        .bind(stop_timestamp_ns)
+        .execute(&mut *tx)
+        .await?;
+
+        let record = Self::fetch_recording_locked(&mut tx, recording_index)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?;
+
+        tx.commit().await?;
+        Ok(record)
+    }
+
+    async fn refine_recording_stop(
+        &self,
+        recording_index: i64,
+        stop_timestamp_ns: i64,
+    ) -> Result<RecordingRow, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET stop_timestamp_ns = ?3, \
+                    stopped_at = COALESCE(stopped_at, ?2), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
