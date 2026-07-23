@@ -44,6 +44,9 @@ const MAIN_STARTCODE: u64 = 0x4E4D_7A56_1F5F_04AD;
 const STREAM_STARTCODE: u64 = 0x4E53_1140_5BF2_F9DB;
 const SYNCPOINT_STARTCODE: u64 = 0x4E4B_E4AD_EECA_4569;
 
+/// On-disk width of a startcode — the full 64 bits, written big-endian.
+const STARTCODE_BYTES: usize = size_of::<u64>();
+
 /// NUT bitstream version we emit. Version 3 is the long-stable spec; version
 /// 4 introduced extra stream-header fields we do not need.
 const NUT_VERSION: u64 = 3;
@@ -652,7 +655,7 @@ fn wrap_packet(startcode: u64, payload: &[u8]) -> Vec<u8> {
     let forward_ptr = payload.len() as u64 + 4; // +4 for the trailing checksum
     let needs_header_checksum = forward_ptr > 4096;
 
-    let mut packet = Vec::with_capacity(8 + 9 + 4 + payload.len() + 4);
+    let mut packet = Vec::with_capacity(STARTCODE_BYTES + 9 + 4 + payload.len() + 4);
     packet.extend_from_slice(&startcode.to_be_bytes());
     vencode(&mut packet, forward_ptr);
     if needs_header_checksum {
@@ -712,6 +715,50 @@ fn sencode(out: &mut Vec<u8>, value: i64) {
         magnitude.wrapping_mul(2).wrapping_sub(1)
     };
     vencode(out, encoded);
+}
+
+/// Decode every frame's PTS from a finished NUT chunk, in write order — the
+/// test-side inverse of [`NutWriter::write_frame_precompressed`]'s framing, so
+/// writer tests can assert on the exact timestamps written into a chunk.
+#[cfg(test)]
+pub(crate) fn read_frame_pts(bytes: &[u8]) -> Vec<u64> {
+    let mut pts_values = Vec::new();
+    let mut offset = FILE_ID_STRING.len();
+    while offset < bytes.len() {
+        if bytes[offset] == b'N' {
+            // Startcode-wrapped packet (headers / syncpoints): skip startcode,
+            // forward_ptr, the header checksum forward_ptr > 4096 implies, and
+            // the payload-plus-checksum span forward_ptr covers.
+            offset += STARTCODE_BYTES;
+            let (forward_ptr, consumed) = vdecode(bytes, offset);
+            offset += consumed;
+            if forward_ptr > 4096 {
+                offset += 4;
+            }
+            offset += forward_ptr as usize;
+        } else {
+            assert_eq!(
+                bytes[offset], FRAME_CODE_ALL_EXPLICIT,
+                "unexpected frame_code at offset {offset}"
+            );
+            offset += 1;
+            let (_coded_flags, consumed) = vdecode(bytes, offset);
+            offset += consumed;
+            let (_stream_id, consumed) = vdecode(bytes, offset);
+            offset += consumed;
+            let (coded_pts, consumed) = vdecode(bytes, offset);
+            offset += consumed;
+            let (data_size, consumed) = vdecode(bytes, offset);
+            offset += consumed;
+            let pts = coded_pts
+                .checked_sub(1u64 << MSB_PTS_SHIFT)
+                .expect("frame not coded in full-pts form");
+            pts_values.push(pts);
+            // Skip the frame header checksum and the payload.
+            offset += 4 + data_size as usize;
+        }
+    }
+    pts_values
 }
 
 /// Decode a NUT variable-length unsigned integer starting at `offset`.
