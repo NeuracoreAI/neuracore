@@ -221,7 +221,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         total_steps = self._infer_total_steps(steps)
         base_time = time.time()
         if not self.dry_run:
-            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
+            nc.start_recording(
+                robot_name=self.robot_name,
+                instance=self.robot_instance(self._worker_id),
+            )
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
             if item.split is not None
@@ -258,7 +261,9 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             )
         if not self.dry_run:
             nc.stop_recording(
-                robot_name=self.robot_name, instance=self._worker_id, wait=True
+                robot_name=self.robot_name,
+                instance=self.robot_instance(self._worker_id),
+                wait=True,
             )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 

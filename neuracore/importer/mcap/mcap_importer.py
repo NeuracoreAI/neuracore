@@ -128,7 +128,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             raise ImportError(f"MCAP file not found for item {item.index}.")
 
         label = item.description or file_path.name
-        instance = max(0, self._worker_id)
+        instance = self.robot_instance(self._worker_id)
         self.logger.info(
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )

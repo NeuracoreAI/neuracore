@@ -161,7 +161,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             self.num_episodes,
         )
         if not self.dry_run:
-            nc.start_recording(robot_name=self.robot_name, instance=self._worker_id)
+            nc.start_recording(
+                robot_name=self.robot_name,
+                instance=self.robot_instance(self._worker_id),
+            )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
             item.index, step=0, total_steps=total_steps, episode_label=str(episode_id)
@@ -195,7 +198,9 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             )
         if not self.dry_run:
             nc.stop_recording(
-                robot_name=self.robot_name, instance=self._worker_id, wait=True
+                robot_name=self.robot_name,
+                instance=self.robot_instance(self._worker_id),
+                wait=True,
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
