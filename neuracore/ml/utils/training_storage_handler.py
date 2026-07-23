@@ -8,7 +8,6 @@ import requests
 import torch
 from torch import nn
 
-import neuracore as nc
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
@@ -203,7 +202,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         load_path = self.local_dir / checkpoint_name
         if self.log_to_cloud:
             download_url = self._get_checkpoint_download_url(checkpoint_name)
-            session = thread_local_session()
+            session = thread_local_session(retry_transient=True)
             response = session.get(download_url)
             if response.status_code != 200:
                 raise ValueError(
@@ -334,13 +333,8 @@ class TrainingStorageHandler(UploadStorageMixin):
             headers: Optional headers to include in the request.
         """
         headers = headers or get_auth().get_headers()
-        session = thread_local_session()
-        response = session.put(url, headers=headers, json=json, data=data)
-        if response.status_code == 401:
-            logger.warning("Unauthorized request. Token may have expired.")
-            nc.login()
-            response = session.put(url, headers=headers, json=json, data=data)
-        return response
+        session = thread_local_session(retry_transient=True)
+        return session.put(url, headers=headers, json=json, data=data)
 
     def _get_request(self, url: str, params: dict | None = None) -> requests.Response:
         """Helper method to send a GET request.
@@ -349,13 +343,8 @@ class TrainingStorageHandler(UploadStorageMixin):
             url: The URL to send the request to.
             params: Optional parameters to include in the request.
         """
-        session = thread_local_session()
-        response = session.get(url, headers=get_auth().get_headers(), params=params)
-        if response.status_code == 401:
-            logger.warning("Unauthorized request. Token may have expired.")
-            nc.login()
-            response = session.get(url, headers=get_auth().get_headers(), params=params)
-        return response
+        session = thread_local_session(retry_transient=True)
+        return session.get(url, headers=get_auth().get_headers(), params=params)
 
     def _delete_request(self, url: str) -> requests.Response:
         """Helper method to send a DELETE request.
@@ -363,10 +352,5 @@ class TrainingStorageHandler(UploadStorageMixin):
         Args:
             url: The URL to send the request to.
         """
-        session = thread_local_session()
-        response = session.delete(url, headers=get_auth().get_headers())
-        if response.status_code == 401:
-            logger.warning("Unauthorized request. Token may have expired.")
-            nc.login()
-            response = session.delete(url, headers=get_auth().get_headers())
-        return response
+        session = thread_local_session(retry_transient=True)
+        return session.delete(url, headers=get_auth().get_headers())

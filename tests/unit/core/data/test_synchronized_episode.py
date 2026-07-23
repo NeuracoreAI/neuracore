@@ -1,8 +1,9 @@
 """Tests for SynchronizedRecording class."""
 
 import re
+from types import SimpleNamespace
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -11,6 +12,8 @@ from PIL import Image
 
 from neuracore.core.const import API_URL
 from neuracore.core.data.synced_recording import SynchronizedRecording
+
+MODULE = "neuracore.core.data.synced_recording"
 
 
 @pytest.mark.usefixtures("mock_login")
@@ -97,6 +100,30 @@ class TestSynchronizedRecording:
         assert len(result.observations) == len(synced_data.observations)
         assert result.start_time == synced_data.start_time
         assert result.end_time == synced_data.end_time
+
+    def test_get_synced_data_requests_a_retrying_session(self, synced_data) -> None:
+        """Test that _get_synced_data requests the retrying session."""
+        fake_self = SimpleNamespace(
+            id="rec-1",
+            dataset=SimpleNamespace(org_id="org-1"),
+            frequency=30,
+            cross_embodiment_union=None,
+        )
+        session = MagicMock()
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = synced_data.model_dump(mode="json")
+        session.post.return_value = response
+        auth = MagicMock()
+        auth.get_headers = MagicMock(return_value={})
+
+        with (
+            patch(f"{MODULE}.thread_local_session", return_value=session) as mock,
+            patch(f"{MODULE}.get_auth", return_value=auth),
+        ):
+            SynchronizedRecording._get_synced_data(fake_self)
+
+        mock.assert_called_with(retry_transient=True)
 
     def test_len(self, synced_recording):
         """Test __len__ returns correct number of frames."""
