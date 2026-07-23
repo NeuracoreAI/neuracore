@@ -20,7 +20,12 @@ const RECORDING_ID_RECEIVE_POLL: Duration = Duration::from_millis(2);
 /// Interval between successive health probes to the daemon.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a single health request waits for the daemon's reply before re-asking.
-const HEALTH_RESPONSE_WAIT: Duration = Duration::from_millis(20);
+///
+/// This must comfortably exceed the daemon listener's 25 ms idle poll interval.
+/// A shorter window can abandon every request before an idle daemon gets its
+/// next polling turn, making startup report that a healthy daemon never became
+/// ready. The extra margin also covers scheduler jitter under macOS tracing.
+const HEALTH_RESPONSE_WAIT: Duration = Duration::from_millis(100);
 /// Poll cadence while waiting for one health reply.
 const HEALTH_RECEIVE_POLL: Duration = Duration::from_millis(2);
 

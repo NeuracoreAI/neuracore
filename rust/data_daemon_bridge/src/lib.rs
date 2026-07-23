@@ -45,6 +45,7 @@ pub mod nut_writer;
 mod paths;
 mod publisher;
 mod query;
+mod sleep_diagnostics;
 mod writer;
 
 use data_daemon_shared::{Envelope, RecordingIdQuery};
@@ -54,6 +55,7 @@ use pyo3::prelude::*;
 
 use crate::publisher::{now_ns, publish, publisher_tx, ProducerError, PublishMsg};
 use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
+use crate::sleep_diagnostics::{diagnostic_native_sleep, diagnostic_signpost_anomaly};
 use crate::writer::{writer_queue, FrameJob, WriterMsg};
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
@@ -322,6 +324,9 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
+        let queue = writer_queue();
+        let queue_before = queue.snapshot();
+        let stop_started = std::time::Instant::now();
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
@@ -332,12 +337,14 @@ fn stop_recording(
         // flush barrier keeps consecutive recordings' start/stop boundaries
         // strictly ordered: the stop can never be reordered behind the next
         // recording's `StartRecording` on this thread.
+        let publish_started = std::time::Instant::now();
         publish(&Envelope::StopRecording {
             robot_id: robot_id.clone(),
             robot_instance,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        let publish_elapsed = publish_started.elapsed();
         // Then barrier on the writer: it drains every frame still queued for
         // this source (FIFO), seals the tail chunks and announces them, then
         // acks. Blocking here means `stop_recording` still returns only once
@@ -347,13 +354,40 @@ fn stop_recording(
         // retention route them into the just-closed window by their in-window
         // open timestamp.
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let drain_started = std::time::Instant::now();
         // Control messages bypass the frame caps, so this never blocks or stalls.
-        let _ = writer_queue().push(WriterMsg::FlushSource {
-            robot_id,
+        let _ = queue.push(WriterMsg::FlushSource {
+            robot_id: robot_id.clone(),
             robot_instance,
             ack: ack_tx,
         });
         let _ = ack_rx.recv();
+        let drain_elapsed = drain_started.elapsed();
+        let queue_after = queue.snapshot();
+        eprintln!(
+            concat!(
+                "NCD writer stop diagnostics source={}:{} total_ms={:.1} ",
+                "publish_ms={:.1} drain_ms={:.1} ",
+                "before[msgs={} in_flight={} raw_mib={:.1} spool_mib={:.1} ",
+                "memory_cap_mib={:.1} spool_cap_mib={:.1}] ",
+                "after[msgs={} in_flight={} raw_mib={:.1} spool_mib={:.1}]",
+            ),
+            robot_id,
+            robot_instance,
+            stop_started.elapsed().as_secs_f64() * 1_000.0,
+            publish_elapsed.as_secs_f64() * 1_000.0,
+            drain_elapsed.as_secs_f64() * 1_000.0,
+            queue_before.queued_messages,
+            queue_before.in_flight_frames,
+            queue_before.queued_frame_bytes as f64 / (1024.0 * 1024.0),
+            queue_before.spool_bytes as f64 / (1024.0 * 1024.0),
+            queue_before.memory_max as f64 / (1024.0 * 1024.0),
+            queue_before.spool_max as f64 / (1024.0 * 1024.0),
+            queue_after.queued_messages,
+            queue_after.in_flight_frames,
+            queue_after.queued_frame_bytes as f64 / (1024.0 * 1024.0),
+            queue_after.spool_bytes as f64 / (1024.0 * 1024.0),
+        );
         Ok(())
     })
 }
@@ -470,5 +504,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
+    module.add_function(wrap_pyfunction!(diagnostic_native_sleep, module)?)?;
+    module.add_function(wrap_pyfunction!(diagnostic_signpost_anomaly, module)?)?;
     Ok(())
 }

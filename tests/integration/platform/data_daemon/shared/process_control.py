@@ -36,6 +36,9 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import (
     terminate_pid,
     wait_for_exit,
 )
+from tests.integration.platform.data_daemon.shared.producer_diagnostics import (
+    ProducerDiagnosticHistory,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
     STOP_METHOD_SIGINT,
@@ -162,17 +165,41 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
-def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
+def assert_on_schedule(
+    deadline: float,
+    tolerance: float,
+    label: str,
+    *,
+    observed_at: float | None = None,
+    diagnostic_history: ProducerDiagnosticHistory | None = None,
+    role_name: str | None = None,
+    frame_index: int | None = None,
+) -> float:
     """Assert the producer fired at the intended wall-clock moment.
 
     Independent of any duration check: bounds *when* a logging call started,
-    not how long it took.
+    not how long it took. ``observed_at`` lets callers use the exact same clock
+    sample for diagnostics and the assertion.
     """
-    lateness = time.time() - deadline
-    assert abs(lateness) <= tolerance, (
+    observed = time.time() if observed_at is None else observed_at
+    lateness = observed - deadline
+    message = (
         f"{label} fired at wrong moment: "
         f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
     )
+    on_schedule = abs(lateness) <= tolerance
+    if not on_schedule and diagnostic_history is not None:
+        try:
+            message += "\n" + diagnostic_history.format_failure(
+                role_name=role_name or label,
+                frame_index=-1 if frame_index is None else frame_index,
+                deadline=deadline,
+                observed_at=observed,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to format producer scheduling diagnostics")
+    assert on_schedule, message
+    return lateness
 
 
 def surface_worker_errors(fn):

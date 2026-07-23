@@ -192,9 +192,13 @@ geomadr
 geomid
 geomnum
 getbuffer
+getloadavg
 getpgid
+getpgrp
 getpid
+getpriority
 gettid
+gettime
 ghjdidnia
 gitignored
 gptj
@@ -325,6 +329,7 @@ Nonblock
 noprint
 nostdin
 nprocs
+nsec
 numpy
 octomap
 offsamples
@@ -463,6 +468,7 @@ synchronizable
 syncpoint
 syncpoints
 targetbody
+tcgetpgrp
 tdefl
 TDVB
 teleop
@@ -475,6 +481,7 @@ tfrecord
 thiserror
 threadid
 thres
+timespec
 timestep
 timesteps
 tinyxml
@@ -538,6 +545,8 @@ writeback
 WRONLY
 wxyz
 XARM
+xcrun
+xctrace
 xdata
 xdist
 xlabel

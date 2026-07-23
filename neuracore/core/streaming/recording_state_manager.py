@@ -52,6 +52,13 @@ def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
     forced 5-minute timeout. Failures are logged and swallowed: the local
     expiry must always succeed.
     """
+    started_at = time.perf_counter()
+    logger.warning(
+        "Recording expiry bridge drain starting source=%s:%s monotonic=%.6f",
+        robot_id,
+        instance,
+        started_at,
+    )
     try:
         _recording_context._load_native().stop_recording(
             robot_id, instance, time.time_ns()
@@ -61,6 +68,13 @@ def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
             "Failed to notify data bridge of recording expiry for %s:%s",
             robot_id,
             instance,
+        )
+    else:
+        logger.warning(
+            "Recording expiry bridge drain complete source=%s:%s elapsed=%.3fs",
+            robot_id,
+            instance,
+            time.perf_counter() - started_at,
         )
 
 

@@ -36,7 +36,7 @@ jobs:
       max-parallel: 2
       matrix:
         python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        os: [macos-26]
 
     steps:
     - name: Show disk space
@@ -62,21 +62,43 @@ jobs:
         path: "."
         extras: dev
 
+    - name: Disable timer coalescing (macOS)
+      if: runner.os == 'macOS'
+      run: sudo sysctl -w kern.timer.coalescing_enabled=0
+
     - name: Run Data Daemon Integration Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        NEURACORE_PRODUCER_DIAGNOSTICS: "1"
+        NEURACORE_SLEEP_ANOMALIES_PATH: ${{ runner.temp }}/sleep-anomalies.jsonl
+        NEURACORE_DAEMON_PID_PATH: ${{ runner.temp }}/neuracore-data-daemon.pid
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
       # stays attributable.
-      run: >-
-        pytest -o log_cli=true --log-cli-level=INFO
-        -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
-        --import-mode=importlib
-        tests/integration/platform/data_daemon/
+      run: |
+        bash scripts/diagnostics/capture_macos_sleep_latency.sh \
+          --output "$RUNNER_TEMP/stochastic-scheduler.trace" \
+          --time-limit 5m \
+          --window 10s \
+          -- python3 -m pytest -s \
+          -o log_cli=true --log-cli-level=INFO \
+          -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s" \
+          --import-mode=importlib \
+          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[60s-5recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+
+    - name: Upload macOS scheduler trace
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: stochastic-scheduler-trace-${{ matrix.python-version }}
+        path: |
+          ${{ runner.temp }}/stochastic-scheduler.trace
+          ${{ runner.temp }}/sleep-anomalies.jsonl
+        if-no-files-found: warn
 
     - name: Show disk space after tests
       if: always()
