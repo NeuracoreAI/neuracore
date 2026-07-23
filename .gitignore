@@ -122,6 +122,9 @@ examples/test_streaming/
 
 .data_daemon_test_state/
 
+# Local Neuracore login helper (contains credentials)
+login_neuracore.sh
+
 # Bundled rust artefacts built into the package tree by
 # `rust/scripts/build_wheel_artefacts.sh`. Both are per-machine and per-build,
 # so we never commit them; the wheel-build CI job recreates them on every run.

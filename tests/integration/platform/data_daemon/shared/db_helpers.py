@@ -29,6 +29,7 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -131,13 +132,13 @@ class DaemonDbStore:
     def fetch_all_rows(self, table: str) -> list[dict[str, Any]]:
         """Return every row from the named table in the daemon state DB."""
         table_name = self._table_name(table)
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(f"SELECT * FROM {table_name}").fetchall()  # noqa: S608
         return [dict(row) for row in rows]
 
     def list_tables(self) -> set[str]:
         """Return the names of all user tables currently present in the daemon DB."""
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
@@ -173,7 +174,7 @@ class DaemonDbStore:
         ``recording_id`` (TEXT) under the legacy Python daemon.
         """
         correlation_column = _recording_correlation_column()
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             row = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {correlation_column} = ?",
                 (recording_key,),
@@ -192,7 +193,7 @@ class DaemonDbStore:
         correlate a worker's recordings to daemon-minted ``recording_index``
         values without seeing the local handle.
         """
-        with self.connect() as conn:
+        with closing(self.connect()) as conn:
             rows = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} "
                 f"WHERE {COLUMN_ROBOT_ID} = ? AND {COLUMN_ROBOT_INSTANCE} = ? "
@@ -214,7 +215,7 @@ class DaemonDbStore:
         under the legacy Python daemon.
         """
         correlation_column = _recording_correlation_column()
-        with self.connect_read_only() as conn:
+        with closing(self.connect_read_only()) as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
 

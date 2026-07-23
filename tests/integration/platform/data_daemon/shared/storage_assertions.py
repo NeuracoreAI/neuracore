@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from neuracore.data_daemon.helpers import (
@@ -90,23 +91,22 @@ def assert_db_empty() -> None:
     db_path = harness_db_path()
     if not db_path.exists():
         return
-    with sqlite3.connect(str(db_path)) as conn:
+    non_empty: list[str] = []
+    with closing(sqlite3.connect(str(db_path))) as conn:
         tables = {
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ).fetchall()
         }
-    non_empty: list[str] = []
-    for table in sorted(tables):
-        if table in _INFRA_TABLES:
-            continue
-        with sqlite3.connect(str(db_path)) as conn:
+        for table in sorted(tables):
+            if table in _INFRA_TABLES:
+                continue
             count = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[
                 0
             ]  # noqa: S608
-        if count:
-            non_empty.append(f"  {table}: {count} row(s)")
+            if count:
+                non_empty.append(f"  {table}: {count} row(s)")
     assert (
         not non_empty
     ), "Daemon DB is not empty — unexpected rows found:\n" + "\n".join(non_empty)
