@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import neuracore as nc
+from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
@@ -282,11 +283,14 @@ def build_context_specs(
         if case.context_duration_mode == DURATION_MODE_VARIABLE:
             context_duration_sec = max(
                 1,
-                int(
-                    case.duration_sec
-                    * CONTEXT_DURATION_RANDOM.uniform(
-                        DURATION_VARIABLE_MIN_FACTOR, DURATION_VARIABLE_MAX_FACTOR
-                    )
+                min(
+                    int(
+                        case.duration_sec
+                        * CONTEXT_DURATION_RANDOM.uniform(
+                            DURATION_VARIABLE_MIN_FACTOR, DURATION_VARIABLE_MAX_FACTOR
+                        )
+                    ),
+                    RecordingStateManager.MAX_RECORDING_DURATION_S,
                 ),
             )
         else:
