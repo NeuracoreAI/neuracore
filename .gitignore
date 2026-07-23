@@ -131,3 +131,4 @@ login_neuracore.sh
 # See docs/rust_data_daemon_development.md#packaging-the-wheel.
 neuracore/data_daemon/bin/
 neuracore/data_daemon/_data_bridge*.so
+login_staging.sh

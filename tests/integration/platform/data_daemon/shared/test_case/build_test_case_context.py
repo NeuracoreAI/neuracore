@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import random
 import threading
 import time
@@ -17,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 
 import numpy as np
+import psutil
 
 import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
@@ -29,6 +31,10 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     init_worker_logging,
     relayed_worker_logs,
     surface_worker_errors,
+)
+from tests.integration.platform.data_daemon.shared.producer_diagnostics import (
+    ProducerDiagnosticHistory,
+    ProducerHeartbeatRegistry,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
@@ -361,6 +367,300 @@ def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
     return 0.0
 
 
+PRODUCER_TIMING_REPORT_INTERVAL_S = 60.0
+PRODUCER_TIMING_NEAR_LIMIT_FACTOR = 0.8
+PRODUCER_RESOURCE_SAMPLE_INTERVAL_S = 1.0
+PRODUCER_TIMING_METRICS = (
+    "joint_lateness",
+    "video_lateness",
+    "pre_wait_lateness",
+    "sleep_overshoot",
+    "joint_work",
+    "frame_build",
+    "rgb_log",
+)
+
+
+@dataclass(slots=True)
+class ProducerResourceSample:
+    """One non-blocking resource snapshot for a producer worker process."""
+
+    interval_s: float = 0.0
+    process_cpu_pct: float = 0.0
+    system_cpu_pct: float = 0.0
+    load_per_cpu_pct: float = 0.0
+    rss_mb: float = 0.0
+    thread_count: int = 0
+    voluntary_ctx_switches: int = 0
+    involuntary_ctx_switches: int = 0
+    disk_read_mbps: float = 0.0
+    disk_write_mbps: float = 0.0
+
+
+@dataclass(slots=True)
+class ProducerTimingDiagnostics:
+    """Rate-limited timing telemetry for a synchronous producer recording."""
+
+    context_index: int
+    recording_index: int
+    started_at: float = field(default_factory=time.perf_counter)
+    window_started_at: float = field(default_factory=time.perf_counter)
+    window_events: int = 0
+    near_limit_logged: bool = False
+    window_max: dict[str, float] = field(
+        default_factory=lambda: dict.fromkeys(PRODUCER_TIMING_METRICS, 0.0)
+    )
+    overall_max: dict[str, float] = field(
+        default_factory=lambda: dict.fromkeys(PRODUCER_TIMING_METRICS, 0.0)
+    )
+    last_duration: dict[str, float] = field(
+        default_factory=lambda: {
+            "joint_work": 0.0,
+            "frame_build": 0.0,
+            "rgb_log": 0.0,
+        }
+    )
+
+    process: psutil.Process = field(default_factory=psutil.Process, repr=False)
+    resource_last_at: float = field(default_factory=time.perf_counter)
+    resource_last_cpu_s: float = 0.0
+    resource_last_ctx_voluntary: int = 0
+    resource_last_ctx_involuntary: int = 0
+    resource_last_disk_read_bytes: int = 0
+    resource_last_disk_write_bytes: int = 0
+    resource_latest: ProducerResourceSample = field(
+        default_factory=ProducerResourceSample
+    )
+    resource_window_max: dict[str, float] = field(
+        default_factory=lambda: {
+            "process_cpu_pct": 0.0,
+            "system_cpu_pct": 0.0,
+            "load_per_cpu_pct": 0.0,
+            "rss_mb": 0.0,
+            "sample_gap_s": 0.0,
+            "disk_read_mbps": 0.0,
+            "disk_write_mbps": 0.0,
+        }
+    )
+
+    def __post_init__(self) -> None:
+        cpu_times = self.process.cpu_times()
+        self.resource_last_cpu_s = cpu_times.user + cpu_times.system
+        ctx_switches = self.process.num_ctx_switches()
+        self.resource_last_ctx_voluntary = ctx_switches.voluntary
+        self.resource_last_ctx_involuntary = ctx_switches.involuntary
+        disk = psutil.disk_io_counters()
+        if disk is not None:
+            self.resource_last_disk_read_bytes = disk.read_bytes
+            self.resource_last_disk_write_bytes = disk.write_bytes
+        # Prime the non-blocking system-CPU baseline. Subsequent calls
+        # report utilization over the interval since this one.
+        psutil.cpu_percent(interval=None)
+
+    def _sample_resources(self, *, force: bool = False) -> None:
+        """Refresh resource telemetry without sleeping."""
+        now = time.perf_counter()
+        interval_s = now - self.resource_last_at
+        if not force and interval_s < PRODUCER_RESOURCE_SAMPLE_INTERVAL_S:
+            return
+        if interval_s <= 0.0:
+            return
+
+        try:
+            cpu_times = self.process.cpu_times()
+            process_cpu_s = cpu_times.user + cpu_times.system
+            ctx_switches = self.process.num_ctx_switches()
+            disk = psutil.disk_io_counters()
+            cpu_count = psutil.cpu_count() or 1
+            try:
+                load_per_cpu_pct = (os.getloadavg()[0] / cpu_count) * 100
+            except (AttributeError, OSError):
+                load_per_cpu_pct = 0.0
+
+            disk_read_bytes = (
+                disk.read_bytes
+                if disk is not None
+                else self.resource_last_disk_read_bytes
+            )
+            disk_write_bytes = (
+                disk.write_bytes
+                if disk is not None
+                else self.resource_last_disk_write_bytes
+            )
+            sample = ProducerResourceSample(
+                interval_s=interval_s,
+                process_cpu_pct=(
+                    (process_cpu_s - self.resource_last_cpu_s) / interval_s * 100
+                ),
+                system_cpu_pct=psutil.cpu_percent(interval=None),
+                load_per_cpu_pct=load_per_cpu_pct,
+                rss_mb=self.process.memory_info().rss / (1024 * 1024),
+                thread_count=self.process.num_threads(),
+                voluntary_ctx_switches=(
+                    ctx_switches.voluntary - self.resource_last_ctx_voluntary
+                ),
+                involuntary_ctx_switches=(
+                    ctx_switches.involuntary - self.resource_last_ctx_involuntary
+                ),
+                disk_read_mbps=(
+                    (disk_read_bytes - self.resource_last_disk_read_bytes)
+                    / interval_s
+                    / (1024 * 1024)
+                ),
+                disk_write_mbps=(
+                    (disk_write_bytes - self.resource_last_disk_write_bytes)
+                    / interval_s
+                    / (1024 * 1024)
+                ),
+            )
+        except (OSError, psutil.Error):
+            logger.debug("Failed to sample producer resources", exc_info=True)
+            self.resource_last_at = now
+            return
+
+        self.resource_latest = sample
+        self.resource_last_at = now
+        self.resource_last_cpu_s = process_cpu_s
+        self.resource_last_ctx_voluntary = ctx_switches.voluntary
+        self.resource_last_ctx_involuntary = ctx_switches.involuntary
+        self.resource_last_disk_read_bytes = disk_read_bytes
+        self.resource_last_disk_write_bytes = disk_write_bytes
+        for metric in self.resource_window_max:
+            value = (
+                sample.interval_s
+                if metric == "sample_gap_s"
+                else getattr(sample, metric)
+            )
+            self.resource_window_max[metric] = max(
+                self.resource_window_max[metric], value
+            )
+
+    def _observe_max(self, metric: str, value: float) -> None:
+        value = max(0.0, value)
+        self.window_max[metric] = max(self.window_max[metric], value)
+        self.overall_max[metric] = max(self.overall_max[metric], value)
+
+    def observe_duration(self, metric: str, duration_s: float) -> None:
+        """Record one producer work duration."""
+        self.last_duration[metric] = duration_s
+        self._observe_max(metric, duration_s)
+
+    def observe_schedule(
+        self,
+        *,
+        stream: str,
+        frame_index: int,
+        deadline: float,
+        observed_before_wait: float,
+        observed_after_wait: float,
+        slept: bool,
+        tolerance_s: float,
+    ) -> None:
+        """Record schedule timing and emit a rate-limited near-limit warning."""
+        lateness = observed_after_wait - deadline
+        absolute_lateness = abs(lateness)
+        pre_wait_lateness = max(0.0, observed_before_wait - deadline)
+        sleep_overshoot = max(0.0, lateness) if slept else 0.0
+        lateness_metric = f"{stream}_lateness"
+
+        self.window_events += 1
+        previous_window_max = self.window_max[lateness_metric]
+        self._observe_max(lateness_metric, absolute_lateness)
+        self._observe_max("pre_wait_lateness", pre_wait_lateness)
+        self._observe_max("sleep_overshoot", sleep_overshoot)
+
+        exceeded = absolute_lateness > tolerance_s
+        near_limit = absolute_lateness >= (
+            tolerance_s * PRODUCER_TIMING_NEAR_LIMIT_FACTOR
+        )
+        self._sample_resources(force=near_limit)
+        should_log = exceeded or (
+            near_limit
+            and not self.near_limit_logged
+            and absolute_lateness >= previous_window_max
+        )
+        if should_log:
+            event_monotonic = time.perf_counter()
+            log = logger.error if exceeded else logger.warning
+            log(
+                "Producer timing near deadline ctx=%d rec_idx=%d stream=%s "
+                "frame=%d elapsed=%.3fs monotonic=%.6f "
+                "lateness=%+.1fms pre_wait_late=%.1fms "
+                "sleep_overshoot=%.1fms last_joint_work=%.1fms "
+                "last_frame_build=%.1fms last_rgb_log=%.1fms "
+                "resource_interval=%.2fs proc_cpu=%.0f%% system_cpu=%.0f%% "
+                "load_per_cpu=%.0f%% rss=%.1fMiB threads=%d "
+                "ctx_switches[v=%d iv=%d] disk[r=%.1fMiB/s w=%.1fMiB/s]",
+                self.context_index,
+                self.recording_index,
+                stream,
+                frame_index,
+                event_monotonic - self.started_at,
+                event_monotonic,
+                lateness * 1_000,
+                pre_wait_lateness * 1_000,
+                sleep_overshoot * 1_000,
+                self.last_duration["joint_work"] * 1_000,
+                self.last_duration["frame_build"] * 1_000,
+                self.last_duration["rgb_log"] * 1_000,
+                self.resource_latest.interval_s,
+                self.resource_latest.process_cpu_pct,
+                self.resource_latest.system_cpu_pct,
+                self.resource_latest.load_per_cpu_pct,
+                self.resource_latest.rss_mb,
+                self.resource_latest.thread_count,
+                self.resource_latest.voluntary_ctx_switches,
+                self.resource_latest.involuntary_ctx_switches,
+                self.resource_latest.disk_read_mbps,
+                self.resource_latest.disk_write_mbps,
+            )
+            self.near_limit_logged = True
+
+    def maybe_report(self, *, force: bool = False) -> None:
+        """Print one compact roll-up per interval, or a final recording roll-up."""
+        now = time.perf_counter()
+        window_elapsed = now - self.window_started_at
+        if not force and window_elapsed < PRODUCER_TIMING_REPORT_INTERVAL_S:
+            return
+        if self.window_events == 0:
+            return
+        self._sample_resources(force=True)
+
+        logger.info(
+            "Producer timing summary ctx=%d rec_idx=%d elapsed=%.1fs "
+            "window=%.1fs events=%d max_late[joint=%.1fms video=%.1fms] "
+            "max_wait[already_late=%.1fms sleep_overshoot=%.1fms] "
+            "max_work[joint=%.1fms frame_build=%.1fms rgb_log=%.1fms] "
+            "max_resource[proc_cpu=%.0f%% system_cpu=%.0f%% "
+            "load_per_cpu=%.0f%% rss=%.1fMiB sample_gap=%.2fs "
+            "disk_r=%.1fMiB/s disk_w=%.1fMiB/s]",
+            self.context_index,
+            self.recording_index,
+            now - self.started_at,
+            window_elapsed,
+            self.window_events,
+            self.window_max["joint_lateness"] * 1_000,
+            self.window_max["video_lateness"] * 1_000,
+            self.window_max["pre_wait_lateness"] * 1_000,
+            self.window_max["sleep_overshoot"] * 1_000,
+            self.window_max["joint_work"] * 1_000,
+            self.window_max["frame_build"] * 1_000,
+            self.window_max["rgb_log"] * 1_000,
+            self.resource_window_max["process_cpu_pct"],
+            self.resource_window_max["system_cpu_pct"],
+            self.resource_window_max["load_per_cpu_pct"],
+            self.resource_window_max["rss_mb"],
+            self.resource_window_max["sample_gap_s"],
+            self.resource_window_max["disk_read_mbps"],
+            self.resource_window_max["disk_write_mbps"],
+        )
+        self.window_started_at = now
+        self.window_events = 0
+        self.near_limit_logged = False
+        self.window_max = dict.fromkeys(PRODUCER_TIMING_METRICS, 0.0)
+        self.resource_window_max = dict.fromkeys(self.resource_window_max, 0.0)
+
+
 def log_synchronous_frames(
     *,
     robot_name: str,
@@ -388,10 +688,36 @@ def log_synchronous_frames(
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
+    diagnostics = (
+        ProducerTimingDiagnostics(context_index, recording_index)
+        if assert_deadline
+        else None
+    )
+    history = ProducerDiagnosticHistory(
+        context_index=context_index,
+        recording_index=recording_index,
+        enabled=assert_deadline,
+    )
+    if diagnostics is not None:
+        logger.info(
+            "Producer timing start ctx=%d rec_idx=%d joint_frames=%d@%dhz "
+            "video_frames=%d@%dhz cameras=%d image=%sx%s stochastic=%s",
+            context_index,
+            recording_index,
+            joint_frame_count,
+            joint_fps,
+            video_frame_count,
+            video_fps,
+            len(camera_name_list),
+            image_width,
+            image_height,
+            use_stochastic_timestamps,
+        )
 
     while joint_index < joint_frame_count or video_index < (
         video_frame_count if camera_name_list else 0
     ):
+        iteration_started_ns = time.perf_counter_ns()
         joint_due = joint_index < joint_frame_count
         video_due = camera_name_list and video_index < video_frame_count
         # One jitter is shared by both deadlines/timestamps this iteration, so
@@ -413,62 +739,187 @@ def log_synchronous_frames(
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
+            role_name = "joint"
+            history.record_gap(
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
+            )
+            observed_before_wait = time.time()
+            remaining = joint_deadline - observed_before_wait
             if remaining > 0:
-                time.sleep(remaining)
+                history.sleep(
+                    remaining,
+                    role_name=role_name,
+                    frame_index=joint_index,
+                    deadline=joint_deadline,
+                )
+            observed_after_wait = time.time()
+            if diagnostics is not None:
+                diagnostics.observe_schedule(
+                    stream="joint",
+                    frame_index=joint_index,
+                    deadline=joint_deadline,
+                    observed_before_wait=observed_before_wait,
+                    observed_after_wait=observed_after_wait,
+                    slept=remaining > 0,
+                    tolerance_s=SCHEDULER_TOLERANCE_S,
+                )
+            history.record(
+                "deadline_lateness",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
+                details={"lateness_ms": (observed_after_wait - joint_deadline) * 1_000},
+                statistic_value_ms=(observed_after_wait - joint_deadline) * 1_000,
+            )
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
+                    joint_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=(
+                        f"joint frame ctx={context_index} "
+                        f"rec_idx={recording_index} frame={joint_index}"
+                    ),
+                    observed_at=observed_after_wait,
+                    diagnostic_history=history,
+                    role_name=role_name,
+                    frame_index=joint_index,
                 )
+            joint_work_started = time.perf_counter()
             if use_real_timestamps:
                 timestamp = None
             else:
                 intended = timestamp_start_s + (joint_index / joint_fps)
                 timestamp = intended + jitter
-            joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_positions",
-                assert_deadline=assert_deadline,
+            with history.measure(
+                "generate_joint_values",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
             ):
-                nc.log_joint_positions(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
+                joint_values = generate_joint_values(
+                    joint_index, joint_fps, joint_names
                 )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_velocities",
-                assert_deadline=assert_deadline,
+            with history.measure(
+                "nc.log_joint_positions",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
             ):
-                nc.log_joint_velocities(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_torques",
-                assert_deadline=assert_deadline,
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_joint_positions",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_joint_positions(
+                        joint_values, robot_name=robot_name, timestamp=timestamp
+                    )
+            with history.measure(
+                "nc.log_joint_velocities",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
             ):
-                nc.log_joint_torques(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_custom_1d",
-                assert_deadline=assert_deadline,
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_joint_velocities",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_joint_velocities(
+                        joint_values, robot_name=robot_name, timestamp=timestamp
+                    )
+            with history.measure(
+                "nc.log_joint_torques",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
             ):
-                nc.log_custom_1d(
-                    marker_name,
-                    np.array([float(joint_index)], dtype=np.float32),
-                    robot_name=robot_name,
-                    timestamp=timestamp,
-                )
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_joint_torques",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_joint_torques(
+                        joint_values, robot_name=robot_name, timestamp=timestamp
+                    )
+            with history.measure(
+                "nc.log_custom_1d",
+                role_name=role_name,
+                frame_index=joint_index,
+                deadline=joint_deadline,
+            ):
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_custom_1d",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_custom_1d(
+                        marker_name,
+                        np.array([float(joint_index)], dtype=np.float32),
+                        robot_name=robot_name,
+                        timestamp=timestamp,
+                    )
+            history.record(
+                "loop_iteration",
+                role_name=role_name,
+                frame_index=joint_index,
+                started_ns=iteration_started_ns,
+                deadline=joint_deadline,
+            )
             joint_index += 1
+            if diagnostics is not None:
+                diagnostics.observe_duration(
+                    "joint_work", time.perf_counter() - joint_work_started
+                )
+                diagnostics.maybe_report()
         else:
-            remaining = video_deadline - time.time()
+            role_name = "rgb"
+            history.record_gap(
+                role_name=role_name,
+                frame_index=video_index,
+                deadline=video_deadline,
+            )
+            observed_before_wait = time.time()
+            remaining = video_deadline - observed_before_wait
             if remaining > 0:
-                time.sleep(remaining)
+                history.sleep(
+                    remaining,
+                    role_name=role_name,
+                    frame_index=video_index,
+                    deadline=video_deadline,
+                )
+            observed_after_wait = time.time()
+            if diagnostics is not None:
+                diagnostics.observe_schedule(
+                    stream="video",
+                    frame_index=video_index,
+                    deadline=video_deadline,
+                    observed_before_wait=observed_before_wait,
+                    observed_after_wait=observed_after_wait,
+                    slept=remaining > 0,
+                    tolerance_s=SCHEDULER_TOLERANCE_S,
+                )
+            history.record(
+                "deadline_lateness",
+                role_name=role_name,
+                frame_index=video_index,
+                deadline=video_deadline,
+                details={"lateness_ms": (observed_after_wait - video_deadline) * 1_000},
+                statistic_value_ms=(observed_after_wait - video_deadline) * 1_000,
+            )
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
+                    video_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=(
+                        f"video frame ctx={context_index} "
+                        f"rec_idx={recording_index} frame={video_index}"
+                    ),
+                    observed_at=observed_after_wait,
+                    diagnostic_history=history,
+                    role_name=role_name,
+                    frame_index=video_index,
                 )
             if use_real_timestamps:
                 timestamp = None
@@ -483,19 +934,70 @@ def log_synchronous_frames(
                     + (camera_index * 100_000)
                     + video_index
                 )
-                rgb_image = encode_frame_number(frame_code, image_width, image_height)
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_rgb",
-                    assert_deadline=assert_deadline,
+                frame_build_started = time.perf_counter()
+                with history.measure(
+                    "encode_frame_number",
+                    role_name=role_name,
+                    frame_index=video_index,
+                    deadline=video_deadline,
+                    details={"camera_name": camera_name},
                 ):
-                    nc.log_rgb(
-                        camera_name,
-                        rgb_image,
-                        robot_name=robot_name,
-                        timestamp=timestamp,
+                    rgb_image = encode_frame_number(
+                        frame_code, image_width, image_height
                     )
+                if diagnostics is not None:
+                    diagnostics.observe_duration(
+                        "frame_build", time.perf_counter() - frame_build_started
+                    )
+                rgb_log_started = time.perf_counter()
+                with history.measure(
+                    "nc.log_rgb",
+                    role_name=role_name,
+                    frame_index=video_index,
+                    deadline=video_deadline,
+                    details={"camera_name": camera_name},
+                ):
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_rgb",
+                        assert_deadline=assert_deadline,
+                    ):
+                        nc.log_rgb(
+                            camera_name,
+                            rgb_image,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
+                if diagnostics is not None:
+                    diagnostics.observe_duration(
+                        "rgb_log", time.perf_counter() - rgb_log_started
+                    )
+            history.record(
+                "loop_iteration",
+                role_name=role_name,
+                frame_index=video_index,
+                started_ns=iteration_started_ns,
+                deadline=video_deadline,
+            )
             video_index += 1
+            if diagnostics is not None:
+                diagnostics.maybe_report()
+
+    history.log_summary()
+    if diagnostics is not None:
+        diagnostics.maybe_report(force=True)
+        logger.info(
+            "Producer timing complete ctx=%d rec_idx=%d overall_max_late"
+            "[joint=%.1fms video=%.1fms] overall_max_work"
+            "[joint=%.1fms frame_build=%.1fms rgb_log=%.1fms]",
+            context_index,
+            recording_index,
+            diagnostics.overall_max["joint_lateness"] * 1_000,
+            diagnostics.overall_max["video_lateness"] * 1_000,
+            diagnostics.overall_max["joint_work"] * 1_000,
+            diagnostics.overall_max["frame_build"] * 1_000,
+            diagnostics.overall_max["rgb_log"] * 1_000,
+        )
 
 
 def build_thread_roles(
@@ -544,6 +1046,7 @@ def run_threaded_logging(
     )
     barrier = threading.Barrier(len(roles))
     thread_errors: list[BaseException] = []
+    heartbeat_registry = ProducerHeartbeatRegistry()
 
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
@@ -552,20 +1055,55 @@ def run_threaded_logging(
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
+            diagnostic_role = (
+                f"rgb:{role_spec['camera_names'][0]}" if is_rgb else role_name
+            )
+            history = ProducerDiagnosticHistory(
+                context_index=context_index,
+                recording_index=recording_index,
+                heartbeat_registry=heartbeat_registry,
+                enabled=assert_deadline,
+            )
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             thread_wall_start = time.time()
             for frame_index in range(frame_count):
+                iteration_started_ns = time.perf_counter_ns()
                 jitter = get_jitter(use_stochastic_timestamps, fps)
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+                history.record_gap(
+                    role_name=diagnostic_role,
+                    frame_index=frame_index,
+                    deadline=frame_deadline,
+                )
                 remaining = frame_deadline - time.time()
                 if remaining > 0:
-                    time.sleep(remaining)
+                    history.sleep(
+                        remaining,
+                        role_name=diagnostic_role,
+                        frame_index=frame_index,
+                        deadline=frame_deadline,
+                    )
+                observed_after_wait = time.time()
+                history.record(
+                    "deadline_lateness",
+                    role_name=diagnostic_role,
+                    frame_index=frame_index,
+                    deadline=frame_deadline,
+                    details={
+                        "lateness_ms": (observed_after_wait - frame_deadline) * 1_000
+                    },
+                    statistic_value_ms=(observed_after_wait - frame_deadline) * 1_000,
+                )
                 if assert_deadline and use_stochastic_timestamps:
                     assert_on_schedule(
                         frame_deadline,
                         SCHEDULER_TOLERANCE_S,
                         label=f"{role_name} frame",
+                        observed_at=observed_after_wait,
+                        diagnostic_history=history,
+                        role_name=diagnostic_role,
+                        frame_index=frame_index,
                     )
                 if use_real_timestamps:
                     timestamp = None
@@ -584,69 +1122,121 @@ def run_threaded_logging(
                             + (camera_index * 100_000)
                             + frame_index
                         )
-                        rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height
-                        )
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_rgb",
-                            assert_deadline=assert_deadline,
+                        with history.measure(
+                            "encode_frame_number",
+                            role_name=diagnostic_role,
+                            frame_index=frame_index,
+                            deadline=frame_deadline,
+                            details={"camera_name": camera_id},
                         ):
-                            nc.log_rgb(
-                                camera_id,
-                                rgb_image,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
+                            rgb_image = encode_frame_number(
+                                frame_code, image_width, image_height
                             )
+                        with history.measure(
+                            "nc.log_rgb",
+                            role_name=diagnostic_role,
+                            frame_index=frame_index,
+                            deadline=frame_deadline,
+                            details={"camera_name": camera_id},
+                        ):
+                            with Timer(
+                                MAX_TIME_TO_LOG_S,
+                                label="nc.log_rgb",
+                                assert_deadline=assert_deadline,
+                            ):
+                                nc.log_rgb(
+                                    camera_id,
+                                    rgb_image,
+                                    robot_name=robot_name,
+                                    timestamp=timestamp,
+                                )
                 else:
                     thread_joint_names = list(role_spec["joint_names"])
-                    joint_values = generate_joint_values(
-                        frame_index, joint_fps, thread_joint_names
-                    )
+                    with history.measure(
+                        "generate_joint_values",
+                        role_name=diagnostic_role,
+                        frame_index=frame_index,
+                        deadline=frame_deadline,
+                    ):
+                        joint_values = generate_joint_values(
+                            frame_index, joint_fps, thread_joint_names
+                        )
                     if role_name == "joint_positions":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_positions",
-                            assert_deadline=assert_deadline,
+                        with history.measure(
+                            "nc.log_joint_positions",
+                            role_name=diagnostic_role,
+                            frame_index=frame_index,
+                            deadline=frame_deadline,
                         ):
-                            nc.log_joint_positions(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
+                            with Timer(
+                                MAX_TIME_TO_LOG_S,
+                                label="nc.log_joint_positions",
+                                assert_deadline=assert_deadline,
+                            ):
+                                nc.log_joint_positions(
+                                    joint_values,
+                                    robot_name=robot_name,
+                                    timestamp=timestamp,
+                                )
                     elif role_name == "joint_velocities":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_velocities",
-                            assert_deadline=assert_deadline,
+                        with history.measure(
+                            "nc.log_joint_velocities",
+                            role_name=diagnostic_role,
+                            frame_index=frame_index,
+                            deadline=frame_deadline,
                         ):
-                            nc.log_joint_velocities(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
+                            with Timer(
+                                MAX_TIME_TO_LOG_S,
+                                label="nc.log_joint_velocities",
+                                assert_deadline=assert_deadline,
+                            ):
+                                nc.log_joint_velocities(
+                                    joint_values,
+                                    robot_name=robot_name,
+                                    timestamp=timestamp,
+                                )
                     else:
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_torques",
-                            assert_deadline=assert_deadline,
+                        with history.measure(
+                            "nc.log_joint_torques",
+                            role_name=diagnostic_role,
+                            frame_index=frame_index,
+                            deadline=frame_deadline,
                         ):
-                            nc.log_joint_torques(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_custom_1d",
-                    assert_deadline=assert_deadline,
+                            with Timer(
+                                MAX_TIME_TO_LOG_S,
+                                label="nc.log_joint_torques",
+                                assert_deadline=assert_deadline,
+                            ):
+                                nc.log_joint_torques(
+                                    joint_values,
+                                    robot_name=robot_name,
+                                    timestamp=timestamp,
+                                )
+                with history.measure(
+                    "nc.log_custom_1d",
+                    role_name=diagnostic_role,
+                    frame_index=frame_index,
+                    deadline=frame_deadline,
                 ):
-                    nc.log_custom_1d(
-                        marker_name,
-                        np.array([float(frame_index)], dtype=np.float32),
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_custom_1d",
+                        assert_deadline=assert_deadline,
+                    ):
+                        nc.log_custom_1d(
+                            marker_name,
+                            np.array([float(frame_index)], dtype=np.float32),
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
+                history.record(
+                    "loop_iteration",
+                    role_name=diagnostic_role,
+                    frame_index=frame_index,
+                    started_ns=iteration_started_ns,
+                    deadline=frame_deadline,
+                )
+            history.log_summary()
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 

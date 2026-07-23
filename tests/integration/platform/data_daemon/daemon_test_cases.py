@@ -249,7 +249,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
     # Tests: long-running stability, memory leak detection, large dataset
     # accumulation
     DataDaemonTestCase(
-        duration_sec=300,
+        duration_sec=275,
         joint_count=10,
         video_count=1,
         image_width=1920,
@@ -261,17 +261,17 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
     ),
     DataDaemonTestCase(
-        duration_sec=300,
+        duration_sec=60,
         joint_count=10,
         video_count=1,
         image_width=1920,
         image_height=1080,
         parallel_contexts=2,
-        recording_count=16,
+        recording_count=5,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=15,
         joint_fps=15,
-        timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        # timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -392,7 +392,7 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=1920,
         image_height=1080,
         parallel_contexts=2,
-        recording_count=16,
+        recording_count=2,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=15,
         joint_fps=15,

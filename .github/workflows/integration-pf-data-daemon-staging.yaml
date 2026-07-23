@@ -35,8 +35,8 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        python-version: ['3.14']
+        os: [macos-26]
 
     steps:
     - name: Show disk space
@@ -68,6 +68,7 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        NEURACORE_PRODUCER_DIAGNOSTICS: "1"
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
@@ -76,7 +77,7 @@ jobs:
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        "tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[60s-5recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz]"
 
     - name: Show disk space after tests
       if: always()

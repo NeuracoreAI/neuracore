@@ -42,6 +42,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
@@ -300,10 +301,22 @@ pub(crate) struct LoggingStalled;
 ///   unbounded and fill the disk, stalling `stop_recording`'s tail-chunk flush
 ///   for seconds. The writer thread refreshes `spool_bytes` from a periodic
 ///   directory scan ([`refresh_spool_backlog`]).
+#[derive(Debug)]
+pub(crate) struct WriterQueueSnapshot {
+    pub(crate) queued_messages: usize,
+    pub(crate) queued_frame_bytes: usize,
+    pub(crate) in_flight_frames: usize,
+    pub(crate) spool_bytes: u64,
+    pub(crate) memory_max: usize,
+    pub(crate) spool_max: u64,
+}
+
+/// Byte-bounded MPSC queue between logging threads and the video writer.
 pub(crate) struct FrameQueue {
     inner: Mutex<FrameQueueInner>,
     not_full: Condvar,
     not_empty: Condvar,
+    in_flight_frames: AtomicUsize,
     /// In-memory frame-buffer cap. Drained by the local writer thread, which
     /// always makes progress, so a frame blocked on it waits unbounded.
     /// [`WRITER_QUEUE_MAX_BYTES`] in production; tests shrink it to exercise the
@@ -328,6 +341,18 @@ struct FrameQueueInner {
 }
 
 impl FrameQueue {
+    pub(crate) fn snapshot(&self) -> WriterQueueSnapshot {
+        let inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        WriterQueueSnapshot {
+            queued_messages: inner.msgs.len(),
+            queued_frame_bytes: inner.bytes,
+            in_flight_frames: self.in_flight_frames.load(Ordering::Relaxed),
+            spool_bytes: inner.spool_bytes,
+            memory_max: self.memory_max,
+            spool_max: self.spool_max,
+        }
+    }
+
     fn new() -> Self {
         Self::build(
             WRITER_QUEUE_MAX_BYTES,
@@ -347,6 +372,7 @@ impl FrameQueue {
             }),
             not_full: Condvar::new(),
             not_empty: Condvar::new(),
+            in_flight_frames: AtomicUsize::new(0),
             memory_max,
             spool_max,
             block_timeout,
@@ -823,6 +849,9 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 while in_flight.len() >= MAX_FRAMES_IN_FLIGHT {
                     write_front(&mut in_flight);
                 }
+                queue
+                    .in_flight_frames
+                    .store(in_flight.len(), Ordering::Relaxed);
             }
             Some(WriterMsg::FlushSource {
                 robot_id,
@@ -835,6 +864,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 while !in_flight.is_empty() {
                     write_front(&mut in_flight);
                 }
+                queue.in_flight_frames.store(0, Ordering::Relaxed);
                 if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
                     tracing::warn!(%error, "failed to flush tail video chunks on stop");
                 }
@@ -863,6 +893,9 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
         // Mux whatever finished compressing, keeping spooling latency low without
         // ever blocking on a slow frame.
         drain_ready(&mut in_flight);
+        queue
+            .in_flight_frames
+            .store(in_flight.len(), Ordering::Relaxed);
         // Refresh the backlog estimate on a coarse cadence so frame-admission
         // backpressure tracks the daemon draining the spool inbox.
         if bounded && last_scan.elapsed() >= SPOOL_SCAN_INTERVAL {

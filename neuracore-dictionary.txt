@@ -192,6 +192,7 @@ geomadr
 geomid
 geomnum
 getbuffer
+getloadavg
 getpgid
 getpid
 gettid
