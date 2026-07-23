@@ -46,7 +46,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
-use data_daemon_shared::service_name::MAX_VIDEO_CHUNK_FRAMES;
+use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
 use data_daemon_shared::Envelope;
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
@@ -99,6 +99,18 @@ const WRITER_QUEUE_MAX_BYTES: usize = CHUNK_FLUSH_BYTES as usize;
 /// estimate and release frame-admission backpressure. Also bounds how long a
 /// producer stays blocked after the daemon drains a chunk (≤ this interval).
 const SPOOL_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Bounds on the synthesized PTS step for a frame whose capture timestamp does
+/// not advance past the previous frame's PTS (a duplicate, out-of-order or
+/// regressed capture clock). The step is the stream's last healthy inter-frame
+/// gap clamped into this range: the floor keeps a disordered stretch from
+/// collapsing into sub-millisecond spacing — a chunk crammed onto a 1 µs ramp
+/// makes the per-chunk transcode guess a microsecond frame rate, and the
+/// stream-copy concat then emits the non-monotonic PTS the backend rejects as
+/// "Video missing logged frames" — while the ceiling keeps a long capture
+/// pause from being replayed as the synthetic step.
+const SYNTH_PTS_STEP_MIN_US: u64 = 1_000;
+const SYNTH_PTS_STEP_MAX_US: u64 = 100_000;
 
 /// How long a video frame may wait for spool-backlog headroom before
 /// `log_frame` gives up and raises. The spool drains only as the *daemon*
@@ -168,6 +180,18 @@ struct VideoChunkState {
     pts_origin_us: Option<i64>,
     /// Last PTS written to any chunk for the stream; enforces monotonicity.
     last_pts_us: Option<u64>,
+    /// Most recent healthy PTS advance for the stream (µs), recorded only when
+    /// it is a plausible frame interval (≤ `SYNTH_PTS_STEP_MAX_US`, so a
+    /// forward timestamp spike never counts). Survives chunk rolls — it
+    /// describes the camera's cadence, not the chunk — and is the step used
+    /// (clamped into `SYNTH_PTS_STEP_{MIN,MAX}_US`) when a frame's capture
+    /// timestamp fails to advance past the previous frame's PTS.
+    observed_frame_gap_us: Option<u64>,
+    /// Whether the in-progress chunk has already logged a synthesized-PTS
+    /// warning. One warn per chunk surfaces every affected chunk without a
+    /// sustained disorder stretch (potentially every remaining frame of the
+    /// chunk) flooding the log.
+    pts_synth_warned: bool,
     /// Per-frame capture time in ns for the in-progress chunk — drained into
     /// the announcement so the daemon can bucket frames into a window.
     frame_timestamps_ns: Vec<i64>,
@@ -957,6 +981,8 @@ fn record_video_frame(
             frame_count: 0,
             pts_origin_us: None,
             last_pts_us: None,
+            observed_frame_gap_us: None,
+            pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
         }));
@@ -1058,13 +1084,53 @@ fn append_frame_locked(
     if state.nut_writer.is_none() {
         state.pts_origin_us = None;
         state.last_pts_us = None;
+        state.pts_synth_warned = false;
     }
-    let origin_us = *state.pts_origin_us.get_or_insert(timestamp_ns / 1_000);
-    let relative_us = (timestamp_ns / 1_000).saturating_sub(origin_us).max(0);
+    let timestamp_us = timestamp_ns / 1_000;
+    let origin_us = *state.pts_origin_us.get_or_insert(timestamp_us);
+    let relative_us = timestamp_us.saturating_sub(origin_us).max(0);
     let mut pts = relative_us as u64;
     if let Some(previous) = state.last_pts_us {
         if pts <= previous {
-            pts = previous.saturating_add(1);
+            // The capture timestamp failed to advance past the previous
+            // frame's PTS (duplicate, out-of-order or regressed clock — e.g.
+            // a future-stamped frame having seeded this chunk's origin).
+            // Advance by the stream's healthy frame gap and re-anchor the
+            // origin on this frame so the rest of the chunk resumes true
+            // capture spacing: one bad timestamp then costs one synthesized
+            // step instead of collapsing every remaining frame onto a 1 µs
+            // ramp (see `SYNTH_PTS_STEP_MIN_US` for the downstream failure
+            // that causes). The trade runs long by construction: every
+            // synthesized step stretches the chunk's timeline by up to one
+            // frame gap rather than ever shortening it.
+            let step = state
+                .observed_frame_gap_us
+                .unwrap_or(SYNTH_PTS_STEP_MIN_US)
+                .clamp(SYNTH_PTS_STEP_MIN_US, SYNTH_PTS_STEP_MAX_US);
+            if !state.pts_synth_warned {
+                state.pts_synth_warned = true;
+                // `behind_us` is how far this frame's capture stamp sits
+                // behind the previous frame's effective capture position —
+                // the size of the upstream disorder (µs-scale = logging
+                // jitter; seconds-scale = a recording-seam or clock event
+                // worth chasing at its source).
+                tracing::warn!(
+                    sensor_name,
+                    timestamp_us,
+                    previous_pts_us = previous,
+                    step_us = step,
+                    behind_us = origin_us + previous as i64 - timestamp_us,
+                    "video frame timestamp did not advance past the previous \
+                     frame's PTS; synthesizing step (logged once per chunk)"
+                );
+            }
+            pts = previous.saturating_add(step);
+            state.pts_origin_us = Some(timestamp_us.saturating_sub(pts as i64));
+        } else if pts - previous <= SYNTH_PTS_STEP_MAX_US {
+            // Only a plausible frame interval counts as the healthy gap: a
+            // forward spike (a future-stamped frame mid-chunk) must not become
+            // the step used to recover from the regression it causes.
+            state.observed_frame_gap_us = Some(pts - previous);
         }
     }
 
@@ -1083,7 +1149,7 @@ fn append_frame_locked(
             width: state.width,
             height: state.height,
             time_base_num: 1,
-            time_base_den: 1_000_000,
+            time_base_den: VIDEO_SPOOL_TICKS_PER_SECOND,
         };
         match NutWriter::create(&chunk_path, config) {
             Ok(writer) => state.nut_writer = Some(writer),
@@ -1290,6 +1356,8 @@ mod tests {
             frame_count: 0,
             pts_origin_us: None,
             last_pts_us: None,
+            observed_frame_gap_us: None,
+            pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
         }
@@ -1577,5 +1645,169 @@ mod tests {
         // Draining one frame frees headroom and admits the waiter.
         assert!(matches!(queue.pop(), WriterMsg::Frame(_)));
         assert!(pusher.join().unwrap().is_ok());
+    }
+
+    /// One frame interval at ~60 fps, in microseconds.
+    const FRAME_GAP_US: i64 = 16_683;
+
+    /// Append one frame stamped `timestamp_us` to `state`, using a geometry
+    /// large enough (4096×4096, ~48 MiB logical per frame) that a chunk rolls
+    /// after six frames — the PTS-collapse scenarios all sit at chunk
+    /// rotation, so tests need cheap rolls. The payload is a stand-in blob:
+    /// the NUT muxes it verbatim and these tests only read back PTS.
+    fn append_ts_us(state: &mut VideoChunkState, timestamp_us: i64) -> Vec<Envelope> {
+        append_frame_locked(
+            state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            4096,
+            4096,
+            &[0u8; 4],
+            timestamp_us * 1_000,
+            timestamp_us as f64 / 1e6,
+        )
+    }
+
+    /// Read back every sealed chunk's frame PTS from `spool_dir`, in chunk
+    /// open order (spool filenames embed the strictly-increasing open time).
+    fn sealed_chunk_pts(spool_dir: &std::path::Path) -> Vec<Vec<u64>> {
+        let mut chunk_names: Vec<PathBuf> = std::fs::read_dir(spool_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        chunk_names.sort();
+        chunk_names
+            .iter()
+            .map(|path| crate::nut_writer::read_frame_pts(&std::fs::read(path).unwrap()))
+            .collect()
+    }
+
+    /// The canonical PTS vector for six frames at the test cadence: one
+    /// synthesized step (equal to the learned gap) followed by re-anchored
+    /// capture-relative spacing reproduces the true capture timeline exactly.
+    fn capture_relative_pts() -> Vec<u64> {
+        (0..6).map(|index| (index * FRAME_GAP_US) as u64).collect()
+    }
+
+    #[test]
+    fn future_stamped_chunk_open_frame_does_not_collapse_the_chunk() {
+        // Regression: a single future-stamped frame arriving exactly
+        // at a chunk rotation used to seed the fresh chunk's PTS origin, pin
+        // every following frame's `relative_us` at 0, and collapse the whole
+        // chunk onto a 1 µs ramp ([0, 1, 2, 3, 4, 5] here). The per-chunk
+        // transcode then guesses a microsecond frame rate for that segment
+        // and the stream-copy concat turns it into the non-monotonic PTS the
+        // backend rejects as "Video missing logged frames" — even though the
+        // capture timestamps of all the other frames were pristine.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 4096, 4096);
+        let base: i64 = 1_753_000_000_000_000;
+
+        // Chunk 1: six clean ~60 fps frames (seals on the sixth).
+        for index in 0..6 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        // Chunk 2 opens on a frame stamped ~5 s in the future; the remaining
+        // frames continue the true capture series.
+        append_ts_us(&mut state, base + 6 * FRAME_GAP_US + 5_000_000);
+        for index in 7..12 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+
+        // The poisoned frame lands at 0; the first true frame costs one
+        // synthesized step at the learned gap and re-anchors, so the rest of
+        // the chunk reproduces the capture-relative timeline exactly.
+        let chunks = sealed_chunk_pts(dir.path());
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], capture_relative_pts());
+        assert_eq!(chunks[1], capture_relative_pts());
+    }
+
+    #[test]
+    fn mid_chunk_timestamp_regression_does_not_collapse_the_tail() {
+        // Regression, mid-chunk variant: a capture-clock rewind
+        // inside a chunk used to pin `relative_us` at 0 for the rest of the
+        // chunk, cramming every remaining frame onto the 1 µs ramp
+        // ([0, 16683, 33366, 33367, 33368, 33369] here).
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 4096, 4096);
+        let base: i64 = 1_753_000_000_000_000;
+
+        for index in 0..3 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        // The clock rewinds ~10 s mid-chunk and keeps advancing at 60 fps.
+        for index in 3..6 {
+            append_ts_us(&mut state, base - 10_000_000 + index * FRAME_GAP_US);
+        }
+        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+
+        // The rewound frame costs one synthesized step at the learned gap and
+        // re-anchors, so the tail keeps capture-relative spacing.
+        let chunks = sealed_chunk_pts(dir.path());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], capture_relative_pts());
+    }
+
+    #[test]
+    fn forward_timestamp_spike_does_not_poison_the_healthy_gap() {
+        // A frame stamped far in the future *mid-chunk* passes the monotonic
+        // branch (the phantom freeze it leaves is the accepted, run-long
+        // trade), but its jump must not be recorded as the stream's healthy
+        // gap: the very next frame — which regresses relative to the spike —
+        // must be synthesized at the camera's learned cadence, not at the
+        // clamp ceiling.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 4096, 4096);
+        let base: i64 = 1_753_000_000_000_000;
+
+        for index in 0..3 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        // Frame 3 spikes ~5 s forward; frames 4 and 5 resume the true series.
+        append_ts_us(&mut state, base + 3 * FRAME_GAP_US + 5_000_000);
+        for index in 4..6 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+
+        let spike = 5_000_000 + 3 * FRAME_GAP_US;
+        let expected: Vec<u64> = vec![
+            0,
+            FRAME_GAP_US as u64,
+            (2 * FRAME_GAP_US) as u64,
+            // The spike itself stays where it was stamped...
+            spike as u64,
+            // ...and recovery advances by the learned gap, then re-anchored
+            // capture spacing — not by `SYNTH_PTS_STEP_MAX_US`.
+            (spike + FRAME_GAP_US) as u64,
+            (spike + 2 * FRAME_GAP_US) as u64,
+        ];
+        let chunks = sealed_chunk_pts(dir.path());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], expected);
+    }
+
+    #[test]
+    fn clean_monotonic_input_keeps_chunk_relative_capture_pts() {
+        // The happy path must stay byte-identical: every chunk's PTS are the
+        // frame's capture time relative to the chunk's first frame.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 4096, 4096);
+        let base: i64 = 1_753_000_000_000_000;
+
+        for index in 0..12 {
+            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        }
+        flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
+
+        let expected: Vec<u64> = (0..6).map(|index| (index * FRAME_GAP_US) as u64).collect();
+        let chunks = sealed_chunk_pts(dir.path());
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], expected);
+        assert_eq!(chunks[1], expected);
     }
 }
