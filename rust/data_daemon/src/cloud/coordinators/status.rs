@@ -22,6 +22,7 @@ use crate::api::models::{TraceStatusUpdate, TraceStatusValue};
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
+use crate::state::store::MAX_COMPLETION_REPORT_ATTEMPTS;
 use crate::state::{RecordingRow, SqliteStateStore, StateStore};
 
 /// Maximum number of traces to coalesce before flushing.
@@ -35,6 +36,10 @@ pub const COMPLETION_MAX_WAIT: Duration = Duration::from_millis(200);
 /// larger than the `MAX_WAIT` triggers above so a perpetually-missing org
 /// doesn't spin the executor while waiting for login / org selection.
 const ORG_RESOLVE_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+/// Ignore unreported completions younger than this during a reconcile pass —
+/// a freshly-queued completion normally stamps within the flush deadline, so
+/// only traces that have sat unacknowledged for a while are re-driven.
+const COMPLETION_RECONCILE_GRACE: Duration = Duration::from_secs(10);
 
 /// Update emitted by the uploader for the status coordinator to forward to
 /// the backend.
@@ -121,6 +126,12 @@ async fn run(
     // Periodic flush ticker — fires on the STATUS_FLUSH cadence regardless of inbox load.
     let mut flush_ticker = interval(crate::intervals::STATUS_FLUSH);
     flush_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // Reconcile ticker — re-drives completions whose backend ack never landed
+    // (dropped batch, crash between ack and stamp, failed stamp write). The
+    // reclaim gate reads `completion_reported_at`, so without this a single
+    // lost batch would retain its recording forever.
+    let mut reconcile_ticker = interval(crate::intervals::COMPLETION_RECONCILE);
+    reconcile_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             biased;
@@ -153,6 +164,13 @@ async fn run(
             _ = flush_ticker.tick() => {
                 flush_due(&store, &client, &org_rx, &mut pending, &mut background_flushes);
             }
+            _ = reconcile_ticker.tick() => {
+                reconcile_unreported_completions(
+                    &store,
+                    &mut pending,
+                    COMPLETION_RECONCILE_GRACE,
+                ).await;
+            }
             maybe_update = inbox.recv() => {
                 let Some(update) = maybe_update else { break };
                 let recording_index = update.recording_index;
@@ -172,6 +190,54 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+/// Re-queue completion updates for uploaded traces whose backend ack never
+/// landed. The batch PUT is idempotent (same status body the uploader already
+/// sent), so re-driving is safe; each pass increments the trace's attempt
+/// counter and the reclaim gate opens once the attempts are exhausted, so a
+/// permanently-rejected completion cannot retain its recording forever.
+async fn reconcile_unreported_completions(
+    store: &Arc<SqliteStateStore>,
+    pending: &mut HashMap<i64, RecordingBatch>,
+    grace: Duration,
+) {
+    let stale = match store
+        .claim_unreported_completions(grace.as_secs() as i64, MAX_BATCH_SIZE as i64)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "could not list unreported completions");
+            return;
+        }
+    };
+    for trace in stale {
+        if trace.completion_report_attempts >= MAX_COMPLETION_REPORT_ATTEMPTS {
+            tracing::warn!(
+                trace_id = %trace.trace_id,
+                recording_index = trace.recording_index,
+                attempts = trace.completion_report_attempts,
+                "final re-send of unacknowledged trace completion; reclaim unblocks after this"
+            );
+        } else {
+            tracing::info!(
+                trace_id = %trace.trace_id,
+                recording_index = trace.recording_index,
+                attempts = trace.completion_report_attempts,
+                "re-sending unacknowledged trace completion"
+            );
+        }
+        let recording_index = trace.recording_index;
+        let batch = pending
+            .entry(recording_index)
+            .or_insert_with(|| RecordingBatch::new(recording_index));
+        batch.add(StatusUpdate::completed(
+            recording_index,
+            trace.trace_id,
+            trace.total_bytes,
+        ));
     }
 }
 
@@ -285,6 +351,17 @@ async fn flush_batch(
                 count = updates_payload.len(),
                 "flushed status updates"
             );
+            // Watermark the acknowledged completions so the recording reaper
+            // knows they durably reached the backend; without the stamp a
+            // sweep can destroy a recording whose completion is still queued.
+            let completed: Vec<String> = updates_payload
+                .iter()
+                .filter(|(_, update)| update.status == Some(TraceStatusValue::UploadComplete))
+                .map(|(trace_id, _)| trace_id.clone())
+                .collect();
+            if let Err(error) = store.mark_traces_completion_reported(&completed).await {
+                tracing::warn!(%error, recording_index, "could not stamp completion_reported_at");
+            }
         }
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, count = updates_payload.len(), "status batch update failed");
@@ -498,6 +575,132 @@ mod tests {
         )
         .await;
         assert!(result.is_none(), "a sent batch is not re-queued");
+    }
+
+    #[tokio::test]
+    async fn flush_batch_stamps_acked_completions() {
+        // The reaper's reclaim gate reads `completion_reported_at`; an acked
+        // batch must stamp exactly the traces whose UPLOAD_COMPLETE it
+        // carried, and only those.
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store, "rec-1").await;
+        store
+            .create_trace(index, "t1", Some("J"), None)
+            .await
+            .unwrap();
+        store
+            .create_trace(index, "t2", Some("J"), None)
+            .await
+            .unwrap();
+        let mut batch = RecordingBatch::new(index);
+        batch.add(StatusUpdate::in_progress(index, "t1".to_string(), 10));
+        batch.add(StatusUpdate::completed(index, "t2".to_string(), 200));
+
+        flush_batch(
+            Arc::new(store.clone()),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+
+        let traces = store.list_traces_for_recording(index).await.unwrap();
+        let stamped_at = |id: &str| {
+            traces
+                .iter()
+                .find(|trace| trace.trace_id == id)
+                .unwrap()
+                .completion_reported_at
+        };
+        assert!(
+            stamped_at("t2").is_some(),
+            "the acked completion is watermarked"
+        );
+        assert!(
+            stamped_at("t1").is_none(),
+            "an in-progress update is not watermarked"
+        );
+    }
+
+    /// The dropped-batch recovery path: an uploaded trace whose completion
+    /// batch was lost (PUT failure, crash before stamp) is re-driven by the
+    /// reconcile pass, stamped once the re-sent batch is acked, and the
+    /// recording becomes reclaimable.
+    #[tokio::test]
+    async fn reconcile_re_sends_dropped_completion_until_reclaimable() {
+        use crate::state::{
+            ProgressReportStatus, TraceUpdate, TraceUploadStatus, TraceWriteStatus,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let store = Arc::new(store);
+        // Fully-settled recording with one uploaded trace, but its completion
+        // was never acked (the batch carrying it was dropped).
+        let index = seed_recording(&store, "rec-1").await;
+        store
+            .create_trace(index, "t1", Some("J"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                "t1",
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(TraceUploadStatus::Uploaded),
+                    total_bytes: Some(200),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store.mark_recording_stopped(index, 1).await.unwrap();
+        store.mark_recording_stop_notified(index).await.unwrap();
+        store.set_expected_trace_count(index, 1).await.unwrap();
+        store
+            .set_progress_report_status(
+                index,
+                ProgressReportStatus::Pending,
+                ProgressReportStatus::Reported,
+            )
+            .await
+            .unwrap();
+        assert!(
+            store.recordings_pending_reclaim().await.unwrap().is_empty(),
+            "the dropped completion blocks reclaim"
+        );
+
+        // Reconcile pass picks the trace up and queues a fresh completion.
+        let mut pending: HashMap<i64, RecordingBatch> = HashMap::new();
+        reconcile_unreported_completions(&store, &mut pending, Duration::ZERO).await;
+        let batch = pending.remove(&index).expect("reconcile queues a batch");
+        assert!(batch.has_completion, "the re-driven update is a completion");
+
+        // Flushing the re-driven batch stamps the trace and unblocks reclaim.
+        flush_batch(
+            Arc::clone(&store),
+            client(&server),
+            org_rx(Some("org-1")),
+            batch,
+        )
+        .await;
+        let traces = store.list_traces_for_recording(index).await.unwrap();
+        assert!(traces[0].completion_reported_at.is_some());
+        let reclaimable = store.recordings_pending_reclaim().await.unwrap();
+        assert_eq!(reclaimable.len(), 1, "the recording reclaims after re-send");
     }
 
     #[tokio::test]
