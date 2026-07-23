@@ -67,7 +67,9 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
 
 
-def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
+def encode_frame_number(
+    frame_num: int, width: int, height: int, out: np.ndarray | None = None
+) -> np.ndarray:
     """Encode a frame number into the pixel data of a synthetic video frame.
 
     The 16-byte big-endian representation of ``frame_num`` is written into the
@@ -85,12 +87,21 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
             less than ``2 ** 128``).
         width: Frame width in pixels.
         height: Frame height in pixels.
+        out: If given, write into this preallocated ``(height, width, 3)``
+            ``uint8`` array instead of allocating a new one, and skip the
+            fill (every grid cell is always overwritten below, so a buffer
+            filled once and reused is never left with stale pixels). Callers
+            that pass ``out`` must never retain the returned array past the
+            point where its contents may next be overwritten.
 
     Returns:
         A NumPy array with shape ``(height, width, 3)`` and dtype ``uint8``.
     """
-    img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
-    img.fill(FRAME_DEFAULT_FILL_VALUE)
+    if out is None:
+        img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
+        img.fill(FRAME_DEFAULT_FILL_VALUE)
+    else:
+        img = out
 
     frame_bytes = frame_num.to_bytes(FRAME_BYTE_LENGTH, byteorder="big")
 
@@ -104,6 +115,36 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
                 img[row, col, 2] = pixel_value // FRAME_HALF_DIVISOR
 
     return img
+
+
+def preallocate_frame_buffer(
+    should_allocate: bool, image_width: int | None, image_height: int | None
+) -> np.ndarray | None:
+    """Preallocate and fill a reusable frame buffer, or return ``None``.
+
+    Callers that log video frames reuse a single buffer across iterations
+    (via :func:`encode_frame_number`'s ``out`` param) instead of allocating a
+    new one per frame, for a reduced memory footprint.
+
+    Args:
+        should_allocate: Whether this caller needs a buffer at all (e.g. the
+            recording has cameras, or this thread's role is "rgb").
+        image_width: Frame width in pixels, or ``None`` if not video.
+        image_height: Frame height in pixels, or ``None`` if not video.
+
+    Returns:
+        A preallocated, pre-filled ``(image_height, image_width, 3)``
+        ``uint8`` array, or ``None`` if ``should_allocate`` is ``False`` or
+        either dimension is ``None``.
+    """
+    if not should_allocate or image_width is None or image_height is None:
+        return None
+    frame_buffer = np.zeros(
+        (image_height, image_width, FRAME_COLOR_CHANNELS), dtype=np.uint8
+    )
+    frame_buffer.fill(FRAME_DEFAULT_FILL_VALUE)
+    encode_frame_number(0, image_width, image_height, out=frame_buffer)
+    return frame_buffer
 
 
 @dataclass(frozen=True, slots=True)
@@ -385,6 +426,10 @@ def log_synchronous_frames(
     Joint and video frames are interleaved in a single loop using a wall-clock
     deadline scheduler, so both streams advance together in time order.
     """
+    frame_buffer = preallocate_frame_buffer(
+        bool(camera_name_list), image_width, image_height
+    )
+
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
@@ -483,7 +528,9 @@ def log_synchronous_frames(
                     + (camera_index * 100_000)
                     + video_index
                 )
-                rgb_image = encode_frame_number(frame_code, image_width, image_height)
+                rgb_image = encode_frame_number(
+                    frame_code, image_width, image_height, out=frame_buffer
+                )
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
@@ -554,6 +601,7 @@ def run_threaded_logging(
             is_rgb = role_name == "rgb"
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
+            frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
             thread_wall_start = time.time()
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
@@ -585,7 +633,7 @@ def run_threaded_logging(
                             + frame_index
                         )
                         rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height
+                            frame_code, image_width, image_height, out=frame_buffer
                         )
                         with Timer(
                             MAX_TIME_TO_LOG_S,
