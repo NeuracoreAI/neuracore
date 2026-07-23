@@ -261,7 +261,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
     ),
     DataDaemonTestCase(
-        duration_sec=10,
+        duration_sec=300,
         joint_count=10,
         video_count=1,
         image_width=1920,

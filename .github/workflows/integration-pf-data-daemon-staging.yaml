@@ -70,7 +70,7 @@ jobs:
           pytest -o log_cli=true --log-cli-level=INFO
           -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
           --import-mode=importlib
-          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[10s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
 
       - name: Show disk space after tests
         if: always()

@@ -169,7 +169,7 @@ def assert_schedule_duration(
     label: str,
 ) -> None:
     """Assert that a producer sustained its requested rate overall."""
-    limit = expected_duration + tolerance
+    limit = expected_duration + max(tolerance, expected_duration * 0.01)
     assert elapsed <= limit, (
         f"{label} schedule took too long: "
         f"elapsed={elapsed:.3f}s, limit={limit:.3f}s"
