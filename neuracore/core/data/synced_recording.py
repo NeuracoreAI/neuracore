@@ -115,7 +115,7 @@ class SynchronizedRecording:
             requests.HTTPError: If the API request fails.
         """
         auth = get_auth()
-        session = thread_local_session()
+        session = thread_local_session(retry_transient=True)
         response = session.post(
             f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
             json=SynchronizeRecordingRequest(
@@ -143,7 +143,7 @@ class SynchronizedRecording:
             URL string for downloading the file.
         """
         auth = get_auth()
-        session = thread_local_session()
+        session = thread_local_session(retry_transient=True)
         response = session.get(
             f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}/download_url",
             params={"filepath": filepath},

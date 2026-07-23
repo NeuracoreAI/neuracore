@@ -122,6 +122,25 @@ def test_depth_requests_lossless_only_and_never_falls_back_to_lossy() -> None:
     assert requested == ["DEPTH_IMAGES/cam/lossless.mp4"]
 
 
+def test_get_video_url_requests_a_retrying_session() -> None:
+    fake_self = SimpleNamespace(id="rec-1", dataset=SimpleNamespace(org_id="org-1"))
+    fake_self._get_recording_file_url = MethodType(
+        SynchronizedRecording._get_recording_file_url, fake_self
+    )
+    session = MagicMock()
+    session.get.return_value = _response(200, url="https://example.com/lossless.mp4")
+    auth = MagicMock()
+    auth.get_headers = MagicMock(return_value={})
+
+    with (
+        patch(f"{MODULE}.thread_local_session", return_value=session) as mock_session,
+        patch(f"{MODULE}.get_auth", return_value=auth),
+    ):
+        SynchronizedRecording._get_video_url(fake_self, DataType.RGB_IMAGES, "cam")
+
+    mock_session.assert_called_with(retry_transient=True)
+
+
 def test_non_404_on_lossy_fallback_propagates() -> None:
     # The lossless 404 falls back to lossy; a real error (here 500) on the lossy
     # leg must propagate, not be swallowed as "no artefact found".

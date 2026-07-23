@@ -39,25 +39,45 @@ _RETRY = Retry(
     allowed_methods=False,  # type: ignore[arg-type]  # False = retry all methods
 )
 
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+_TRANSIENT_RETRY = _RETRY.new(
+    status=2,  # retry transient backend statuses twice, so three attempts
+    status_forcelist=_RETRYABLE_STATUS_CODES,
+    raise_on_status=False,  # return the final response rather than raising
+)
+
 _thread_local = threading.local()
 
 
-def thread_local_session() -> requests.Session:
-    """Return a retry-enabled Session cached per thread and process."""
+def thread_local_session(retry_transient: bool = False) -> requests.Session:
+    """Return a retry-enabled Session cached per thread and process.
+
+    Args:
+        retry_transient: Retry transient backend statuses with exponential
+            backoff, returning the final response when attempts are exhausted.
+
+    Returns:
+        The cached Session for this thread, process and retry policy.
+    """
     pid = os.getpid()
 
-    session = getattr(_thread_local, "session", None)
-    session_pid = getattr(_thread_local, "pid", None)
+    if getattr(_thread_local, "pid", None) != pid:
+        _thread_local.sessions = {}
+        _thread_local.pid = pid
 
-    if session is None or session_pid != pid:
+    session = _thread_local.sessions.get(retry_transient)
+
+    if session is None:
         session = requests.Session()
 
-        adapter = HTTPAdapter(max_retries=_RETRY)
+        adapter = HTTPAdapter(
+            max_retries=_TRANSIENT_RETRY if retry_transient else _RETRY
+        )
         session.mount("https://", adapter)
         session.mount("http://", adapter)
 
-        _thread_local.session = session
-        _thread_local.pid = pid
+        _thread_local.sessions[retry_transient] = session
 
     return session
 

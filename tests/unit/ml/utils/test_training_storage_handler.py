@@ -389,6 +389,16 @@ class TestUpdateTrainingProgress:
         assert len(put_requests) == 1
         assert put_requests[0].json() == {"epoch": 3, "step": 150, "error": None}
 
+    def test_does_not_log_in_again_on_401(self, handler, requests_mock, monkeypatch):
+        login = MagicMock()
+        monkeypatch.setattr("neuracore.login", login)
+        matcher = requests_mock.put(f"{BASE_JOB_URL}/update", status_code=401)
+
+        handler.update_training_progress(epoch=3, step=150)
+
+        assert matcher.call_count == 1
+        assert not login.called
+
     def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
         local_handler.update_training_progress(epoch=1, step=1)
 

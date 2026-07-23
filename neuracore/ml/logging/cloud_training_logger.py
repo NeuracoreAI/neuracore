@@ -177,7 +177,7 @@ class CloudTrainingLogger(TrainingLogger):
                 for name, step_map in self._store.items()
             }
         }
-        session = thread_local_session()
+        session = thread_local_session(retry_transient=True)
         response = session.put(
             f"{API_URL}/org/{org_id}/training/jobs/{self.training_id}/metrics",
             headers=get_auth().get_headers(),
@@ -194,4 +194,10 @@ class CloudTrainingLogger(TrainingLogger):
 
         # Final sync if in cloud mode
         if self.training_id is not None:
-            self._sync_to_cloud()
+            try:
+                self._sync_to_cloud()
+            except Exception:
+                logger.warning(
+                    "Final cloud metric sync failed; some metrics may be missing.",
+                    exc_info=True,
+                )
