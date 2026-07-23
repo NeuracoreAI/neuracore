@@ -19,15 +19,17 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import neuracore as nc
+from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
-    assert_schedule_duration,
+    assert_on_schedule,
     init_worker_logging,
     relayed_worker_logs,
     surface_worker_errors,
+    wait_until,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
@@ -66,7 +68,9 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
 
 
-def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
+def encode_frame_number(
+    frame_num: int, width: int, height: int, out: np.ndarray | None = None
+) -> np.ndarray:
     """Encode a frame number into the pixel data of a synthetic video frame.
 
     The 16-byte big-endian representation of ``frame_num`` is written into the
@@ -84,12 +88,21 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
             less than ``2 ** 128``).
         width: Frame width in pixels.
         height: Frame height in pixels.
+        out: If given, write into this preallocated ``(height, width, 3)``
+            ``uint8`` array instead of allocating a new one, and skip the
+            fill (every grid cell is always overwritten below, so a buffer
+            filled once and reused is never left with stale pixels). Callers
+            that pass ``out`` must never retain the returned array past the
+            point where its contents may next be overwritten.
 
     Returns:
         A NumPy array with shape ``(height, width, 3)`` and dtype ``uint8``.
     """
-    img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
-    img.fill(FRAME_DEFAULT_FILL_VALUE)
+    if out is None:
+        img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
+        img.fill(FRAME_DEFAULT_FILL_VALUE)
+    else:
+        img = out
 
     frame_bytes = frame_num.to_bytes(FRAME_BYTE_LENGTH, byteorder="big")
 
@@ -103,6 +116,36 @@ def encode_frame_number(frame_num: int, width: int, height: int) -> np.ndarray:
                 img[row, col, 2] = pixel_value // FRAME_HALF_DIVISOR
 
     return img
+
+
+def preallocate_frame_buffer(
+    should_allocate: bool, image_width: int | None, image_height: int | None
+) -> np.ndarray | None:
+    """Preallocate and fill a reusable frame buffer, or return ``None``.
+
+    Callers that log video frames reuse a single buffer across iterations
+    (via :func:`encode_frame_number`'s ``out`` param) instead of allocating a
+    new one per frame, for a reduced memory footprint.
+
+    Args:
+        should_allocate: Whether this caller needs a buffer at all (e.g. the
+            recording has cameras, or this thread's role is "rgb").
+        image_width: Frame width in pixels, or ``None`` if not video.
+        image_height: Frame height in pixels, or ``None`` if not video.
+
+    Returns:
+        A preallocated, pre-filled ``(image_height, image_width, 3)``
+        ``uint8`` array, or ``None`` if ``should_allocate`` is ``False`` or
+        either dimension is ``None``.
+    """
+    if not should_allocate or image_width is None or image_height is None:
+        return None
+    frame_buffer = np.zeros(
+        (image_height, image_width, FRAME_COLOR_CHANNELS), dtype=np.uint8
+    )
+    frame_buffer.fill(FRAME_DEFAULT_FILL_VALUE)
+    encode_frame_number(0, image_width, image_height, out=frame_buffer)
+    return frame_buffer
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,11 +325,14 @@ def build_context_specs(
         if case.context_duration_mode == DURATION_MODE_VARIABLE:
             context_duration_sec = max(
                 1,
-                int(
-                    case.duration_sec
-                    * CONTEXT_DURATION_RANDOM.uniform(
-                        DURATION_VARIABLE_MIN_FACTOR, DURATION_VARIABLE_MAX_FACTOR
-                    )
+                min(
+                    int(
+                        case.duration_sec
+                        * CONTEXT_DURATION_RANDOM.uniform(
+                            DURATION_VARIABLE_MIN_FACTOR, DURATION_VARIABLE_MAX_FACTOR
+                        )
+                    ),
+                    RecordingStateManager.MAX_RECORDING_DURATION_S,
                 ),
             )
         else:
@@ -379,9 +425,13 @@ def log_synchronous_frames(
     """Log all joint and video frames for one recording synchronously.
 
     Joint and video frames are interleaved in a single loop using a monotonic
-    deadline scheduler, so both streams advance together in time order.
+     deadline scheduler, so both streams advance together in time order.
     """
-    schedule_start = time.perf_counter()
+    frame_buffer = preallocate_frame_buffer(
+        bool(camera_name_list), image_width, image_height
+    )
+
+    recording_wall_start = time.perf_counter()
     joint_index = 0
     video_index = 0
 
@@ -398,20 +448,25 @@ def log_synchronous_frames(
         )
 
         joint_deadline = (
-            schedule_start + (joint_index / joint_fps) + jitter
+            recording_wall_start + (joint_index / joint_fps) + jitter
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            schedule_start + (video_index / video_fps) + jitter
+            recording_wall_start + (video_index / video_fps) + jitter
             if video_due
             else float("inf")
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.perf_counter()
-            if remaining > 0:
-                time.sleep(remaining)
+            wait_stats = wait_until(joint_deadline)
+            if assert_deadline and use_stochastic_timestamps:
+                assert_on_schedule(
+                    joint_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"ctx-{context_index} joint frame {joint_index}",
+                    wait_stats=wait_stats,
+                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -455,9 +510,14 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            remaining = video_deadline - time.perf_counter()
-            if remaining > 0:
-                time.sleep(remaining)
+            wait_stats = wait_until(video_deadline)
+            if assert_deadline and use_stochastic_timestamps:
+                assert_on_schedule(
+                    video_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"ctx-{context_index} video frame {video_index}",
+                    wait_stats=wait_stats,
+                )
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -471,7 +531,9 @@ def log_synchronous_frames(
                     + (camera_index * 100_000)
                     + video_index
                 )
-                rgb_image = encode_frame_number(frame_code, image_width, image_height)
+                rgb_image = encode_frame_number(
+                    frame_code, image_width, image_height, out=frame_buffer
+                )
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
@@ -484,18 +546,6 @@ def log_synchronous_frames(
                         timestamp=timestamp,
                     )
             video_index += 1
-
-    if assert_deadline and use_stochastic_timestamps:
-        expected_duration = max(
-            joint_frame_count / joint_fps,
-            video_frame_count / video_fps if camera_name_list else 0.0,
-        )
-        assert_schedule_duration(
-            time.perf_counter() - schedule_start,
-            expected_duration,
-            SCHEDULER_TOLERANCE_S,
-            label="synchronous frame",
-        )
 
 
 def build_thread_roles(
@@ -554,13 +604,19 @@ def run_threaded_logging(
             is_rgb = role_name == "rgb"
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
-            schedule_start = time.perf_counter()
+            frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            thread_wall_start = time.perf_counter()
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = schedule_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.perf_counter()
-                if remaining > 0:
-                    time.sleep(remaining)
+                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+                wait_stats = wait_until(frame_deadline)
+                if assert_deadline and use_stochastic_timestamps:
+                    assert_on_schedule(
+                        frame_deadline,
+                        SCHEDULER_TOLERANCE_S,
+                        label=f"ctx-{context_index} {role_name} frame {frame_index}",
+                        wait_stats=wait_stats,
+                    )
                 if use_real_timestamps:
                     timestamp = None
                 else:
@@ -579,7 +635,7 @@ def run_threaded_logging(
                             + frame_index
                         )
                         rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height
+                            frame_code, image_width, image_height, out=frame_buffer
                         )
                         with Timer(
                             MAX_TIME_TO_LOG_S,
@@ -641,14 +697,6 @@ def run_threaded_logging(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
-
-            if assert_deadline and use_stochastic_timestamps:
-                assert_schedule_duration(
-                    time.perf_counter() - schedule_start,
-                    frame_count / fps,
-                    SCHEDULER_TOLERANCE_S,
-                    label=f"{role_name} frame",
-                )
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 

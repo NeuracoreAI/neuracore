@@ -60,17 +60,27 @@ jobs:
           path: "."
           extras: dev
 
-      - name: Run failing Data Daemon test
+      - name: Reproduce Data Daemon scheduling failure
         env:
           NEURACORE_API_URL: https://staging.api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
           NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
           NEURACORE_PROVIDE_LIVE_DATA: false
-        run: >-
-          pytest -o log_cli=true --log-cli-level=INFO
-          -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
-          --import-mode=importlib
-          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[10s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+        run: |
+          for attempt in {1..10}; do
+            echo "::group::Attempt $attempt"
+
+            if ! pytest -o log_cli=true --log-cli-level=INFO \
+              -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s" \
+              --import-mode=importlib \
+              'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[10s-8recs-variable-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+            then
+              echo "::endgroup::"
+              exit 1
+            fi
+
+            echo "::endgroup::"
+          done
 
       - name: Show disk space after tests
         if: always()

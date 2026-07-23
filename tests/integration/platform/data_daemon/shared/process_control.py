@@ -21,6 +21,7 @@ import time
 import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from neuracore.data_daemon.const import SOCKET_PATH
@@ -162,17 +163,49 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
-def assert_schedule_duration(
-    elapsed: float,
-    expected_duration: float,
+@dataclass(frozen=True, slots=True)
+class ScheduleWaitStats:
+    requested_s: float
+    elapsed_s: float
+    process_cpu_s: float
+    thread_cpu_s: float
+
+
+def wait_until(deadline: float) -> ScheduleWaitStats:
+    """Wait until a deadline and record where the elapsed time went."""
+    wait_started_at = time.perf_counter()
+    requested_s = max(deadline - wait_started_at, 0.0)
+    process_cpu_started_at = time.process_time()
+    thread_cpu_started_at = time.thread_time()
+
+    if requested_s > 0:
+        time.sleep(requested_s)
+
+    return ScheduleWaitStats(
+        requested_s=requested_s,
+        elapsed_s=time.perf_counter() - wait_started_at,
+        process_cpu_s=time.process_time() - process_cpu_started_at,
+        thread_cpu_s=time.thread_time() - thread_cpu_started_at,
+    )
+
+
+def assert_on_schedule(
+    deadline: float,
     tolerance: float,
     label: str,
+    *,
+    wait_stats: ScheduleWaitStats,
 ) -> None:
-    """Assert that a producer sustained its requested rate overall."""
-    limit = expected_duration + tolerance
-    assert elapsed <= limit, (
-        f"{label} schedule took too long: "
-        f"elapsed={elapsed:.3f}s, limit={limit:.3f}s"
+    """Assert the producer fired at the intended monotonic-clock moment."""
+    lateness = time.perf_counter() - deadline
+    assert abs(lateness) <= tolerance, (
+        f"{label} fired at wrong moment: "
+        f"lateness={lateness:+.3f}s, "
+        f"tolerance=±{tolerance:.3f}s, "
+        f"sleep_requested={wait_stats.requested_s:.3f}s, "
+        f"wait_elapsed={wait_stats.elapsed_s:.3f}s, "
+        f"process_cpu={wait_stats.process_cpu_s:.3f}s, "
+        f"producer_thread_cpu={wait_stats.thread_cpu_s:.3f}s"
     )
 
 
