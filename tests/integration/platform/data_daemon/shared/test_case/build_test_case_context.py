@@ -430,7 +430,7 @@ def log_synchronous_frames(
         bool(camera_name_list), image_width, image_height
     )
 
-    recording_wall_start = time.time()
+    recording_wall_start = time.perf_counter()
     joint_index = 0
     video_index = 0
 
@@ -458,12 +458,15 @@ def log_synchronous_frames(
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
+            remaining = joint_deadline - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
+                    joint_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"ctx-{context_index} joint frame {joint_index}",
+                    remaining_before_sleep=remaining,
                 )
             if use_real_timestamps:
                 timestamp = None
@@ -508,12 +511,15 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            remaining = video_deadline - time.time()
+            remaining = video_deadline - time.perf_counter()
             if remaining > 0:
                 time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
+                    video_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"ctx-{context_index} video frame {video_index}",
+                    remaining_before_sleep=remaining,
                 )
             if use_real_timestamps:
                 timestamp = None
@@ -606,14 +612,15 @@ def run_threaded_logging(
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
+                remaining = frame_deadline - time.perf_counter()
                 if remaining > 0:
                     time.sleep(remaining)
                 if assert_deadline and use_stochastic_timestamps:
                     assert_on_schedule(
                         frame_deadline,
                         SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
+                        label=(f"ctx-{context_index} {role_name} frame {frame_index}"),
+                        remaining_before_sleep=remaining,
                     )
                 if use_real_timestamps:
                     timestamp = None
