@@ -125,6 +125,7 @@ def _assert_resume_failed_without_starting_job(
     *,
     job_id: str,
     dataset_name: str,
+    dataset_id: str,
     job_before_resume: dict,
 ) -> None:
     """Assert the resume is actionable, side-effect free, and fails early."""
@@ -137,6 +138,8 @@ def _assert_resume_failed_without_starting_job(
 
     # These checks enforce an actionable error: operation, affected resource,
     # exact dataset, and explanation that the dataset is no longer available.
+    # Prefer the dataset name when the soft-delete tombstone still exists; the
+    # dataset ID remains a valid identifier if a hard-purge already removed it.
     assert (
         "resume" in normalized_error or "resuming" in normalized_error
     ), f"Resume failure did not identify the failed operation: {error_message}"
@@ -145,7 +148,11 @@ def _assert_resume_failed_without_starting_job(
     ), f"Resume failure did not identify the dataset as the cause: {error_message}"
     assert (
         dataset_name.lower() in normalized_error
-    ), f"Resume failure did not reference dataset {dataset_name!r}: {error_message}"
+        or dataset_id.lower() in normalized_error
+    ), (
+        f"Resume failure did not reference dataset {dataset_name!r} "
+        f"({dataset_id}): {error_message}"
+    )
     assert any(
         phrase in normalized_error
         for phrase in ("deleted", "no longer exists", "does not exist", "not found")
@@ -258,6 +265,7 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
         # Step 3: delete the dataset
         dataset_id = dataset.id
         dataset.delete()
+        dataset = None
 
         # Try accessing the dataset by name and ID to ensure it is fully deleted
         # before proceeding.
@@ -267,10 +275,11 @@ def test_resume_fails_when_training_dataset_has_been_deleted() -> None:
         assert by_id is None, f"Dataset {dataset_id!r} still exists after deletion"
 
         # Step 4: the backend must reject the request before mutating the job or
-        # allocating replacement compute, and must name the deleted dataset.
+        # allocating replacement compute, and must identify the deleted dataset.
         _assert_resume_failed_without_starting_job(
             job_id=job_id,
             dataset_name=dataset_name,
+            dataset_id=dataset_id,
             job_before_resume=completed_job,
         )
     finally:
