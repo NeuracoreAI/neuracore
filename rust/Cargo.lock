@@ -427,6 +427,7 @@ dependencies = [
  "clap",
  "crc32c",
  "dashmap",
+ "data_daemon_bridge",
  "data_daemon_shared",
  "dirs",
  "iceoryx2",

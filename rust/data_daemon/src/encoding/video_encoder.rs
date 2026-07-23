@@ -32,6 +32,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
+
 use tokio::process::Command;
 
 /// Default ffmpeg binary name. Tests override via [`VideoEncoder::with_binary`]
@@ -342,15 +344,26 @@ impl VideoEncoder {
         // bytes) fed via the rawvideo demuxer on stdin — no lavfi/input-file
         // dependency, so the probe works even on a minimal build. ffmpeg parses
         // (and would reject) the options before reading stdin, so an unsupported
-        // `-vsync passthrough` or `libx264rgb` encode fails immediately rather
-        // than on a healthy input. The two `-map 0:v -c:v …` blocks exercise the
-        // same codec and pixel formats as `encode_chunk` (the build-dependent
-        // parts); the real lossy encode adds options the probe omits (e.g.
-        // `-qp 23` / `+genpts`), so the full option set is not identical.
+        // `-vsync passthrough`, `-enc_time_base` or `libx264rgb` encode fails
+        // immediately rather than on a healthy input. The two `-map 0:v -c:v …`
+        // blocks exercise the same codec, pixel formats and timestamp pinning
+        // as `encode_chunk` (the build-dependent parts); the real lossy encode
+        // adds options the probe omits (e.g. `-qp 23` / `+genpts`), so the full
+        // option set is not identical.
+        //
+        // `-video_track_timescale` is a mov-muxer private option and the null
+        // muxer silently ignores unknown muxer options, so probing it demands a
+        // real mp4 output: the first block writes a one-frame mp4 to a temp
+        // path (removed afterwards) while the second keeps the null muxer.
         const PROBE_FRAME_LEN: usize = 16 * 16 * 3 / 2;
         let frame = vec![128u8; PROBE_FRAME_LEN];
+        let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
+        let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
+        let mp4_probe_out =
+            std::env::temp_dir().join(format!("ncd_ffmpeg_preflight_{}.mp4", std::process::id()));
 
-        let mut child = std::process::Command::new(&self.binary)
+        let child = std::process::Command::new(&self.binary)
+            .arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
             .arg("error")
@@ -362,26 +375,32 @@ impl VideoEncoder {
             .arg("16x16")
             .arg("-i")
             .arg("-")
-            // Lossy pass (matches encode_chunk's first output).
+            // Lossy pass (matches encode_chunk's first output), written
+            // through the real mp4 muxer so the timescale pin is genuinely
+            // validated.
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
             .arg("-c:v")
             .arg("libx264")
             .arg("-pix_fmt")
             .arg("yuv420p")
             .arg("-preset")
             .arg("ultrafast")
-            .arg("-f")
-            .arg("null")
-            .arg("-")
+            .arg("-video_track_timescale")
+            .arg(&track_timescale)
+            .arg(&mp4_probe_out)
             // Lossless pass (matches encode_chunk's second output) — the
             // build-dependent `libx264rgb` rgb24 capability the encoder relies on.
             .arg("-map")
             .arg("0:v")
             .arg("-vsync")
             .arg("passthrough")
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
             .arg("-c:v")
             .arg("libx264rgb")
             .arg("-pix_fmt")
@@ -400,7 +419,14 @@ impl VideoEncoder {
             .map_err(|source| FfmpegPreflightError::NotFound {
                 binary: self.binary.clone(),
                 source,
-            })?;
+            });
+        let mut child = match child {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&mp4_probe_out);
+                return Err(error);
+            }
+        };
 
         // The frame is far smaller than a pipe buffer, so writing then dropping
         // stdin cannot deadlock against ffmpeg's reads.
@@ -408,12 +434,12 @@ impl VideoEncoder {
             let _ = stdin.write_all(&frame);
         }
 
-        let output = child
-            .wait_with_output()
-            .map_err(|source| FfmpegPreflightError::NotFound {
-                binary: self.binary.clone(),
-                source,
-            })?;
+        let output = child.wait_with_output();
+        let _ = std::fs::remove_file(&mp4_probe_out);
+        let output = output.map_err(|source| FfmpegPreflightError::NotFound {
+            binary: self.binary.clone(),
+            source,
+        })?;
 
         if output.status.success() {
             Ok(())
@@ -480,10 +506,27 @@ impl VideoEncoder {
         // on both (only deprecated, not removed, on 5.1+). The default branch
         // emits two `-map 0:v -c:v ...` output blocks from a single demux pass;
         // lossy-only emits a single block (no preview/archive split).
+        //
+        // Every output also pins its timing to the NUT's microsecond clock
+        // ([`VIDEO_SPOOL_TICKS_PER_SECOND`], shared with the producer's NUT
+        // writer): `-enc_time_base` fixes the encoder time base and
+        // `-video_track_timescale` fixes the mp4 track timescale.
+        // Without both, ffmpeg derives them from a per-chunk *guessed* frame
+        // rate, and the guess is unstable across chunks of one recording
+        // (near-constant capture deltas keep the microsecond base while
+        // jittery ones normalise to e.g. 59.94 fps → a 1/60000 track). The
+        // final stream-copy concat mishandles mixed-timescale segments and
+        // emits whole chunks crammed onto consecutive single ticks with
+        // backwards decoded PTS — the "Video missing logged frames" rejection
+        // — from perfectly clean input. Pinning both bases keeps every
+        // segment's PTS equal to its capture timestamps (microsecond-exact,
+        // matching the trace sidecar) and makes the concat timescale-uniform.
         // Bound each output's libx264 thread pool to the caller-sized value
         // (see `adaptive_encode_threads`) so the transcode fleet fills idle
         // cores at low concurrency without oversubscribing at high concurrency.
         let encode_threads = encode_threads.to_string();
+        let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
+        let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
         let lossy_only = request.codec.is_lossy_only();
         let mut command = Command::new(&self.binary);
         command
@@ -505,6 +548,8 @@ impl VideoEncoder {
             // `-preset medium`. No preview downscale and no lossless pass — this
             // is the canonical (and only) upload for the trace.
             command
+                .arg("-enc_time_base")
+                .arg(&enc_time_base)
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-threads")
@@ -515,6 +560,8 @@ impl VideoEncoder {
                 .arg("medium")
                 .arg("-crf")
                 .arg("23")
+                .arg("-video_track_timescale")
+                .arg(&track_timescale)
                 .arg(&request.lossy_out);
         } else {
             // Downscale the lossy preview proxy (only) to keep this dominant
@@ -527,6 +574,8 @@ impl VideoEncoder {
                 // output and the per-frame timestamp sidecar.
                 .arg("-vf")
                 .arg(&preview_filter)
+                .arg("-enc_time_base")
+                .arg(&enc_time_base)
                 .arg("-c:v")
                 .arg("libx264")
                 .arg("-threads")
@@ -537,11 +586,15 @@ impl VideoEncoder {
                 .arg("ultrafast")
                 .arg("-qp")
                 .arg("23")
+                .arg("-video_track_timescale")
+                .arg(&track_timescale)
                 .arg(&request.lossy_out)
                 .arg("-map")
                 .arg("0:v")
                 .arg("-vsync")
                 .arg("passthrough")
+                .arg("-enc_time_base")
+                .arg(&enc_time_base)
                 // libx264rgb encodes the rgb24 frames directly: bit-exact to the
                 // captured pixels, ~2.5× faster than a yuv444p10le pass, and the
                 // format the Python reference encoder writes.
@@ -555,6 +608,8 @@ impl VideoEncoder {
                 .arg("ultrafast")
                 .arg("-qp")
                 .arg("0")
+                .arg("-video_track_timescale")
+                .arg(&track_timescale)
                 .arg(&request.lossless_out);
         }
         command
@@ -1237,6 +1292,177 @@ mod tests {
         assert_eq!(frames, 6, "all source frames must be encoded");
     }
 
+    #[tokio::test]
+    async fn encode_chunk_pins_the_microsecond_track_timescale() {
+        // Without the pinned `-enc_time_base` / `-video_track_timescale`,
+        // ffmpeg derives each segment's timescale from a per-chunk guessed
+        // frame rate. The guess differs between chunks of one recording
+        // (near-constant capture deltas keep the microsecond base, jittery
+        // ones normalise to a standard rate), and the stream-copy concat of
+        // mixed-timescale segments crams whole chunks onto consecutive
+        // single ticks with backwards decoded PTS — the backend's "Video
+        // missing logged frames" rejection — from perfectly clean input.
+        // Every output must therefore carry the NUT's 1/1000000 clock.
+        let ffmpeg = match locate_binary("ffmpeg") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffmpeg not on PATH — skipping timescale test.");
+                return;
+            }
+        };
+        let ffprobe = match locate_binary("ffprobe") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffprobe not on PATH — skipping timescale test.");
+                return;
+            }
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("chunk_0000.nut");
+        write_synthetic_nut(&ffmpeg, &raw, 8);
+
+        let encoder = VideoEncoder::new();
+        let split_lossy = tempdir.path().join("split_lossy.mp4");
+        let split_lossless = tempdir.path().join("split_lossless.mp4");
+        encoder
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw.clone(),
+                    lossy_out: split_lossy.clone(),
+                    lossless_out: split_lossless.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("split transcode");
+        let single_lossy = tempdir.path().join("single_lossy.mp4");
+        encoder
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw,
+                    lossy_out: single_lossy.clone(),
+                    lossless_out: tempdir.path().join("unused_lossless.mp4"),
+                    codec: LossyVideoCodec::H264MediumLossyOnly,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("lossy-only transcode");
+
+        for path in [&split_lossy, &split_lossless, &single_lossy] {
+            let probe = StdCommand::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=time_base",
+                    "-of",
+                    "csv=p=0",
+                ])
+                .arg(path)
+                .output()
+                .expect("spawn ffprobe");
+            assert!(probe.status.success());
+            let time_base = String::from_utf8_lossy(&probe.stdout).trim().to_string();
+            assert_eq!(
+                time_base,
+                format!("1/{VIDEO_SPOOL_TICKS_PER_SECOND}"),
+                "{} must carry the pinned microsecond timescale",
+                path.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concat_of_mixed_cadence_chunks_keeps_monotonic_pts() {
+        // The terminal symptom this pipeline must never reproduce: chunks of
+        // one recording whose capture cadence differs in character (jittery
+        // vs metronome-constant) used to encode to segments with *different*
+        // guessed timescales, and the stream-copy concat of those crammed a
+        // whole chunk onto consecutive single ticks with backwards decoded
+        // PTS. Build exactly that fixture with the real producer NUT writer
+        // and assert the merged video stays sound.
+        let ffprobe = match locate_binary("ffprobe") {
+            Some(path) => path,
+            None => {
+                eprintln!("ffprobe not on PATH — skipping mixed-cadence test.");
+                return;
+            }
+        };
+        if locate_binary("ffmpeg").is_none() {
+            eprintln!("ffmpeg not on PATH — skipping mixed-cadence test.");
+            return;
+        }
+
+        use data_daemon_bridge::nut_writer::{NutVideoConfig, NutWriter};
+        let tempdir = TempDir::new().unwrap();
+        let frames_per_chunk: i64 = 48;
+        let rgb = vec![128u8; 16 * 16 * 3];
+        let write_chunk = |path: &Path, jittery: bool| {
+            let mut writer = NutWriter::create(
+                path,
+                NutVideoConfig {
+                    width: 16,
+                    height: 16,
+                    time_base_num: 1,
+                    time_base_den: VIDEO_SPOOL_TICKS_PER_SECOND,
+                },
+            )
+            .expect("create NUT");
+            let mut timestamp_us: i64 = 0;
+            for index in 0..frames_per_chunk {
+                // ~59.9 fps; the jittery variant wobbles ±0.5 ms like real
+                // capture, the constant variant ticks like a metronome — the
+                // exact contrast that used to flip the guessed timescale.
+                timestamp_us += if jittery {
+                    16_740 + ((index * 7_919) % 1_000) - 500
+                } else {
+                    16_683
+                };
+                writer
+                    .write_frame(timestamp_us as u64, &rgb)
+                    .expect("write frame");
+            }
+            writer.finish().expect("finish NUT");
+        };
+
+        let encoder = VideoEncoder::new();
+        let mut segments = Vec::new();
+        for (chunk_index, jittery) in [true, false, true].into_iter().enumerate() {
+            let raw = tempdir.path().join(format!("chunk_{chunk_index:04}.nut"));
+            let lossy = tempdir
+                .path()
+                .join(format!("chunk_{chunk_index:04}_lossy.mp4"));
+            write_chunk(&raw, jittery);
+            encoder
+                .encode_chunk(
+                    &ChunkEncodeRequest {
+                        raw_nut: raw,
+                        lossy_out: lossy.clone(),
+                        lossless_out: tempdir
+                            .path()
+                            .join(format!("chunk_{chunk_index:04}_lossless.mp4")),
+                        codec: LossyVideoCodec::LosslessPlusPreview,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
+                .await
+                .expect("transcode chunk");
+            segments.push(lossy);
+        }
+
+        let final_lossy = tempdir.path().join("lossy.mp4");
+        encoder
+            .concat_segments(&segments, &final_lossy)
+            .await
+            .expect("concat");
+        assert_merged_video_is_sound(&ffprobe, &final_lossy);
+    }
+
     #[test]
     fn lossy_video_codec_resolves_from_config_str() {
         assert_eq!(
@@ -1362,6 +1588,75 @@ mod tests {
             nb_read_frames, total_frames,
             "concat output should contain all {total_frames} frames"
         );
+        assert_merged_video_is_sound(&ffprobe, &final_lossy);
+    }
+
+    /// Assert the invariants the whole per-chunk pipeline exists to protect on
+    /// a concatenated video: the merged track carries the pinned microsecond
+    /// timescale and its decoded frames present in strictly increasing PTS
+    /// order (the backend's `synchronize_video` rejects the file on the first
+    /// backwards step as "Video missing logged frames").
+    fn assert_merged_video_is_sound(ffprobe: &Path, video: &Path) {
+        let probe = StdCommand::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=time_base",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(video)
+            .output()
+            .expect("spawn ffprobe");
+        assert!(probe.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&probe.stdout).trim(),
+            format!("1/{VIDEO_SPOOL_TICKS_PER_SECOND}"),
+            "{} must keep the pinned microsecond timescale through the concat",
+            video.display()
+        );
+
+        // Decode-order PTS, exactly as the backend guard walks them.
+        let probe = StdCommand::new(ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_frames",
+                "-show_entries",
+                "frame=pts,pkt_pts",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(video)
+            .output()
+            .expect("spawn ffprobe");
+        assert!(probe.status.success());
+        let stdout = String::from_utf8_lossy(&probe.stdout);
+        let pts_values: Vec<i64> = stdout
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("pts=")
+                    .or_else(|| line.strip_prefix("pkt_pts="))
+            })
+            .filter_map(|value| value.parse().ok())
+            .collect();
+        assert!(
+            !pts_values.is_empty(),
+            "{} yielded no decoded PTS",
+            video.display()
+        );
+        for pair in pts_values.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "{}: decoded PTS must be strictly increasing, got {pair:?}",
+                video.display()
+            );
+        }
     }
 
     #[tokio::test]

@@ -39,6 +39,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+data_daemon_bridge = { path = "../data_daemon_bridge" }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }
 wiremock = "0.6"

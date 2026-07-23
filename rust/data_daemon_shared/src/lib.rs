@@ -97,6 +97,16 @@ pub mod service_name {
         - VIDEO_CHUNK_HEADER_RESERVE)
         / VIDEO_CHUNK_BYTES_PER_FRAME) as u32;
 
+    /// The microsecond clock shared by every stage of the video path: the
+    /// producer writes spool NUT chunks with a `1/1_000_000` time base, and
+    /// the daemon pins its per-chunk encode outputs to the same clock
+    /// (`-enc_time_base` / `-video_track_timescale`). Sharing one constant
+    /// keeps the two in lockstep — if they diverge, ffmpeg falls back to a
+    /// per-chunk *guessed* frame rate, chunks of one recording land on
+    /// different timescales, and the stream-copy concat corrupts the merged
+    /// video's PTS.
+    pub const VIDEO_SPOOL_TICKS_PER_SECOND: u32 = 1_000_000;
+
     /// Subscriber buffer depth for the lifecycle service.
     ///
     /// Lossless, in-order delivery is *not* a function of this depth: the
