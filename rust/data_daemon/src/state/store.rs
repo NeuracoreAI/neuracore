@@ -33,6 +33,12 @@ const BUSY_TIMEOUT_MS: u32 = 5000;
 /// lives on its own single-connection pool and never competes for these.
 const READ_POOL_CONNECTIONS: u32 = 4;
 
+/// How many reconcile re-sends a trace's completion PUT gets before the
+/// recording reaper is allowed to reclaim the recording anyway. At the
+/// reconcile cadence this bounds a persistently-rejected completion to
+/// roughly ten minutes of retention, instead of pinning the disk forever.
+pub const MAX_COMPLETION_REPORT_ATTEMPTS: i64 = 20;
+
 /// Errors surfaced by [`StateStore`] operations.
 #[derive(Debug, Error)]
 pub enum StateStoreError {
@@ -273,6 +279,29 @@ pub trait StateStore: Send + Sync {
     /// a recording stuck on a permanently-failed upload on every 60 s sweep.
     /// Returned in `created_at` order.
     async fn recordings_pending_reclaim(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
+
+    /// Stamp `completion_reported_at = now` on the given traces after the
+    /// status coordinator's batch PUT carrying their `UPLOAD_COMPLETE` was
+    /// acknowledged by the backend. Idempotent: already-stamped traces keep
+    /// their original timestamp.
+    async fn mark_traces_completion_reported(
+        &self,
+        trace_ids: &[String],
+    ) -> Result<(), StateStoreError>;
+
+    /// Claim uploaded traces whose completion was never acknowledged
+    /// (`completion_reported_at IS NULL`) so the status coordinator's
+    /// reconcile pass can re-send them. Only traces untouched for
+    /// `older_than_secs` are eligible (a freshly-queued completion stamps
+    /// within the flush deadline), and each claim increments
+    /// `completion_report_attempts`; traces at
+    /// [`MAX_COMPLETION_REPORT_ATTEMPTS`] are never claimed again — at that
+    /// point the reclaim gate opens instead.
+    async fn claim_unreported_completions(
+        &self,
+        older_than_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
     /// Resolve the cloud `recording_id` for the recording identified by
     /// `(robot_id, robot_instance, start_timestamp_ns)`.
@@ -1199,15 +1228,90 @@ impl StateStore for SqliteStateStore {
                          (SELECT 1 FROM traces t \
                            WHERE t.recording_index = r.recording_index \
                              AND t.upload_status != 'uploaded') \
+                     AND NOT EXISTS \
+                         (SELECT 1 FROM traces t \
+                           WHERE t.recording_index = r.recording_index \
+                             AND t.completion_reported_at IS NULL \
+                             AND t.completion_report_attempts < ?1) \
                  ) \
            ORDER BY r.created_at ASC",
         )
+        .bind(MAX_COMPLETION_REPORT_ATTEMPTS)
         .fetch_all(&self.read_pool)
         .await?;
         rows.iter()
             .map(RecordingRow::from_row)
             .collect::<Result<Vec<_>, _>>()
             .map_err(Into::into)
+    }
+
+    async fn mark_traces_completion_reported(
+        &self,
+        trace_ids: &[String],
+    ) -> Result<(), StateStoreError> {
+        if trace_ids.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        for trace_id in trace_ids {
+            sqlx::query(
+                "UPDATE traces \
+                    SET completion_reported_at = COALESCE(completion_reported_at, ?2), \
+                        last_updated = ?2 \
+                  WHERE trace_id = ?1",
+            )
+            .bind(trace_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn claim_unreported_completions(
+        &self,
+        older_than_secs: i64,
+        limit: i64,
+    ) -> Result<Vec<TraceRecord>, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        let cutoff = now - chrono::Duration::seconds(older_than_secs);
+        let rows = sqlx::query(
+            "SELECT * FROM traces \
+              WHERE upload_status = 'uploaded' \
+                AND completion_reported_at IS NULL \
+                AND completion_report_attempts < ?1 \
+                AND last_updated <= ?2 \
+              ORDER BY last_updated ASC \
+              LIMIT ?3",
+        )
+        .bind(MAX_COMPLETION_REPORT_ATTEMPTS)
+        .bind(cutoff)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut claimed = rows
+            .iter()
+            .map(TraceRecord::from_row)
+            .collect::<Result<Vec<_>, _>>()?;
+        for trace in &mut claimed {
+            sqlx::query(
+                "UPDATE traces \
+                    SET completion_report_attempts = completion_report_attempts + 1, \
+                        last_updated = ?2 \
+                  WHERE trace_id = ?1",
+            )
+            .bind(&trace.trace_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            trace.completion_report_attempts += 1;
+            trace.last_updated = now;
+        }
+        tx.commit().await?;
+        Ok(claimed)
     }
 
     async fn resolve_recording_id_for_marker(
@@ -2232,57 +2336,65 @@ mod tests {
         );
     }
 
+    // Helper: drive a stopped recording with one trace at `upload` status
+    // through the full notify/progress gates.
+    async fn stopped_with_trace(
+        store: &SqliteStateStore,
+        instance: i64,
+        trace_id: &str,
+        upload: TraceUploadStatus,
+    ) -> i64 {
+        let index = seed_recording(store, instance).await;
+        store
+            .mark_recording_start_notified(index, &format!("cloud-{instance}"))
+            .await
+            .unwrap();
+        store
+            .create_trace(index, trace_id, Some("J"), None)
+            .await
+            .unwrap();
+        store
+            .update_trace(
+                trace_id,
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    upload_status: Some(upload),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .unwrap();
+        store.mark_recording_stopped(index, 1).await.unwrap();
+        store.mark_recording_stop_notified(index).await.unwrap();
+        store.set_expected_trace_count(index, 1).await.unwrap();
+        store
+            .set_progress_report_status(
+                index,
+                ProgressReportStatus::Pending,
+                ProgressReportStatus::Reported,
+            )
+            .await
+            .unwrap();
+        index
+    }
+
     #[tokio::test]
     async fn recordings_pending_reclaim_only_returns_settled_recordings() {
         let (store, _tempdir) = open_store().await;
 
-        // Helper: drive a stopped recording with one trace at `upload` status
-        // through the full notify/progress gates.
-        async fn stopped_with_trace(
-            store: &SqliteStateStore,
-            instance: i64,
-            trace_id: &str,
-            upload: TraceUploadStatus,
-        ) -> i64 {
-            let index = seed_recording(store, instance).await;
-            store
-                .mark_recording_start_notified(index, &format!("cloud-{instance}"))
-                .await
-                .unwrap();
-            store
-                .create_trace(index, trace_id, Some("J"), None)
-                .await
-                .unwrap();
-            store
-                .update_trace(
-                    trace_id,
-                    TraceUpdate {
-                        write_status: Some(TraceWriteStatus::Written),
-                        upload_status: Some(upload),
-                        ..TraceUpdate::default()
-                    },
-                )
-                .await
-                .unwrap();
-            store.mark_recording_stopped(index, 1).await.unwrap();
-            store.mark_recording_stop_notified(index).await.unwrap();
-            store.set_expected_trace_count(index, 1).await.unwrap();
-            store
-                .set_progress_report_status(
-                    index,
-                    ProgressReportStatus::Pending,
-                    ProgressReportStatus::Reported,
-                )
-                .await
-                .unwrap();
-            index
-        }
-
-        // A: stopped + fully uploaded → reclaimable.
+        // A: stopped + fully uploaded + completion acked → reclaimable.
         let uploaded = stopped_with_trace(&store, 0, "a1", TraceUploadStatus::Uploaded).await;
+        store
+            .mark_traces_completion_reported(&["a1".to_string()])
+            .await
+            .unwrap();
         // B: stopped, settled at the recording level, but one trace failed to
         // upload → must NOT be reclaimable (and must not be re-scanned forever).
         let failed = stopped_with_trace(&store, 1, "b1", TraceUploadStatus::Failed).await;
+        // E: fully uploaded locally but the completion PUT has not been acked
+        // → must NOT be reclaimable (the reaper would destroy the queued
+        // completion before the status coordinator flushes it).
+        let unreported = stopped_with_trace(&store, 4, "e1", TraceUploadStatus::Uploaded).await;
         // C: cancelled + backend notified → reclaimable with no trace scan.
         let cancelled = seed_recording(&store, 2).await;
         store
@@ -2319,6 +2431,51 @@ mod tests {
         assert!(
             !reclaimable.contains(&live),
             "a live recording never reclaims"
+        );
+        assert!(
+            !reclaimable.contains(&unreported),
+            "an unacknowledged completion blocks reclaim until the status PUT lands"
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_unreported_completions_bounds_attempts_and_unblocks_reclaim() {
+        let (store, _tempdir) = open_store().await;
+        let index = stopped_with_trace(&store, 0, "t1", TraceUploadStatus::Uploaded).await;
+
+        // A fresh row is inside the grace window: nothing to claim yet.
+        assert!(store
+            .claim_unreported_completions(3600, 10)
+            .await
+            .unwrap()
+            .is_empty());
+
+        // Each pass past the grace window claims the trace once and
+        // increments its attempt counter.
+        for expected_attempts in 1..=MAX_COMPLETION_REPORT_ATTEMPTS {
+            let claimed = store.claim_unreported_completions(0, 10).await.unwrap();
+            assert_eq!(claimed.len(), 1);
+            assert_eq!(claimed[0].trace_id, "t1");
+            assert_eq!(claimed[0].completion_report_attempts, expected_attempts);
+        }
+
+        // Attempts exhausted: never claimed again, and the reclaim gate opens
+        // so the recording cannot be retained forever.
+        assert!(store
+            .claim_unreported_completions(0, 10)
+            .await
+            .unwrap()
+            .is_empty());
+        let reclaimable: Vec<i64> = store
+            .recordings_pending_reclaim()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.recording_index)
+            .collect();
+        assert!(
+            reclaimable.contains(&index),
+            "exhausted completion-report attempts unblock reclaim"
         );
     }
 

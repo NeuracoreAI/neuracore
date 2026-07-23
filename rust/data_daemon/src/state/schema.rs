@@ -252,6 +252,17 @@ pub struct TraceRecord {
     /// registration coordinator. The uploader reads this back on
     /// `ReadyForUpload` and dispatches one resumable upload per entry.
     pub upload_session_uris: Option<String>,
+    /// When the status coordinator's `UPLOAD_COMPLETE` PUT for this trace
+    /// was acknowledged by the backend. `NULL` until then; the reaper only
+    /// reclaims recordings whose traces are all stamped (or have exhausted
+    /// [`completion_report_attempts`](Self::completion_report_attempts)).
+    /// Note: failed traces emit a terminal status through the same path, so
+    /// a stamp means "final status acked", NOT "uploaded successfully" —
+    /// `upload_status` stays the authority on upload success.
+    pub completion_reported_at: Option<NaiveDateTime>,
+    /// How many times the reconcile pass has re-driven this trace's
+    /// completion PUT; reclaim opens once the attempts are exhausted.
+    pub completion_report_attempts: i64,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -286,6 +297,8 @@ impl TraceRecord {
             error_code,
             error_message: row.try_get("error_message")?,
             upload_session_uris: row.try_get("upload_session_uris")?,
+            completion_reported_at: row.try_get("completion_reported_at")?,
+            completion_report_attempts: row.try_get("completion_report_attempts")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })

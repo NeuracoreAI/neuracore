@@ -49,5 +49,11 @@ pub const UPLOAD_RESCAN: Duration = Duration::from_secs(5);
 /// the cloud, so a relaxed cadence keeps the scan off the hot path.
 pub const RECORDING_RECLAIM: Duration = Duration::from_secs(60);
 
+/// Completion-report reconcile: re-drives `UPLOAD_COMPLETE` status updates
+/// whose backend acknowledgement never landed (dropped batch, crash between
+/// ack and stamp). The PUT is idempotent, so the relaxed cadence only bounds
+/// how quickly a stuck recording becomes reclaimable again.
+pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
+
 /// Connection health probe — matches the Python `connection_manager.py` cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);
