@@ -101,6 +101,7 @@ dev = [
     "types-aiofiles",
     "pyinstrument",
     "plotly",
+    "ataraxis-time",
 ]
 import = [
     # lerobot is used only for dataset importing

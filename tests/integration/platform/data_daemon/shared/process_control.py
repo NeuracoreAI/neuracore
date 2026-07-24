@@ -23,6 +23,8 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
+from ataraxis_time import PrecisionTimer
+
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import (
     get_daemon_pid_path,
@@ -160,6 +162,61 @@ class Timer:
             existing["count"] += incoming["count"]
             existing["total"] += incoming["total"]
             existing["max"] = max(existing["max"], incoming["max"])
+
+
+_HAS_UNIFIED_DELAY = hasattr(PrecisionTimer("us"), "delay")
+"""Whether this ataraxis-time install has the >= 4.0.0 unified ``delay`` API.
+
+Pre-4.0.0 (e.g. resolved on hosts whose macOS predates the macosx_15_0 floor
+that 3.0.0+ wheels require) splits GIL release into a separate method instead
+of a ``block`` kwarg.
+"""
+
+# A single PrecisionTimer instance is not safe to call concurrently from
+# multiple threads: measured cross-talk of several *milliseconds* when
+# threads share one instance, versus low-microsecond precision when each
+# thread gets its own — so each thread lazily gets its own timer here.
+_thread_local = threading.local()
+
+
+def _get_deadline_timer() -> PrecisionTimer:
+    timer = getattr(_thread_local, "timer", None)
+    if timer is None:
+        timer = PrecisionTimer("us")
+        _thread_local.timer = timer
+    return timer
+
+
+def _busy_wait_us(remaining_us: int) -> None:
+    timer = _get_deadline_timer()
+    if _HAS_UNIFIED_DELAY:
+        timer.delay(remaining_us, block=False)
+    else:
+        timer.delay_noblock(remaining_us)
+
+
+# A process's first call into the compiled extension pays a one-off cost
+# (dynamic-linking/first-touch of the C++ code, shared by every thread's
+# timer instance since it lives in the same loaded library). Pay it now, at
+# import time, so it never lands inside a recording's first frame deadline.
+_busy_wait_us(1_000)
+
+
+def sleep_until(deadline: float) -> None:
+    """Busy-wait until wall-clock ``deadline`` without holding the GIL.
+
+    ``time.sleep`` wake-up precision isn't guaranteed on any given host or
+    under load, and a pure-Python busy-wait still contends for the GIL with
+    other threads. :class:`PrecisionTimer` busy-waits in C++ with the GIL
+    released, so it neither depends on OS sleep precision nor blocks other
+    producer threads' logging calls while it spins. Frame intervals in
+    these tests are always sub-second (fps > 1), so the wait is already
+    short.
+    """
+    remaining_us = int((deadline - time.time()) * 1_000_000)
+    if remaining_us <= 0:
+        return
+    _busy_wait_us(remaining_us)
 
 
 def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
