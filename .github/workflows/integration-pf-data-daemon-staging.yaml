@@ -5,15 +5,20 @@ run-name: "Cougar Tracing — macOS 300s stochastic capture (${{ github.ref_name
 #
 # Captures evidence for the remaining macOS-only nightly failure: the 300s
 # stochastic performance cases fail "fired at wrong moment" — a producer
-# frame lands beyond the ±50ms tolerance because the producer thread stops
-# running (sleep overshoot / preemption) while system CPU is saturated.
-# Runs ONLY those cases, on the macOS matrix where they fail, with three
-# evidence layers uploaded as artifacts:
+# frame lands beyond the ±50ms tolerance because the producer thread's
+# sleep wakes 20-170ms late in the first seconds of a case's first
+# recording. Run 30108050527 attributed the failure window to macOS
+# background daemons (mds/mds_stores Spotlight indexing, softwareupdated,
+# mobileassetd) churning through the setup step's file writes while the
+# freshly spawned context workers import. This revision A/Bs that theory:
+# the `quiet` matrix arm disables Spotlight and update daemons before
+# setup, `baseline` leaves them on. Evidence layers per leg:
 #   producer: per-frame timing diagnostics (NEURACORE_PRODUCER_DIAGNOSTICS,
 #     harness ported from test/300s-failure) in the pytest logs;
-#   host: continuous `top` samples, thermal notifications and best-effort
-#     powermetrics under host-telemetry/ showing what competes for CPU at
-#     the moment lateness spikes;
+#   host: a sleep-jitter sentinel (50ms sleeper logging wakeup overshoot
+#     for the whole job), 0.5s ps sampling, continuous `top` samples,
+#     thermal notifications and best-effort powermetrics under
+#     host-telemetry/;
 #   daemon: debug-level daemon logs, continuous log streams and state.db
 #     snapshots (RUST_LOG=debug rather than trace so the daemon's own
 #     logging overhead does not perturb the scheduling behaviour under
@@ -44,8 +49,9 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        python-version: ['3.10', '3.14']
+        python-version: ['3.10']
         os: [macos-26, macos-26-xlarge]
+        quiet: ['baseline', 'quiet']
 
     steps:
     - name: Show disk space
@@ -56,6 +62,99 @@ jobs:
       with:
         environment: staging
         ref: ${{ inputs.ref }}
+
+    - name: Quiet macOS background services
+      if: matrix.quiet == 'quiet'
+      # The A/B variable: stop the daemons that run 30108050527 caught
+      # holding the cores during the failure window. Before setup so
+      # Spotlight never starts indexing the build's file churn.
+      run: |
+        sudo mdutil -a -i off || true
+        sudo softwareupdate --schedule off || true
+        sudo launchctl bootout system/com.apple.softwareupdated 2>/dev/null || true
+        sudo launchctl bootout system/com.apple.mobileassetd 2>/dev/null || true
+        mdutil -a -s || true
+
+    - name: Start host telemetry
+      shell: bash
+      # Runs before setup so the sentinel and samplers cover the setup
+      # phase's load spike as well as the tests.
+      run: |
+        set -euo pipefail
+        mkdir -p tracing-artifacts/host-telemetry
+        {
+          date -u +"start_utc=%Y-%m-%dT%H:%M:%SZ epoch=%s"
+          sw_vers
+          uname -a
+          sysctl hw.model hw.ncpu hw.memsize 2>/dev/null || true
+          sysctl kern.timer 2>/dev/null || true
+          mdutil -a -s 2>/dev/null || true
+        } > tracing-artifacts/host-telemetry/host-info.txt
+        ps aux > tracing-artifacts/host-telemetry/ps-at-start.txt
+        # Sentinel: sleeps 50ms in a loop and logs every wakeup overshoot
+        # >10ms plus a 30s percentile summary. Measures the exact primitive
+        # the producers fail on, independently of the tests, for the whole
+        # job. Epoch-stamped for correlation with producer diagnostics.
+        cat > "${RUNNER_TEMP}/sleep_sentinel.py" <<'SENTINEL'
+        import time
+
+        INTERVAL = 0.05
+        REPORT_EVERY = 30.0
+
+        samples = []
+        last_report = time.monotonic()
+        while True:
+            start = time.monotonic()
+            time.sleep(INTERVAL)
+            overshoot_ms = (time.monotonic() - start - INTERVAL) * 1000.0
+            samples.append(overshoot_ms)
+            if overshoot_ms > 10.0:
+                print(f"{time.time():.3f} overshoot_ms={overshoot_ms:.1f}", flush=True)
+            now = time.monotonic()
+            if now - last_report >= REPORT_EVERY:
+                samples.sort()
+                count = len(samples)
+                print(
+                    f"{time.time():.3f} summary n={count}"
+                    f" p50={samples[count // 2]:.1f}"
+                    f" p95={samples[int(count * 0.95)]:.1f}"
+                    f" max={samples[-1]:.1f}",
+                    flush=True,
+                )
+                samples = []
+                last_report = now
+        SENTINEL
+        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" \
+          > tracing-artifacts/host-telemetry/sleep-sentinel.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/sentinel.pid"
+        # 0.5s process sampler: cputime deltas between ticks attribute
+        # sub-second CPU bursts that top's 2s window averages away.
+        cat > "${RUNNER_TEMP}/pssampler.sh" <<'PSS'
+        #!/usr/bin/env bash
+        set -u
+        while true; do
+          echo "== $(date -u +%s)"
+          ps -Ao pid,pcpu,cputime,comm -r 2>/dev/null | head -12
+          sleep 0.5
+        done
+        PSS
+        chmod +x "${RUNNER_TEMP}/pssampler.sh"
+        nohup "${RUNNER_TEMP}/pssampler.sh" \
+          > tracing-artifacts/host-telemetry/ps-sample.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/pssampler.pid"
+        # Whole-host CPU attribution. `top` logging mode timestamps every
+        # sample; correlate against the producer diagnostics' epoch
+        # timestamps in the pytest log.
+        nohup top -l 0 -s 2 -n 20 -o cpu \
+          -stats pid,command,cpu,th,csw,state,time \
+          > tracing-artifacts/host-telemetry/top-stream.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/top.pid"
+        nohup pmset -g thermlog \
+          > tracing-artifacts/host-telemetry/thermlog.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/thermlog.pid"
+        # Best-effort: not available inside some macOS runner VMs.
+        sudo nohup powermetrics -i 5000 --samplers cpu_power,thermal,tasks \
+          > tracing-artifacts/host-telemetry/powermetrics.log 2>&1 &
 
     - name: Set up Python ${{ matrix.python-version }}
       uses: actions/setup-python@v6
@@ -69,34 +168,6 @@ jobs:
         checkout: "false"
         path: "."
         extras: dev
-
-    - name: Start host telemetry
-      shell: bash
-      run: |
-        set -euo pipefail
-        mkdir -p tracing-artifacts/host-telemetry
-        {
-          date -u +"start_utc=%Y-%m-%dT%H:%M:%SZ epoch=%s"
-          sw_vers
-          uname -a
-          sysctl hw.model hw.ncpu hw.memsize 2>/dev/null || true
-        } > tracing-artifacts/host-telemetry/host-info.txt
-        ps aux > tracing-artifacts/host-telemetry/ps-at-start.txt
-        # Whole-host CPU attribution. Lateness spikes come with large
-        # thread-not-running time and ~100% system CPU, so the culprit is
-        # whatever else holds the cores at that moment. `top` logging mode
-        # timestamps every sample; correlate against the producer
-        # diagnostics' epoch timestamps in the pytest log.
-        nohup top -l 0 -s 2 -n 20 -o cpu \
-          -stats pid,command,cpu,th,csw,state,time \
-          > tracing-artifacts/host-telemetry/top-stream.log 2>&1 &
-        echo $! > "${RUNNER_TEMP}/top.pid"
-        nohup pmset -g thermlog \
-          > tracing-artifacts/host-telemetry/thermlog.log 2>&1 &
-        echo $! > "${RUNNER_TEMP}/thermlog.pid"
-        # Best-effort: not available inside some macOS runner VMs.
-        sudo nohup powermetrics -i 5000 --samplers cpu_power,thermal,tasks \
-          > tracing-artifacts/host-telemetry/powermetrics.log 2>&1 &
 
     - name: Start state snapshotter
       shell: bash
@@ -228,18 +299,21 @@ jobs:
         kill "$(cat "${RUNNER_TEMP}/snapshotter.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/top.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/thermlog.pid" 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat "${RUNNER_TEMP}/sentinel.pid" 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat "${RUNNER_TEMP}/pssampler.pid" 2>/dev/null)" 2>/dev/null || true
         sudo pkill -x powermetrics 2>/dev/null || true
         pkill -f 'tail.*daemon.log' 2>/dev/null || true
         sleep 2
         gzip -f tracing-artifacts/logstreams/* 2>/dev/null || true
         gzip -f tracing-artifacts/host-telemetry/top-stream.log \
-          tracing-artifacts/host-telemetry/powermetrics.log 2>/dev/null || true
+          tracing-artifacts/host-telemetry/powermetrics.log \
+          tracing-artifacts/host-telemetry/ps-sample.log 2>/dev/null || true
 
     - name: Upload tracing artifacts
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}
+        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}-${{ matrix.quiet }}
         path: |
           tracing-artifacts/
         if-no-files-found: warn
