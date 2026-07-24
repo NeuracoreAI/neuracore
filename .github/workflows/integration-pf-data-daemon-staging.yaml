@@ -71,9 +71,12 @@ jobs:
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
-      # stays attributable.
+      # stays attributable. Run at the highest scheduling priority (nice -20,
+      # requires sudo) so pytest isn't starved of CPU by other runner activity
+      # during these timing-sensitive performance tests; `-E` preserves the env
+      # vars set above (sudo would otherwise drop them).
       run: >-
-        pytest -o log_cli=true --log-cli-level=INFO
+        sudo -E nice -n -20 pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
         tests/integration/platform/data_daemon/performance
