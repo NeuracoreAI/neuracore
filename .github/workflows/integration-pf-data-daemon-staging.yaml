@@ -7,12 +7,14 @@ run-name: "Cougar Tracing — macOS 300s stochastic capture (${{ github.ref_name
 # stochastic performance cases fail "fired at wrong moment" — a producer
 # frame lands beyond the ±50ms tolerance because the producer thread's
 # sleep wakes 20-170ms late in the first seconds of a case's first
-# recording. Run 30108050527 attributed the failure window to macOS
-# background daemons (mds/mds_stores Spotlight indexing, softwareupdated,
-# mobileassetd) churning through the setup step's file writes while the
-# freshly spawned context workers import. This revision A/Bs that theory:
-# the `quiet` matrix arm disables Spotlight and update daemons before
-# setup, `baseline` leaves them on. Evidence layers per leg:
+# recording. Runs 30108050527/30109237047/30109801387 narrowed the root
+# cause to idle-guest timer behaviour: plain sleeps from idle processes
+# wake 30-160ms late with hard per-config p95 ceilings (immune to CPU
+# warmth and latency QoS), while sleeps from processes inside a busy
+# workload are precise. This revision tests two mitigations under noisy
+# (non-quieted) conditions: the `spinner` arm keeps one core non-idle via
+# a nice-20 spinner, the `busywait` arm switches the stochastic producers
+# to busy-wait mode. Evidence layers per leg:
 #   producer: per-frame timing diagnostics (NEURACORE_PRODUCER_DIAGNOSTICS,
 #     harness ported from test/300s-failure) in the pytest logs;
 #   host: a sleep-jitter sentinel (50ms sleeper logging wakeup overshoot
@@ -32,26 +34,22 @@ on:
         required: false
         type: string
         default: ""
-      busy_wait:
-        description: "Stochastic producer wait mode: 0 = sleep between frames (what the nightly suite does), 1 = busy-wait (measures preemption directly)."
-        required: false
-        type: choice
-        options: ["0", "1"]
-        default: "0"
-
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
-      NEURACORE_STOCHASTIC_BUSY_WAIT: ${{ inputs.busy_wait }}
+      # The busywait arm exercises the harness's busy-wait mode as the
+      # candidate fix; the spinner arm keeps sleep mode and instead keeps
+      # the guest busy from outside the tests.
+      NEURACORE_STOCHASTIC_BUSY_WAIT: ${{ matrix.mitigation == 'busywait' && '1' || '0' }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         python-version: ['3.10']
         os: [macos-26, macos-26-xlarge]
-        quiet: ['baseline', 'quiet']
+        mitigation: ['spinner', 'busywait']
 
     steps:
     - name: Show disk space
@@ -63,17 +61,19 @@ jobs:
         environment: staging
         ref: ${{ inputs.ref }}
 
-    - name: Quiet macOS background services
-      if: matrix.quiet == 'quiet'
-      # The A/B variable: stop the daemons that run 30108050527 caught
-      # holding the cores during the failure window. Before setup so
-      # Spotlight never starts indexing the build's file churn.
+    - name: Start keep-awake spinner
+      if: matrix.mitigation == 'spinner'
+      # Mechanism test: sentinel runs 30109237047/30109801387 showed plain
+      # sleeps are 30-160ms late whenever the guest idles (hard per-config
+      # p95 ceilings, immune to CPU-warmth and latency QoS), yet producer
+      # sleeps are precise while recordings keep the box busy. A minimum-
+      # priority spinner keeps one core non-idle so timers keep firing; if
+      # the tests pass and the cold sentinel tightens, idle-guest timer
+      # coalescing is confirmed as the root cause.
       run: |
-        sudo mdutil -a -i off || true
-        sudo softwareupdate --schedule off || true
-        sudo launchctl bootout system/com.apple.softwareupdated 2>/dev/null || true
-        sudo launchctl bootout system/com.apple.mobileassetd 2>/dev/null || true
-        mdutil -a -s || true
+        nohup nice -n 20 python3 -c 'while True: pass' > /dev/null 2>&1 &
+        echo $! > "${RUNNER_TEMP}/spinner.pid"
+        echo "spinner pid $(cat "${RUNNER_TEMP}/spinner.pid")"
 
     - name: Start host telemetry
       shell: bash
@@ -316,6 +316,7 @@ jobs:
         kill "$(cat "${RUNNER_TEMP}/top.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/thermlog.pid" 2>/dev/null)" 2>/dev/null || true
         pkill -f sleep_sentinel.py 2>/dev/null || true
+        kill "$(cat "${RUNNER_TEMP}/spinner.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/pssampler.pid" 2>/dev/null)" 2>/dev/null || true
         sudo pkill -x powermetrics 2>/dev/null || true
         pkill -f 'tail.*daemon.log' 2>/dev/null || true
@@ -329,7 +330,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}-${{ matrix.quiet }}
+        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}-${{ matrix.mitigation }}
         path: |
           tracing-artifacts/
         if-no-files-found: warn
