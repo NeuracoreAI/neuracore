@@ -30,6 +30,7 @@ autouse
 avgpool
 axvline
 backpressure
+BARRIERFSYNC
 bfloat
 bgra
 bibtex
@@ -154,6 +155,7 @@ fadvise
 falsey
 fastapi
 fcntl
+fdatasync
 feedforward
 fflags
 ffprobe
@@ -184,6 +186,7 @@ frontleft
 frontright
 fspath
 ftruncate
+FULLFSYNC
 gdown
 geglu
 gelu
