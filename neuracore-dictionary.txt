@@ -35,6 +35,7 @@ bgra
 bibtex
 bigendian
 bigym
+blackhole
 blit
 blowaway
 bodyless
@@ -128,6 +129,7 @@ eigenpy
 einops
 elementwise
 elems
+elif
 embs
 Emika
 ENOENT
@@ -153,6 +155,7 @@ facenum
 fadvise
 falsey
 fastapi
+faulthandler
 fcntl
 feedforward
 fflags
@@ -192,6 +195,7 @@ geomadr
 geomid
 geomnum
 getbuffer
+getloadavg
 getpgid
 getpid
 gettid
@@ -443,6 +447,7 @@ setpriority
 setsid
 setuptools
 shadowsize
+SIGBUS
 siglip
 Siglip
 SIGLIP

@@ -1,11 +1,23 @@
 name: Cougar Tracing - Data Daemon (Staging)
-run-name: "Cougar Tracing run — data daemon (${{ github.ref_name }})"
+run-name: "Cougar Tracing — macOS 300s stochastic capture (${{ github.ref_name }})"
 
-# TEMPORARY tracing branch (ci/cougar-tracing-run). The NORMAL nightly
-# data-daemon integration suite (full test scope, full matrix, single pass)
-# plus the diagnostic capture layer: RUST_LOG=trace daemon logs, continuous
-# log streams + state.db snapshots, everything uploaded as artifacts, and
-# job/faulthandler timeouts so a wedge is diagnosable. Do not merge to main.
+# TEMPORARY tracing branch (ci/cougar-tracing-run). Do not merge to main.
+#
+# Captures evidence for the remaining macOS-only nightly failure: the 300s
+# stochastic performance cases fail "fired at wrong moment" — a producer
+# frame lands beyond the ±50ms tolerance because the producer thread stops
+# running (sleep overshoot / preemption) while system CPU is saturated.
+# Runs ONLY those cases, on the macOS matrix where they fail, with three
+# evidence layers uploaded as artifacts:
+#   producer: per-frame timing diagnostics (NEURACORE_PRODUCER_DIAGNOSTICS,
+#     harness ported from test/300s-failure) in the pytest logs;
+#   host: continuous `top` samples, thermal notifications and best-effort
+#     powermetrics under host-telemetry/ showing what competes for CPU at
+#     the moment lateness spikes;
+#   daemon: debug-level daemon logs, continuous log streams and state.db
+#     snapshots (RUST_LOG=debug rather than trace so the daemon's own
+#     logging overhead does not perturb the scheduling behaviour under
+#     test).
 
 on:
   workflow_dispatch:
@@ -15,18 +27,25 @@ on:
         required: false
         type: string
         default: ""
+      busy_wait:
+        description: "Stochastic producer wait mode: 0 = sleep between frames (what the nightly suite does), 1 = busy-wait (measures preemption directly)."
+        required: false
+        type: choice
+        options: ["0", "1"]
+        default: "0"
 
 jobs:
   test:
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
+      NEURACORE_STOCHASTIC_BUSY_WAIT: ${{ inputs.busy_wait }}
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        os: [macos-26, macos-26-xlarge]
 
     steps:
     - name: Show disk space
@@ -50,6 +69,34 @@ jobs:
         checkout: "false"
         path: "."
         extras: dev
+
+    - name: Start host telemetry
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p tracing-artifacts/host-telemetry
+        {
+          date -u +"start_utc=%Y-%m-%dT%H:%M:%SZ epoch=%s"
+          sw_vers
+          uname -a
+          sysctl hw.model hw.ncpu hw.memsize 2>/dev/null || true
+        } > tracing-artifacts/host-telemetry/host-info.txt
+        ps aux > tracing-artifacts/host-telemetry/ps-at-start.txt
+        # Whole-host CPU attribution. Lateness spikes come with large
+        # thread-not-running time and ~100% system CPU, so the culprit is
+        # whatever else holds the cores at that moment. `top` logging mode
+        # timestamps every sample; correlate against the producer
+        # diagnostics' epoch timestamps in the pytest log.
+        nohup top -l 0 -s 2 -n 20 -o cpu \
+          -stats pid,command,cpu,th,csw,state,time \
+          > tracing-artifacts/host-telemetry/top-stream.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/top.pid"
+        nohup pmset -g thermlog \
+          > tracing-artifacts/host-telemetry/thermlog.log 2>&1 &
+        echo $! > "${RUNNER_TEMP}/thermlog.pid"
+        # Best-effort: not available inside some macOS runner VMs.
+        sudo nohup powermetrics -i 5000 --samplers cpu_power,thermal,tasks \
+          > tracing-artifacts/host-telemetry/powermetrics.log 2>&1 &
 
     - name: Start state snapshotter
       shell: bash
@@ -116,17 +163,20 @@ jobs:
         echo "$!" > "${RUNNER_TEMP}/snapshotter.pid"
         echo "snapshotter pid $(cat "${RUNNER_TEMP}/snapshotter.pid")"
 
-    - name: Run Data Daemon Integration Tests (full suite, trace capture)
-      # Bounded well under the 6h default so a wedge cannot burn the budget
-      # and the artifact upload still runs; faulthandler dumps stacks first.
-      timeout-minutes: 330
+    - name: Run macOS 300s stochastic cases (trace capture)
+      # Three ~300s cases per pass; a fully green pass captures nothing, so
+      # retry up to 3 passes and stop at the first failing one. Bounded well
+      # under the 6h default so a wedge cannot burn the budget and the
+      # artifact upload still runs; faulthandler dumps stacks first.
+      timeout-minutes: 240
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
-        RUST_LOG: "data_daemon=trace,data_daemon_bridge=trace,data_daemon_shared=trace,data_daemon_ipc=trace,info"
-        NDD_DEBUG: "1"
+        NEURACORE_PRODUCER_DIAGNOSTICS: "1"
+        RUST_LOG: "data_daemon=debug,data_daemon_bridge=debug,data_daemon_shared=debug,data_daemon_ipc=debug,info"
+        NDD_DEBUG: "true"
         PYTHONFAULTHANDLER: "1"
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context
@@ -135,13 +185,26 @@ jobs:
       run: |
         set -uo pipefail
         mkdir -p tracing-artifacts
-        pytest -o log_cli=true --log-cli-level=INFO \
-          -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s" \
-          -o faulthandler_timeout=900 \
-          --import-mode=importlib \
-          tests/integration/platform/data_daemon/ \
-          2>&1 | tee "tracing-artifacts/pytest-daemon.log"
-        exit "${PIPESTATUS[0]}"
+        nodes=(
+          'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+          'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
+          'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic-wait]'
+        )
+        rc=0
+        for attempt in 1 2 3; do
+          echo "=== attempt ${attempt} $(date -u +"%Y-%m-%dT%H:%M:%SZ epoch=%s") ==="
+          pytest -o log_cli=true --log-cli-level=INFO \
+            -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s" \
+            -o faulthandler_timeout=900 \
+            --import-mode=importlib \
+            "${nodes[@]}" \
+            2>&1 | tee "tracing-artifacts/pytest-daemon-attempt${attempt}.log"
+          rc="${PIPESTATUS[0]}"
+          if [ "${rc}" -ne 0 ]; then
+            break
+          fi
+        done
+        exit "${rc}"
 
     - name: Collect final daemon state
       if: always()
@@ -151,21 +214,26 @@ jobs:
         mkdir -p tracing-artifacts/final
         for root in ".data_daemon_test_state" "${HOME}/.neuracore/data_daemon"; do
           [ -d "${root}" ] || continue
-          find "${root}" \( -name 'daemon.log' -o -name 'state.db' -o -name 'state.db-*' \) \
+          find "${root}" \( -name 'daemon.log' -o -name 'state.db' -o -name 'state.db-*' -o -name '*.csv' \) \
             -exec sh -c 'cp "$2" "$1/cap_$(echo "$2" | tr "/ " "__")" 2>/dev/null || true' _ "tracing-artifacts/final" {} \; || true
           du -ak "${root}" 2>/dev/null | sort -rn > "tracing-artifacts/final/manifest_$(echo "${root}" | tr '/ ' '__').txt" || true
         done
 
     - name: Stop capture and compress log streams
       if: always()
-      # The snapshotter and tail followers must be dead before upload-artifact
-      # zips the directory — files mutating mid-zip make the upload fail with
-      # "error creating zip".
+      # The snapshotter, tail followers and telemetry samplers must be dead
+      # before upload-artifact zips the directory — files mutating mid-zip
+      # make the upload fail with "error creating zip".
       run: |
         kill "$(cat "${RUNNER_TEMP}/snapshotter.pid" 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat "${RUNNER_TEMP}/top.pid" 2>/dev/null)" 2>/dev/null || true
+        kill "$(cat "${RUNNER_TEMP}/thermlog.pid" 2>/dev/null)" 2>/dev/null || true
+        sudo pkill -x powermetrics 2>/dev/null || true
         pkill -f 'tail.*daemon.log' 2>/dev/null || true
         sleep 2
         gzip -f tracing-artifacts/logstreams/* 2>/dev/null || true
+        gzip -f tracing-artifacts/host-telemetry/top-stream.log \
+          tracing-artifacts/host-telemetry/powermetrics.log 2>/dev/null || true
 
     - name: Upload tracing artifacts
       if: always()
@@ -174,17 +242,6 @@ jobs:
         name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}
         path: |
           tracing-artifacts/
-        if-no-files-found: warn
-        include-hidden-files: true
-        retention-days: 7
-
-    - name: Upload recordings tree (best-effort, may be large)
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: cougar-tracing-daemon-recordings-${{ matrix.os }}-py${{ matrix.python-version }}
-        path: |
-          .data_daemon_test_state/**/recordings/**
         if-no-files-found: warn
         include-hidden-files: true
         retention-days: 7
