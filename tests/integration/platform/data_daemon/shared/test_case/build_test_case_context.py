@@ -8,7 +8,6 @@ Configuration dataclasses and the matrix builder live in
 
 from __future__ import annotations
 
-import gc
 import logging
 import multiprocessing
 import random
@@ -397,11 +396,25 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
-def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
-    if use_stochastic_timestamps:
-        window = stochastic_jitter_window(fps)
-        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
-    return 0.0
+def get_jitter(
+    use_stochastic_timestamps: bool, fps: int, previous_jitter: float = 0.0
+) -> float:
+    """Draw the next jitter value, clamped to a bounded step from the last one.
+
+    Independent draws per frame can land at opposite extremes on consecutive
+    iterations, shrinking the gap between two deadlines by up to ``2 *
+    window`` regardless of ``fps`` — enough to make a deadline unreachable no
+    matter how precisely it's waited for. Bounding the step to ``window``
+    still keeps every value within ``[-window, window]`` (the range
+    ``_assert_stochastic_timestamps`` checks) while halving that worst case.
+    """
+    if not use_stochastic_timestamps:
+        return 0.0
+    window = stochastic_jitter_window(fps)
+    candidate = STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
+    lo = max(-window, previous_jitter - window)
+    hi = min(window, previous_jitter + window)
+    return max(lo, min(hi, candidate))
 
 
 def log_synchronous_frames(
@@ -435,6 +448,7 @@ def log_synchronous_frames(
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
+    previous_jitter = 0.0
 
     while joint_index < joint_frame_count or video_index < (
         video_frame_count if camera_name_list else 0
@@ -446,7 +460,9 @@ def log_synchronous_frames(
         jitter = get_jitter(
             use_stochastic_timestamps,
             max(joint_fps, video_fps) if camera_name_list else joint_fps,
+            previous_jitter,
         )
+        previous_jitter = jitter
 
         joint_deadline = (
             recording_wall_start + (joint_index / joint_fps) + jitter
@@ -601,8 +617,10 @@ def run_threaded_logging(
             fps = video_fps if is_rgb else joint_fps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
             thread_wall_start = time.time()
+            previous_jitter = 0.0
             for frame_index in range(frame_count):
-                jitter = get_jitter(use_stochastic_timestamps, fps)
+                jitter = get_jitter(use_stochastic_timestamps, fps, previous_jitter)
+                previous_jitter = jitter
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
                 sleep_until(frame_deadline)
                 if assert_deadline and use_stochastic_timestamps:
@@ -728,53 +746,44 @@ def log_frames(
     joint_name_list = joint_names_for_count(spec.case.joint_count)
     camera_name_list = camera_names(spec.case.video_count)
 
-    # A cyclic-GC pass can stop-the-world for several ms — enough to blow the
-    # per-frame deadline tolerance. Only performance tests check that
-    # tolerance (assert_deadline), so only they pay for disabling it.
-    if spec.assert_deadline:
-        gc.disable()
-    try:
-        if spec.case.producer_channels == PRODUCER_PER_THREAD:
-            return run_threaded_logging(
-                robot_name=spec.robot_name,
-                joint_frame_count=spec.expected_joint_frames,
-                video_frame_count=spec.expected_video_frames,
-                recording_index=recording_index,
-                timestamp_start_s=recording_timestamp_start_s,
-                joint_fps=spec.case.joint_fps,
-                video_fps=spec.case.video_fps,
-                context_index=spec.context_index,
-                joint_names=joint_name_list,
-                camera_name_list=camera_name_list,
-                image_width=spec.case.image_width,
-                image_height=spec.case.image_height,
-                use_real_timestamps=use_real_timestamps,
-                use_stochastic_timestamps=use_stochastic_timestamps,
-                assert_deadline=spec.assert_deadline,
-            )
-
-        log_synchronous_frames(
+    if spec.case.producer_channels == PRODUCER_PER_THREAD:
+        return run_threaded_logging(
             robot_name=spec.robot_name,
             joint_frame_count=spec.expected_joint_frames,
             video_frame_count=spec.expected_video_frames,
             recording_index=recording_index,
             timestamp_start_s=recording_timestamp_start_s,
+            joint_fps=spec.case.joint_fps,
+            video_fps=spec.case.video_fps,
+            context_index=spec.context_index,
             joint_names=joint_name_list,
             camera_name_list=camera_name_list,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
-            joint_fps=spec.case.joint_fps,
-            video_fps=spec.case.video_fps,
-            marker_name=marker_name,
-            context_index=spec.context_index,
             use_real_timestamps=use_real_timestamps,
             use_stochastic_timestamps=use_stochastic_timestamps,
             assert_deadline=spec.assert_deadline,
         )
-        return [marker_name]
-    finally:
-        if spec.assert_deadline:
-            gc.enable()
+
+    log_synchronous_frames(
+        robot_name=spec.robot_name,
+        joint_frame_count=spec.expected_joint_frames,
+        video_frame_count=spec.expected_video_frames,
+        recording_index=recording_index,
+        timestamp_start_s=recording_timestamp_start_s,
+        joint_names=joint_name_list,
+        camera_name_list=camera_name_list,
+        image_width=spec.case.image_width,
+        image_height=spec.case.image_height,
+        joint_fps=spec.case.joint_fps,
+        video_fps=spec.case.video_fps,
+        marker_name=marker_name,
+        context_index=spec.context_index,
+        use_real_timestamps=use_real_timestamps,
+        use_stochastic_timestamps=use_stochastic_timestamps,
+        assert_deadline=spec.assert_deadline,
+    )
+    return [marker_name]
 
 
 def _bind_worker_dataset(spec: ContextSpec) -> None:
