@@ -10,6 +10,11 @@ on:
         required: false
         type: string
         default: ""
+      rust_log:
+        description: "RUST_LOG filter for the bundled data daemon. Recommended: 'data_daemon=debug' (our crates only). Plain 'debug' also floods sqlx/hyper/h2/rustls; quieten with e.g. 'debug,sqlx=warn,hyper=warn,h2=warn,rustls=warn'. When set, the daemon's log is streamed inline into the pytest output. Leave empty to disable."
+        required: false
+        type: string
+        default: ""
 
 jobs:
   pre-commit:
@@ -61,6 +66,21 @@ jobs:
         checkout: "false"
         path: "."
         extras: dev
+
+    # Opt-in verbose logging: exports RUST_LOG so the spawned daemon logs at the
+    # requested level, and NCD_TEST_SURFACE_DAEMON_LOG so the harness relays the
+    # daemon's log inline with the pytest output. Both are inherited by the test
+    # step below. Skipped entirely (env unset) on scheduled runs and when the
+    # input is left empty. The value is passed via env to avoid shell injection.
+    - name: Enable verbose daemon logging
+      if: inputs.rust_log != ''
+      env:
+        RUST_LOG_INPUT: ${{ inputs.rust_log }}
+      run: |
+        {
+          echo "RUST_LOG=$RUST_LOG_INPUT"
+          echo "NCD_TEST_SURFACE_DAEMON_LOG=1"
+        } >> "$GITHUB_ENV"
 
     - name: Run Data Daemon Integration Tests
       env:

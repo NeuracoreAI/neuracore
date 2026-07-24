@@ -25,6 +25,7 @@ from pathlib import Path
 
 from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import (
+    get_daemon_db_path,
     get_daemon_pid_path,
     get_daemon_recordings_root_path,
 )
@@ -237,6 +238,101 @@ def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
         yield log_queue
     finally:
         log_queue.put(None)
+        thread.join(timeout=5.0)
+
+
+# ---------------------------------------------------------------------------
+# Daemon log streaming (opt-in via NCD_TEST_SURFACE_DAEMON_LOG)
+# ---------------------------------------------------------------------------
+
+DAEMON_LOG_STREAM_ENV = "NCD_TEST_SURFACE_DAEMON_LOG"
+"""Env var that turns on inline relaying of the daemon's log into the test log."""
+
+_daemon_log_relay_logger = logging.getLogger("neuracore.data_daemon.daemon_log")
+
+
+def daemon_log_streaming_enabled() -> bool:
+    """Return True when the daemon-log relay has been opted into via the env var."""
+    return os.environ.get(DAEMON_LOG_STREAM_ENV, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _follow_daemon_log(log_path: Path, stop: threading.Event) -> None:
+    """Tail ``log_path`` line by line, relaying each line through the logger.
+
+    Runs on a daemon thread for the lifetime of one daemon-running block. The
+    Rust daemon runs detached with its ``tracing`` output routed to this file,
+    so re-emitting each completed line through the logger interleaves the
+    daemon's output with the test runner's own live-log lines rather than
+    hiding it in a file the CI never prints. ``stop`` is set once the daemon
+    has been stopped; a final read then drains whatever it wrote last.
+    """
+    while not log_path.exists():
+        if stop.wait(0.1):
+            return
+    try:
+        handle = log_path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    remainder = ""
+
+    def emit_complete_lines() -> bool:
+        """Read newly appended text and relay any now-complete lines."""
+        nonlocal remainder
+        chunk = handle.read()
+        if not chunk:
+            return False
+        remainder += chunk
+        *lines, remainder = remainder.split("\n")
+        for line in lines:
+            _daemon_log_relay_logger.info("%s", line)
+        return True
+
+    with handle:
+        while True:
+            if emit_complete_lines():
+                continue
+            if stop.is_set():
+                emit_complete_lines()
+                break
+            time.sleep(0.1)
+
+    if remainder.strip():
+        _daemon_log_relay_logger.info("%s", remainder)
+
+
+@contextmanager
+def stream_daemon_log_if_requested() -> Generator[None]:
+    """Relay the daemon's log file into the test logger while the block runs.
+
+    No-op unless :func:`daemon_log_streaming_enabled` (the staging workflow's
+    verbose-logging input sets ``NCD_TEST_SURFACE_DAEMON_LOG``). Enter this
+    only *after* the daemon has been started: the background launcher truncates
+    ``daemon.log`` on each start, so following it from the beginning here
+    captures exactly this daemon's output.
+    """
+    if not daemon_log_streaming_enabled():
+        yield
+        return
+
+    log_path = get_daemon_db_path().parent / "daemon.log"
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=_follow_daemon_log,
+        args=(log_path, stop),
+        name="daemon-log-tail",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
         thread.join(timeout=5.0)
 
 

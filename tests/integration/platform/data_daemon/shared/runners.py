@@ -17,7 +17,10 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_runn
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_daemon_cleanup,
 )
-from tests.integration.platform.data_daemon.shared.process_control import stop_daemon
+from tests.integration.platform.data_daemon.shared.process_control import (
+    stop_daemon,
+    stream_daemon_log_if_requested,
+)
 from tests.integration.platform.data_daemon.shared.profiles import (
     scoped_offline_profile,
     scoped_online_mode,
@@ -73,7 +76,8 @@ def offline_daemon_running() -> Generator[None]:
             stop_daemon()
             assert_daemon_cleanup()
             ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
-            yield
+            with stream_daemon_log_if_requested():
+                yield
         finally:
             stop_daemon()
             assert_daemon_cleanup()
@@ -98,7 +102,8 @@ def online_daemon_running() -> Generator[None]:
             stop_daemon()
             assert_daemon_cleanup()
             ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
-            yield
+            with stream_daemon_log_if_requested():
+                yield
         finally:
             stop_daemon()
             assert_daemon_cleanup()
