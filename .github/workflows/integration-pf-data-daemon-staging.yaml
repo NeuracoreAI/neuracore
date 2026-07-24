@@ -7,14 +7,15 @@ run-name: "Cougar Tracing — macOS 300s stochastic capture (${{ github.ref_name
 # stochastic performance cases fail "fired at wrong moment" — a producer
 # frame lands beyond the ±50ms tolerance because the producer thread's
 # sleep wakes 20-170ms late in the first seconds of a case's first
-# recording. Runs 30108050527/30109237047/30109801387 narrowed the root
-# cause to idle-guest timer behaviour: plain sleeps from idle processes
-# wake 30-160ms late with hard per-config p95 ceilings (immune to CPU
-# warmth and latency QoS), while sleeps from processes inside a busy
-# workload are precise. This revision tests two mitigations under noisy
-# (non-quieted) conditions: the `spinner` arm keeps one core non-idle via
-# a nice-20 spinner, the `busywait` arm switches the stochastic producers
-# to busy-wait mode. Evidence layers per leg:
+# recording. Runs 30108050527/30109237047/30109801387/30110350339
+# established that plain sleeps on these VM runners wake 30-160ms late
+# as a baseline condition (hard per-config ceilings; immune to CPU
+# warmth, latency QoS, daemon quieting, and a keep-awake spinner), so a
+# ±50ms schedule assert over time.sleep cannot pass reliably. This
+# revision compares wait primitives (cold/short/chunked/kqueue sentinels)
+# to determine whether any of them beats the leeway, which decides
+# between a harness wait rewrite and a macOS-specific tolerance.
+# Evidence layers per leg:
 #   producer: per-frame timing diagnostics (NEURACORE_PRODUCER_DIAGNOSTICS,
 #     harness ported from test/300s-failure) in the pytest logs;
 #   host: a sleep-jitter sentinel (50ms sleeper logging wakeup overshoot
@@ -39,17 +40,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
-      # The busywait arm exercises the harness's busy-wait mode as the
-      # candidate fix; the spinner arm keeps sleep mode and instead keeps
-      # the guest busy from outside the tests.
-      NEURACORE_STOCHASTIC_BUSY_WAIT: ${{ matrix.mitigation == 'busywait' && '1' || '0' }}
+      NEURACORE_STOCHASTIC_BUSY_WAIT: "0"
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
         python-version: ['3.10']
         os: [macos-26, macos-26-xlarge]
-        mitigation: ['spinner', 'busywait']
 
     steps:
     - name: Show disk space
@@ -60,20 +57,6 @@ jobs:
       with:
         environment: staging
         ref: ${{ inputs.ref }}
-
-    - name: Start keep-awake spinner
-      if: matrix.mitigation == 'spinner'
-      # Mechanism test: sentinel runs 30109237047/30109801387 showed plain
-      # sleeps are 30-160ms late whenever the guest idles (hard per-config
-      # p95 ceilings, immune to CPU-warmth and latency QoS), yet producer
-      # sleeps are precise while recordings keep the box busy. A minimum-
-      # priority spinner keeps one core non-idle so timers keep firing; if
-      # the tests pass and the cold sentinel tightens, idle-guest timer
-      # coalescing is confirmed as the root cause.
-      run: |
-        nohup nice -n 20 python3 -c 'while True: pass' > /dev/null 2>&1 &
-        echo $! > "${RUNNER_TEMP}/spinner.pid"
-        echo "spinner pid $(cat "${RUNNER_TEMP}/spinner.pid")"
 
     - name: Start host telemetry
       shell: bash
@@ -91,35 +74,63 @@ jobs:
           mdutil -a -s 2>/dev/null || true
         } > tracing-artifacts/host-telemetry/host-info.txt
         ps aux > tracing-artifacts/host-telemetry/ps-at-start.txt
-        # Sentinels: 50ms sleepers logging wakeup overshoot >10ms plus 30s
-        # percentile summaries, whole job, epoch-stamped. Run 30109237047
-        # showed the cold sleeper is 40-160ms late continuously while busy
-        # producer threads are punctual, so three variants discriminate the
-        # mechanism and candidate fixes:
-        #   cold — pure sleeper, the observed latency floor;
-        #   warm — burns 5ms CPU before each sleep (does recent on-core
-        #     time tighten timer coalescing?);
-        #   qos  — cold sleeper under `taskpolicy -l 0` (does latency QoS
-        #     alone tighten it?).
+        # Sentinels: wait-primitive comparison, whole job, epoch-stamped.
+        # Prior runs established plain 50ms sleeps wake 30-160ms late on
+        # these VMs (hard per-config ceilings; immune to CPU warmth,
+        # latency QoS, quieting, and a keep-awake spinner). These four
+        # variants determine whether ANY wait primitive beats the leeway,
+        # which decides the harness fix:
+        #   cold    — plain 50ms time.sleep (control);
+        #   short   — plain 5ms time.sleep (is leeway proportional to the
+        #             requested interval?);
+        #   chunked — 50ms absolute target reached via 5ms sleep chunks
+        #             (the harness-fix candidate if leeway is proportional);
+        #   kqueue  — 50ms EVFILT_TIMER with NOTE_CRITICAL (macOS
+        #             low-latency timer path).
         cat > "${RUNNER_TEMP}/sleep_sentinel.py" <<'SENTINEL'
+        import select
         import sys
         import time
 
         MODE = sys.argv[1]
-        INTERVAL = 0.05
-        BURN_SEC = 0.005
+        INTERVAL = 0.005 if MODE == "short" else 0.05
+        CHUNK = 0.005
         REPORT_EVERY = 30.0
+        NOTE_USECONDS = 0x2
+        NOTE_CRITICAL = 0x8
+
+        kq = select.kqueue() if MODE == "kqueue" else None
+
+        def wait_once() -> float:
+            """Wait one interval, return overshoot in ms."""
+            if MODE == "chunked":
+                start = time.monotonic()
+                target = start + INTERVAL
+                while True:
+                    remaining = target - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(CHUNK if remaining > CHUNK else remaining)
+                return (time.monotonic() - target) * 1000.0
+            if MODE == "kqueue":
+                event = select.kevent(
+                    1,
+                    select.KQ_FILTER_TIMER,
+                    select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
+                    NOTE_USECONDS | NOTE_CRITICAL,
+                    int(INTERVAL * 1e6),
+                )
+                start = time.monotonic()
+                kq.control([event], 1, None)
+                return (time.monotonic() - start - INTERVAL) * 1000.0
+            start = time.monotonic()
+            time.sleep(INTERVAL)
+            return (time.monotonic() - start - INTERVAL) * 1000.0
 
         samples = []
         last_report = time.monotonic()
         while True:
-            if MODE == "warm":
-                burn_until = time.monotonic() + BURN_SEC
-                while time.monotonic() < burn_until:
-                    pass
-            start = time.monotonic()
-            time.sleep(INTERVAL)
-            overshoot_ms = (time.monotonic() - start - INTERVAL) * 1000.0
+            overshoot_ms = wait_once()
             samples.append(overshoot_ms)
             if overshoot_ms > 10.0:
                 print(f"{time.time():.3f} overshoot_ms={overshoot_ms:.1f}", flush=True)
@@ -137,12 +148,10 @@ jobs:
                 samples = []
                 last_report = now
         SENTINEL
-        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" cold \
-          > tracing-artifacts/host-telemetry/sleep-sentinel-cold.log 2>&1 &
-        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" warm \
-          > tracing-artifacts/host-telemetry/sleep-sentinel-warm.log 2>&1 &
-        nohup taskpolicy -l 0 python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" cold \
-          > tracing-artifacts/host-telemetry/sleep-sentinel-qos.log 2>&1 &
+        for mode in cold short chunked kqueue; do
+          nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" "${mode}" \
+            > "tracing-artifacts/host-telemetry/sleep-sentinel-${mode}.log" 2>&1 &
+        done
         # 0.5s process sampler: cputime deltas between ticks attribute
         # sub-second CPU bursts that top's 2s window averages away.
         cat > "${RUNNER_TEMP}/pssampler.sh" <<'PSS'
@@ -316,7 +325,6 @@ jobs:
         kill "$(cat "${RUNNER_TEMP}/top.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/thermlog.pid" 2>/dev/null)" 2>/dev/null || true
         pkill -f sleep_sentinel.py 2>/dev/null || true
-        kill "$(cat "${RUNNER_TEMP}/spinner.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/pssampler.pid" 2>/dev/null)" 2>/dev/null || true
         sudo pkill -x powermetrics 2>/dev/null || true
         pkill -f 'tail.*daemon.log' 2>/dev/null || true
@@ -330,7 +338,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}-${{ matrix.mitigation }}
+        name: cougar-tracing-daemon-${{ matrix.os }}-py${{ matrix.python-version }}
         path: |
           tracing-artifacts/
         if-no-files-found: warn
