@@ -409,6 +409,7 @@ respawns
 restartability
 resumably
 RETRYABLE
+REUSEADDR
 rgba
 rgbd
 rgbs

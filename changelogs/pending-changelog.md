@@ -10,3 +10,7 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+The requests-based HTTP session now retries requests that fail because the
+connection was dropped before a response arrived (TCP resets, stale keep-alive
+reuse), matching the retry behaviour of the aiohttp stack.
