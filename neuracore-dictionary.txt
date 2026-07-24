@@ -168,6 +168,7 @@ fogend
 fogstart
 footgun
 forcelimited
+forcelist
 forcerange
 fourcc
 fovy
@@ -408,6 +409,7 @@ respawns
 restartability
 resumably
 RETRYABLE
+REUSEADDR
 rgba
 rgbd
 rgbs
