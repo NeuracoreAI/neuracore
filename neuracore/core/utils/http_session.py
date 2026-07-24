@@ -27,13 +27,50 @@ from aiohttp import (
 )
 from requests.adapters import HTTPAdapter
 from urllib3 import Retry
+from urllib3.exceptions import ProtocolError
 
 logger = logging.getLogger(__name__)
 
-_RETRY = Retry(
+_DROPPED_CONNECTION_ERRORS = (
+    ConnectionResetError,
+    ConnectionAbortedError,
+    BrokenPipeError,
+)
+
+
+def _is_dropped_connection(error: Exception) -> bool:
+    """Whether the error means the connection died without delivering a response.
+
+    Covers stale keep-alive reuse, TCP resets from proxies/NAT (including during
+    the TLS handshake) and ``RemoteDisconnected`` (a ``ConnectionResetError``
+    subclass). Errors where response bytes did arrive, such as a garbled status
+    line, are excluded.
+    """
+    return isinstance(error, ProtocolError) and any(
+        isinstance(arg, _DROPPED_CONNECTION_ERRORS) for arg in error.args
+    )
+
+
+class _DroppedConnectionRetry(Retry):
+    """Retry policy that treats dropped connections as connection errors.
+
+    urllib3 classifies a ``ProtocolError`` on an established connection as a
+    read error, which this policy disables. A dropped connection never
+    delivered a response, so it is safe to retry under the ``connect`` budget,
+    mirroring ``retry_connection_failures`` on the aiohttp stack.
+    """
+
+    def _is_connection_error(self, err: Exception) -> bool:
+        return super()._is_connection_error(err) or _is_dropped_connection(err)
+
+    def _is_read_error(self, err: Exception) -> bool:
+        return super()._is_read_error(err) and not _is_dropped_connection(err)
+
+
+_RETRY = _DroppedConnectionRetry(
     total=3,  # cap total retry attempts across all categories
-    connect=3,  # retry conn establishment failures (stale keep-alive reuse lands here)
-    read=0,  # never retry after bytes left the wire
+    connect=3,  # conn establishment failures and dropped connections land here
+    read=0,  # never retry once response bytes have arrived
     status=0,  # no status-code retries; let 5xx raise immediately
     backoff_factor=0.1,  # 0.1s, 0.2s, 0.4s between retries (~0.7s worst case)
     allowed_methods=False,  # type: ignore[arg-type]  # False = retry all methods
