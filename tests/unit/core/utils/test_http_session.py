@@ -1,3 +1,5 @@
+import socket
+import struct
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -9,6 +11,7 @@ import requests_mock
 from aiohttp import ClientSession, ServerDisconnectedError, web
 from aiohttp.test_utils import TestServer
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import MaxRetryError, ProtocolError
 
 from neuracore.core.utils import http_session
 from neuracore.core.utils.http_session import (
@@ -313,4 +316,106 @@ class TestTransientRetryBehaviour:
             response = thread_local_session().get(server.url)
         assert response.status_code == 503
         assert server.call_count == 1
+        _reset_thread_local()
+
+
+class _ScriptedSocketServer:
+    """Raw socket server replaying one scripted action per connection.
+
+    Actions: ``rst`` aborts with a TCP reset after reading the request,
+    ``fin`` closes cleanly without responding, ``garbled`` answers with a
+    malformed status line and ``ok`` serves a minimal HTTP 200. The final
+    action repeats for any additional connections.
+    """
+
+    def __init__(self, actions: list[str]) -> None:
+        self.actions = actions
+        self.connections = 0
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.url = f"http://127.0.0.1:{self._listener.getsockname()[1]}/resource"
+
+    def __enter__(self) -> "_ScriptedSocketServer":
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self._listener.close()
+        self._thread.join(timeout=5)
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                connection, _ = self._listener.accept()
+            except OSError:
+                return
+            action = self.actions[min(self.connections, len(self.actions) - 1)]
+            self.connections += 1
+            connection.recv(65536)
+            if action == "rst":
+                connection.setsockopt(
+                    socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+                )
+            elif action == "garbled":
+                connection.sendall(b"banana\r\n\r\n")
+            elif action == "ok":
+                connection.sendall(
+                    b"HTTP/1.1 200 OK\r\n"
+                    b"Content-Length: 4\r\nConnection: close\r\n\r\nbody"
+                )
+            connection.close()
+
+
+class TestDroppedConnectionRetry:
+    def test_reset_counts_against_connect_budget(self):
+        reset_error = ProtocolError(
+            "Connection aborted.", ConnectionResetError(104, "Connection reset by peer")
+        )
+        updated = http_session._RETRY.increment("POST", "/resource", error=reset_error)
+        assert updated.connect == http_session._RETRY.connect - 1
+
+    def test_garbled_response_exhausts_immediately(self):
+        from http.client import BadStatusLine
+
+        garbled_error = ProtocolError("Connection aborted.", BadStatusLine("banana"))
+        with pytest.raises(MaxRetryError):
+            http_session._RETRY.increment("GET", "/resource", error=garbled_error)
+
+    def test_recovers_from_connection_reset(self):
+        _reset_thread_local()
+        with _ScriptedSocketServer(["rst", "ok"]) as server:
+            response = thread_local_session().get(server.url)
+        assert response.status_code == 200
+        assert server.connections == 2
+
+    def test_recovers_from_server_disconnect(self):
+        _reset_thread_local()
+        with _ScriptedSocketServer(["fin", "ok"]) as server:
+            response = thread_local_session().get(server.url)
+        assert response.status_code == 200
+        assert server.connections == 2
+
+    def test_retries_resets_on_post(self):
+        _reset_thread_local()
+        with _ScriptedSocketServer(["rst", "ok"]) as server:
+            response = thread_local_session().post(server.url, json={"a": 1})
+        assert response.status_code == 200
+        assert server.connections == 2
+
+    def test_gives_up_when_resets_persist(self):
+        _reset_thread_local()
+        with _ScriptedSocketServer(["rst"]) as server:
+            with pytest.raises(requests.exceptions.ConnectionError):
+                thread_local_session().get(server.url)
+        assert server.connections == 4  # first attempt + three retries
+
+    def test_garbled_response_is_not_retried(self):
+        _reset_thread_local()
+        with _ScriptedSocketServer(["garbled"]) as server:
+            with pytest.raises(requests.exceptions.ConnectionError):
+                thread_local_session().get(server.url)
+        assert server.connections == 1
         _reset_thread_local()
