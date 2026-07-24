@@ -80,48 +80,55 @@ jobs:
         # latency QoS, quieting, and a keep-awake spinner). These four
         # variants determine whether ANY wait primitive beats the leeway,
         # which decides the harness fix:
-        #   cold    — plain 50ms time.sleep (control);
-        #   short   — plain 5ms time.sleep (is leeway proportional to the
-        #             requested interval?);
-        #   chunked — 50ms absolute target reached via 5ms sleep chunks
-        #             (the harness-fix candidate if leeway is proportional);
-        #   kqueue  — 50ms EVFILT_TIMER with NOTE_CRITICAL (macOS
-        #             low-latency timer path).
+        # Run 30111198741 (xlarge): leeway scales with the requested
+        # interval (50ms sleep => ~150ms ceiling, 5ms sleep => ~50ms
+        # ceiling; 5ms-chunked 50ms target => p95 ~38ms), and the
+        # NOTE_CRITICAL kqueue probe spun on immediate EV_ERROR returns.
+        # This revision sizes the chunk and fixes the kqueue probe:
+        #   cold   — plain 50ms time.sleep (control);
+        #   chunk5 — 50ms absolute target via 5ms sleep chunks;
+        #   chunk2 — 50ms absolute target via 2ms sleep chunks (predicted
+        #            ~20ms ceiling => reliable under the ±50ms assert);
+        #   kqueue — 50ms oneshot EVFILT_TIMER, plain NOTE_USECONDS,
+        #            registration separated from the wait.
         cat > "${RUNNER_TEMP}/sleep_sentinel.py" <<'SENTINEL'
         import select
         import sys
         import time
 
         MODE = sys.argv[1]
-        INTERVAL = 0.005 if MODE == "short" else 0.05
-        CHUNK = 0.005
+        INTERVAL = 0.05
+        CHUNKS = {"chunk5": 0.005, "chunk2": 0.002}
         REPORT_EVERY = 30.0
         NOTE_USECONDS = 0x2
-        NOTE_CRITICAL = 0x8
 
         kq = select.kqueue() if MODE == "kqueue" else None
 
         def wait_once() -> float:
             """Wait one interval, return overshoot in ms."""
-            if MODE == "chunked":
-                start = time.monotonic()
-                target = start + INTERVAL
+            if MODE in CHUNKS:
+                chunk = CHUNKS[MODE]
+                target = time.monotonic() + INTERVAL
                 while True:
                     remaining = target - time.monotonic()
                     if remaining <= 0:
                         break
-                    time.sleep(CHUNK if remaining > CHUNK else remaining)
+                    time.sleep(chunk if remaining > chunk else remaining)
                 return (time.monotonic() - target) * 1000.0
             if MODE == "kqueue":
                 event = select.kevent(
                     1,
                     select.KQ_FILTER_TIMER,
                     select.KQ_EV_ADD | select.KQ_EV_ONESHOT,
-                    NOTE_USECONDS | NOTE_CRITICAL,
+                    NOTE_USECONDS,
                     int(INTERVAL * 1e6),
                 )
                 start = time.monotonic()
-                kq.control([event], 1, None)
+                kq.control([event], 0, 0)
+                fired = kq.control(None, 1, None)
+                if fired and fired[0].flags & select.KQ_EV_ERROR:
+                    print(f"kqueue error: {fired[0]}", flush=True)
+                    sys.exit(1)
                 return (time.monotonic() - start - INTERVAL) * 1000.0
             start = time.monotonic()
             time.sleep(INTERVAL)
@@ -148,7 +155,7 @@ jobs:
                 samples = []
                 last_report = now
         SENTINEL
-        for mode in cold short chunked kqueue; do
+        for mode in cold chunk5 chunk2 kqueue; do
           nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" "${mode}" \
             > "tracing-artifacts/host-telemetry/sleep-sentinel-${mode}.log" 2>&1 &
         done
