@@ -760,7 +760,7 @@ def log_synchronous_frames(
             (
                 "busy_wait"
                 if use_stochastic_timestamps and STOCHASTIC_BUSY_WAIT
-                else "time.sleep"
+                else "chunked_sleep"
             ),
         )
 

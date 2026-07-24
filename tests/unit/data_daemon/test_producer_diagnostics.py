@@ -47,7 +47,7 @@ def test_sleep_diagnostics_calculate_oversleep(monkeypatch: pytest.MonkeyPatch) 
     history.sleep(0.010, role_name="rgb", frame_index=4, deadline=100.0)
 
     event = history.events[-1]
-    assert event.operation == "time.sleep"
+    assert event.operation == "chunked_sleep"
     assert event.duration_ms == pytest.approx(17.5)
     details = event.details
     assert details.get("requested_ms") == pytest.approx(10.0)
@@ -220,14 +220,23 @@ def test_disabled_history_is_inert_and_schedule_result_is_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     history = make_history(enabled=False)
+    clock = {"now": 100.0}
     slept: list[float] = []
-    monkeypatch.setattr(producer_diagnostics.time, "sleep", slept.append)
+
+    def fake_sleep(duration: float) -> None:
+        slept.append(duration)
+        clock["now"] += duration
+
+    monkeypatch.setattr(producer_diagnostics.time, "time", lambda: clock["now"])
+    monkeypatch.setattr(producer_diagnostics.time, "sleep", fake_sleep)
 
     history.record("operation", role_name="rgb", frame_index=1)
-    history.sleep(0.002, role_name="rgb", frame_index=1, deadline=10.0)
+    history.sleep(0.002, role_name="rgb", frame_index=1, deadline=100.002)
 
     assert history.events == ()
-    assert slept == [0.002]
+    assert slept[0] == pytest.approx(0.001)
+    assert sum(slept) == pytest.approx(0.002)
+    assert clock["now"] == pytest.approx(100.002)
     assert assert_on_schedule(
         10.0, 0.05, "rgb frame", observed_at=10.04
     ) == pytest.approx(0.04)

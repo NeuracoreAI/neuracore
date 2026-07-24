@@ -307,6 +307,7 @@ multirun
 muxer
 muxes
 muxing
+nanosleep
 nans
 nbconvert
 nbformat

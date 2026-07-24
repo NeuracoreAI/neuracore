@@ -18,6 +18,23 @@ HISTORY_SIZE = 32
 UNATTRIBUTED_GAP_NS = 5_000_000
 WAIT_DELAY_LOG_THRESHOLD_MS = 5.0
 WAIT_DELAY_LOG_LIMIT = 20
+SLEEP_CHUNK_FLOOR_S = 0.001
+
+
+def _sleep_toward(deadline: float) -> None:
+    """Sleep to the wall-clock deadline in halving chunks.
+
+    XNU grants nanosleep a timer leeway proportional to the requested
+    interval; on GitHub macOS runner VMs a single full-length sleep wakes
+    30-160ms late, which alone breaks a ±50ms schedule. Halving the
+    remaining time keeps every chunk's leeway inside the buffer still
+    ahead of the deadline and ends on microsecond-scale requests.
+    """
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(remaining / 2 if remaining > SLEEP_CHUNK_FLOOR_S else remaining)
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,10 +240,10 @@ class ProducerDiagnosticHistory:
                 while time.time() < deadline:
                     pass
             else:
-                time.sleep(requested_s)
+                _sleep_toward(deadline)
             return
 
-        operation = "busy_wait" if busy_wait else "time.sleep"
+        operation = "busy_wait" if busy_wait else "chunked_sleep"
         started_ns = time.perf_counter_ns()
         wall_started_ns = time.time_ns()
         monotonic_started_ns = time.monotonic_ns()
@@ -237,7 +254,7 @@ class ProducerDiagnosticHistory:
             while time.time() < deadline:
                 pass
         else:
-            time.sleep(requested_s)
+            _sleep_toward(deadline)
 
         thread_cpu_ended_ns = time.thread_time_ns()
         process_cpu_ended_ns = time.process_time_ns()
