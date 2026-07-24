@@ -162,6 +162,18 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
+def sleep_until(deadline: float) -> None:
+    """Busy-wait until wall-clock ``deadline``.
+
+    ``time.sleep`` wake-up precision isn't guaranteed on any given host or
+    under load. Frame intervals in these tests are always sub-second (fps
+    > 1), so the wait is already short; spinning on ``time.time()`` lands on
+    the deadline regardless of platform scheduling behavior.
+    """
+    while time.time() < deadline:
+        pass
+
+
 def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
     """Assert the producer fired at the intended wall-clock moment.
 

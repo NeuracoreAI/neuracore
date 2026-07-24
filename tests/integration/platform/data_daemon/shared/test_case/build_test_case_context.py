@@ -28,6 +28,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     assert_on_schedule,
     init_worker_logging,
     relayed_worker_logs,
+    sleep_until,
     surface_worker_errors,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
@@ -458,9 +459,7 @@ def log_synchronous_frames(
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
+            sleep_until(joint_deadline)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
@@ -508,9 +507,7 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            remaining = video_deadline - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
+            sleep_until(video_deadline)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
@@ -606,9 +603,7 @@ def run_threaded_logging(
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
+                sleep_until(frame_deadline)
                 if assert_deadline and use_stochastic_timestamps:
                     assert_on_schedule(
                         frame_deadline,
