@@ -91,19 +91,32 @@ jobs:
           mdutil -a -s 2>/dev/null || true
         } > tracing-artifacts/host-telemetry/host-info.txt
         ps aux > tracing-artifacts/host-telemetry/ps-at-start.txt
-        # Sentinel: sleeps 50ms in a loop and logs every wakeup overshoot
-        # >10ms plus a 30s percentile summary. Measures the exact primitive
-        # the producers fail on, independently of the tests, for the whole
-        # job. Epoch-stamped for correlation with producer diagnostics.
+        # Sentinels: 50ms sleepers logging wakeup overshoot >10ms plus 30s
+        # percentile summaries, whole job, epoch-stamped. Run 30109237047
+        # showed the cold sleeper is 40-160ms late continuously while busy
+        # producer threads are punctual, so three variants discriminate the
+        # mechanism and candidate fixes:
+        #   cold — pure sleeper, the observed latency floor;
+        #   warm — burns 5ms CPU before each sleep (does recent on-core
+        #     time tighten timer coalescing?);
+        #   qos  — cold sleeper under `taskpolicy -l 0` (does latency QoS
+        #     alone tighten it?).
         cat > "${RUNNER_TEMP}/sleep_sentinel.py" <<'SENTINEL'
+        import sys
         import time
 
+        MODE = sys.argv[1]
         INTERVAL = 0.05
+        BURN_SEC = 0.005
         REPORT_EVERY = 30.0
 
         samples = []
         last_report = time.monotonic()
         while True:
+            if MODE == "warm":
+                burn_until = time.monotonic() + BURN_SEC
+                while time.monotonic() < burn_until:
+                    pass
             start = time.monotonic()
             time.sleep(INTERVAL)
             overshoot_ms = (time.monotonic() - start - INTERVAL) * 1000.0
@@ -124,9 +137,12 @@ jobs:
                 samples = []
                 last_report = now
         SENTINEL
-        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" \
-          > tracing-artifacts/host-telemetry/sleep-sentinel.log 2>&1 &
-        echo $! > "${RUNNER_TEMP}/sentinel.pid"
+        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" cold \
+          > tracing-artifacts/host-telemetry/sleep-sentinel-cold.log 2>&1 &
+        nohup python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" warm \
+          > tracing-artifacts/host-telemetry/sleep-sentinel-warm.log 2>&1 &
+        nohup taskpolicy -l 0 python3 -u "${RUNNER_TEMP}/sleep_sentinel.py" cold \
+          > tracing-artifacts/host-telemetry/sleep-sentinel-qos.log 2>&1 &
         # 0.5s process sampler: cputime deltas between ticks attribute
         # sub-second CPU bursts that top's 2s window averages away.
         cat > "${RUNNER_TEMP}/pssampler.sh" <<'PSS'
@@ -299,7 +315,7 @@ jobs:
         kill "$(cat "${RUNNER_TEMP}/snapshotter.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/top.pid" 2>/dev/null)" 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/thermlog.pid" 2>/dev/null)" 2>/dev/null || true
-        kill "$(cat "${RUNNER_TEMP}/sentinel.pid" 2>/dev/null)" 2>/dev/null || true
+        pkill -f sleep_sentinel.py 2>/dev/null || true
         kill "$(cat "${RUNNER_TEMP}/pssampler.pid" 2>/dev/null)" 2>/dev/null || true
         sudo pkill -x powermetrics 2>/dev/null || true
         pkill -f 'tail.*daemon.log' 2>/dev/null || true
