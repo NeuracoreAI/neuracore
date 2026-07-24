@@ -82,13 +82,15 @@ jobs:
         # which decides the harness fix:
         # Runs 30111198741/30111554071: leeway scales with the requested
         # interval; chunk2 achieved p95 ~8-15ms while kqueue EVFILT_TIMER
-        # gets the same leeway as plain sleep (dead end). The harness
-        # producer wait now uses exponential-halving chunks; the sentinels
-        # measure that same algorithm against the alternatives:
+        # gets the same leeway as plain sleep (dead end). Run 30112627043
+        # measured exponential halving at p95 ~50ms (its first half-sized
+        # chunk carries more leeway than the remaining buffer absorbs), so
+        # the producer wait now uses fixed 2ms chunks:
         #   cold   — plain 50ms time.sleep (control);
-        #   chunk2 — 50ms absolute target via 2ms sleep chunks;
-        #   exp    — 50ms absolute target via halving chunks (the
-        #            algorithm now used by the producer wait).
+        #   chunk2 — 50ms absolute target via 2ms sleep chunks (the
+        #            algorithm now used by the producer wait);
+        #   exp    — 50ms absolute target via halving chunks (kept for
+        #            comparison).
         cat > "${RUNNER_TEMP}/sleep_sentinel.py" <<'SENTINEL'
         import sys
         import time

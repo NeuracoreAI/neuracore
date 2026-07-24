@@ -18,23 +18,25 @@ HISTORY_SIZE = 32
 UNATTRIBUTED_GAP_NS = 5_000_000
 WAIT_DELAY_LOG_THRESHOLD_MS = 5.0
 WAIT_DELAY_LOG_LIMIT = 20
-SLEEP_CHUNK_FLOOR_S = 0.001
+SLEEP_CHUNK_S = 0.002
 
 
 def _sleep_toward(deadline: float) -> None:
-    """Sleep to the wall-clock deadline in halving chunks.
+    """Sleep to the wall-clock deadline in fixed 2ms chunks.
 
     XNU grants nanosleep a timer leeway proportional to the requested
     interval; on GitHub macOS runner VMs a single full-length sleep wakes
-    30-160ms late, which alone breaks a ±50ms schedule. Halving the
-    remaining time keeps every chunk's leeway inside the buffer still
-    ahead of the deadline and ends on microsecond-scale requests.
+    30-160ms late, which alone breaks a ±50ms schedule. Sized-down
+    requests keep every chunk's leeway small: measured wakeup error is
+    p95 ~8ms for 2ms chunks versus ~50ms for exponential halving (run
+    30112627043), because halving's first chunk already carries more
+    leeway than the remaining buffer absorbs.
     """
     while True:
         remaining = deadline - time.time()
         if remaining <= 0:
             return
-        time.sleep(remaining / 2 if remaining > SLEEP_CHUNK_FLOOR_S else remaining)
+        time.sleep(SLEEP_CHUNK_S if remaining > SLEEP_CHUNK_S else remaining)
 
 
 @dataclass(frozen=True, slots=True)

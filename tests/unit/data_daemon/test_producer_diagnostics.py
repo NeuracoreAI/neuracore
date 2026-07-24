@@ -231,12 +231,15 @@ def test_disabled_history_is_inert_and_schedule_result_is_unchanged(
     monkeypatch.setattr(producer_diagnostics.time, "sleep", fake_sleep)
 
     history.record("operation", role_name="rgb", frame_index=1)
-    history.sleep(0.002, role_name="rgb", frame_index=1, deadline=100.002)
+    history.sleep(0.005, role_name="rgb", frame_index=1, deadline=100.005)
 
     assert history.events == ()
-    assert slept[0] == pytest.approx(0.001)
-    assert sum(slept) == pytest.approx(0.002)
-    assert clock["now"] == pytest.approx(100.002)
+    assert slept == [
+        pytest.approx(0.002),
+        pytest.approx(0.002),
+        pytest.approx(0.001),
+    ]
+    assert clock["now"] == pytest.approx(100.005)
     assert assert_on_schedule(
         10.0, 0.05, "rgb frame", observed_at=10.04
     ) == pytest.approx(0.04)
