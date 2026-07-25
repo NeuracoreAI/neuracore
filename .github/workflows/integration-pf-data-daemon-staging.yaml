@@ -58,18 +58,12 @@ jobs:
         environment: staging
         ref: ${{ inputs.ref }}
 
-    - name: Quiet macOS background services
-      # Run 30113104130: the 2ms-chunked wait removed every cold-start
-      # failure; the residual flakes are 50-280ms work-path stalls under
-      # contention. This validates the full recommended CI config:
-      # chunked wait + quiet daemons (run 30109237047 showed quieting
-      # halves the contention tail).
-      run: |
-        sudo mdutil -a -i off || true
-        sudo softwareupdate --schedule off || true
-        sudo launchctl bootout system/com.apple.softwareupdated 2>/dev/null || true
-        sudo launchctl bootout system/com.apple.mobileassetd 2>/dev/null || true
-        mdutil -a -s || true
+    - name: Disable timer coalescing (macOS)
+      # Mirrors main's #813 under nightly-like (non-quieted) conditions so
+      # the cold/chunk2/exp sentinels measure whether the sysctl alone
+      # makes plain sleeps precise (compare run 30113104130's noisy
+      # baseline: cold p95 75-150ms).
+      run: sudo sysctl -w kern.timer.coalescing_enabled=0 || true
 
     - name: Start host telemetry
       shell: bash
@@ -290,7 +284,14 @@ jobs:
       run: |
         set -uo pipefail
         mkdir -p tracing-artifacts
+        # First node reproduces nightly 30136887541's NEW failure: both
+        # 3.10 legs (ubuntu AND macos) went silent right after a completed
+        # mid-sequence nc.stop_recording in a -wait 300s case — hung in
+        # the stop->start transition — until the 6h job cap killed them.
+        # faulthandler_timeout dumps every thread's stack into this log
+        # each 900s while it hangs, which the nightly cannot do.
         nodes=(
+          'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-wait]'
           'tests/integration/platform/data_daemon/performance/test_pre_network.py::test_disk_db_write_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
           'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic]'
           'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-variable-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-stochastic-wait]'
