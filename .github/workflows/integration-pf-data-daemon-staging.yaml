@@ -62,6 +62,10 @@ jobs:
         path: "."
         extras: dev
 
+    - name: Disable timer coalescing (macOS)
+      if: runner.os == 'macOS'
+      run: sudo sysctl -w kern.timer.coalescing_enabled=0
+
     - name: Run Data Daemon Integration Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
