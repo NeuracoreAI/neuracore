@@ -58,6 +58,19 @@ jobs:
         environment: staging
         ref: ${{ inputs.ref }}
 
+    - name: Quiet macOS background services
+      # Run 30113104130: the 2ms-chunked wait removed every cold-start
+      # failure; the residual flakes are 50-280ms work-path stalls under
+      # contention. This validates the full recommended CI config:
+      # chunked wait + quiet daemons (run 30109237047 showed quieting
+      # halves the contention tail).
+      run: |
+        sudo mdutil -a -i off || true
+        sudo softwareupdate --schedule off || true
+        sudo launchctl bootout system/com.apple.softwareupdated 2>/dev/null || true
+        sudo launchctl bootout system/com.apple.mobileassetd 2>/dev/null || true
+        mdutil -a -s || true
+
     - name: Start host telemetry
       shell: bash
       # Runs before setup so the sentinel and samplers cover the setup
