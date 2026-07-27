@@ -8,11 +8,9 @@ Configuration dataclasses and the matrix builder live in
 
 from __future__ import annotations
 
-import ctypes
 import logging
 import multiprocessing
 import random
-import sys
 import threading
 import time
 import uuid
@@ -24,7 +22,9 @@ import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
-from tests.integration.platform.data_daemon.shared.macos_helper import set_thread_rt
+from tests.integration.platform.data_daemon.shared.macos_helper import (
+    set_thread_policy_for_macos,
+)
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
@@ -578,31 +578,6 @@ QOS = {
     "background": 0x09,
 }
 
-_libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
-
-
-def set_qos(name="user_interactive"):
-    """Set QoS for the CALLING thread. Returns the class read back, or None."""
-    if sys.platform != "darwin":
-        return None
-    rc = _libc.pthread_set_qos_class_self_np(ctypes.c_uint(QOS[name]), ctypes.c_int(0))
-    if rc != 0:
-        raise OSError(ctypes.get_errno(), "pthread_set_qos_class_self_np failed")
-    return get_qos()
-
-
-def get_qos():
-    if sys.platform != "darwin":
-        return None
-    _libc.pthread_self.restype = ctypes.c_void_p
-    cls = ctypes.c_uint(0)
-    rel = ctypes.c_int(0)
-    _libc.pthread_get_qos_class_np(
-        ctypes.c_void_p(_libc.pthread_self()), ctypes.byref(cls), ctypes.byref(rel)
-    )
-    inv = {v: k for k, v in QOS.items()}
-    return inv.get(cls.value, hex(cls.value))
-
 
 def run_threaded_logging(
     *,
@@ -632,7 +607,7 @@ def run_threaded_logging(
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
         try:
-            set_thread_rt(0.004, 0.001, 0.003)
+            set_thread_policy_for_macos()  # set policy because new thread
             barrier.wait()
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
@@ -867,6 +842,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     )
 
     use_rust = is_rust_daemon_enabled()
+    set_thread_policy_for_macos()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)

@@ -3,6 +3,9 @@ import ctypes.util
 import sys
 
 _DARWIN = sys.platform == "darwin"
+_PERIOD_S = 0.004
+_COMPUTATION_S = 0.001
+_CONSTRAINT_S = 0.003
 
 if _DARWIN:
     _lib = ctypes.CDLL(ctypes.util.find_library("c"))
@@ -34,7 +37,7 @@ if _DARWIN:
     _lib.mach_timebase_info(ctypes.byref(_tb))
 
 
-def set_thread_rt(period_s, computation_s, constraint_s, preemptible=True):
+def _set_thread_rt(period_s, computation_s, constraint_s, preemptible=True):
     """Apply RT time-constraint policy to the CALLING thread. No-op off macOS.
 
     Call inside the thread's target function, not at import.
@@ -60,3 +63,11 @@ def set_thread_rt(period_s, computation_s, constraint_s, preemptible=True):
     finally:
         _lib.mach_port_deallocate(_lib.mach_task_self(), th)
     return True
+
+
+def set_thread_policy_for_macos():
+    """MacOs Scheduler doesn't provide the real time performance necessary for the
+    preciseness of stochastic tests. Set up a thread policy to enable real time
+    performance. Policy has to be set for each new thread.
+    """
+    _set_thread_rt(_PERIOD_S, _COMPUTATION_S, _CONSTRAINT_S)
