@@ -9,8 +9,10 @@ here without cycles.
 from __future__ import annotations
 
 import functools
+import gc
 import logging
 import logging.handlers
+import math
 import multiprocessing
 import os
 import signal
@@ -162,17 +164,118 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
-def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
-    """Assert the producer fired at the intended wall-clock moment.
+def _percentile(ordered: list[float], percentile: float) -> float:
+    """Return the nearest-rank percentile of an already-sorted list."""
+    rank = math.ceil(percentile / 100.0 * len(ordered))
+    return ordered[max(0, min(len(ordered), rank) - 1)]
 
-    Independent of any duration check: bounds *when* a logging call started,
-    not how long it took.
+
+class ScheduleMonitor:
+    """Collect producer wake lateness across a recording.
+
+    Samples every deadline instead of raising on the first breach, so a single
+    OS or garbage-collection stall does not abandon a long recording before it
+    has produced any distribution to read. The percentile check bounds
+    sustained lag while tolerating isolated outliers.
+
+    Attributes:
+        tolerance_s: Lateness in seconds each sample is compared against.
+        percentile: Percentile of samples that must stay within tolerance.
     """
-    lateness = time.time() - deadline
-    assert abs(lateness) <= tolerance, (
-        f"{label} fired at wrong moment: "
-        f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
-    )
+
+    def __init__(self, tolerance_s: float, percentile: float) -> None:
+        self.tolerance_s = tolerance_s
+        self.percentile = percentile
+        self._samples: dict[str, list[float]] = {}
+        self._worst: dict[str, tuple[float, str, float]] = {}
+
+    def record(
+        self,
+        deadline: float,
+        label: str,
+        prior_label: str = "",
+        prior_elapsed_s: float = 0.0,
+    ) -> None:
+        """Record how late this deadline fired."""
+        lateness = time.time() - deadline
+        self._samples.setdefault(label, []).append(lateness)
+        if lateness > self._worst.get(label, (float("-inf"), "", 0.0))[0]:
+            self._worst[label] = (lateness, prior_label, prior_elapsed_s)
+
+    def summary(self) -> str:
+        """Render one line per stream with the lateness distribution."""
+        lines = []
+        for label in sorted(self._samples):
+            ordered = sorted(self._samples[label])
+            over = sum(1 for x in ordered if abs(x) > self.tolerance_s)
+            worst, prior_label, prior_s = self._worst[label]
+            at_percentile = _percentile(ordered, self.percentile) * 1000
+            lines.append(
+                f"    {label:<22} n={len(ordered):5d}"
+                f"  p50={_percentile(ordered, 50) * 1000:7.1f}ms"
+                f"  p{self.percentile:g}={at_percentile:7.1f}ms"
+                f"  max={worst * 1000:7.1f}ms"
+                f"  over_tolerance={over}"
+                f"  (worst followed {prior_label or 'nothing'}"
+                f" taking {prior_s * 1000:.1f}ms)"
+            )
+        return "\n".join(lines)
+
+    def assert_within_budget(self) -> None:
+        """Raise when a stream's percentile lateness exceeds the tolerance."""
+        for label in sorted(self._samples):
+            ordered = sorted(self._samples[label])
+            at_percentile = _percentile(ordered, self.percentile)
+            assert abs(at_percentile) <= self.tolerance_s, (
+                f"{label} ran behind schedule: "
+                f"p{self.percentile:g}={at_percentile:+.3f}s exceeds "
+                f"tolerance=±{self.tolerance_s:.3f}s over {len(ordered)} frames"
+            )
+
+
+class GcPauseRecorder:
+    """Record cyclic-collector pause times for the calling process.
+
+    A generation-2 pass holds the GIL for the whole collection, so it delays
+    every other thread in the process, including a producer waiting to wake
+    from time.sleep. Pause cost grows with the number of tracked objects.
+    """
+
+    def __init__(self) -> None:
+        self.pauses: list[tuple[int, float]] = []
+        self._open: dict[int, float] = {}
+
+    def _callback(self, phase: str, info: dict[str, int]) -> None:
+        generation = info["generation"]
+        if phase == "start":
+            self._open[generation] = time.perf_counter()
+            return
+        started = self._open.pop(generation, None)
+        if started is not None:
+            self.pauses.append((generation, time.perf_counter() - started))
+
+    def __enter__(self) -> GcPauseRecorder:
+        gc.callbacks.append(self._callback)
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        if self._callback in gc.callbacks:
+            gc.callbacks.remove(self._callback)
+
+    def summary(self) -> str:
+        """Render per-generation pause counts and the worst pause seen."""
+        if not self.pauses:
+            return "    no collections"
+        lines = []
+        for generation in sorted({g for g, _ in self.pauses}):
+            durations = sorted(d for g, d in self.pauses if g == generation)
+            lines.append(
+                f"    gen-{generation}  runs={len(durations):5d}"
+                f"  p50={_percentile(durations, 50) * 1000:7.1f}ms"
+                f"  max={durations[-1] * 1000:7.1f}ms"
+                f"  total={sum(durations) * 1000:8.1f}ms"
+            )
+        return "\n".join(lines)
 
 
 def surface_worker_errors(fn):

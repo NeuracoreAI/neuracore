@@ -8,6 +8,7 @@ Configuration dataclasses and the matrix builder live in
 
 from __future__ import annotations
 
+import gc
 import logging
 import multiprocessing
 import random
@@ -24,8 +25,9 @@ from tests.integration.platform.data_daemon.shared.assertions import assert_cont
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
+    GcPauseRecorder,
+    ScheduleMonitor,
     Timer,
-    assert_on_schedule,
     init_worker_logging,
     relayed_worker_logs,
     surface_worker_errors,
@@ -34,6 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     camera_names,
     case_id,
+    format_timer_stats_line,
     generate_joint_values,
     joint_names_for_count,
 )
@@ -51,6 +54,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
+    SCHEDULER_LATENESS_PERCENTILE,
     SCHEDULER_TOLERANCE_S,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -64,7 +68,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
-STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+
+_GC_FROZEN = False
 
 
 def encode_frame_number(
@@ -395,10 +400,19 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
-def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
+def stochastic_timestamp_rng(context_index: int, stream: str) -> random.Random:
+    """Return the timestamp-jitter generator for one stream of one context.
+
+    Each stream draws from its own generator, so parallel contexts and the
+    per-thread producer's threads never interleave draws on a shared one.
+    """
+    return random.Random(f"stochastic-timestamp:{context_index}:{stream}")
+
+
+def get_jitter(rng: random.Random, use_stochastic_timestamps: bool, fps: int) -> float:
     if use_stochastic_timestamps:
         window = stochastic_jitter_window(fps)
-        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
+        return rng.uniform(-window, window)
     return 0.0
 
 
@@ -430,29 +444,32 @@ def log_synchronous_frames(
         bool(camera_name_list), image_width, image_height
     )
 
+    joint_jitter_rng = stochastic_timestamp_rng(context_index, "joint")
+    video_jitter_rng = stochastic_timestamp_rng(context_index, "video")
+    monitor = ScheduleMonitor(SCHEDULER_TOLERANCE_S, SCHEDULER_LATENESS_PERCENTILE)
+
     recording_wall_start = time.time()
     joint_index = 0
     video_index = 0
+    prior_label = "recording start"
+    prior_elapsed_s = 0.0
 
     while joint_index < joint_frame_count or video_index < (
         video_frame_count if camera_name_list else 0
     ):
         joint_due = joint_index < joint_frame_count
         video_due = camera_name_list and video_index < video_frame_count
-        # One jitter is shared by both deadlines/timestamps this iteration, so
-        # size it to the tighter (higher-fps) window to stay within both.
-        jitter = get_jitter(
-            use_stochastic_timestamps,
-            max(joint_fps, video_fps) if camera_name_list else joint_fps,
-        )
 
+        # Deadlines are nominal so the sequence stays monotone and the lateness
+        # assertion measures scheduling error alone. Jitter belongs on the
+        # reported timestamp, drawn per stream below.
         joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps) + jitter
+            recording_wall_start + (joint_index / joint_fps)
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            recording_wall_start + (video_index / video_fps) + jitter
+            recording_wall_start + (video_index / video_fps)
             if video_due
             else float("inf")
         )
@@ -462,14 +479,20 @@ def log_synchronous_frames(
             if remaining > 0:
                 time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
+                monitor.record(
+                    joint_deadline,
+                    "joint frame",
+                    prior_label=prior_label,
+                    prior_elapsed_s=prior_elapsed_s,
                 )
+            branch_start = time.perf_counter()
             if use_real_timestamps:
                 timestamp = None
             else:
                 intended = timestamp_start_s + (joint_index / joint_fps)
-                timestamp = intended + jitter
+                timestamp = intended + get_jitter(
+                    joint_jitter_rng, use_stochastic_timestamps, joint_fps
+                )
             joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
             with Timer(
                 MAX_TIME_TO_LOG_S,
@@ -507,19 +530,27 @@ def log_synchronous_frames(
                     timestamp=timestamp,
                 )
             joint_index += 1
+            prior_label = "joint frame"
+            prior_elapsed_s = time.perf_counter() - branch_start
         else:
             remaining = video_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
+                monitor.record(
+                    video_deadline,
+                    "video frame",
+                    prior_label=prior_label,
+                    prior_elapsed_s=prior_elapsed_s,
                 )
+            branch_start = time.perf_counter()
             if use_real_timestamps:
                 timestamp = None
             else:
                 intended = timestamp_start_s + (video_index / video_fps)
-                timestamp = intended + jitter
+                timestamp = intended + get_jitter(
+                    video_jitter_rng, use_stochastic_timestamps, video_fps
+                )
 
             for camera_index, camera_name in enumerate(camera_name_list):
                 frame_code = (
@@ -543,6 +574,16 @@ def log_synchronous_frames(
                         timestamp=timestamp,
                     )
             video_index += 1
+            prior_label = "video frame"
+            prior_elapsed_s = time.perf_counter() - branch_start
+
+    if assert_deadline and use_stochastic_timestamps:
+        logger.info(
+            "Producer wake lateness, recording %d:\n%s",
+            recording_index,
+            monitor.summary(),
+        )
+        monitor.assert_within_budget()
 
 
 def build_thread_roles(
@@ -591,6 +632,7 @@ def run_threaded_logging(
     )
     barrier = threading.Barrier(len(roles))
     thread_errors: list[BaseException] = []
+    monitor = ScheduleMonitor(SCHEDULER_TOLERANCE_S, SCHEDULER_LATENESS_PERCENTILE)
 
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
@@ -602,24 +644,29 @@ def run_threaded_logging(
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            jitter_rng = stochastic_timestamp_rng(context_index, role_name)
             thread_wall_start = time.time()
+            prior_elapsed_s = 0.0
             for frame_index in range(frame_count):
-                jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+                frame_deadline = thread_wall_start + (frame_index / fps)
                 remaining = frame_deadline - time.time()
                 if remaining > 0:
                     time.sleep(remaining)
                 if assert_deadline and use_stochastic_timestamps:
-                    assert_on_schedule(
+                    monitor.record(
                         frame_deadline,
-                        SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
+                        f"{role_name} frame",
+                        prior_label=f"{role_name} frame",
+                        prior_elapsed_s=prior_elapsed_s,
                     )
+                frame_start = time.perf_counter()
                 if use_real_timestamps:
                     timestamp = None
                 else:
                     intended = timestamp_start_s + (frame_index / fps)
-                    timestamp = intended + jitter
+                    timestamp = intended + get_jitter(
+                        jitter_rng, use_stochastic_timestamps, fps
+                    )
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
                         role_spec["camera_names"]
@@ -695,6 +742,7 @@ def run_threaded_logging(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+                prior_elapsed_s = time.perf_counter() - frame_start
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 
@@ -710,6 +758,14 @@ def run_threaded_logging(
         raise RuntimeError(
             f"Threaded producer failed: {thread_errors[0]}"
         ) from thread_errors[0]
+
+    if assert_deadline and use_stochastic_timestamps:
+        logger.info(
+            "Producer wake lateness, recording %d:\n%s",
+            recording_index,
+            monitor.summary(),
+        )
+        monitor.assert_within_budget()
 
     return [str(role["marker_name"]) for role in roles]
 
@@ -801,6 +857,33 @@ def _bind_worker_dataset(spec: ContextSpec) -> None:
         ) from last_error
 
 
+def _log_timer_stats_on_failure(context_index: int) -> None:
+    """Emit this context's timer stats before its failure unwinds the worker.
+
+    ContextResult carries timer stats to the parent only on the success path,
+    so an aborted context would otherwise report no per-call timings at all.
+    """
+    labels = sorted(Timer._stats)
+    if not labels:
+        return
+    lines = [format_timer_stats_line(label, Timer._stats[label]) for label in labels]
+    logger.warning(
+        "Timer stats for aborted context %d  (n / avg / max):\n%s",
+        context_index,
+        "\n".join(lines),
+    )
+
+
+def _log_gc_pauses(context_index: int, recorder: GcPauseRecorder) -> None:
+    """Emit this context's collector pauses alongside its live-object count."""
+    logger.info(
+        "GC pauses for context %d (%d tracked objects live):\n%s",
+        context_index,
+        len(gc.get_objects()),
+        recorder.summary(),
+    )
+
+
 @surface_worker_errors
 def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     """Subprocess wrapper for context_worker used by multiprocessing.Pool.
@@ -808,17 +891,30 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     On Linux, Pool uses fork so workers inherit a copy of the parent's
     Timer._stats. Clearing it here ensures workers only capture their own
     timers and the parent's pre-fork timers (e.g. nc.login) are not
-    double-counted when stats are merged back. The stochastic-timestamp RNG
-    is reseeded per-context so parallel workers produce independent jitter
-    sequences instead of replaying the parent's seed. Spawned workers
-    (macOS) additionally re-authenticate, as they do not inherit the
-    parent's in-process auth state.
+    double-counted when stats are merged back. Spawned workers (macOS)
+    additionally re-authenticate, as they do not inherit the parent's
+    in-process auth state.
     """
     multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
-    STOCHASTIC_TIMESTAMP_RANDOM.seed(1 + spec.context_index)
     ensure_login()
     return context_worker(spec)
+
+
+def _freeze_startup_objects() -> None:
+    """Move already-live objects out of reach of the cyclic collector.
+
+    Import-time objects survive every generation-2 pass, and pause cost scales
+    with the number of tracked objects, so freezing them shortens every later
+    collection. Runs once per process; the sequential and pooled paths both
+    reach it.
+    """
+    global _GC_FROZEN
+    if _GC_FROZEN:
+        return
+    gc.collect()
+    gc.freeze()
+    _GC_FROZEN = True
 
 
 def context_worker(spec: ContextSpec) -> ContextResult:
@@ -828,6 +924,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         wait_for_recording_index_for_source,
     )
 
+    _freeze_startup_objects()
     use_rust = is_rust_daemon_enabled()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
@@ -843,8 +940,10 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
     wall_started_at: float | None = None
     wall_stopped_at: float = 0.0
+    gc_recorder = GcPauseRecorder()
 
     try:
+        gc_recorder.__enter__()
         _bind_worker_dataset(spec)
         with Timer(
             MAX_TIME_TO_START_S,
@@ -975,6 +1074,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 )
             wall_stopped_at = time.time()
 
+        _log_gc_pauses(spec.context_index, gc_recorder)
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
             dataset_name=spec.dataset_name,
@@ -1005,6 +1105,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             timer_stats=captured_timer_stats,
         )
     except Exception:
+        _log_timer_stats_on_failure(spec.context_index)
+        _log_gc_pauses(spec.context_index, gc_recorder)
         if robot is not None:
             try:
                 if robot.is_recording():
@@ -1017,6 +1119,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 )
         raise
     finally:
+        gc_recorder.__exit__(None, None, None)
         _cleanup_test_worker_robot(robot)
 
 

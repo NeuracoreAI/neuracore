@@ -421,7 +421,7 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _format_timer_stats_line(label: str, stats: dict[str, float]) -> str:
+def format_timer_stats_line(label: str, stats: dict[str, float]) -> str:
     """Format a timer stats line for analysis output."""
     count = int(stats["count"])
     avg = stats["total"] / count if count > 0 else 0.0
@@ -502,7 +502,7 @@ def log_run_analysis(
             stats = Timer._stats[label]
             count = int(stats["count"])
             stats["total"] / count if count > 0 else 0.0
-            lines.append(_format_timer_stats_line(label, Timer._stats[label]))
+            lines.append(format_timer_stats_line(label, Timer._stats[label]))
 
     if disk_durations:
         avg_duration_s = sum(disk_durations.values()) / len(disk_durations)

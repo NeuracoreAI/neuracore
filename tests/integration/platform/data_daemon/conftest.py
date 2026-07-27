@@ -20,7 +20,7 @@ from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
     DataDaemonTestCase,
-    _format_timer_stats_line,
+    format_timer_stats_line,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     ContextResult,
@@ -223,7 +223,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         for label in all_labels:
             stats = run["timer_stats"].get(label)
             if stats is not None:
-                lines.append(_format_timer_stats_line(label, stats))
+                lines.append(format_timer_stats_line(label, stats))
             else:
                 lines.append(f"    {label:<42}  ---")
 
@@ -231,7 +231,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
     if infra_labels:
         lines.append("\n  Infrastructure timings:")
         for label in infra_labels:
-            lines.append(_format_timer_stats_line(label, timer_stats[label]))
+            lines.append(format_timer_stats_line(label, timer_stats[label]))
 
     lines.append(separator)
     terminalreporter.write_line("\n".join(lines))

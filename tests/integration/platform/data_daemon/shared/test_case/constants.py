@@ -60,6 +60,10 @@ TIMESTAMP_MODE_STOCHASTIC = "stochastic"
 STOCHASTIC_JITTER_FACTOR = 0.5
 # OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
 SCHEDULER_TOLERANCE_S = 0.05
+# Share of producer frames that must wake within SCHEDULER_TOLERANCE_S. Isolated
+# stalls (a generation-2 collection holds the GIL for the whole pass) are
+# expected on shared CI hardware; sustained lag is not.
+SCHEDULER_LATENESS_PERCENTILE = 99.0
 
 
 def stochastic_jitter_window(fps: int) -> float:

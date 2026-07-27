@@ -76,11 +76,15 @@ jobs:
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
       # stays attributable.
+      # TODO: temporary. "-k stochastic" narrows the run to the four scheduler
+      # cases under investigation. Drop the selector and restore the full
+      # tests/integration/platform/data_daemon/ run before merging.
       run: >-
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        -k stochastic
+        tests/integration/platform/data_daemon/performance/
 
     - name: Show disk space after tests
       if: always()
