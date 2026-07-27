@@ -21,10 +21,11 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
-// Only the Linux `sync_file_range` writeback hint needs the raw fd; gated to
-// avoid an unused-import warning on platforms without that syscall (e.g. macOS).
+// Both the Linux `sync_file_range` writeback hint and the macOS `fsync` pacing
+// call need the raw fd; gate the import to those two targets so other platforms
+// don't warn on an unused import.
 use std::cell::RefCell;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -220,23 +221,26 @@ const SYNCPOINT_INTERVAL_BYTES: u64 = 32_768;
 /// the writer thread rather than a `log_*` caller.
 const BUF_WRITER_CAPACITY_BYTES: usize = 8 * 1024 * 1024;
 
-/// Issue an async writeback hint at least this often, measured by bytes
-/// appended since the last hint.
+/// Pace writeback at least this often, measured by bytes appended since the
+/// last hint.
 ///
-/// A chunk is 256 MiB ([`CHUNK_FLUSH_BYTES`](crate)) and the kernel's
-/// `balance_dirty_pages` throttle fires on the *system-wide* dirty-page count —
-/// so at 1080p@60 across multiple cameras hundreds of MiB of dirty pages can
-/// pile up before a chunk closes, then a single `write()` hard-stalls for
-/// hundreds of ms. Hinting writeback every 16 MiB starts the kernel draining
-/// those pages continuously, keeping the dirty footprint bounded (≈ interval ×
-/// active streams) so the throttle never reaches a hard stall. It's only a
-/// handful of cheap syscalls per chunk — far coarser than per-frame, far finer
-/// than per-chunk (which would arrive after the stall already happened).
+/// A chunk is 256 MiB ([`CHUNK_FLUSH_BYTES`](crate)) and left un-paced the OS
+/// lets dirty pages pile up on the *system-wide* count — so at 1080p@60 across
+/// multiple cameras hundreds of MiB can accumulate before a chunk closes, then
+/// a single `write()` hard-stalls for hundreds of ms (Linux's
+/// `balance_dirty_pages` throttle; macOS's own writeback throttle). Kicking
+/// writeback every 16 MiB starts the pages draining continuously, keeping the
+/// dirty footprint bounded (≈ interval × active streams) so the throttle never
+/// reaches a hard stall. It's only a handful of syscalls per chunk — far
+/// coarser than per-frame, far finer than per-chunk (which would arrive after
+/// the stall already happened).
 ///
-/// We only hint writeback (`SYNC_FILE_RANGE_WRITE`); we do **not** drop the
-/// pages (`fadvise(DONTNEED)`), because the daemon re-reads each NUT to
-/// transcode it — cleaning the pages keeps them cache-warm for that read while
-/// still relieving write pressure.
+/// On Linux this is an async, non-blocking range hint; on macOS it's a blocking
+/// whole-file `fsync` (no non-blocking equivalent exists) that costs the writer
+/// thread a brief pause each time rather than a `log_*` caller. Either way we
+/// only *write back* the pages; we do **not** drop them (`fadvise(DONTNEED)`),
+/// because the daemon re-reads each NUT to transcode it — cleaning the pages
+/// keeps them cache-warm for that read while still relieving write pressure.
 const WRITEBACK_HINT_INTERVAL_BYTES: u64 = 16 * 1024 * 1024;
 
 impl NutWriter {
@@ -413,15 +417,18 @@ impl NutWriter {
         Ok(())
     }
 
-    /// Ask the kernel to start writing back the bytes appended since the last
-    /// hint, *without waiting* (`SYNC_FILE_RANGE_WRITE`). This bounds the
+    /// Start writing back the bytes appended since the last hint, bounding the
     /// producer's dirty-page footprint so a later `write()` doesn't hard-stall
-    /// under `balance_dirty_pages` throttling. The pages are cleaned but not
-    /// evicted, so the daemon's subsequent transcode read still hits cache.
+    /// under the OS writeback throttle. On Linux this queues async writeback for
+    /// the appended range *without waiting* (`SYNC_FILE_RANGE_WRITE`); macOS has
+    /// no non-blocking range equivalent, so it issues a blocking whole-file
+    /// `fsync` on the writer thread instead. Either way the pages are cleaned
+    /// but not evicted, so the daemon's subsequent transcode read still hits
+    /// cache.
     ///
     /// Best-effort: the buffered tail is flushed into the page cache first so
     /// the whole range is eligible, then the marker advances regardless of the
-    /// syscall result — a writeback hint is a pure optimisation and must never
+    /// syscall result — writeback pacing is a pure optimisation and must never
     /// drop a frame or surface an error.
     fn hint_writeback(&mut self) {
         // Push the BufWriter's contents into the page cache so the full range
@@ -436,10 +443,14 @@ impl NutWriter {
         if nbytes == 0 {
             return;
         }
-        // `sync_file_range` is Linux-only. On other platforms (macOS) the
-        // `flush()` above has already pushed the tail into the page cache, which
-        // is all the hint guarantees; there is no portable async-writeback
-        // equivalent worth the complexity, so we simply skip it.
+        // Kick off writeback for the appended range. Linux queues it async via
+        // `sync_file_range`; macOS has no non-blocking equivalent, so it flushes
+        // the whole file with a blocking `fsync` on the writer thread. We use
+        // plain `fsync` (not `F_FULLFSYNC`/`F_BARRIERFSYNC`) because we want
+        // writeback pacing, not durability/ordering — the spool file is scratch
+        // that the daemon re-reads then transcodes. NB: `libc` exposes no
+        // `fdatasync` for the Apple target, so `fsync` is also the only
+        // buildable choice on macOS — do not "simplify" it to `fdatasync`.
         #[cfg(target_os = "linux")]
         {
             let fd = self.writer.get_ref().as_raw_fd();
@@ -460,6 +471,24 @@ impl NutWriter {
                     errno = %io::Error::last_os_error(),
                     path = %self.path.display(),
                     "sync_file_range writeback hint failed (ignored)",
+                );
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let fd = self.writer.get_ref().as_raw_fd();
+            // SAFETY: `fd` is the open NUT file's descriptor, valid for the
+            // lifetime of `self.writer`; `fsync` reads only kernel state for
+            // that fd — it does not touch user memory or take ownership of it.
+            // The [offset, nbytes) range is intentionally unused: `fsync`
+            // flushes the whole file, and flushing beyond the hinted range is
+            // safe (earlier ranges were cleaned by prior hints).
+            let result = unsafe { libc::fsync(fd) };
+            if result != 0 {
+                tracing::debug!(
+                    errno = %io::Error::last_os_error(),
+                    path = %self.path.display(),
+                    "fsync writeback pacing failed (ignored)",
                 );
             }
         }
@@ -1357,5 +1386,32 @@ mod tests {
             decoded.stdout.len(),
             expected.len()
         );
+    }
+
+    #[test]
+    fn writeback_pacing_runs_cleanly_past_the_hint_interval() {
+        // The other tests use tiny frames that never reach
+        // `WRITEBACK_HINT_INTERVAL_BYTES`, so this is the only coverage that
+        // actually executes the platform arm of `hint_writeback` (Linux
+        // `sync_file_range`, macOS `fsync`). It asserts only that crossing the
+        // interval completes without error — it does NOT validate pacing or
+        // timing, which depend on nondeterministic kernel writeback latency.
+        let tempdir = TempDir::new().unwrap();
+        let path = tempdir.path().join("frames.nut");
+        let config = NutVideoConfig {
+            width: 16,
+            height: 16,
+            time_base_num: 1,
+            time_base_den: 1_000_000,
+        };
+        let mut writer = NutWriter::create(&path, config).unwrap();
+
+        // Two ~10 MiB opaque payloads push `bytes_written` past the 16 MiB
+        // hint interval, firing `hint_writeback` at least once.
+        let payload = vec![0u8; 10 * 1024 * 1024];
+        writer.write_frame_precompressed(0, &payload).unwrap();
+        writer.write_frame_precompressed(1, &payload).unwrap();
+        assert!(writer.bytes_written() > WRITEBACK_HINT_INTERVAL_BYTES);
+        assert!(writer.finish().is_ok());
     }
 }
