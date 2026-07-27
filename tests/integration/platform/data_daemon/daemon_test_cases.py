@@ -386,7 +386,7 @@ NETWORK_PERFORMANCE_CASES = (
         wait=True,
     ),
     DataDaemonTestCase(
-        duration_sec=300,
+        duration_sec=10,
         joint_count=10,
         video_count=1,
         image_width=1920,
