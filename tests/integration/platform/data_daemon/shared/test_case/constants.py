@@ -58,7 +58,8 @@ TIMESTAMP_MODE_STOCHASTIC = "stochastic"
 # Jitter amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 STOCHASTIC_JITTER_FACTOR = 0.5
-# OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
+# Slack budget for a stochastic producer to reach its scheduler deadline.
+# Kernel wake latency is diagnosed separately and does not consume this budget.
 SCHEDULER_TOLERANCE_S = 0.05
 
 

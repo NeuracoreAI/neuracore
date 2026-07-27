@@ -85,9 +85,10 @@ class DataDaemonTestCase:
     ``DataDaemonTestBatch`` that applies shared infrastructure parameters.
 
     Attributes:
-        duration_sec: Wall-clock duration logged per individual recording, in
-            seconds.  All frames are generated at ``fps`` Hz so the total
-            expected frame count is ``fps * duration_sec``.
+        duration_sec: Logical duration represented by each recording, in seconds.
+            All streams contain ``fps * duration_sec`` frames and are paced
+            against wall time. Stochastic mode follows a seeded, precomputed
+            timetable instead of submitting the full recording as one burst.
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
@@ -150,7 +151,9 @@ class DataDaemonTestCase:
             ``"manual"`` (default) passes explicit monotonically-increasing
             timestamps computed from ``timestamp_start_s + frame_index / fps``.
             ``"real"`` omits the ``timestamp`` argument so the logging API uses
-            the wall-clock time at the moment each frame is logged.
+            the wall-clock time at the moment each frame is logged. ``"stochastic"``
+            uses seeded, jittered logical timestamps and schedules each logging
+            call against an interruptible monotonic clock.
         skip: When ``True``, the case is skipped at collection time instead of
             being executed.  Lets unstable or not-yet-validated workloads stay
             in the suite (documented and discoverable) without running.  A

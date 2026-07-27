@@ -19,7 +19,7 @@ venv.bak/
 dist/
 build/
 *.whl
-
+/login_staging.sh
 # PyInstaller
 #  Usually these files are written by a python script from a template
 *.manifest

@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import random
+import select
+import socket
 import threading
 import time
 import uuid
@@ -64,7 +66,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
-STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+STOCHASTIC_TIMESTAMP_SEED = 1
+SYNCHRONOUS_PLAN_KEY = "synchronous"
 
 
 def encode_frame_number(
@@ -184,6 +187,120 @@ class ContextExpectedTimestamps:
 
 
 @dataclass(frozen=True, slots=True)
+class StochasticTimestampPlan:
+    """Precomputed logical timestamps for one recording.
+
+    Synchronous logging uses one key because joint and video data belong to the
+    same robot sample. Per-thread logging uses one key per independent producer.
+    Building the complete plan before logging makes jitter deterministic and
+    independent of thread scheduling.
+    """
+
+    by_producer: dict[str, tuple[float, ...]]
+
+    def timestamps_for(self, producer_key: str) -> tuple[float, ...]:
+        """Return the timestamp sequence assigned to one producer."""
+        return self.by_producer[producer_key]
+
+
+class StochasticReplayScheduler:
+    """Pace logical timestamp gaps against an interruptible monotonic clock.
+
+    A socket-pair-backed ``select`` wait provides kernel-timed blocking without
+    ``time.sleep`` or busy waiting. An error in any producer writes to the
+    cancellation socket, waking every waiting producer immediately.
+
+    Each producer's first event is anchored to the common recording start.
+    After its readiness check passes, the next deadline is rebased to that
+    event's actual dispatch plus the next precomputed logical gap. Thus kernel
+    scheduling noise cannot accumulate or cause a catch-up burst, while every
+    producer event still has its own 50 ms readiness deadline.
+    """
+
+    def __init__(self, logical_start_s: float) -> None:
+        self._logical_start_s = logical_start_s
+        self._monotonic_start_s: float | None = None
+        self._start_lock = threading.Lock()
+        self._producer_state_lock = threading.Lock()
+        self._producer_state: dict[str, tuple[float, float]] = {}
+        self._cancelled = threading.Event()
+        self._cancel_reader, self._cancel_writer = socket.socketpair()
+
+    def start(self) -> None:
+        """Anchor logical time to the monotonic clock exactly once."""
+        with self._start_lock:
+            if self._monotonic_start_s is None:
+                self._monotonic_start_s = time.monotonic()
+
+    def wait_until(
+        self,
+        logical_timestamp_s: float,
+        *,
+        producer_key: str = "default",
+        assert_deadline: bool = False,
+        label: str = "stochastic frame",
+    ) -> bool:
+        """Wait until ``logical_timestamp_s`` is due.
+
+        Returns ``False`` if another producer cancelled the replay.
+        Timestamps jittered just before the logical start are due immediately.
+        Performance tests assert the producer reached the scheduler on time
+        before making the dispatch its new scheduling base. Kernel wake delay
+        is diagnostic only; logging API duration is checked by its own timer.
+        """
+        if self._cancelled.is_set():
+            return False
+        if self._monotonic_start_s is None:
+            raise RuntimeError("stochastic replay scheduler has not been started")
+
+        with self._producer_state_lock:
+            previous = self._producer_state.get(producer_key)
+        if previous is None:
+            logical_offset_s = logical_timestamp_s - self._logical_start_s
+            deadline_s = self._monotonic_start_s + logical_offset_s
+        else:
+            previous_logical_s, previous_dispatch_s = previous
+            logical_gap_s = logical_timestamp_s - previous_logical_s
+            if logical_gap_s < 0.0:
+                raise ValueError(
+                    f"stochastic plan for {producer_key!r} is not monotonic"
+                )
+            deadline_s = previous_dispatch_s + logical_gap_s
+        entered_at_s = time.monotonic()
+        remaining_s = deadline_s - entered_at_s
+        if remaining_s > 0.0:
+            readable, _, _ = select.select([self._cancel_reader], [], [], remaining_s)
+            if readable:
+                return False
+        fired_at_s = time.monotonic()
+        if assert_deadline:
+            assert_on_schedule(
+                deadline_s,
+                SCHEDULER_TOLERANCE_S,
+                label,
+                entered_at=entered_at_s,
+                fired_at=fired_at_s,
+            )
+        with self._producer_state_lock:
+            self._producer_state[producer_key] = (
+                logical_timestamp_s,
+                fired_at_s,
+            )
+        return True
+
+    def cancel(self) -> None:
+        """Cancel the replay and wake all waiting producer threads."""
+        if self._cancelled.is_set():
+            return
+        self._cancelled.set()
+        try:
+            self._cancel_writer.send(b"\0")
+        except OSError:
+            # Socket teardown may race worker-error cancellation at shutdown.
+            pass
+
+
+@dataclass(frozen=True, slots=True)
 class ContextCaseSpec:
     duration_sec: int
     joint_count: int
@@ -200,15 +317,14 @@ class ContextCaseSpec:
     def stop_recording_sla_s(self) -> float:
         """Seconds allowed for the ``nc.stop_recording`` call.
 
-        ``wait=False`` is fire-and-forget — the call never blocks on the
-        upload pipeline — so it gets a flat constant. ``wait=True`` blocks
-        until every trace has uploaded, so its budget is the sum of the
-        joint-data and video-data upload costs: total joint samples
-        (``duration_sec * joint_count * joint_fps``) and total video pixels
+        ``wait=False`` is fire-and-forget, so it gets a flat strict budget.
+        ``wait=True`` blocks until every trace has uploaded, so its budget is
+        the sum of the joint-data and video-data upload costs: total joint
+        samples (``duration_sec * joint_count * joint_fps``) and total video pixels
         (``duration_sec * video_fps * video_count * image_width *
         image_height``), each times an observed per-unit upload cost. The
-        budget is floored at the duration-based overhead so short or
-        low-volume recordings keep a sane minimum.
+        budget is floored at the duration-based overhead so short or low-volume
+        recordings keep a sane minimum.
         """
         if not self.wait:
             return STOP_RECORDING_NO_WAIT_SLA_S
@@ -395,11 +511,74 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
-def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
-    if use_stochastic_timestamps:
-        window = stochastic_jitter_window(fps)
-        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
-    return 0.0
+def _planned_timestamps(
+    *,
+    timestamp_start_s: float,
+    frame_count: int,
+    fps: int,
+    rng: random.Random,
+) -> tuple[float, ...]:
+    """Return a seeded logical timestamp sequence with bounded jitter."""
+    window = stochastic_jitter_window(fps)
+    return tuple(
+        timestamp_start_s + (frame_index / fps) + rng.uniform(-window, window)
+        for frame_index in range(frame_count)
+    )
+
+
+def build_stochastic_timestamp_plan(
+    *,
+    timestamp_start_s: float,
+    joint_frame_count: int,
+    video_frame_count: int,
+    joint_fps: int,
+    video_fps: int,
+    producer_channels: str,
+    joint_names: list[str],
+    camera_name_list: list[str],
+    context_index: int,
+    recording_index: int,
+) -> StochasticTimestampPlan:
+    """Build the complete logical timestamp plan before producers start.
+
+    A synchronous plan represents robot sample ticks shared by every data type.
+    Per-thread mode instead receives one independently jittered plan per role.
+    """
+    rng = random.Random(
+        STOCHASTIC_TIMESTAMP_SEED + (context_index * 1_000_003) + recording_index
+    )
+    by_producer: dict[str, tuple[float, ...]] = {}
+
+    if producer_channels == PRODUCER_PER_THREAD:
+        roles = build_thread_roles(
+            joint_names=joint_names,
+            camera_name_list=camera_name_list,
+        )
+        for role in roles:
+            is_rgb = role["role"] == "rgb"
+            producer_key = str(role["marker_name"])
+            by_producer[producer_key] = _planned_timestamps(
+                timestamp_start_s=timestamp_start_s,
+                frame_count=video_frame_count if is_rgb else joint_frame_count,
+                fps=video_fps if is_rgb else joint_fps,
+                rng=rng,
+            )
+    else:
+        if camera_name_list and (
+            joint_fps != video_fps or joint_frame_count != video_frame_count
+        ):
+            raise ValueError(
+                "synchronous stochastic joint/video logging requires matching "
+                "frame counts and fps; use per_thread for independent producers"
+            )
+        by_producer[SYNCHRONOUS_PLAN_KEY] = _planned_timestamps(
+            timestamp_start_s=timestamp_start_s,
+            frame_count=joint_frame_count,
+            fps=joint_fps,
+            rng=rng,
+        )
+
+    return StochasticTimestampPlan(by_producer=by_producer)
 
 
 def log_synchronous_frames(
@@ -419,16 +598,102 @@ def log_synchronous_frames(
     context_index: int,
     use_real_timestamps: bool = False,
     use_stochastic_timestamps: bool = False,
+    stochastic_plan: StochasticTimestampPlan | None = None,
+    stochastic_scheduler: StochasticReplayScheduler | None = None,
     assert_deadline: bool = False,  # only set by performance tests
 ) -> None:
-    """Log all joint and video frames for one recording synchronously.
+    """Log joint and video frames synchronously in timestamp order.
 
-    Joint and video frames are interleaved in a single loop using a wall-clock
-    deadline scheduler, so both streams advance together in time order.
+    Real/manual modes retain their existing pacing. Stochastic mode schedules
+    one shared robot-sample tick for joint and video data. The tick has the
+    50 ms producer-readiness deadline; existing per-call timers separately
+    constrain the work performed by each logging API call within that sample.
     """
+    if use_stochastic_timestamps and stochastic_plan is None:
+        raise ValueError("stochastic timestamps require a logical event plan")
+    if use_stochastic_timestamps:
+        stochastic_scheduler = stochastic_scheduler or StochasticReplayScheduler(
+            timestamp_start_s
+        )
+
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
     )
+    if stochastic_scheduler is not None:
+        stochastic_scheduler.start()
+
+    if use_stochastic_timestamps:
+        assert stochastic_plan is not None
+        assert stochastic_scheduler is not None
+        shared_timestamps = stochastic_plan.timestamps_for(SYNCHRONOUS_PLAN_KEY)
+        for frame_index, timestamp in enumerate(shared_timestamps):
+            if not stochastic_scheduler.wait_until(
+                timestamp,
+                producer_key=SYNCHRONOUS_PLAN_KEY,
+                assert_deadline=assert_deadline,
+                label=f"synchronous tick {frame_index}",
+            ):
+                return
+
+            joint_values = generate_joint_values(frame_index, joint_fps, joint_names)
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_joint_positions",
+                assert_deadline=assert_deadline,
+            ):
+                nc.log_joint_positions(
+                    joint_values, robot_name=robot_name, timestamp=timestamp
+                )
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_joint_velocities",
+                assert_deadline=assert_deadline,
+            ):
+                nc.log_joint_velocities(
+                    joint_values, robot_name=robot_name, timestamp=timestamp
+                )
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_joint_torques",
+                assert_deadline=assert_deadline,
+            ):
+                nc.log_joint_torques(
+                    joint_values, robot_name=robot_name, timestamp=timestamp
+                )
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_custom_1d",
+                assert_deadline=assert_deadline,
+            ):
+                nc.log_custom_1d(
+                    marker_name,
+                    np.array([float(frame_index)], dtype=np.float32),
+                    robot_name=robot_name,
+                    timestamp=timestamp,
+                )
+
+            for camera_index, camera_name in enumerate(camera_name_list):
+                frame_code = (
+                    (context_index * 1_000_000_000)
+                    + (recording_index * 10_000_000)
+                    + (camera_index * 100_000)
+                    + frame_index
+                )
+                rgb_image = encode_frame_number(
+                    frame_code, image_width, image_height, out=frame_buffer
+                )
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_rgb",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_rgb(
+                        camera_name,
+                        rgb_image,
+                        robot_name=robot_name,
+                        timestamp=timestamp,
+                    )
+        return
 
     recording_wall_start = time.time()
     joint_index = 0
@@ -438,21 +703,15 @@ def log_synchronous_frames(
         video_frame_count if camera_name_list else 0
     ):
         joint_due = joint_index < joint_frame_count
-        video_due = camera_name_list and video_index < video_frame_count
-        # One jitter is shared by both deadlines/timestamps this iteration, so
-        # size it to the tighter (higher-fps) window to stay within both.
-        jitter = get_jitter(
-            use_stochastic_timestamps,
-            max(joint_fps, video_fps) if camera_name_list else joint_fps,
-        )
+        video_due = bool(camera_name_list) and video_index < video_frame_count
 
         joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps) + jitter
+            recording_wall_start + (joint_index / joint_fps)
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            recording_wall_start + (video_index / video_fps) + jitter
+            recording_wall_start + (video_index / video_fps)
             if video_due
             else float("inf")
         )
@@ -461,15 +720,12 @@ def log_synchronous_frames(
             remaining = joint_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
-                )
+
             if use_real_timestamps:
                 timestamp = None
             else:
-                intended = timestamp_start_s + (joint_index / joint_fps)
-                timestamp = intended + jitter
+                timestamp = timestamp_start_s + (joint_index / joint_fps)
+
             joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
             with Timer(
                 MAX_TIME_TO_LOG_S,
@@ -511,15 +767,11 @@ def log_synchronous_frames(
             remaining = video_deadline - time.time()
             if remaining > 0:
                 time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
-                )
+
             if use_real_timestamps:
                 timestamp = None
             else:
-                intended = timestamp_start_s + (video_index / video_fps)
-                timestamp = intended + jitter
+                timestamp = timestamp_start_s + (video_index / video_fps)
 
             for camera_index, camera_name in enumerate(camera_name_list):
                 frame_code = (
@@ -584,42 +836,61 @@ def run_threaded_logging(
     use_real_timestamps: bool = False,
     use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
+    stochastic_plan: StochasticTimestampPlan | None = None,
+    stochastic_scheduler: StochasticReplayScheduler | None = None,
 ) -> list[str]:
     """Run logging across multiple threads, one per data role."""
+    if use_stochastic_timestamps and stochastic_plan is None:
+        raise ValueError("stochastic timestamps require a logical event plan")
+    if use_stochastic_timestamps:
+        stochastic_scheduler = stochastic_scheduler or StochasticReplayScheduler(
+            timestamp_start_s
+        )
+
     roles = build_thread_roles(
         joint_names=joint_names, camera_name_list=camera_name_list
     )
-    barrier = threading.Barrier(len(roles))
+    start_action = stochastic_scheduler.start if stochastic_scheduler else None
+    barrier = threading.Barrier(len(roles), action=start_action)
     thread_errors: list[BaseException] = []
 
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
         try:
-            barrier.wait()
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            planned_timestamps = (
+                stochastic_plan.timestamps_for(marker_name)
+                if stochastic_plan is not None
+                else ()
+            )
+            barrier.wait()
             thread_wall_start = time.time()
             for frame_index in range(frame_count):
-                jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
-                if assert_deadline and use_stochastic_timestamps:
-                    assert_on_schedule(
-                        frame_deadline,
-                        SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
-                    )
+                if use_stochastic_timestamps:
+                    assert stochastic_scheduler is not None
+                    if not stochastic_scheduler.wait_until(
+                        planned_timestamps[frame_index],
+                        producer_key=marker_name,
+                        assert_deadline=assert_deadline,
+                        label=f"{role_name} frame {frame_index}",
+                    ):
+                        return
+                else:
+                    frame_deadline = thread_wall_start + (frame_index / fps)
+                    remaining = frame_deadline - time.time()
+                    if remaining > 0:
+                        time.sleep(remaining)
                 if use_real_timestamps:
                     timestamp = None
+                elif use_stochastic_timestamps:
+                    timestamp = planned_timestamps[frame_index]
                 else:
-                    intended = timestamp_start_s + (frame_index / fps)
-                    timestamp = intended + jitter
+                    timestamp = timestamp_start_s + (frame_index / fps)
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
                         role_spec["camera_names"]
@@ -697,6 +968,9 @@ def run_threaded_logging(
                     )
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
+            barrier.abort()
+            if stochastic_scheduler is not None:
+                stochastic_scheduler.cancel()
 
     threads = [
         threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
@@ -731,6 +1005,22 @@ def log_frames(
     )
     joint_name_list = joint_names_for_count(spec.case.joint_count)
     camera_name_list = camera_names(spec.case.video_count)
+    stochastic_plan = (
+        build_stochastic_timestamp_plan(
+            timestamp_start_s=recording_timestamp_start_s,
+            joint_frame_count=spec.expected_joint_frames,
+            video_frame_count=spec.expected_video_frames,
+            joint_fps=spec.case.joint_fps,
+            video_fps=spec.case.video_fps,
+            producer_channels=spec.case.producer_channels,
+            joint_names=joint_name_list,
+            camera_name_list=camera_name_list,
+            context_index=spec.context_index,
+            recording_index=recording_index,
+        )
+        if use_stochastic_timestamps
+        else None
+    )
 
     if spec.case.producer_channels == PRODUCER_PER_THREAD:
         return run_threaded_logging(
@@ -749,6 +1039,7 @@ def log_frames(
             use_real_timestamps=use_real_timestamps,
             use_stochastic_timestamps=use_stochastic_timestamps,
             assert_deadline=spec.assert_deadline,
+            stochastic_plan=stochastic_plan,
         )
 
     log_synchronous_frames(
@@ -768,6 +1059,7 @@ def log_frames(
         use_real_timestamps=use_real_timestamps,
         use_stochastic_timestamps=use_stochastic_timestamps,
         assert_deadline=spec.assert_deadline,
+        stochastic_plan=stochastic_plan,
     )
     return [marker_name]
 
@@ -808,15 +1100,13 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     On Linux, Pool uses fork so workers inherit a copy of the parent's
     Timer._stats. Clearing it here ensures workers only capture their own
     timers and the parent's pre-fork timers (e.g. nc.login) are not
-    double-counted when stats are merged back. The stochastic-timestamp RNG
-    is reseeded per-context so parallel workers produce independent jitter
-    sequences instead of replaying the parent's seed. Spawned workers
-    (macOS) additionally re-authenticate, as they do not inherit the
-    parent's in-process auth state.
+    double-counted when stats are merged back. Spawned workers (macOS)
+    additionally re-authenticate, as they do not inherit the parent's
+    in-process auth state. Stochastic timestamps come from context/recording-
+    specific logical plans and therefore need no process-global RNG state.
     """
     multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
-    STOCHASTIC_TIMESTAMP_RANDOM.seed(1 + spec.context_index)
     ensure_login()
     return context_worker(spec)
 
@@ -839,7 +1129,11 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     robot = None
 
     if spec.start_delay_s > 0.0:
-        time.sleep(spec.start_delay_s)
+        if case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC:
+            # Preserve staggered real-time arrivals without a sleep or busy wait.
+            threading.Event().wait(timeout=spec.start_delay_s)
+        else:
+            time.sleep(spec.start_delay_s)
 
     wall_started_at: float | None = None
     wall_stopped_at: float = 0.0

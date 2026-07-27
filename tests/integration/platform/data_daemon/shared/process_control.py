@@ -162,16 +162,47 @@ class Timer:
             existing["max"] = max(existing["max"], incoming["max"])
 
 
-def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
-    """Assert the producer fired at the intended wall-clock moment.
+def assert_on_schedule(
+    deadline: float,
+    tolerance: float,
+    label: str,
+    *,
+    entered_at: float | None = None,
+    fired_at: float | None = None,
+) -> None:
+    """Assert a producer was ready for its monotonic deadline on time.
 
-    Independent of any duration check: bounds *when* a logging call started,
-    not how long it took.
+    ``entered_at`` measures whether preceding logging work kept the producer
+    from reaching the scheduler. Kernel wake latency is reported separately
+    but deliberately excluded from this producer SLA. The per-call
+    :class:`Timer` bounds how long each logging API takes to accept its part of
+    the sample.
     """
-    lateness = time.time() - deadline
-    assert abs(lateness) <= tolerance, (
-        f"{label} fired at wrong moment: "
-        f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
+    dispatch_at = time.monotonic() if fired_at is None else fired_at
+    dispatch_lateness = dispatch_at - deadline
+    producer_lateness = (
+        dispatch_lateness if entered_at is None else entered_at - deadline
+    )
+    wake_delay = (
+        0.0 if entered_at is None else max(0.0, dispatch_at - max(deadline, entered_at))
+    )
+
+    if dispatch_lateness > tolerance and producer_lateness <= tolerance:
+        logger.debug(
+            "%s dispatch was late due to scheduler wake latency: "
+            "dispatch_lateness=%+.3fs, wake_delay=+%.3fs "
+            "(excluded from producer SLA)",
+            label,
+            dispatch_lateness,
+            wake_delay,
+        )
+
+    assert producer_lateness <= tolerance, (
+        f"{label} producer reached scheduler too late: "
+        f"producer_lateness={producer_lateness:+.3f}s, "
+        f"tolerance=+{tolerance:.3f}s, "
+        f"dispatch_lateness={dispatch_lateness:+.3f}s, "
+        f"wake_delay=+{wake_delay:.3f}s"
     )
 
 

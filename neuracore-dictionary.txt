@@ -447,6 +447,7 @@ siglip
 Siglip
 SIGLIP
 silu
+socketpair
 softmax
 solimp
 solref
