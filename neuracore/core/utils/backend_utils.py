@@ -31,18 +31,50 @@ def get_active_data_traces(recording_id: str) -> list[RecordingDataTrace]:
         requests.HTTPError: If the API request fails.
         ValueError: If the response has an unexpected format.
         ConfigError: If there is an error trying to get the current org.
+        requests.RequestException: If the API request fails or times out.
     """
     org_id = get_current_org()
     session = thread_local_session()
     response = session.get(
         f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/active",
         headers=get_auth().get_headers(),
+        timeout=10,
     )
     if response.status_code == 404:
         return []
     response.raise_for_status()
     data = response.json() or []
     return [RecordingDataTrace.model_validate(item) for item in data]
+
+
+def is_recording_upload_complete(recording_id: str) -> bool:
+    """Check whether all expected traces for a recording are uploaded.
+
+    Args:
+        recording_id: Unique identifier of the recording to check.
+
+    Returns:
+        True when all expected traces are uploaded, otherwise False.
+
+    Raises:
+        requests.HTTPError: If the API returns an unsuccessful response.
+        requests.RequestException: If the request fails or times out.
+        TypeError: If the response is not a boolean.
+    """
+    org_id = get_current_org()
+    session = thread_local_session()
+    response = session.get(
+        f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/complete",
+        headers=get_auth().get_headers(),
+        timeout=10,
+    )
+    response.raise_for_status()
+
+    data = response.json()
+    if not isinstance(data, bool):
+        raise TypeError("Expected a boolean recording upload-completion response")
+
+    return data
 
 
 def synced_dataset_key(sync_freq: int, data_types: list[DataType]) -> str:

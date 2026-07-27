@@ -32,6 +32,9 @@ from .globals import GlobalSingleton
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S = 60 * 15
+_RECORDING_UPLOAD_POLL_INTERVAL_S = 0.2
+
 
 def _get_robot(robot_name: str | None, instance: int) -> Robot:
     """Get a robot by name and instance.
@@ -305,6 +308,7 @@ def stop_recording(
     instance: int = 0,
     wait: bool = False,
     timestamp: float | None = None,
+    wait_timeout_s: float = _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S,
 ) -> None:
     """Stop recording data for a specific robot.
 
@@ -320,6 +324,8 @@ def stop_recording(
         timestamp: Optional capture time (Unix seconds) for the recording's
             stop, matching the ``log_*`` methods. When omitted, the current
             time is captured.
+        wait_timeout_s: Maximum number of seconds to wait for recording uploads
+            to complete when ``wait=True``.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
@@ -334,6 +340,11 @@ def stop_recording(
     recording_id = robot.get_current_recording_id()
     if not recording_id:
         raise ValueError("Recording_id is None, no current recording")
+
+    if wait_timeout_s < 0:
+        raise ValueError("wait_timeout_s must be non-negative")
+
+    wait_deadline = time.monotonic() + wait_timeout_s if wait else None
     if is_rust_daemon_enabled():
         cloud_recording_id = robot.get_cloud_recording_id() if wait else None
         robot.stop_recording(
@@ -349,15 +360,18 @@ def stop_recording(
         if not wait:
             return
 
-    # TODO: We need to instead check that the specific recording is complete
-    is_traces_registered = False
-    while True:
-        data_traces = backend_utils.get_active_data_traces(recording_id)
-        if len(data_traces) > 0:
-            is_traces_registered = True
-        elif len(data_traces) == 0 and is_traces_registered:
-            break
-        time.sleep(0.2)
+    assert wait_deadline is not None
+
+    while time.monotonic() < wait_deadline:
+        if backend_utils.is_recording_upload_complete(recording_id):
+            return
+
+        time.sleep(_RECORDING_UPLOAD_POLL_INTERVAL_S)
+
+    raise TimeoutError(
+        "Timed out waiting for recording uploads to complete "
+        f"for recording '{recording_id}'"
+    )
 
 
 def get_cloud_recording_id(
