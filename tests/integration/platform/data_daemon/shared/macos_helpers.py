@@ -4,7 +4,7 @@ import sys
 
 _DARWIN = sys.platform == "darwin"
 _PERIOD_S = 0.004
-_COMPUTATION_S = 0.001
+_COMPUTATION_S = 0.0025
 _CONSTRAINT_S = 0.003
 
 if _DARWIN:

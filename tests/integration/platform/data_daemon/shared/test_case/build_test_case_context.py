@@ -22,7 +22,7 @@ import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
-from tests.integration.platform.data_daemon.shared.macos_helper import (
+from tests.integration.platform.data_daemon.shared.macos_helpers import (
     set_thread_policy_for_macos,
 )
 from tests.integration.platform.data_daemon.shared.process_control import (
