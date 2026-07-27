@@ -77,7 +77,7 @@ jobs:
       # namespaces live log lines by worker process so interleaved context output
       # stays attributable.
       run: >-
-        ${{ runner.os == 'macOS' && 'caffeinate -i' || '' }} pytest -o log_cli=true --log-cli-level=INFO
+        pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
         tests/integration/platform/data_daemon/performance/test_network.py
