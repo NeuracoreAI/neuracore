@@ -1,4 +1,5 @@
 import json
+from unittest.mock import Mock
 
 import pytest
 import requests
@@ -206,9 +207,120 @@ def test_update_robot_name_forwards_arguments(monkeypatch):
     assert robot_id == "robot_id_123"
 
 
+def test_get_active_data_traces_uses_request_timeout(monkeypatch) -> None:
+    response = Mock(status_code=200)
+    response.json.return_value = []
+
+    session = Mock()
+    session.get.return_value = response
+
+    auth = Mock()
+    auth.get_headers.return_value = {"Authorization": "Bearer test-token"}
+
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "thread_local_session",
+        lambda: session,
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_current_org",
+        lambda: "org-123",
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_auth",
+        lambda: auth,
+    )
+
+    result = api_core.backend_utils.get_active_data_traces("recording-123")
+
+    assert result == []
+    session.get.assert_called_once()
+
+    request_kwargs = session.get.call_args.kwargs
+    assert request_kwargs.get("timeout") == 10
+
+
+@pytest.mark.parametrize("complete", [True, False])
+def test_is_recording_upload_complete_returns_backend_state(
+    monkeypatch,
+    complete: bool,
+) -> None:
+    response = Mock()
+    response.json.return_value = complete
+
+    session = Mock()
+    session.get.return_value = response
+
+    auth = Mock()
+    auth.get_headers.return_value = {"Authorization": "Bearer test-token"}
+
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "thread_local_session",
+        lambda: session,
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_current_org",
+        lambda: "org-123",
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_auth",
+        lambda: auth,
+    )
+
+    result = api_core.backend_utils.is_recording_upload_complete("recording-123")
+
+    assert result is complete
+    session.get.assert_called_once_with(
+        (f"{API_URL}/org/org-123/recording/" "recording-123/traces/complete"),
+        headers={"Authorization": "Bearer test-token"},
+        timeout=10,
+    )
+    response.raise_for_status.assert_called_once_with()
+
+
+def test_is_recording_upload_complete_rejects_invalid_response(
+    monkeypatch,
+) -> None:
+    response = Mock()
+    response.json.return_value = {"complete": True}
+
+    session = Mock()
+    session.get.return_value = response
+
+    auth = Mock()
+    auth.get_headers.return_value = {}
+
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "thread_local_session",
+        lambda: session,
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_current_org",
+        lambda: "org-123",
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "get_auth",
+        lambda: auth,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="Expected a boolean recording upload-completion response",
+    ):
+        api_core.backend_utils.is_recording_upload_complete("recording-123")
+
+
 def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
     calls: list[tuple[str, bool]] = []
-    active_trace_rows = iter(([{"id": "trace-1"}], []))
+    completion_checks: list[str] = []
 
     class _FakeRobot:
         def is_recording(self) -> bool:
@@ -226,13 +338,24 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         ) -> None:
             calls.append((recording_id, wait_for_producer_drain))
 
+    def is_upload_complete(recording_id: str) -> bool:
+        completion_checks.append(recording_id)
+        return True
+
     monkeypatch.setattr(
-        api_core, "_get_robot", lambda robot_name, instance: _FakeRobot()
+        api_core,
+        "_get_robot",
+        lambda robot_name, instance: _FakeRobot(),
+    )
+    monkeypatch.setattr(
+        api_core,
+        "is_rust_daemon_enabled",
+        lambda: False,
     )
     monkeypatch.setattr(
         api_core.backend_utils,
-        "get_active_data_traces",
-        lambda recording_id: next(active_trace_rows),
+        "is_recording_upload_complete",
+        is_upload_complete,
     )
 
     nc.stop_recording(wait=False)
@@ -242,3 +365,73 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         ("rec-123", False),
         ("rec-123", True),
     ]
+    assert completion_checks == ["rec-123"]
+
+
+def test_stop_recording_wait_times_out_when_upload_never_completes(
+    monkeypatch,
+) -> None:
+    poll_count = 0
+
+    class _FakeRobot:
+        def is_recording(self) -> bool:
+            return True
+
+        def get_current_recording_id(self) -> str:
+            return "rec-123"
+
+        def stop_recording(
+            self,
+            recording_id: str,
+            *,
+            wait_for_producer_drain: bool = True,
+            timestamp: float | None = None,
+        ) -> None:
+            pass
+
+    def upload_never_completes(recording_id: str) -> bool:
+        nonlocal poll_count
+        poll_count += 1
+        return False
+
+    # First call creates the deadline:
+    #     0.0 + 1.0 = 1.0
+    # Second call allows one poll:
+    #     0.0 < 1.0
+    # Third call passes the deadline:
+    #     2.0 > 1.0
+    clock = iter((0.0, 0.0, 2.0))
+
+    monkeypatch.setattr(
+        api_core,
+        "_get_robot",
+        lambda robot_name, instance: _FakeRobot(),
+    )
+    monkeypatch.setattr(
+        api_core,
+        "is_rust_daemon_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "is_recording_upload_complete",
+        upload_never_completes,
+    )
+    monkeypatch.setattr(
+        api_core.time,
+        "monotonic",
+        lambda: next(clock),
+    )
+    monkeypatch.setattr(
+        api_core.time,
+        "sleep",
+        lambda _seconds: None,
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="Timed out waiting for recording uploads to complete",
+    ):
+        nc.stop_recording(wait=True, wait_timeout_s=1.0)
+
+    assert poll_count == 1
