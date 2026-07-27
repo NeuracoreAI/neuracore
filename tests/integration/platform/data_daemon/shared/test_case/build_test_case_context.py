@@ -423,14 +423,14 @@ def log_synchronous_frames(
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Joint and video frames are interleaved in a single loop using a wall-clock
+    Joint and video frames are interleaved in a single loop using a monotonic
     deadline scheduler, so both streams advance together in time order.
     """
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
     )
 
-    recording_wall_start = time.time()
+    recording_schedule_start = time.monotonic()
     joint_index = 0
     video_index = 0
 
@@ -439,6 +439,7 @@ def log_synchronous_frames(
     ):
         joint_due = joint_index < joint_frame_count
         video_due = camera_name_list and video_index < video_frame_count
+
         # One jitter is shared by both deadlines/timestamps this iteration, so
         # size it to the tighter (higher-fps) window to stay within both.
         jitter = get_jitter(
@@ -447,54 +448,73 @@ def log_synchronous_frames(
         )
 
         joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps) + jitter
+            recording_schedule_start + (joint_index / joint_fps) + jitter
             if joint_due
             else float("inf")
         )
         video_deadline = (
-            recording_wall_start + (video_index / video_fps) + jitter
+            recording_schedule_start + (video_index / video_fps) + jitter
             if video_due
             else float("inf")
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
+            remaining = joint_deadline - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
+
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
+                    joint_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label="joint frame",
                 )
+
             if use_real_timestamps:
                 timestamp = None
             else:
                 intended = timestamp_start_s + (joint_index / joint_fps)
                 timestamp = intended + jitter
-            joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
+
+            joint_values = generate_joint_values(
+                joint_index,
+                joint_fps,
+                joint_names,
+            )
+
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_positions",
                 assert_deadline=assert_deadline,
             ):
                 nc.log_joint_positions(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
+                    joint_values,
+                    robot_name=robot_name,
+                    timestamp=timestamp,
                 )
+
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_velocities",
                 assert_deadline=assert_deadline,
             ):
                 nc.log_joint_velocities(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
+                    joint_values,
+                    robot_name=robot_name,
+                    timestamp=timestamp,
                 )
+
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_torques",
                 assert_deadline=assert_deadline,
             ):
                 nc.log_joint_torques(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
+                    joint_values,
+                    robot_name=robot_name,
+                    timestamp=timestamp,
                 )
+
             with Timer(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_custom_1d",
@@ -506,15 +526,20 @@ def log_synchronous_frames(
                     robot_name=robot_name,
                     timestamp=timestamp,
                 )
+
             joint_index += 1
         else:
-            remaining = video_deadline - time.time()
+            remaining = video_deadline - time.monotonic()
             if remaining > 0:
                 time.sleep(remaining)
+
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
+                    video_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label="video frame",
                 )
+
             if use_real_timestamps:
                 timestamp = None
             else:
@@ -529,8 +554,12 @@ def log_synchronous_frames(
                     + video_index
                 )
                 rgb_image = encode_frame_number(
-                    frame_code, image_width, image_height, out=frame_buffer
+                    frame_code,
+                    image_width,
+                    image_height,
+                    out=frame_buffer,
                 )
+
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
@@ -542,6 +571,7 @@ def log_synchronous_frames(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+
             video_index += 1
 
 
@@ -587,7 +617,8 @@ def run_threaded_logging(
 ) -> list[str]:
     """Run logging across multiple threads, one per data role."""
     roles = build_thread_roles(
-        joint_names=joint_names, camera_name_list=camera_name_list
+        joint_names=joint_names,
+        camera_name_list=camera_name_list,
     )
     barrier = threading.Barrier(len(roles))
     thread_errors: list[BaseException] = []
@@ -596,30 +627,40 @@ def run_threaded_logging(
         """Execute logging for a single thread role."""
         try:
             barrier.wait()
+
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
-            frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
-            thread_wall_start = time.time()
+            frame_buffer = preallocate_frame_buffer(
+                is_rgb,
+                image_width,
+                image_height,
+            )
+            thread_schedule_start = time.monotonic()
+
             for frame_index in range(frame_count):
                 jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
+                frame_deadline = thread_schedule_start + (frame_index / fps) + jitter
+
+                remaining = frame_deadline - time.monotonic()
                 if remaining > 0:
                     time.sleep(remaining)
+
                 if assert_deadline and use_stochastic_timestamps:
                     assert_on_schedule(
                         frame_deadline,
                         SCHEDULER_TOLERANCE_S,
                         label=f"{role_name} frame",
                     )
+
                 if use_real_timestamps:
                     timestamp = None
                 else:
                     intended = timestamp_start_s + (frame_index / fps)
                     timestamp = intended + jitter
+
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
                         role_spec["camera_names"]
@@ -633,8 +674,12 @@ def run_threaded_logging(
                             + frame_index
                         )
                         rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height, out=frame_buffer
+                            frame_code,
+                            image_width,
+                            image_height,
+                            out=frame_buffer,
                         )
+
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
@@ -649,8 +694,11 @@ def run_threaded_logging(
                 else:
                     thread_joint_names = list(role_spec["joint_names"])
                     joint_values = generate_joint_values(
-                        frame_index, joint_fps, thread_joint_names
+                        frame_index,
+                        joint_fps,
+                        thread_joint_names,
                     )
+
                     if role_name == "joint_positions":
                         with Timer(
                             MAX_TIME_TO_LOG_S,
@@ -684,6 +732,7 @@ def run_threaded_logging(
                                 robot_name=robot_name,
                                 timestamp=timestamp,
                             )
+
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_custom_1d",
@@ -695,14 +744,22 @@ def run_threaded_logging(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 
     threads = [
-        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
+        threading.Thread(
+            target=worker,
+            args=(role,),
+            daemon=True,
+        )
+        for role in roles
     ]
+
     for thread in threads:
         thread.start()
+
     for thread in threads:
         thread.join()
 

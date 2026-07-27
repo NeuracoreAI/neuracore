@@ -163,12 +163,8 @@ class Timer:
 
 
 def assert_on_schedule(deadline: float, tolerance: float, label: str) -> None:
-    """Assert the producer fired at the intended wall-clock moment.
-
-    Independent of any duration check: bounds *when* a logging call started,
-    not how long it took.
-    """
-    lateness = time.time() - deadline
+    """Assert the producer fired near its monotonic deadline."""
+    lateness = time.monotonic() - deadline
     assert abs(lateness) <= tolerance, (
         f"{label} fired at wrong moment: "
         f"lateness={lateness:+.3f}s, tolerance=±{tolerance:.3f}s"
