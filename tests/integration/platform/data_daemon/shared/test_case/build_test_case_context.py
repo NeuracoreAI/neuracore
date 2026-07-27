@@ -24,6 +24,7 @@ import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
+from tests.integration.platform.data_daemon.shared.macos_helper import set_thread_rt
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
@@ -631,9 +632,7 @@ def run_threaded_logging(
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
         try:
-            logger.warning(get_qos())
-            set_qos()
-            logger.warning(get_qos())
+            set_thread_rt(0.004, 0.001, 0.003)
             barrier.wait()
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])

@@ -325,6 +325,7 @@ Nonblock
 noprint
 nostdin
 nprocs
+numer
 numpy
 octomap
 offsamples
@@ -363,6 +364,7 @@ popleft
 posinf
 precheck
 preds
+preemptible
 preexec
 pretrained
 pretraining
