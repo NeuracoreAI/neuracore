@@ -22,6 +22,9 @@ import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
+from tests.integration.platform.data_daemon.shared.macos_helper import (
+    set_thread_policy_for_macos,
+)
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
@@ -595,6 +598,7 @@ def run_threaded_logging(
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
         try:
+            set_thread_policy_for_macos()  # set policy because new thread
             barrier.wait()
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
@@ -829,6 +833,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     )
 
     use_rust = is_rust_daemon_enabled()
+    set_thread_policy_for_macos()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)
