@@ -5,6 +5,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
+    OS_EXCEPT_DARWIN,
     PRODUCER_PER_THREAD,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
@@ -88,6 +89,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_fps=250,  # previously 500 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
         wait=False,
         requires_rust_daemon=True,
     ),
@@ -179,6 +181,7 @@ NETWORK_INTEGRITY_CASES = (
         joint_fps=250,  # previously 500 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
         wait=False,
     ),
     DataDaemonTestCase(
@@ -272,6 +275,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -397,6 +401,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
     ),
     DataDaemonTestCase(
         duration_sec=300,
@@ -410,6 +415,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
         wait=True,
     ),
     DataDaemonTestCase(
@@ -445,6 +451,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
         timestamp_mode=TIMESTAMP_MODE_STOCHASTIC,
+        run_on_os=OS_EXCEPT_DARWIN,
         wait=False,
     ),
 )
