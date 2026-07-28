@@ -36,6 +36,7 @@ from neuracore_types import (
     BatchedNCData,
     DataItemStats,
     DataType,
+    GPUType,
     JointDataStats,
     ModelInitDescription,
 )
@@ -236,6 +237,18 @@ class MyCustomAlgorithm(NeuracoreModel):
             set[DataType]: Set of supported output data types
         """
         return {DataType.JOINT_TARGET_POSITIONS}
+
+    @staticmethod
+    def get_supported_gpus() -> list[GPUType]:
+        """Return the GPU types supported for cloud training.
+
+        Returns:
+            list[GPUType]: GPU types that can train this model
+        """
+        return [
+            GPUType.NVIDIA_A100_80GB,
+            GPUType.NVIDIA_TESLA_V100,
+        ]
 ```
 
 ### Step 2: Required Methods
@@ -248,6 +261,21 @@ Your model must implement these methods:
 4. **`configure_optimizers`**: Define what optimizers to use for training
 5. **`get_supported_input_data_types`**: Declare what input data types your model supports
 6. **`get_supported_output_data_types`**: Declare what output data types your model can produce
+7. **`get_supported_gpus`**: Declare which GPU types can train your model in the cloud
+
+`get_supported_gpus` must be a static method that returns a literal list, set, or
+tuple of `GPUType` members. The supported values are:
+
+- `GPUType.NVIDIA_H100_80GB`
+- `GPUType.NVIDIA_A100_80GB`
+- `GPUType.NVIDIA_TESLA_A100`
+- `GPUType.NVIDIA_TESLA_V100`
+- `GPUType.NVIDIA_TESLA_T4`
+- `GPUType.NVIDIA_L4`
+
+Only include GPU types on which you expect the algorithm to train successfully.
+Neuracore checks the selected GPU against this declaration before starting a cloud
+training run.
 
 ### Step 3: Optional Methods
 
@@ -303,6 +331,10 @@ pip install -e .[dev,ml]
 
 After uploading, your algorithm will appear as a trainable option when launching training jobs.
 
+If you uploaded an algorithm before GPU compatibility declarations were introduced,
+add `get_supported_gpus` to the model and upload it again. Training cannot start
+until the algorithm declares at least one supported GPU.
+
 
 ### Tips for Algorithm Development
 
@@ -320,6 +352,10 @@ If you encounter issues with your algorithm:
 - Verify that your model correctly handles the batch structure
 - Check that your model returns outputs in the expected format
 - Ensure all tensor dimensions match what Neuracore expects
+- Ensure `get_supported_gpus` is a static method returning a literal collection of
+  `GPUType` members
+- If a training run reports that its GPU is unsupported, select one returned by
+  `get_supported_gpus` or update and re-upload the algorithm after testing it
 - When uploading as a ZIP, make sure your module imports are correctly structured
 
 
