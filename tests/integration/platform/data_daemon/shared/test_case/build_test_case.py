@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
@@ -40,6 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TIMESTAMP_MODE_STOCHASTIC,
     StopMethod,
     StorageStateAction,
+    TestOs,
     TimestampMode,
 )
 
@@ -162,6 +164,12 @@ class DataDaemonTestCase:
             long-running workloads that the Python daemon cannot sustain use
             this flag so they still exercise the Rust daemon in CI without
             failing the legacy suite.
+        run_on_os: Operating systems the case runs on, as ``sys.platform``
+            values (see ``OS_ALL`` / ``OS_EXCEPT_DARWIN``).  ``None`` (default)
+            means every OS; set a tuple to opt out of the platforms it omits, and
+            the case is skipped at collection time elsewhere.  A batch-level
+            ``run_on_os`` only fills in cases that leave this ``None``, so a
+            per-case selection always wins over the batch's.
         video_codec: When set (e.g. ``"h264_medium"``), the case selects that
             global video codec via ``nc.set_video_encoding_options`` before
             recording, so RGB cameras upload a single lossy CRF-23 video and the
@@ -196,7 +204,13 @@ class DataDaemonTestCase:
     timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
     skip: bool = False
     requires_rust_daemon: bool = False
+    run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
+
+    @property
+    def runs_on_current_os(self) -> bool:
+        """Return True when this case is selected for the running platform."""
+        return self.run_on_os is None or sys.platform in self.run_on_os
 
     @property
     def has_video(self) -> bool:
@@ -257,6 +271,11 @@ class DataDaemonTestBatch:
             against the Rust data daemon and is skipped on the legacy Python
             daemon.  When ``False`` (default), each case keeps its own per-case
             ``requires_rust_daemon`` value.
+        run_on_os: Default OS selection for cases that do not specify one; see
+            ``DataDaemonTestCase.run_on_os``.  Unlike the infrastructure params
+            above this does *not* override the cases: any case with its own
+            ``run_on_os`` keeps it.  ``None`` (default) leaves every case
+            running on all platforms.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -267,6 +286,7 @@ class DataDaemonTestBatch:
     timestamp_mode: TimestampMode | None = None
     skip: bool = False
     requires_rust_daemon: bool = False
+    run_on_os: tuple[TestOs, ...] | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -290,6 +310,13 @@ class DataDaemonTestBatch:
                     if f.name not in _BATCH_PARAMS
                 },
                 **batch_overrides,
+                # Batch OS selection is a default, not an override: a case that
+                # names its own platforms keeps them.
+                **(
+                    {"run_on_os": self.run_on_os}
+                    if self.run_on_os is not None and c.run_on_os is None
+                    else {}
+                ),
             })
             for c in self.cases
         ]
