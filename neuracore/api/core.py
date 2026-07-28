@@ -366,7 +366,11 @@ def stop_recording(
         if backend_utils.is_recording_upload_complete(recording_id):
             return
 
-        time.sleep(_RECORDING_UPLOAD_POLL_INTERVAL_S)
+        remaining_s = wait_deadline - time.monotonic()
+        if remaining_s <= 0:
+            break
+
+        time.sleep(min(_RECORDING_UPLOAD_POLL_INTERVAL_S, remaining_s))
 
     raise TimeoutError(
         "Timed out waiting for recording uploads to complete "

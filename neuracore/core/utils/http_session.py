@@ -84,15 +84,30 @@ _TRANSIENT_RETRY = _RETRY.new(
     raise_on_status=False,  # return the final response rather than raising
 )
 
+_READ_TIMEOUT_RETRY = _RETRY.new(
+    read=2,
+    allowed_methods=frozenset({"GET", "HEAD"}),
+)
+
+_TRANSIENT_READ_TIMEOUT_RETRY = _TRANSIENT_RETRY.new(
+    read=2,
+    allowed_methods=frozenset({"GET", "HEAD"}),
+)
+
 _thread_local = threading.local()
 
 
-def thread_local_session(retry_transient: bool = False) -> requests.Session:
+def thread_local_session(
+    retry_transient: bool = False,
+    retry_read_timeout: bool = False,
+) -> requests.Session:
     """Return a retry-enabled Session cached per thread and process.
 
     Args:
-        retry_transient: Retry transient backend statuses with exponential
-            backoff, returning the final response when attempts are exhausted.
+        retry_transient: Retry transient backend status codes with exponential
+            backoff.
+        retry_read_timeout: Retry idempotent GET and HEAD requests that time out
+            while waiting for a response.
 
     Returns:
         The cached Session for this thread, process and retry policy.
@@ -103,18 +118,26 @@ def thread_local_session(retry_transient: bool = False) -> requests.Session:
         _thread_local.sessions = {}
         _thread_local.pid = pid
 
-    session = _thread_local.sessions.get(retry_transient)
+    session_key = (retry_transient, retry_read_timeout)
+    session = _thread_local.sessions.get(session_key)
 
     if session is None:
         session = requests.Session()
 
-        adapter = HTTPAdapter(
-            max_retries=_TRANSIENT_RETRY if retry_transient else _RETRY
-        )
+        if retry_transient and retry_read_timeout:
+            retry_policy = _TRANSIENT_READ_TIMEOUT_RETRY
+        elif retry_read_timeout:
+            retry_policy = _READ_TIMEOUT_RETRY
+        elif retry_transient:
+            retry_policy = _TRANSIENT_RETRY
+        else:
+            retry_policy = _RETRY
+
+        adapter = HTTPAdapter(max_retries=retry_policy)
         session.mount("https://", adapter)
         session.mount("http://", adapter)
 
-        _thread_local.sessions[retry_transient] = session
+        _thread_local.sessions[session_key] = session
 
     return session
 
