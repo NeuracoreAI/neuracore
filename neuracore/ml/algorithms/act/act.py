@@ -24,6 +24,7 @@ from neuracore_types import (
     CameraDataStats,
     DataItemStats,
     DataType,
+    GPUType,
     JointDataStats,
     ModelInitDescription,
     ParallelGripperOpenAmountDataStats,
@@ -857,3 +858,12 @@ class ACT(NeuracoreModel):
             DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         }
+
+    @staticmethod
+    def get_supported_gpus() -> list[GPUType]:
+        """Get the GPU types recommended for training this model."""
+        return [
+            GPUType.NVIDIA_A100_80GB,
+            GPUType.NVIDIA_TESLA_V100,
+            GPUType.NVIDIA_TESLA_T4,
+        ]
