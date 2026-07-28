@@ -256,10 +256,12 @@ def test_is_recording_upload_complete_returns_backend_state(
     auth = Mock()
     auth.get_headers.return_value = {"Authorization": "Bearer test-token"}
 
+    session_factory = Mock(return_value=session)
+
     monkeypatch.setattr(
         api_core.backend_utils,
         "thread_local_session",
-        lambda: session,
+        session_factory,
     )
     monkeypatch.setattr(
         api_core.backend_utils,
@@ -273,6 +275,8 @@ def test_is_recording_upload_complete_returns_backend_state(
     )
 
     result = api_core.backend_utils.is_recording_upload_complete("recording-123")
+
+    session_factory.assert_called_once_with(retry_read_timeout=True)
 
     assert result is complete
     session.get.assert_called_once_with(
@@ -295,10 +299,12 @@ def test_is_recording_upload_complete_rejects_invalid_response(
     auth = Mock()
     auth.get_headers.return_value = {}
 
+    session_factory = Mock(return_value=session)
+
     monkeypatch.setattr(
         api_core.backend_utils,
         "thread_local_session",
-        lambda: session,
+        session_factory,
     )
     monkeypatch.setattr(
         api_core.backend_utils,
@@ -316,6 +322,8 @@ def test_is_recording_upload_complete_rejects_invalid_response(
         match="Expected a boolean recording upload-completion response",
     ):
         api_core.backend_utils.is_recording_upload_complete("recording-123")
+
+    session_factory.assert_called_once_with(retry_read_timeout=True)
 
 
 def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
