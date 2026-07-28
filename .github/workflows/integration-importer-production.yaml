@@ -98,7 +98,7 @@ jobs:
           echo "Importer datasets ref: ${IMPORTER_DATASETS_REF}"
           echo "Importer datasets commit: $(git -C "${repo_root}" rev-parse HEAD)"
 
-      - name: Set up neuracore from PyPI
+      - name: Set up neuracore with Rust data daemon from PyPI
         uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
         with:
           version: ${{ steps.harness.outputs.release-tag }}
@@ -107,6 +107,7 @@ jobs:
 
       - name: Run Importer Integration Tests
         env:
+          NCD_RUST_DAEMON: "1"
           NEURACORE_API_URL: https://api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
           NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}

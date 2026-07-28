@@ -25,7 +25,10 @@ jobs:
 
   test:
     needs: pre-commit
+    # Use the Rust data daemon for the production integration suite.
     runs-on: ubuntu-24.04
+    env:
+      NCD_RUST_DAEMON: "1"
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -51,7 +54,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
         cache: 'pip'
 
-    - name: Set up neuracore from PyPI
+    - name: Set up neuracore with Rust data daemon from PyPI
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
       with:
         version: ${{ steps.harness.outputs.release-tag }}
