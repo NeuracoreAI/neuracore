@@ -51,6 +51,11 @@ DURATION_MODE_VARIABLE = "variable"
 DURATION_VARIABLE_MIN_FACTOR = 0.75
 DURATION_VARIABLE_MAX_FACTOR = 1.25
 
+# run_on_os (values match ``sys.platform``)
+OS_LINUX = "linux"
+OS_DARWIN = "darwin"
+OS_WINDOWS = "win32"
+
 # timestamp_mode
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
@@ -89,6 +94,9 @@ TIMESTAMP_MODES = (
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
 )
+OS_ALL = (OS_LINUX, OS_DARWIN, OS_WINDOWS)
+# The macOS scheduler cannot hold the per-frame deadlines stochastic cases assert.
+OS_EXCEPT_DARWIN = (OS_LINUX, OS_WINDOWS)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -97,6 +105,7 @@ TIMESTAMP_MODES = (
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 TimestampMode = Literal["manual", "real", "stochastic"]
+TestOs = Literal["linux", "darwin", "win32"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
