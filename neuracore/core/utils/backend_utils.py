@@ -62,7 +62,7 @@ def is_recording_upload_complete(recording_id: str) -> bool:
         TypeError: If the response is not a boolean.
     """
     org_id = get_current_org()
-    session = thread_local_session()
+    session = thread_local_session(retry_read_timeout=True)
     response = session.get(
         f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/complete",
         headers=get_auth().get_headers(),

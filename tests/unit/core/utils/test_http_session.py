@@ -11,7 +11,7 @@ import requests_mock
 from aiohttp import ClientSession, ServerDisconnectedError, web
 from aiohttp.test_utils import TestServer
 from requests.adapters import HTTPAdapter
-from urllib3.exceptions import MaxRetryError, ProtocolError
+from urllib3.exceptions import MaxRetryError, ProtocolError, ReadTimeoutError
 
 from neuracore.core.utils import http_session
 from neuracore.core.utils.http_session import (
@@ -419,3 +419,65 @@ class TestDroppedConnectionRetry:
                 thread_local_session().get(server.url)
         assert server.connections == 1
         _reset_thread_local()
+
+
+class TestReadTimeoutRetrySession:
+    def test_read_timeout_session_is_cached_separately(self):
+        _reset_thread_local()
+
+        plain = thread_local_session()
+        read_retry = thread_local_session(retry_read_timeout=True)
+
+        assert read_retry is not plain
+        assert thread_local_session(retry_read_timeout=True) is read_retry
+
+    def test_read_timeout_retry_config(self):
+        _reset_thread_local()
+
+        retry = (
+            thread_local_session(retry_read_timeout=True).get_adapter(_URL).max_retries
+        )
+
+        assert retry.total == 3
+        assert retry.connect == 3
+        assert retry.read == 2
+        assert retry.status == 0
+        assert retry.allowed_methods == frozenset({"GET", "HEAD"})
+
+    def test_combined_retry_config(self):
+        _reset_thread_local()
+
+        retry = (
+            thread_local_session(
+                retry_transient=True,
+                retry_read_timeout=True,
+            )
+            .get_adapter(_URL)
+            .max_retries
+        )
+
+        assert retry.read == 2
+        assert retry.status == 2
+        assert retry.allowed_methods == frozenset({"GET", "HEAD"})
+
+    def test_get_read_timeout_consumes_read_retry_budget(self):
+        error = ReadTimeoutError(None, "/resource", "Read timed out")
+
+        updated = http_session._READ_TIMEOUT_RETRY.increment(
+            method="GET",
+            url="/resource",
+            error=error,
+        )
+
+        assert updated.total == 2
+        assert updated.read == 1
+
+    def test_post_read_timeout_is_not_retried(self):
+        error = ReadTimeoutError(None, "/resource", "Read timed out")
+
+        with pytest.raises(ReadTimeoutError):
+            http_session._READ_TIMEOUT_RETRY.increment(
+                method="POST",
+                url="/resource",
+                error=error,
+            )
