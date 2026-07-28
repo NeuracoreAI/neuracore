@@ -25,9 +25,9 @@ jobs:
 
   test:
     needs: pre-commit
-    # Exercise the bundled Rust daemon on each shipped OS (Linux x86_64, macOS
-    # arm64) across the Python support range; each leg builds and tests its
-    # own native bundle.
+    # Use the Rust data daemon for the staging integration suite. Exercise its
+    # bundled native artefacts on each shipped OS (Linux x86_64, macOS arm64)
+    # across the Python support range.
     runs-on: ${{ matrix.os }}
     env:
       NCD_RUST_DAEMON: "1"
