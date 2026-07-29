@@ -160,7 +160,8 @@ class DataDaemonTestCase:
             this per-case value.
         requires_rust_daemon: When ``True``, the case only runs against the
             Rust data daemon and is skipped when the legacy Python daemon is
-            active (``NCD_RUST_DAEMON`` unset).  High-contention, high-rate, and
+            active (``NCD_RUST_DAEMON`` falsy, or no bundled binary to run).
+            High-contention, high-rate, and
             long-running workloads that the Python daemon cannot sustain use
             this flag so they still exercise the Rust daemon in CI without
             failing the legacy suite.

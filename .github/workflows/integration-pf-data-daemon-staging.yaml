@@ -29,8 +29,6 @@ jobs:
     # bundled native artefacts on each shipped OS (Linux x86_64, macOS arm64)
     # across the Python support range.
     runs-on: ${{ matrix.os }}
-    env:
-      NCD_RUST_DAEMON: "1"
     strategy:
       fail-fast: false
       max-parallel: 2
