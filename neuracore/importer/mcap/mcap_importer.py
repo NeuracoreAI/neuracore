@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -133,18 +134,29 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )
 
+        recording_start_timestamp = time.time()
+        recording_stop_timestamp = recording_start_timestamp
+
         if not self.dry_run:
-            nc.start_recording(robot_name=self.robot_name, instance=instance)
+            nc.start_recording(
+                robot_name=self.robot_name,
+                instance=instance,
+                timestamp=recording_start_timestamp,
+            )
         try:
-            message_count = self._stream_episode_file(
+            message_count, recording_stop_timestamp = self._stream_episode_file(
                 episode_file_path=file_path,
                 item=item,
                 label=label,
+                recording_start_timestamp=recording_start_timestamp,
             )
         finally:
             if not self.dry_run:
                 nc.stop_recording(
-                    robot_name=self.robot_name, instance=instance, wait=True
+                    robot_name=self.robot_name,
+                    instance=instance,
+                    wait=True,
+                    timestamp=recording_stop_timestamp,
                 )
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
@@ -168,12 +180,17 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 )
 
     def _stream_episode_file(
-        self, episode_file_path: Path, item: ImportItem, label: str
-    ) -> int:
+        self,
+        episode_file_path: Path,
+        item: ImportItem,
+        label: str,
+        recording_start_timestamp: float,
+    ) -> tuple[int, float]:
         """Stream messages from one MCAP episode file."""
         topics = get_mcap_topics(topic_map=self.topic_map)
         factories = list(self._decoder_factories or [])
-        base_timestamp: float | None = None
+        source_start_timestamp: float | None = None
+        recording_stop_timestamp = recording_start_timestamp
         message_count = 0
 
         with episode_file_path.open("rb") as stream:
@@ -195,9 +212,16 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 reader=reader,
                 topics=topics,
             ):
-                if base_timestamp is None:
-                    base_timestamp = decoded_message.timestamp_seconds
-                timestamp = max(0.0, decoded_message.timestamp_seconds - base_timestamp)
+                if source_start_timestamp is None:
+                    source_start_timestamp = decoded_message.timestamp_seconds
+
+                relative_timestamp = max(
+                    0.0,
+                    decoded_message.timestamp_seconds - source_start_timestamp,
+                )
+                timestamp = recording_start_timestamp + relative_timestamp
+                recording_stop_timestamp = max(recording_stop_timestamp, timestamp)
+
                 decoded_data = convert_decoded_mcap_data(
                     decoded_data=decoded_message.data
                 )
@@ -220,7 +244,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             total_steps=total,
             episode_label=label,
         )
-        return message_count
+        return message_count, recording_stop_timestamp
 
     def _log_transformed_data(
         self,
