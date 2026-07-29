@@ -2,7 +2,7 @@ name: Integration ML - Dataset Datatype Validation (Production)
 
 on:
   schedule:
-    - cron: "0 7 * * *"  # 6. test_dataset_datatype_validation.py
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
