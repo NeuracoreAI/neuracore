@@ -2,7 +2,7 @@ name: Integration ML - Resume Training (Staging)
 
 on:
   schedule:
-    - cron: "0 2 * * *"  # 2. test_resume_training.py
+    - cron: "0 2 * * *"
   workflow_dispatch:
 
 jobs:
