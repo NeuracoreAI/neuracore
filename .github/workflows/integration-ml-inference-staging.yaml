@@ -2,7 +2,7 @@ name: Integration ML - Inference (Staging)
 
 on:
   schedule:
-    - cron: "0 3 * * *"  # 3. test_inference.py
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 jobs:
