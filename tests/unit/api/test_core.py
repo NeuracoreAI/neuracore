@@ -443,3 +443,53 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         nc.stop_recording(wait=True, wait_timeout_s=1.0)
 
     assert poll_count == 1
+
+
+def test_stop_recording_wait_uses_capped_exponential_backoff(monkeypatch) -> None:
+    now = 0.0
+    sleep_calls: list[float] = []
+
+    class _FakeRobot:
+        def is_recording(self) -> bool:
+            return True
+
+        def get_current_recording_id(self) -> str:
+            return "rec-123"
+
+        def stop_recording(
+            self,
+            recording_id: str,
+            *,
+            wait_for_producer_drain: bool = True,
+            timestamp: float | None = None,
+        ) -> None:
+            pass
+
+    def sleep(seconds: float) -> None:
+        nonlocal now
+        sleep_calls.append(seconds)
+        now += seconds
+
+    monkeypatch.setattr(
+        api_core,
+        "_get_robot",
+        lambda robot_name, instance: _FakeRobot(),
+    )
+    monkeypatch.setattr(
+        api_core,
+        "is_rust_daemon_enabled",
+        lambda: False,
+    )
+    monkeypatch.setattr(
+        api_core.backend_utils,
+        "is_recording_upload_complete",
+        lambda recording_id: False,
+    )
+    monkeypatch.setattr(api_core.time, "monotonic", lambda: now)
+    monkeypatch.setattr(api_core.time, "sleep", sleep)
+    monkeypatch.setattr(api_core, "_RECORDING_UPLOAD_MAX_POLL_INTERVAL_S", 0.8)
+
+    with pytest.raises(TimeoutError):
+        nc.stop_recording(wait=True, wait_timeout_s=3.0)
+
+    assert sleep_calls == pytest.approx([0.5, 0.8, 0.8, 0.8, 0.1])

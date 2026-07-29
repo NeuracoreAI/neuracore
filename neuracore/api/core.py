@@ -33,7 +33,9 @@ from .globals import GlobalSingleton
 logger = logging.getLogger(__name__)
 
 _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S = 60 * 15
-_RECORDING_UPLOAD_POLL_INTERVAL_S = 0.2
+_RECORDING_UPLOAD_POLL_INTERVAL_S = 0.5
+_RECORDING_UPLOAD_MAX_POLL_INTERVAL_S = 5.0
+_RECORDING_UPLOAD_POLL_BACKOFF_FACTOR = 2.0
 
 
 def _get_robot(robot_name: str | None, instance: int) -> Robot:
@@ -362,6 +364,7 @@ def stop_recording(
 
     assert wait_deadline is not None
 
+    poll_interval_s = _RECORDING_UPLOAD_POLL_INTERVAL_S
     while time.monotonic() < wait_deadline:
         if backend_utils.is_recording_upload_complete(recording_id):
             return
@@ -370,7 +373,11 @@ def stop_recording(
         if remaining_s <= 0:
             break
 
-        time.sleep(min(_RECORDING_UPLOAD_POLL_INTERVAL_S, remaining_s))
+        time.sleep(min(poll_interval_s, remaining_s))
+        poll_interval_s = min(
+            poll_interval_s * _RECORDING_UPLOAD_POLL_BACKOFF_FACTOR,
+            _RECORDING_UPLOAD_MAX_POLL_INTERVAL_S,
+        )
 
     raise TimeoutError(
         "Timed out waiting for recording uploads to complete "

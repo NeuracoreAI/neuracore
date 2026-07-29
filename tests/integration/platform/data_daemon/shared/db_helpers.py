@@ -92,6 +92,9 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 
 logger = logging.getLogger(__name__)
 
+_DATASET_READY_MAX_POLL_INTERVAL_S = 5.0
+_POLL_BACKOFF_FACTOR = 2.0
+
 
 def _recording_correlation_column() -> str:
     """Return the recordings/traces correlation column for the active daemon.
@@ -719,7 +722,8 @@ def wait_for_dataset_ready(
         dataset_name: Name of the dataset to poll.
         expected_recording_count: Exact number of recordings to wait for.
         timeout_s: Maximum time to wait in seconds before raising.
-        poll_interval_s: Seconds between successive polls.
+        poll_interval_s: Initial delay between polls in seconds. The delay
+            doubles after each unsuccessful poll, up to five seconds.
 
     Raises:
         TimeoutError: If the dataset does not have ``expected_recording_count``
@@ -728,6 +732,7 @@ def wait_for_dataset_ready(
     wait_start = time.perf_counter()
     last_error: Exception | None = None
     recording_count: int | None = None
+    current_poll_interval_s = poll_interval_s
     while True:
         elapsed_s = time.perf_counter() - wait_start
         try:
@@ -746,7 +751,11 @@ def wait_for_dataset_ready(
                 f"recording(s)."
             ) from last_error
 
-        time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed_s)))
+        time.sleep(min(current_poll_interval_s, max(0.0, timeout_s - elapsed_s)))
+        current_poll_interval_s = min(
+            current_poll_interval_s * _POLL_BACKOFF_FACTOR,
+            _DATASET_READY_MAX_POLL_INTERVAL_S,
+        )
 
 
 def wait_for_recordings_finalized(
