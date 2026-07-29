@@ -1068,7 +1068,8 @@ def run_case_contexts(
         results = [context_worker(specs[0])]
     else:
         with relayed_worker_logs() as log_queue:
-            with multiprocessing.Pool(
+            spawn_ctx = multiprocessing.get_context("spawn")
+            with spawn_ctx.Pool(
                 case.parallel_contexts,
                 initializer=init_worker_logging,
                 initargs=(log_queue, logging.getLogger().getEffectiveLevel()),

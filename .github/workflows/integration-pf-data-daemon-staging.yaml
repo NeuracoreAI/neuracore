@@ -29,7 +29,7 @@ jobs:
   test:
     needs: pre-commit
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
 
     env:
       NCD_RUST_DAEMON: "1"
@@ -57,7 +57,7 @@ jobs:
           path: "."
           extras: dev
 
-      - name: Run large recording completion regression test
+      - name: Run full Data Daemon regression suite
         env:
           NEURACORE_API_URL: https://staging.api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
@@ -67,7 +67,7 @@ jobs:
           pytest -o log_cli=true --log-cli-level=INFO
           -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
           --import-mode=importlib
-          'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[300s-16recs-2ctx-seq-10joints-15hz-1cam-1920x1080-15hz-wait]'
+          tests/integration/platform/data_daemon/
 
       - name: Show disk space after tests
         if: always()
