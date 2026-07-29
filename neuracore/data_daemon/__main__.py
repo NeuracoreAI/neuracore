@@ -1,9 +1,8 @@
 """Entry point for ``python -m neuracore.data_daemon``.
 
-By default this runs the Python data daemon CLI. When the
-``NCD_RUST_DAEMON`` environment variable is truthy and the bundled Rust
-data-daemon binary is present, execution is handed off to it instead. The
-flag keeps the Python daemon available throughout the rollout window.
+By default this hands off to the bundled Rust data-daemon binary, falling back
+to the Python data daemon CLI when that binary is absent or unusable. Setting
+``NCD_RUST_DAEMON`` to a falsy value pins the process to the Python daemon.
 """
 
 from __future__ import annotations
@@ -43,9 +42,8 @@ def main() -> None:
                 # executable, ENOEXEC); fall back to the Python daemon rather
                 # than crashing the rollout.
                 print(
-                    f"NCD_RUST_DAEMON is set but the bundled Rust data-daemon "
-                    f"binary could not be executed ({error}); falling back to "
-                    "the Python daemon.",
+                    "The bundled Rust data-daemon binary could not be "
+                    f"executed ({error}); falling back to the Python daemon.",
                     file=sys.stderr,
                 )
 

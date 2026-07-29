@@ -148,6 +148,20 @@ def _context(recording_id: str = "rec-1") -> DataRecordingContext:
     )
 
 
+@pytest.fixture(autouse=True)
+def use_python_daemon(monkeypatch) -> None:
+    """Pin the module to the legacy zmq producer channel.
+
+    The rust daemon is the default at runtime, so without this the file's
+    coverage would swing with whether a daemon binary happens to be installed.
+    Cases that want the rust path call ``_use_rust_daemon`` to re-patch.
+    """
+    monkeypatch.setattr(
+        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
+        lambda: False,
+    )
+
+
 def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
     _FakeProducerChannel.instances.clear()
     monkeypatch.setattr(

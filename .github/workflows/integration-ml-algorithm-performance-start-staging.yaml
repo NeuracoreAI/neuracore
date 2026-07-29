@@ -98,7 +98,6 @@ jobs:
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
-        NCD_RUST_DAEMON: "1"
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         ALGORITHM_NAME: ${{ matrix.algorithm }}
       run: pytest -o log_cli=true --log-cli-level=INFO -v -k test_start_training "$TEST_HARNESS_PATH"

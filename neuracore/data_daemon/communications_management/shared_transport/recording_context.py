@@ -19,7 +19,7 @@ _DATA_BRIDGE_IMPORT_HINT = (
     "neuracore.data_daemon._data_bridge is not available. The Rust extension "
     "is bundled in the neuracore wheel (prebuilt for Linux x86_64 and "
     "Apple-Silicon macOS); reinstall with `pip install neuracore` on one of "
-    "those platforms, or unset NCD_RUST_DAEMON to fall back to the legacy "
+    "those platforms, or set NCD_RUST_DAEMON=0 to fall back to the legacy "
     "Python data daemon."
 )
 

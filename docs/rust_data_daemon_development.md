@@ -218,14 +218,16 @@ maturin develop
 python -c "import neuracore.data_daemon._data_bridge as p; print(p)"
 ```
 
-To route the Python SDK through the data bridge instead of the legacy zmq one, set the rollout flag:
+The SDK routes through the data bridge by default. To pin a run to the legacy zmq producer and the Python daemon instead, set the rollout flag falsy:
 
 ```bash
-export NCD_RUST_DAEMON=1
+export NCD_RUST_DAEMON=0
 python your_script.py
 ```
 
 Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. A small shim bridges the data bridge to the Python `ProducerChannel` contract.
+
+With the flag unset, the default is gated on the daemon binary actually being present. This matters during development because `maturin develop` builds only the `_data_bridge` extension — the binary comes from `rust/scripts/build_wheel_artefacts.sh`. Without that gate, a bridge-only build would put the SDK on the Rust producer while the *Python* daemon consumed the other end. Run the artefacts script (or set `NCD_RUST_DAEMON=1` deliberately) when you want the Rust daemon in a source checkout.
 
 ---
 

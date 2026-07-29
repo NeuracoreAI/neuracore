@@ -25,16 +25,15 @@ jobs:
 
   test:
     needs: pre-commit
-    # Use the Rust data daemon for the production integration suite.
-    runs-on: ubuntu-24.04
-    env:
-      NCD_RUST_DAEMON: "1"
+    # Exercise the released wheel's bundled Rust daemon on each shipped OS
+    # (Linux x86_64, macOS arm64) across the Python support range.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 2
       matrix:
-        python-version: ['3.11']
-        ffmpeg: [true, false]
+        python-version: ['3.10', '3.14']
+        os: [ubuntu-24.04, macos-26]
 
     steps:
     - name: Show disk space
@@ -66,7 +65,16 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
-      run: pytest -o log_cli=true --log-cli-level=INFO tests/integration/platform/data_daemon/
+
+      # --import-mode=importlib keeps the repo root off sys.path. Without it
+      # pytest prepends it (tests/ is a package up to the root) and `import
+      # neuracore` resolves to the checked-out source instead of the installed
+      # wheel — where the bundled daemon binary is gitignored, so the Rust
+      # daemon is unreachable and the suite falls back to Python.
+      run: >-
+        pytest -o log_cli=true --log-cli-level=INFO
+        --import-mode=importlib
+        tests/integration/platform/data_daemon/
 
     - name: Show disk space after tests
       run: df -h /
