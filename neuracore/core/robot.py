@@ -876,7 +876,14 @@ class Robot:
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
         """Return a reusable daemon recording context, creating it lazily."""
         if self._daemon_recording_context is None:
-            self._daemon_recording_context = DaemonRecordingContext()
+            if is_rust_daemon_enabled():
+                if self.id is None:
+                    raise RobotError("Robot not initialized. Call init() first.")
+                context = DaemonRecordingContext()
+                context.bind_source(self.id, self.instance)
+                self._daemon_recording_context = context
+            else:
+                self._daemon_recording_context = DaemonRecordingContext()
         return self._daemon_recording_context
 
     def _cleanup_daemon_recording_context(self) -> None:

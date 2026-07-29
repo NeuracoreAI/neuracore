@@ -1,10 +1,18 @@
+import json
+from unittest.mock import MagicMock
+
 import numpy as np
 import pytest
-from neuracore_types import DataType
+from neuracore_types import DataType, ParallelGripperOpenAmountData
 
 import neuracore as nc
+from neuracore.api import logging as api_logging
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
+from neuracore.core.robot import Robot
+from neuracore.data_daemon.communications_management.shared_transport import (
+    recording_context,
+)
 
 
 def test_log_joints_and_cams(
@@ -450,6 +458,55 @@ def test_log_parallel_gripper_open_amounts(
         name="gripper2",
         value=0.7,
     )
+
+
+def test_sse_started_rust_recording_logs_with_bound_robot_source(monkeypatch) -> None:
+    """A producer that did not publish StartRecording can log after SSE state.
+
+    The active recording id represents state learned from SSE. Creating the
+    robot's daemon context must bind its source without publishing a duplicate
+    native start event.
+    """
+    robot = Robot("test_robot", instance=3, org_id="org-1")
+    robot.id = "robot-from-sse"
+    native = MagicMock()
+
+    monkeypatch.setattr(api_logging, "is_rust_daemon_enabled", lambda: True)
+    monkeypatch.setattr(
+        "neuracore.core.robot.is_rust_daemon_enabled",
+        lambda: True,
+    )
+    monkeypatch.setattr(recording_context, "is_rust_daemon_enabled", lambda: True)
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    monkeypatch.setattr(
+        robot,
+        "get_current_recording_id",
+        lambda: "cloud-recording-id-from-sse",
+    )
+
+    sample = ParallelGripperOpenAmountData(timestamp=12.5, open_amount=0.4)
+    api_logging._record_json_to_daemon(
+        robot,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        "secondary_gripper",
+        sample,
+        sample.timestamp,
+    )
+
+    native.start_recording.assert_not_called()
+    native.log_json.assert_called_once()
+    args = native.log_json.call_args.args
+    assert args[:4] == (
+        "robot-from-sse",
+        3,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS.value,
+        "secondary_gripper",
+    )
+    assert json.loads(args[4]) == sample.model_dump(mode="json")
+    assert args[5:] == (12_500_000_000, 12.5)
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
 
 
 def test_log_parallel_gripper_target_open_amounts(

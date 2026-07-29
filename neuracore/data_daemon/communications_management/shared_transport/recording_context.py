@@ -95,6 +95,23 @@ class RecordingContext:
         """Set or clear the recording identifier for this context."""
         self.recording_id = recording_id
 
+    def bind_source(self, robot_id: str, robot_instance: int = 0) -> None:
+        """Bind messages to a robot source without starting a recording.
+
+        A process may learn that a recording is active through SSE even when a
+        different process published ``StartRecording``. Those producer
+        processes still need the source identity in order to contribute data to
+        the daemon-owned recording window, but must not publish another start.
+
+        Args:
+            robot_id: Robot identifier used as the daemon source key.
+            robot_instance: Robot instance used as the daemon source key.
+        """
+        if not robot_id:
+            raise ValueError("robot_id is required to bind a recording source.")
+        self._robot_id = robot_id
+        self._robot_instance = robot_instance
+
     # -- Native (Rust daemon) interface -------------------------------------
 
     def start_recording(
@@ -118,10 +135,7 @@ class RecordingContext:
         """
         if not self._rust_mode:
             return
-        if not robot_id:
-            raise ValueError("robot_id is required to start a recording.")
-        self._robot_id = robot_id
-        self._robot_instance = robot_instance
+        self.bind_source(robot_id, robot_instance)
         timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
 
         self._recording_marker_ns = _load_native().start_recording(
