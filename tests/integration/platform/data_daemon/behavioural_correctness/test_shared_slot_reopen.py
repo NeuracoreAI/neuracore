@@ -41,10 +41,12 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 logger = logging.getLogger(__name__)
 
-pytestmark = pytest.mark.skipif(
-    is_rust_daemon_enabled(),
-    reason="Shared-slot reopen applies only to the legacy Python daemon",
-)
+
+@pytest.fixture(autouse=True)
+def skip_on_rust_daemon() -> None:
+    """Skip this Python-only test when the Rust daemon is the active backend."""
+    if is_rust_daemon_enabled():
+        pytest.skip("Shared-slot reopen applies only to the legacy Python daemon")
 
 
 _CASE = DataDaemonTestCase(

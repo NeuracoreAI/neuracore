@@ -33,7 +33,7 @@ pip install -e .
 ```
 
 Recommended for video recording, and **required** when running the Rust daemon
-(`NCD_RUST_DAEMON=1`):
+(the default):
 
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -124,16 +124,17 @@ neuracore data-daemon launch
 ```
 
 the CLI launches the daemon as a separate background process. There are two
-daemon implementations and the launcher picks one based on the `NCD_RUST_DAEMON`
-flag (see [rust_data_daemon_development.md](rust_data_daemon_development.md)):
+daemon implementations and the launcher picks one (see
+[rust_data_daemon_development.md](rust_data_daemon_development.md)):
 
-- **Rust daemon** — when `NCD_RUST_DAEMON` is truthy,
-  the launcher `exec`s the native binary bundled in the `neuracore` wheel
-  (Linux x86_64 and Apple-Silicon macOS) at
+- **Rust daemon (default)** — the launcher `exec`s the native binary bundled in
+  the `neuracore` wheel (Linux x86_64 and Apple-Silicon macOS) at
   `neuracore/data_daemon/bin/data-daemon`. This is the implementation described
   throughout this guide.
-- **Legacy Python daemon (default)** — when `NCD_RUST_DAEMON` is unset or not
-  truthy, the launcher runs the Python implementation instead.
+- **Legacy Python daemon** — used when `NCD_RUST_DAEMON` is set to a falsy value
+  (`0`, `false`, `no`, `n`), or when the bundled binary is not present at all —
+  a source install that never ran `rust/scripts/build_wheel_artefacts.sh`, or a
+  platform with no published wheel.
 
 Either daemon process:
 - boots the internal components it needs
@@ -548,11 +549,11 @@ neuracore data-daemon launch
 
 Both daemons encode video with `ffmpeg`, but they handle a missing or broken
 `ffmpeg` differently:
-- **Rust daemon** (`NCD_RUST_DAEMON=1`) — verifies `ffmpeg` at startup. If the
+- **Rust daemon** (default) — verifies `ffmpeg` at startup. If the
   binary is missing from `PATH`, or the local build cannot run the encode the
   daemon needs, the preflight fails and the daemon refuses to start (rather than
   starting and silently dropping every video recording).
-- **Legacy Python daemon** (default) — uses the `ffmpeg` CLI when it is on
+- **Legacy Python daemon** — uses the `ffmpeg` CLI when it is on
   `PATH` and falls back to PyAV when `ffmpeg` is unavailable or fails to
   initialise.
 
