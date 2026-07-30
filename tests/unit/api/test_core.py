@@ -282,7 +282,7 @@ def test_is_recording_upload_complete_returns_backend_state(
     session.get.assert_called_once_with(
         (f"{API_URL}/org/org-123/recording/" "recording-123/traces/complete"),
         headers={"Authorization": "Bearer test-token"},
-        timeout=10,
+        timeout=3,
     )
     response.raise_for_status.assert_called_once_with()
 

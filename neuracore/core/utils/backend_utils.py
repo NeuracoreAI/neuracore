@@ -66,7 +66,7 @@ def is_recording_upload_complete(recording_id: str) -> bool:
     response = session.get(
         f"{API_URL}/org/{org_id}/recording/{recording_id}/traces/complete",
         headers=get_auth().get_headers(),
-        timeout=10,
+        timeout=3,
     )
     response.raise_for_status()
 
