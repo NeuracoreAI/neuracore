@@ -12,6 +12,8 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    ObservedRecordingUploads,
+    latching_upload_observer,
     resolve_cloud_recording_ids,
     wait_for_upload_complete_in_db,
 )
@@ -47,6 +49,7 @@ _CASES = DataDaemonTestBatch(
 def _assert_online_verification_invariants(
     results: list[ContextResult],
     *,
+    observed: ObservedRecordingUploads,
     timeout_seconds: float = 30.0,
 ) -> None:
     """Block until every recording in *results* has reached ``upload_complete``
@@ -55,9 +58,17 @@ def _assert_online_verification_invariants(
 
     Upload completion is tracked in the daemon DB by the local
     ``recording_index`` correlation key.
+
+    Recordings whose completion *observed* already latched during the record
+    phase are satisfied: their rows have since been reclaimed by the recording
+    reaper, so there is nothing left here to poll. Everything else is waited on
+    exactly as before — not being complete yet is precisely what makes a
+    recording ineligible for reclamation, so its rows are still there.
     """
     for result in results:
         for recording_index in result.recording_indexes:
+            if observed.is_complete(recording_index):
+                continue
             wait_for_upload_complete_in_db(recording_index, timeout_s=timeout_seconds)
 
 
@@ -103,9 +114,10 @@ def test_cloud_data_integrity(
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs)
-                _assert_online_verification_invariants(results)
-                results = resolve_cloud_recording_ids(results)
+                with latching_upload_observer() as observed:
+                    results = run_case_contexts(case, specs=specs)
+                _assert_online_verification_invariants(results, observed=observed)
+                results = resolve_cloud_recording_ids(results, observed=observed)
                 verify_cloud_results(results=results, case=case)
 
         finally:
