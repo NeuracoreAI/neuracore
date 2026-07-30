@@ -189,7 +189,7 @@ class Robot:
             )
 
         try:
-            session = thread_local_session()
+            session = thread_local_session(retry_transient=True)
             response = session.post(
                 f"{API_URL}/org/{self.org_id}/robots?is_shared={self.shared}",
                 json={

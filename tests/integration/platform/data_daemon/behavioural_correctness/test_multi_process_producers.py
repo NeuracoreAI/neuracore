@@ -65,6 +65,7 @@ def _same_source_producer(
     producer_index: int,
     robot_name: str,
     dataset_name: str,
+    robot_connection_lock: Any,
     ready_barrier: Any,
     logged_barrier: Any,
     recording_started: Any,
@@ -79,7 +80,11 @@ def _same_source_producer(
     try:
         ensure_login()
         nc.get_dataset(dataset_name)
-        robot = nc.connect_robot(robot_name, instance=0, overwrite=False)
+        # Robot registration is setup rather than the multiprocess behavior under test.
+        # THe lock is stop the robot from being registered by more
+        # than on process. at the same time.
+        with robot_connection_lock:
+            robot = nc.connect_robot(robot_name, instance=0, overwrite=False)
         ready_barrier.wait(timeout=_PROCESS_TIMEOUT_S)
 
         recording_index: int | None = None
@@ -219,6 +224,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     )
 
     process_context = multiprocessing.get_context("spawn")
+    robot_connection_lock = process_context.Lock()
     ready_barrier = process_context.Barrier(_PRODUCER_COUNT)
     logged_barrier = process_context.Barrier(_PRODUCER_COUNT)
     recording_started = process_context.Event()
@@ -243,6 +249,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
                         producer_index,
                         robot_name,
                         dataset_name,
+                        robot_connection_lock,
                         ready_barrier,
                         logged_barrier,
                         recording_started,
