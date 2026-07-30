@@ -10,6 +10,16 @@ on:
         required: false
         type: string
         default: ""
+      python-version:
+        description: 'JSON array of Python versions. Trim entries to skip matrix rows.'
+        required: false
+        type: string
+        default: '["3.10", "3.14"]'
+      os:
+        description: 'JSON array of runners. Trim entries to skip matrix rows.'
+        required: false
+        type: string
+        default: '["ubuntu-24.04", "macos-26"]'
 
 jobs:
   pre-commit:
@@ -31,9 +41,12 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 2
+      # Dispatch inputs narrow the axes; the literals are the fallback for
+      # scheduled runs, where the `inputs` context is empty and dispatch input
+      # defaults do not apply.
       matrix:
-        python-version: ['3.10', '3.14']
-        os: [ubuntu-24.04, macos-26]
+        python-version: ${{ fromJSON(inputs.python-version || '["3.10", "3.14"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
 
     steps:
     - name: Show disk space
