@@ -57,7 +57,7 @@ jobs:
       uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
       with:
         version: ${{ steps.harness.outputs.release-tag }}
-        extras: dev,ml,examples
+        extras: dev
 
     - name: Run Data Daemon Integration Tests
       env:
