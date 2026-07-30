@@ -41,7 +41,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 4
       # Dispatch inputs narrow the axes; the literals are the fallback for
       # scheduled runs, where the `inputs` context is empty and dispatch input
       # defaults do not apply.
