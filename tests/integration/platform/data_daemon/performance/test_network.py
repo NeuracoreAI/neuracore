@@ -32,8 +32,9 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
 )
 
-# Cloud performance covers both nowait and wait=True because upload/registration
-# progress is asynchronous and both stop-recording modes must remain valid.
+# Cloud performance keeps representative nowait and wait=True coverage because
+# upload/registration progress is asynchronous. The wait variant is limited to
+# the multi-robot video workload to avoid duplicating every performance case.
 CASES = DataDaemonTestBatch(
     cases=NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,

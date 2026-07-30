@@ -141,8 +141,8 @@ class DataDaemonTestCase:
             acknowledges the stop-recording call before returning.  When
             ``False`` the stop call is fire-and-forget, which exercises the
             daemon's ability to process uploads without an explicit client
-            wait.  Cloud tests expand over both values; offline tests always
-            use ``False``.
+            wait. Selected cloud performance cases exercise both values;
+            offline matrix cases use ``False``.
         joint_fps: Frame rate in Hz for joint data producers.  Determines the
             total expected joint frame count as ``joint_fps * duration_sec``.
         video_fps: Frame rate in Hz for video/camera producers.  Determines the
