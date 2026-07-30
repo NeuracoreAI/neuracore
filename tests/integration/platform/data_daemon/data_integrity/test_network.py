@@ -6,13 +6,15 @@ import pytest
 
 from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    PRE_NETWORK_INTEGRITY_CASES,
+    NETWORK_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    ObservedRecordingUploads,
+    latching_upload_observer,
     resolve_cloud_recording_ids,
     wait_for_upload_complete_in_db,
 )
@@ -39,7 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 _CASES = DataDaemonTestBatch(
-    cases=PRE_NETWORK_INTEGRITY_CASES,
+    cases=NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
@@ -48,6 +50,7 @@ _CASES = DataDaemonTestBatch(
 def _assert_online_verification_invariants(
     results: list[ContextResult],
     *,
+    observed: ObservedRecordingUploads,
     timeout_seconds: float = 30.0,
 ) -> None:
     """Block until every recording in *results* has reached ``upload_complete``
@@ -57,15 +60,25 @@ def _assert_online_verification_invariants(
     Upload completion is tracked in the daemon DB by the active correlation key:
     the local ``recording_index`` under the Rust daemon, the cloud
     ``recording_id`` under the legacy daemon.
+
+    Recordings whose completion *observed* already latched during the record
+    phase are satisfied: their rows have since been reclaimed by the recording
+    reaper, so there is nothing left here to poll. Everything else is waited on
+    exactly as before — not being complete yet is precisely what makes a
+    recording ineligible for reclamation, so its rows are still there.
     """
     for result in results:
         if is_rust_daemon_enabled():
             for recording_index in result.recording_indexes:
+                if observed.is_complete(recording_index):
+                    continue
                 wait_for_upload_complete_in_db(
                     recording_index, timeout_s=timeout_seconds
                 )
         else:
             for recording_id in result.recording_ids:
+                if observed.is_complete(str(recording_id)):
+                    continue
                 wait_for_upload_complete_in_db(
                     str(recording_id), timeout_s=timeout_seconds
                 )
@@ -113,9 +126,10 @@ def test_cloud_data_integrity(
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs)
-                _assert_online_verification_invariants(results)
-                results = resolve_cloud_recording_ids(results)
+                with latching_upload_observer() as observed:
+                    results = run_case_contexts(case, specs=specs)
+                _assert_online_verification_invariants(results, observed=observed)
+                results = resolve_cloud_recording_ids(results, observed=observed)
                 verify_cloud_results(results=results, case=case)
 
         finally:
