@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-24.04", "macos-26"]'
+      pytest-target:
+        description: "Pytest file or exact node ID. Leave as default to run the full suite."
+        required: false
+        type: string
+        default: "tests/integration/platform/data_daemon/"
 
 jobs:
   pre-commit:
@@ -53,7 +58,6 @@ jobs:
     - name: Show disk space
       run: df -h /
 
-
     - name: Checkout test harness
       uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
       with:
@@ -83,15 +87,16 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        PYTEST_TARGET: ${{ inputs.pytest-target || 'tests/integration/platform/data_daemon/' }}
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
-      # stays attributable.
+      # stays attributable. Quoting PYTEST_TARGET preserves parameterized node IDs.
       run: >-
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        "$PYTEST_TARGET"
 
     - name: Show disk space after tests
       if: always()

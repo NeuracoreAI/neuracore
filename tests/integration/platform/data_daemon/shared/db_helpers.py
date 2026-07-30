@@ -705,48 +705,203 @@ def poll_until_condition(
 
 def wait_for_dataset_ready(
     dataset_name: str,
-    expected_recording_count: int = 1,
+    expected_recording_count: int | None = None,
     timeout_s: float = 120.0,
     poll_interval_s: float = 1.5,
+    *,
+    expected_recording_ids: set[str] | None = None,
+    stall_timeout_s: float | None = None,
+    progress_log_interval_s: float = 60.0,
 ) -> None:
-    """Block until the named dataset contains the expected number of recordings.
+    """Wait until the expected recordings are visible in a cloud dataset.
 
-    Polls :func:`neuracore.get_dataset` until ``len(dataset) ==
-    expected_recording_count``. Does not verify DB upload state or cloud
-    finalization — those are separate concerns.
+    When ``expected_recording_ids`` is provided, readiness is determined using
+    those exact IDs. Otherwise, the helper retains its existing count-based
+    behaviour.
+
+    Progress is logged when the visible count changes and periodically while
+    waiting. If ``stall_timeout_s`` is provided, the wait fails when the number
+    of visible expected recordings stops increasing for that duration.
 
     Args:
         dataset_name: Name of the dataset to poll.
-        expected_recording_count: Exact number of recordings to wait for.
-        timeout_s: Maximum time to wait in seconds before raising.
-        poll_interval_s: Seconds between successive polls.
+        expected_recording_count: Expected number of recordings. Defaults to one
+            when exact recording IDs are not provided.
+        timeout_s: Absolute maximum time to wait.
+        poll_interval_s: Delay between polls.
+        expected_recording_ids: Exact cloud recording IDs expected in the dataset.
+        stall_timeout_s: Maximum time permitted without readiness progress.
+        progress_log_interval_s: Interval for unchanged progress reports.
 
     Raises:
-        TimeoutError: If the dataset does not have ``expected_recording_count``
-            recordings within ``timeout_s`` seconds.
+        TimeoutError: If the absolute or stall timeout is reached.
+        ValueError: If the supplied expectations or timeouts are invalid.
     """
-    wait_start = time.perf_counter()
+    expected_ids = (
+        set(expected_recording_ids) if expected_recording_ids is not None else None
+    )
+
+    if expected_ids is not None:
+        if not expected_ids:
+            raise ValueError("expected_recording_ids must not be empty")
+        target_count = len(expected_ids)
+        if (
+            expected_recording_count is not None
+            and expected_recording_count != target_count
+        ):
+            raise ValueError(
+                "expected_recording_count does not match "
+                f"expected_recording_ids: {expected_recording_count} != "
+                f"{target_count}"
+            )
+    else:
+        target_count = (
+            expected_recording_count if expected_recording_count is not None else 1
+        )
+
+    if target_count < 1:
+        raise ValueError("expected_recording_count must be at least one")
+    if timeout_s <= 0:
+        raise ValueError("timeout_s must be positive")
+    if stall_timeout_s is not None and stall_timeout_s <= 0:
+        raise ValueError("stall_timeout_s must be positive")
+    if progress_log_interval_s <= 0:
+        raise ValueError("progress_log_interval_s must be positive")
+
+    wait_started_at = time.monotonic()
+    deadline = wait_started_at + timeout_s
+    last_progress_at = wait_started_at
+    last_log_at = wait_started_at
+
     last_error: Exception | None = None
+    last_seen_ids: set[str] = set()
     recording_count: int | None = None
+    best_visible_count = 0
+    last_logged_visible_count: int | None = None
+
     while True:
-        elapsed_s = time.perf_counter() - wait_start
         try:
             dataset = nc.get_dataset(dataset_name)
             recording_count = len(dataset)
-            if recording_count == expected_recording_count:
+            seen_ids = {str(recording.id) for recording in dataset}
+            last_seen_ids = seen_ids
+
+            if expected_ids is not None:
+                visible_count = len(expected_ids & seen_ids)
+                ready = expected_ids <= seen_ids
+            else:
+                visible_count = recording_count
+                ready = recording_count == target_count
+
+            if ready:
+                elapsed_s = time.monotonic() - wait_started_at
+                logger.info(
+                    "Dataset readiness complete for '%s': %d/%d recording(s) "
+                    "visible after %.1fs",
+                    dataset_name,
+                    visible_count,
+                    target_count,
+                    elapsed_s,
+                )
                 return
+
+            now = time.monotonic()
+            if visible_count > best_visible_count:
+                best_visible_count = visible_count
+                last_progress_at = now
+
+            should_log = (
+                visible_count != last_logged_visible_count
+                or now - last_log_at >= progress_log_interval_s
+            )
+            if should_log:
+                if expected_ids is not None:
+                    missing_ids = sorted(expected_ids - seen_ids)
+                    logger.info(
+                        "Dataset readiness for '%s': %d/%d expected recording(s) "
+                        "visible after %.1fs. Missing: %s",
+                        dataset_name,
+                        visible_count,
+                        target_count,
+                        now - wait_started_at,
+                        missing_ids,
+                    )
+                else:
+                    logger.info(
+                        "Dataset readiness for '%s': %d/%d recording(s) visible "
+                        "after %.1fs",
+                        dataset_name,
+                        visible_count,
+                        target_count,
+                        now - wait_started_at,
+                    )
+                last_logged_visible_count = visible_count
+                last_log_at = now
+
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            now = time.monotonic()
+            if now - last_log_at >= progress_log_interval_s:
+                logger.warning(
+                    "Dataset readiness poll for '%s' failed after %.1fs: %s",
+                    dataset_name,
+                    now - wait_started_at,
+                    exc,
+                )
+                last_log_at = now
 
-        if elapsed_s >= timeout_s:
+        now = time.monotonic()
+        elapsed_s = now - wait_started_at
+
+        if stall_timeout_s is not None and now - last_progress_at >= stall_timeout_s:
+            if expected_ids is not None:
+                state = (
+                    f"Visible {len(expected_ids & last_seen_ids)}/{target_count}. "
+                    f"Missing: {sorted(expected_ids - last_seen_ids)}."
+                )
+            else:
+                state = (
+                    "Has "
+                    f"{recording_count if recording_count is not None else 0}/"
+                    f"{target_count} recording(s)."
+                )
+
             raise TimeoutError(
-                f"Timed out waiting for dataset '{dataset_name}' to have "
-                f"{expected_recording_count} recording(s) after {timeout_s}s. "
-                f"Has {recording_count if recording_count is not None else 0} "
-                f"recording(s)."
+                f"Dataset readiness for '{dataset_name}' made no progress for "
+                f"{stall_timeout_s}s after {elapsed_s:.1f}s. {state}"
             ) from last_error
 
-        time.sleep(min(poll_interval_s, max(0.0, timeout_s - elapsed_s)))
+        if now >= deadline:
+            if expected_ids is not None:
+                state = (
+                    f"Visible {len(expected_ids & last_seen_ids)}/{target_count}. "
+                    f"Missing: {sorted(expected_ids - last_seen_ids)}."
+                )
+            else:
+                state = (
+                    "Has "
+                    f"{recording_count if recording_count is not None else 0}/"
+                    f"{target_count} recording(s)."
+                )
+
+            raise TimeoutError(
+                f"Timed out waiting for dataset '{dataset_name}' after "
+                f"{timeout_s}s. {state}"
+            ) from last_error
+
+        next_deadline = deadline
+        if stall_timeout_s is not None:
+            next_deadline = min(
+                next_deadline,
+                last_progress_at + stall_timeout_s,
+            )
+
+        time.sleep(
+            min(
+                poll_interval_s,
+                max(0.0, next_deadline - time.monotonic()),
+            )
+        )
 
 
 def wait_for_recordings_finalized(
