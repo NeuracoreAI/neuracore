@@ -125,12 +125,17 @@ pub(crate) async fn upload_one_file(
 
         let outcome = put_chunk(
             client,
-            &session_uri,
-            chunk.clone(),
-            offset,
-            chunk_end,
-            total_bytes,
-            is_final,
+            PutChunkRequest {
+                session_uri: &session_uri,
+                chunk: chunk.clone(),
+                chunk_start: offset,
+                chunk_end,
+                total_bytes,
+                is_final,
+                recording_index,
+                trace_id: &trace_id,
+                cloud_filepath,
+            },
         )
         .await?;
         match outcome {
@@ -189,6 +194,19 @@ pub(crate) async fn upload_one_file(
                     trace_id,
                     path = %local_path.display(),
                     "upload session expired; requesting fresh URI"
+                );
+                crate::perf_events::emit(
+                    "retry_backoff",
+                    "scheduled",
+                    Some(recording_index),
+                    Some(&trace_id),
+                    None,
+                    serde_json::json!({
+                        "retry_domain": "upload",
+                        "reason": "session_expired",
+                        "filename": cloud_filepath,
+                        "backoff_ms": 0,
+                    }),
                 );
                 match client
                     .fetch_resumable_upload_url(&org_id, recording_id, cloud_filepath, content_type)
@@ -307,15 +325,34 @@ enum PutChunkOutcome {
     Failed { status: StatusCode, body: String },
 }
 
-async fn put_chunk(
-    client: &Arc<ApiClient>,
-    session_uri: &str,
+/// Data needed to send one chunk and attribute its performance events.
+struct PutChunkRequest<'a> {
+    session_uri: &'a str,
     chunk: Bytes,
     chunk_start: u64,
     chunk_end: u64,
     total_bytes: u64,
     is_final: bool,
+    recording_index: i64,
+    trace_id: &'a str,
+    cloud_filepath: &'a str,
+}
+
+async fn put_chunk(
+    client: &Arc<ApiClient>,
+    request: PutChunkRequest<'_>,
 ) -> Result<PutChunkOutcome, String> {
+    let PutChunkRequest {
+        session_uri,
+        chunk,
+        chunk_start,
+        chunk_end,
+        total_bytes,
+        is_final,
+        recording_index,
+        trace_id,
+        cloud_filepath,
+    } = request;
     let mut headers = HeaderMap::new();
     let content_range = if is_final {
         format!("bytes {chunk_start}-{chunk_end}/{total_bytes}")
@@ -371,7 +408,16 @@ async fn put_chunk(
                     }
                     attempt += 1;
                     tracing::warn!(%error, attempt, "upload chunk transport error; retrying");
-                    sleep(backoff(attempt, client.options().max_backoff)).await;
+                    let delay = backoff(attempt, client.options().max_backoff);
+                    emit_upload_retry(
+                        recording_index,
+                        trace_id,
+                        cloud_filepath,
+                        attempt,
+                        "transport_error",
+                        delay,
+                    );
+                    sleep(delay).await;
                     continue;
                 }
                 Err(_elapsed) => {
@@ -388,7 +434,16 @@ async fn put_chunk(
                         ));
                     }
                     attempt += 1;
-                    sleep(backoff(attempt, client.options().max_backoff)).await;
+                    let delay = backoff(attempt, client.options().max_backoff);
+                    emit_upload_retry(
+                        recording_index,
+                        trace_id,
+                        cloud_filepath,
+                        attempt,
+                        "timeout",
+                        delay,
+                    );
+                    sleep(delay).await;
                     continue;
                 }
             };
@@ -408,6 +463,14 @@ async fn put_chunk(
                 return Err(format!("auth reload failed: {error}"));
             }
             refreshed_auth = true;
+            emit_upload_retry(
+                recording_index,
+                trace_id,
+                cloud_filepath,
+                attempt,
+                "auth_refresh",
+                Duration::ZERO,
+            );
             continue;
         }
         if status.is_success() {
@@ -427,11 +490,44 @@ async fn put_chunk(
         if matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504) && attempt + 1 < MAX_RETRIES {
             attempt += 1;
             tracing::warn!(%status, attempt, "retrying upload chunk after transient failure");
-            sleep(backoff(attempt, client.options().max_backoff)).await;
+            let delay = backoff(attempt, client.options().max_backoff);
+            emit_upload_retry(
+                recording_index,
+                trace_id,
+                cloud_filepath,
+                attempt,
+                &format!("http_{}", status.as_u16()),
+                delay,
+            );
+            sleep(delay).await;
             continue;
         }
         return Ok(PutChunkOutcome::Failed { status, body });
     }
+}
+
+fn emit_upload_retry(
+    recording_index: i64,
+    trace_id: &str,
+    cloud_filepath: &str,
+    attempt: u32,
+    reason: &str,
+    delay: Duration,
+) {
+    crate::perf_events::emit(
+        "retry_backoff",
+        "scheduled",
+        Some(recording_index),
+        Some(trace_id),
+        None,
+        serde_json::json!({
+            "retry_domain": "upload",
+            "attempt": attempt,
+            "reason": reason,
+            "filename": cloud_filepath,
+            "backoff_ms": delay.as_secs_f64() * 1_000.0,
+        }),
+    );
 }
 
 /// Exponential backoff (1s, 2s, 4s, …) for a chunk retry, capped at the API

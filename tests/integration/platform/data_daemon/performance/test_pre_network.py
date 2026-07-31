@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -43,8 +41,7 @@ _CASES = DataDaemonTestBatch(
 def test_disk_db_write_performance(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
-    log_run_analysis_on_teardown,
-    test_wall_timer: Callable[[], float],
+    performance_report,
 ) -> None:
     """Record a high-volume offline workload and verify trace write timing.
 
@@ -57,13 +54,10 @@ def test_disk_db_write_performance(
 
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
-    with scoped_storage_state(case, dataset_name=dataset_name):
-        with offline_daemon_running():
-            results = []
-            try:
+    with performance_report(case, dataset_name=dataset_name) as report:
+        with scoped_storage_state(case, dataset_name=dataset_name):
+            with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs, wait_for_traces=True)
-            finally:
-                log_run_analysis_on_teardown(
-                    case, results, test_wall_s=test_wall_timer()
+                report.capture_results(
+                    run_case_contexts(case, specs=specs, wait_for_traces=True)
                 )

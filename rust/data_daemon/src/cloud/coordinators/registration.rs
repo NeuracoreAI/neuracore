@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -240,8 +240,30 @@ async fn submit_batch(
             })
             .collect();
 
+        let request_started = Instant::now();
+        crate::perf_events::emit(
+            "trace_registration",
+            "started",
+            Some(recording_index),
+            None,
+            None,
+            serde_json::json!({"trace_count": payload.len()}),
+        );
         match client.batch_register(&org_id, &payload).await {
             Ok(response) => {
+                crate::perf_events::emit(
+                    "trace_registration",
+                    "completed",
+                    Some(recording_index),
+                    None,
+                    Some(request_started.elapsed()),
+                    serde_json::json!({
+                        "trace_count": payload.len(),
+                        "registered_count": response.registered_traces.len(),
+                        "failed_count": response.failed_traces.len(),
+                        "outcome": "ok",
+                    }),
+                );
                 let registered_ids: HashMap<String, _> = response
                     .registered_traces
                     .into_iter()
@@ -318,6 +340,18 @@ async fn submit_batch(
             }
             Err(error) => {
                 tracing::warn!(%error, recording_index, "batch register request failed");
+                crate::perf_events::emit(
+                    "trace_registration",
+                    "failed",
+                    Some(recording_index),
+                    None,
+                    Some(request_started.elapsed()),
+                    serde_json::json!({
+                        "trace_count": payload.len(),
+                        "outcome": "error",
+                        "error_kind": error.to_string(),
+                    }),
+                );
                 rollback_to_pending(store, &traces).await;
             }
         }
@@ -376,6 +410,20 @@ async fn handle_registration_setback(
             reason,
             attempt = *attempts,
             "trace registration setback; rolling back to pending for retry"
+        );
+        crate::perf_events::emit(
+            "retry_backoff",
+            "scheduled",
+            None,
+            Some(trace_id),
+            None,
+            serde_json::json!({
+                "retry_domain": "trace_registration",
+                "attempt": *attempts,
+                "next_poll_ms": crate::intervals::REGISTRATION_POLL.as_secs_f64() * 1_000.0,
+                "backoff_ms": crate::intervals::REGISTRATION_POLL.as_secs_f64() * 1_000.0,
+                "reason": reason,
+            }),
         );
         rollback_single_to_pending(store, trace_id).await;
         return;
