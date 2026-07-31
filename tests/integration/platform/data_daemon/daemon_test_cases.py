@@ -7,6 +7,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_STAGGERED,
     OS_EXCEPT_DARWIN,
     PACING_BURST,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_STOCHASTIC,
@@ -102,6 +103,22 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         video_codec="h264_medium",  # activates assert_lossy_only_video_artifacts
         video_pacing=PACING_BURST,
+    ),
+    DataDaemonTestCase(
+        # Producer threads outlive any single recording; start_recording/
+        # stop_recording are driven from a separate control loop while
+        # logging is in flight. timestamp_mode stays MANUAL (default) so
+        # the exact-count assertion applies.
+        duration_sec=30,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_width=640,
+        image_height=480,
+        video_fps=30,
+        joint_fps=30,
+        producer_channels=PRODUCER_CONTINUOUS,
+        video_codec="h264_medium",
     ),
 )
 

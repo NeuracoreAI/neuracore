@@ -34,6 +34,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
     PACING_DEADLINE,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -111,10 +112,21 @@ class DataDaemonTestCase:
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
-        producer_channels: Thread-allocation strategy for data producers.
-            ``"synchronous"`` logs all data types from a single thread in
-            sequence; ``"per_thread"`` spawns one dedicated thread per data
-            type so streams are written concurrently.
+        producer_channels: How producer threads are allocated, and how long
+            they live.  ``"synchronous"`` logs all data types from a single
+            thread in sequence; ``"per_thread"`` spawns one dedicated thread
+            per data type so streams are written concurrently.  Both scope
+            their threads to a single recording, joining them before
+            ``stop_recording``, so no frame is ever in flight when a window
+            boundary passes.  ``"continuous"`` also runs a thread per data
+            type, but for the whole context lifetime: threads start before the
+            first ``nc.start_recording()`` and keep logging, paced by a
+            session-wide frame counter, until after the last
+            ``nc.stop_recording()`` returns — while ``start_recording``/
+            ``stop_recording`` are driven from a separate control loop.  It
+            models real deployments where camera and proprioception loops run
+            for the process lifetime and recording start/stop happen
+            concurrently with in-flight logging.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -198,7 +210,8 @@ class DataDaemonTestCase:
             ``"burst"`` skips that sleep, so frames are pushed as fast as the
             camera thread can render and log them, backlogging the writer
             queue the way a real camera does when the encoder can't keep up.
-            Only affects the RGB thread under ``producer_channels="per_thread"``;
+            Only affects the modes that give RGB a thread of its own
+            (``producer_channels="per_thread"`` or ``"continuous"``);
             timestamps stay synthetic (``timestamp_start_s + frame_index / fps``)
             regardless of delivery pacing.
 
@@ -386,6 +399,8 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_detail}frames")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
+    elif case.producer_channels == PRODUCER_CONTINUOUS:
+        parts.append("continuous")
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:
         parts.append("realtime")
     elif case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC:

@@ -41,6 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONTINUOUS_LOGGING_TAIL_S,
     DATASET_POLL_INTERVAL_S,
     DETAIL_REALISTIC,
     DURATION_MODE_VARIABLE,
@@ -49,6 +50,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PACING_BURST,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     SCHEDULER_TOLERANCE_S,
     STOP_RECORDING_NO_WAIT_SLA_S,
@@ -520,6 +522,35 @@ def build_thread_roles(
     return roles
 
 
+_ROLE_DATA_TYPES = {
+    "rgb": "RGB_IMAGES",
+    "joint_positions": "JOINT_POSITIONS",
+    "joint_velocities": "JOINT_VELOCITIES",
+    "joint_torques": "JOINT_TORQUES",
+}
+
+
+def _role_trace_keys(role_spec: dict[str, object]) -> list[str]:
+    """Return the semantic trace keys one logged frame from *role_spec* touches.
+
+    Matches the ``data_type/data_type_name`` keys used elsewhere in this module
+    (see ``context_worker``'s synthetic ``by_trace`` construction) — one entry
+    per named channel the role owns (joints or its single camera), plus the
+    role's own ``CUSTOM_1D`` marker.
+    """
+    from neuracore_types.utils import validate_safe_name
+
+    role_name = str(role_spec["role"])
+    data_type = _ROLE_DATA_TYPES[role_name]
+    names = (
+        role_spec["camera_names"] if role_name == "rgb" else role_spec["joint_names"]
+    )
+    return [
+        *(f"{data_type}/{validate_safe_name(str(name))}" for name in names),
+        f"CUSTOM_1D/{validate_safe_name(str(role_spec['marker_name']))}",
+    ]
+
+
 def run_threaded_logging(
     *,
     robot_name: str,
@@ -684,6 +715,138 @@ def run_threaded_logging(
     return [str(role["marker_name"]) for role in roles]
 
 
+def run_continuous_logging(
+    *,
+    robot: object,
+    robot_name: str,
+    joint_names: list[str],
+    camera_name_list: list[str],
+    image_width: int | None,
+    image_height: int | None,
+    joint_fps: int,
+    video_fps: int,
+    video_detail: str,
+    timestamp_start_s: float,
+    use_stochastic_timestamps: bool,
+    burst_video: bool,
+    stop_event: threading.Event,
+) -> dict[str, dict[str, list[float]]]:
+    """Log continuously for the whole context lifetime, independent of any
+    single recording.
+
+    Mirrors real deployments where camera/proprioception loops run for the
+    process lifetime: threads start before the first ``nc.start_recording()``
+    and keep logging — paced by a session-wide, ever-increasing frame index —
+    until *stop_event* is set, regardless of how many recordings start and stop
+    while they run. Each frame reads which recording (if any) is active via
+    ``robot.get_current_recording_id()`` before logging, so the caller can
+    build expected-timestamp maps from what the SDK actually admitted rather
+    than from a synthetic per-recording window.
+
+    Returns:
+        Mapping of local recording handle -> trace key -> ordered list of
+        timestamps logged while that handle was current. Frames logged while
+        no recording is active (handle is ``None``) are dropped.
+    """
+    roles = build_thread_roles(
+        joint_names=joint_names, camera_name_list=camera_name_list
+    )
+    barrier = threading.Barrier(len(roles))
+    thread_errors: list[BaseException] = []
+    report: dict[str, dict[str, list[float]]] = {}
+    report_lock = threading.Lock()
+
+    def worker(role_spec: dict[str, object]) -> None:
+        try:
+            set_thread_policy_for_macos()
+            barrier.wait()
+            role_name = str(role_spec["role"])
+            marker_name = str(role_spec["marker_name"])
+            is_rgb = role_name == "rgb"
+            fps = video_fps if is_rgb else joint_fps
+            camera_feed = make_camera_feed(
+                is_rgb, image_width, image_height, video_detail
+            )
+            trace_keys = _role_trace_keys(role_spec)
+            camera_id = str(role_spec["camera_names"][0]) if is_rgb else ""
+            thread_joint_names = [] if is_rgb else list(role_spec["joint_names"])
+            log_joint_fn = {
+                "joint_positions": nc.log_joint_positions,
+                "joint_velocities": nc.log_joint_velocities,
+                "joint_torques": nc.log_joint_torques,
+            }.get(role_name)
+            burst = is_rgb and burst_video
+            thread_wall_start = time.time()
+            frame_index = 0
+            while not stop_event.is_set():
+                jitter = get_jitter(use_stochastic_timestamps, fps)
+                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+                remaining = frame_deadline - time.time()
+                if remaining > 0 and not burst and stop_event.wait(remaining):
+                    break
+                timestamp = timestamp_start_s + (frame_index / fps) + jitter
+
+                handle = robot.get_current_recording_id()
+
+                if is_rgb:
+                    rgb_image = camera_feed.render(frame_index, frame_index)
+                    with Timer(
+                        MAX_TIME_TO_LOG_S, label="nc.log_rgb", assert_deadline=False
+                    ):
+                        nc.log_rgb(
+                            camera_id,
+                            rgb_image,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
+                else:
+                    joint_values = generate_joint_values(
+                        frame_index, fps, thread_joint_names
+                    )
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label=f"nc.{role_name}",
+                        assert_deadline=False,
+                    ):
+                        log_joint_fn(
+                            joint_values, robot_name=robot_name, timestamp=timestamp
+                        )
+                with Timer(
+                    MAX_TIME_TO_LOG_S, label="nc.log_custom_1d", assert_deadline=False
+                ):
+                    nc.log_custom_1d(
+                        marker_name,
+                        np.array([float(frame_index)], dtype=np.float32),
+                        robot_name=robot_name,
+                        timestamp=timestamp,
+                    )
+
+                if handle is not None:
+                    with report_lock:
+                        bucket = report.setdefault(handle, {})
+                        for trace_key in trace_keys:
+                            bucket.setdefault(trace_key, []).append(timestamp)
+
+                frame_index += 1
+        except BaseException as exc:  # noqa: BLE001
+            thread_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if thread_errors:
+        raise RuntimeError(
+            f"Continuous producer failed: {thread_errors[0]}"
+        ) from thread_errors[0]
+
+    return report
+
+
 def log_frames(
     spec: ContextSpec,
     *,
@@ -841,122 +1004,209 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             {} if not use_real_timestamps else None
         )
 
-        for recording_ordinal in range(spec.recordings_per_context):
-            recording_timestamp_start_s = (
-                spec.timestamp_start_s + recording_ordinal * case.duration_sec
+        continuous_stop_event: threading.Event | None = None
+        continuous_thread: threading.Thread | None = None
+        continuous_outcome: dict[str, object] = {}
+        handle_to_disk_key: dict[str, str] = {}
+        trace_key_to_fps: dict[str, int] = {}
+
+        if case.producer_channels == PRODUCER_CONTINUOUS:
+            roles = build_thread_roles(
+                joint_names=joint_name_list, camera_name_list=camera_name_list
             )
-            recording_capture_start_s = None if use_real_timestamps else time.time()
-            recording_capture_stop_s = (
-                None
-                if recording_capture_start_s is None
-                else recording_capture_start_s + case.duration_sec
-            )
+            marker_names = [str(role["marker_name"]) for role in roles]
+            for role in roles:
+                fps = case.video_fps if role["role"] == "rgb" else case.joint_fps
+                for trace_key in _role_trace_keys(role):
+                    trace_key_to_fps[trace_key] = fps
 
-            with Timer(
-                MAX_TIME_TO_START_S,
-                label="nc.start_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.start_recording(
-                    robot_name=spec.robot_name, timestamp=recording_capture_start_s
-                )
-            if wall_started_at is None:
-                wall_started_at = time.time()
+            continuous_stop_event = threading.Event()
 
-            if use_rust:
-                previous_index = recording_indexes[-1] if recording_indexes else 0
-                daemon_recording_index = wait_for_recording_index_for_source(
-                    source[0],
-                    source[1],
-                    after_index=previous_index,
-                    timeout_s=MAX_TIME_TO_START_S,
-                )
-                recording_indexes.append(daemon_recording_index)
-
-                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
-                recording_ids.append(str(cloud_recording_id or ""))
-
-                disk_recording_key = str(daemon_recording_index)
-            else:
-                recording_id = str(robot.get_current_recording_id() or "")
-                recording_ids.append(recording_id)
-                disk_recording_key = recording_id
-
-            # Build per-recording expected timestamps once the recording key is
-            # known. Trace keys use "data_type/data_type_name" to match the
-            # semantic keys resolved from the DB in disk_helpers. data_type_name is
-            # the storage name produced by validate_safe_name (e.g.
-            # "vx300s_left\waist" for joint names).
-            if expected_by_recording is not None:
-                from neuracore_types.utils import validate_safe_name
-
-                joint_ts = precompute_timestamps(
-                    recording_timestamp_start_s,
-                    spec.expected_joint_frames,
-                    case.joint_fps,
-                )
-                video_ts = precompute_timestamps(
-                    recording_timestamp_start_s,
-                    spec.expected_video_frames,
-                    case.video_fps,
-                )
-                by_trace: dict[str, list[float]] = {}
-                for joint_name in joint_name_list:
-                    safe = validate_safe_name(joint_name)
-                    by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
-                    by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
-                    by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
-                for camera in camera_name_list:
-                    safe_cam = validate_safe_name(camera)
-                    by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
-                # CUSTOM_1D marker — name depends on producer_channels mode
-                if case.producer_channels == PRODUCER_PER_THREAD:
-                    # One marker per joint data type thread
-                    for role_name in (
-                        "joint_positions",
-                        "joint_velocities",
-                        "joint_torques",
-                    ):
-                        safe_marker = validate_safe_name(f"marker_{role_name}")
-                        by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                    for camera in camera_name_list:
-                        safe_marker = validate_safe_name(f"marker_{camera}")
-                        by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
-                else:
-                    safe_marker = validate_safe_name("marker_synchronous")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                by_trace_fps = {
-                    trace_key: (
-                        case.video_fps if timestamps is video_ts else case.joint_fps
+            def _run_continuous() -> None:
+                try:
+                    continuous_outcome["report"] = run_continuous_logging(
+                        robot=robot,
+                        robot_name=spec.robot_name,
+                        joint_names=joint_name_list,
+                        camera_name_list=camera_name_list,
+                        image_width=case.image_width,
+                        image_height=case.image_height,
+                        joint_fps=case.joint_fps,
+                        video_fps=case.video_fps,
+                        video_detail=case.video_detail,
+                        timestamp_start_s=spec.timestamp_start_s,
+                        use_stochastic_timestamps=(
+                            case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
+                        ),
+                        burst_video=case.video_pacing == PACING_BURST,
+                        stop_event=continuous_stop_event,
                     )
-                    for trace_key, timestamps in by_trace.items()
-                }
-                expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
-                    by_trace=by_trace,
-                    by_trace_fps=by_trace_fps,
+                except BaseException as exc:  # noqa: BLE001
+                    continuous_outcome["error"] = exc
+
+            continuous_thread = threading.Thread(target=_run_continuous, daemon=True)
+            continuous_thread.start()
+
+        try:
+            for recording_ordinal in range(spec.recordings_per_context):
+                recording_timestamp_start_s = (
+                    spec.timestamp_start_s + recording_ordinal * case.duration_sec
+                )
+                recording_capture_start_s = None if use_real_timestamps else time.time()
+                recording_capture_stop_s = (
+                    None
+                    if recording_capture_start_s is None
+                    else recording_capture_start_s + case.duration_sec
                 )
 
-            current_marker_names = log_frames(
-                spec,
-                recording_index=recording_ordinal,
-                marker_name="marker_synchronous",
-            )
-            if not marker_names:
-                marker_names = current_marker_names
+                with Timer(
+                    MAX_TIME_TO_START_S,
+                    label="nc.start_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
+                ):
+                    nc.start_recording(
+                        robot_name=spec.robot_name, timestamp=recording_capture_start_s
+                    )
+                if wall_started_at is None:
+                    wall_started_at = time.time()
 
-            with Timer(
-                case.stop_recording_sla_s,
-                label="nc.stop_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.stop_recording(
-                    robot_name=spec.robot_name,
-                    wait=case.wait,
-                    timestamp=recording_capture_stop_s,
+                if use_rust:
+                    previous_index = recording_indexes[-1] if recording_indexes else 0
+                    daemon_recording_index = wait_for_recording_index_for_source(
+                        source[0],
+                        source[1],
+                        after_index=previous_index,
+                        timeout_s=MAX_TIME_TO_START_S,
+                    )
+                    recording_indexes.append(daemon_recording_index)
+
+                    cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                    recording_ids.append(str(cloud_recording_id or ""))
+
+                    disk_recording_key = str(daemon_recording_index)
+                else:
+                    recording_id = str(robot.get_current_recording_id() or "")
+                    recording_ids.append(recording_id)
+                    disk_recording_key = recording_id
+
+                if case.producer_channels == PRODUCER_CONTINUOUS:
+                    handle = robot.get_current_recording_id()
+                    if handle is not None:
+                        handle_to_disk_key[handle] = disk_recording_key
+                    time.sleep(case.duration_sec)
+
+                # Build per-recording expected timestamps once the recording key is
+                # known. Trace keys use "data_type/data_type_name" to match the
+                # semantic keys resolved from the DB in disk_helpers. data_type_name is
+                # the storage name produced by validate_safe_name (e.g.
+                # "vx300s_left\waist" for joint names).
+                elif expected_by_recording is not None:
+                    from neuracore_types.utils import validate_safe_name
+
+                    joint_ts = precompute_timestamps(
+                        recording_timestamp_start_s,
+                        spec.expected_joint_frames,
+                        case.joint_fps,
+                    )
+                    video_ts = precompute_timestamps(
+                        recording_timestamp_start_s,
+                        spec.expected_video_frames,
+                        case.video_fps,
+                    )
+                    by_trace: dict[str, list[float]] = {}
+                    for joint_name in joint_name_list:
+                        safe = validate_safe_name(joint_name)
+                        by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
+                        by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
+                        by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
+                    for camera in camera_name_list:
+                        safe_cam = validate_safe_name(camera)
+                        by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
+                    # CUSTOM_1D marker — name depends on producer_channels mode
+                    if case.producer_channels == PRODUCER_PER_THREAD:
+                        # One marker per joint data type thread
+                        for role_name in (
+                            "joint_positions",
+                            "joint_velocities",
+                            "joint_torques",
+                        ):
+                            safe_marker = validate_safe_name(f"marker_{role_name}")
+                            by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
+                        for camera in camera_name_list:
+                            safe_marker = validate_safe_name(f"marker_{camera}")
+                            by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
+                    else:
+                        safe_marker = validate_safe_name("marker_synchronous")
+                        by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
+                    by_trace_fps = {
+                        trace_key: (
+                            case.video_fps if timestamps is video_ts else case.joint_fps
+                        )
+                        for trace_key, timestamps in by_trace.items()
+                    }
+                    expected_by_recording[disk_recording_key] = (
+                        RecordingExpectedTimestamps(
+                            by_trace=by_trace,
+                            by_trace_fps=by_trace_fps,
+                        )
+                    )
+
+                if case.producer_channels != PRODUCER_CONTINUOUS:
+                    current_marker_names = log_frames(
+                        spec,
+                        recording_index=recording_ordinal,
+                        marker_name="marker_synchronous",
+                    )
+                    if not marker_names:
+                        marker_names = current_marker_names
+
+                with Timer(
+                    case.stop_recording_sla_s,
+                    label="nc.stop_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
+                ):
+                    nc.stop_recording(
+                        robot_name=spec.robot_name,
+                        wait=case.wait,
+                        timestamp=recording_capture_stop_s,
+                    )
+                wall_stopped_at = time.time()
+
+            if continuous_stop_event is not None:
+                # Give the still-running producer threads time to log a few
+                # more frames after the last stop_recording, exactly as a real
+                # camera would keep running past the end of a recording.
+                time.sleep(CONTINUOUS_LOGGING_TAIL_S)
+        finally:
+            # Always stop and join the continuous producer threads — even when
+            # the loop above raised — so no producer thread outlives this
+            # worker and confuses the daemon-cleanup assertions that run next.
+            if continuous_thread is not None:
+                continuous_stop_event.set()
+                continuous_thread.join()
+
+        if continuous_thread is not None:
+            continuous_error = continuous_outcome.get("error")
+            if continuous_error is not None:
+                raise RuntimeError(
+                    f"Continuous producer failed: {continuous_error}"
+                ) from continuous_error
+
+            if expected_by_recording is not None:
+                report: dict[str, dict[str, list[float]]] = continuous_outcome.get(
+                    "report", {}
                 )
-            wall_stopped_at = time.time()
+                for handle, disk_key in handle_to_disk_key.items():
+                    by_trace = report.get(handle, {})
+                    expected_by_recording[disk_key] = RecordingExpectedTimestamps(
+                        by_trace=by_trace,
+                        by_trace_fps={
+                            trace_key: trace_key_to_fps[trace_key]
+                            for trace_key in by_trace
+                        },
+                    )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
