@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-24.04", "macos-26"]'
+      performance-metrics:
+        description: 'Capture daemon phase metrics and include them in Allure.'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   pre-commit:
@@ -35,6 +40,12 @@ jobs:
 
   test:
     needs: pre-commit
+    env:
+      NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging
+      NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/daemon-phase-events.jsonl
+      # Scheduled runs always capture metrics. A manual dispatch can disable
+      # them without changing the workflow.
+      NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
     # Use the Rust data daemon for the staging integration suite. Exercise its
     # bundled native artefacts on each shipped OS (Linux x86_64, macOS arm64)
     # across the Python support range.
@@ -77,12 +88,16 @@ jobs:
       if: runner.os == 'macOS'
       run: sudo sysctl -w kern.timer.coalescing_enabled=0
 
+    - name: Prepare performance report directories
+      run: mkdir -p "$NCD_PERF_REPORT_DIR/allure-results" "$NCD_PERF_REPORT_DIR/metrics"
+
     - name: Run Data Daemon Integration Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        NCD_RUST_DAEMON: 1
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
@@ -91,7 +106,34 @@ jobs:
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
         --import-mode=importlib
-        tests/integration/platform/data_daemon/
+        --alluredir="$NCD_PERF_REPORT_DIR/allure-results"
+        --clean-alluredir
+        --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
+        --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
+        'tests/integration/platform/data_daemon/performance/test_network.py::test_cloud_upload_and_readiness_performance[10s-1recs-10joints-250hz-1cam-120x120-120hz-threaded-realtime]'
+
+    - name: Generate Allure performance report
+      if: always()
+      run: |
+        if find "$NCD_PERF_REPORT_DIR/allure-results" -type f -print -quit | grep -q .; then
+          npx --yes allure@3.14.3 awesome \
+            --single-file \
+            --output "$NCD_PERF_REPORT_DIR/allure-report" \
+            "$NCD_PERF_REPORT_DIR/allure-results"
+        else
+          echo "No Allure results were produced"
+        fi
+
+    - name: Upload data-daemon performance report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: data-daemon-staging-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}
+        path: |
+          ${{ env.NCD_PERF_REPORT_DIR }}
+          .data_daemon_test_state/daemon.log
+        if-no-files-found: warn
+        retention-days: 14
 
     - name: Show disk space after tests
       if: always()

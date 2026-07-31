@@ -21,8 +21,10 @@ import pytest
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
     get_runner_pids,
 )
+from tests.integration.platform.data_daemon.shared.reporting import report_step
 from tests.integration.platform.data_daemon.shared.storage_assertions import (
     assert_post_test_storage_state,
     harness_db_path,
@@ -124,16 +126,37 @@ def scoped_storage_state(
     Yields:
         ``None``.
     """
-    apply_storage_state_action(case.storage_state_action)
+    with report_step("Prepare local daemon storage"):
+        with Timer(
+            30.0,
+            label="storage.prepare",
+            always_log=True,
+            assert_deadline=False,
+        ):
+            apply_storage_state_action(case.storage_state_action)
     try:
         yield
     finally:
-        apply_storage_state_action(case.storage_state_action)
+        with report_step("Clean local daemon storage"):
+            with Timer(
+                30.0,
+                label="storage.local_cleanup",
+                always_log=True,
+                assert_deadline=False,
+            ):
+                apply_storage_state_action(case.storage_state_action)
         if (
             dataset_name is not None
             and case.storage_state_action == STORAGE_STATE_DELETE
         ):
-            delete_cloud_dataset(dataset_name)
+            with report_step("Delete cloud test dataset"):
+                with Timer(
+                    60.0,
+                    label="cloud.dataset_delete",
+                    always_log=True,
+                    assert_deadline=False,
+                ):
+                    delete_cloud_dataset(dataset_name)
         assert_post_test_storage_state(
             storage_state_action=case.storage_state_action,
         )
