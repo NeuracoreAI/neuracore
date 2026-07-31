@@ -220,10 +220,12 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             raise ImportError("Frequency is required for importing episodes.")
         total_steps = self._infer_total_steps(steps)
         base_time = time.time()
+        recording_stop_timestamp = base_time
         if not self.dry_run:
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
+                timestamp=base_time,
             )
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
@@ -247,6 +249,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         for idx, step in enumerate(steps, start=1):
             self._reset_step_state()
             timestamp = base_time + (idx / self.frequency)
+            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
             try:
                 self._record_step(step, timestamp)
             except Exception as exc:  # importer-specific policy hook
@@ -264,6 +267,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
                 wait=True,
+                timestamp=recording_stop_timestamp,
             )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 

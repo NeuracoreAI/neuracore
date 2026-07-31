@@ -230,23 +230,32 @@ def test_mcap_importer_build_work_items(monkeypatch, tmp_path: Path):
 def test_mcap_importer_import_item_starts_and_stops_recording(
     monkeypatch, tmp_path: Path
 ):
-    calls: list[str] = []
+    calls: list[tuple[str, float]] = []
 
     monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.time.time",
+        lambda: 100.0,
+    )
+    monkeypatch.setattr(
         "neuracore.importer.mcap.mcap_importer.nc.start_recording",
-        lambda robot_name, instance: calls.append("start"),
+        lambda robot_name, instance, timestamp: calls.append(("start", timestamp)),
     )
     monkeypatch.setattr(
         "neuracore.importer.mcap.mcap_importer.nc.stop_recording",
-        lambda robot_name, instance, wait: calls.append("stop"),
+        lambda robot_name, instance, wait, timestamp: calls.append(("stop", timestamp)),
     )
 
     importer = _make_importer(monkeypatch, tmp_path)
-    monkeypatch.setattr(importer, "_stream_episode_file", lambda *_args, **_kwargs: 3)
+
+    def _stream_episode_file(*_args, **kwargs):
+        assert kwargs["recording_start_timestamp"] == 100.0
+        return 3, 105.0
+
+    monkeypatch.setattr(importer, "_stream_episode_file", _stream_episode_file)
 
     importer.import_item(importer.build_work_items()[0])
 
-    assert calls == ["start", "stop"]
+    assert calls == [("start", 100.0), ("stop", 105.0)]
 
 
 def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
@@ -261,7 +270,11 @@ def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
     )
 
     importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
-    monkeypatch.setattr(importer, "_stream_episode_file", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(
+        importer,
+        "_stream_episode_file",
+        lambda *_args, **_kwargs: (0, 100.0),
+    )
 
     importer.import_item(importer.build_work_items()[0])
 

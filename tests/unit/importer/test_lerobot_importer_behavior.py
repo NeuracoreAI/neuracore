@@ -118,7 +118,13 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     importer._record_step = MagicMock(side_effect=[ValueError("bad step"), None])
 
     with (
-        patch("neuracore.importer.lerobot_importer.nc.start_recording"),
+        patch(
+            "neuracore.importer.lerobot_importer.time.time",
+            return_value=100.0,
+        ),
+        patch(
+            "neuracore.importer.lerobot_importer.nc.start_recording"
+        ) as start_recording,
         patch(
             "neuracore.importer.lerobot_importer.nc.stop_recording"
         ) as stop_recording,
@@ -139,9 +145,19 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
         call(0, step=0, total_steps=2, episode_label="123"),
         call(0, step=2, total_steps=2, episode_label="123"),
     ])
-    stop_recording.assert_called_once_with(
-        robot_name="test_robot", instance=2, wait=True
+
+    start_recording.assert_called_once_with(
+        robot_name="test_robot",
+        instance=2,
+        timestamp=100.0,
     )
+
+    stop_recording.assert_called_once()
+    stop_kwargs = stop_recording.call_args.kwargs
+    assert stop_kwargs["robot_name"] == "test_robot"
+    assert stop_kwargs["instance"] == 2
+    assert stop_kwargs["wait"] is True
+    assert stop_kwargs["timestamp"] == pytest.approx(100.3)
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():

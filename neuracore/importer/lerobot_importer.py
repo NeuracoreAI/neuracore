@@ -150,6 +150,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
         base_time = time.time()
+        recording_stop_timestamp = base_time
         worker_label = (
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
@@ -164,6 +165,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
+                timestamp=base_time,
             )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
@@ -172,6 +174,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         for step_idx, step_data in enumerate(step_iter, start=1):
             self._reset_step_state()
             timestamp = base_time + (step_idx / self.frequency)
+            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
             try:
                 self._record_step(step_data, timestamp)
             except Exception as exc:  # noqa: BLE001
@@ -201,6 +204,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
                 wait=True,
+                timestamp=recording_stop_timestamp,
             )
         self.logger.info("[%s] Completed episode %s", worker_label, episode_id)
 
