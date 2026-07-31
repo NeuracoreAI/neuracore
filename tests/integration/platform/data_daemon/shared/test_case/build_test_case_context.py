@@ -405,6 +405,13 @@ def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
     return 0.0
 
 
+def precompute_timestamps(
+    timestamp_start_s: float, frame_count: int, fps: int
+) -> list[float]:
+    """Return the complete synthetic timestamp sequence for one stream."""
+    return [timestamp_start_s + frame_index / fps for frame_index in range(frame_count)]
+
+
 def log_synchronous_frames(
     *,
     robot_name: str,
@@ -426,14 +433,22 @@ def log_synchronous_frames(
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Joint and video frames are interleaved in a single loop using a wall-clock
-    deadline scheduler, so both streams advance together in time order.
+    Joint and video frames are interleaved in timestamp order. Manual timestamps
+    are precomputed and emitted without wall-clock pacing; real and stochastic
+    modes retain the deadline scheduler used by their timing assertions.
     """
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
     )
 
-    recording_wall_start = time.time()
+    pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
+    recording_wall_start = time.time() if pace_against_wall_clock else 0.0
+    joint_timestamps = precompute_timestamps(
+        timestamp_start_s, joint_frame_count, joint_fps
+    )
+    video_timestamps = precompute_timestamps(
+        timestamp_start_s, video_frame_count, video_fps
+    )
     joint_index = 0
     video_index = 0
 
@@ -444,9 +459,13 @@ def log_synchronous_frames(
         video_due = camera_name_list and video_index < video_frame_count
         # One jitter is shared by both deadlines/timestamps this iteration, so
         # size it to the tighter (higher-fps) window to stay within both.
-        jitter = get_jitter(
-            use_stochastic_timestamps,
-            max(joint_fps, video_fps) if camera_name_list else joint_fps,
+        jitter = (
+            get_jitter(
+                use_stochastic_timestamps,
+                max(joint_fps, video_fps) if camera_name_list else joint_fps,
+            )
+            if pace_against_wall_clock
+            else 0.0
         )
 
         joint_deadline = (
@@ -461,15 +480,18 @@ def log_synchronous_frames(
         )
 
         if joint_deadline <= video_deadline:
-            remaining = joint_deadline - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
+            if pace_against_wall_clock:
+                remaining = joint_deadline - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
                 )
             if use_real_timestamps:
                 timestamp = None
+            elif not use_stochastic_timestamps:
+                timestamp = joint_timestamps[joint_index]
             else:
                 intended = timestamp_start_s + (joint_index / joint_fps)
                 timestamp = intended + jitter
@@ -511,15 +533,18 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            remaining = video_deadline - time.time()
-            if remaining > 0:
-                time.sleep(remaining)
+            if pace_against_wall_clock:
+                remaining = video_deadline - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
                 )
             if use_real_timestamps:
                 timestamp = None
+            elif not use_stochastic_timestamps:
+                timestamp = video_timestamps[video_index]
             else:
                 intended = timestamp_start_s + (video_index / video_fps)
                 timestamp = intended + jitter
@@ -588,7 +613,11 @@ def run_threaded_logging(
     use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
 ) -> list[str]:
-    """Run logging across multiple threads, one per data role."""
+    """Run logging across multiple threads, one per data role.
+
+    Manual timestamps are precomputed per role and emitted without wall-clock
+    pacing. Real and stochastic modes keep their existing deadline scheduling.
+    """
     roles = build_thread_roles(
         joint_names=joint_names, camera_name_list=camera_name_list
     )
@@ -606,13 +635,20 @@ def run_threaded_logging(
             frame_count = video_frame_count if is_rgb else joint_frame_count
             fps = video_fps if is_rgb else joint_fps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
-            thread_wall_start = time.time()
+            pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
+            thread_wall_start = time.time() if pace_against_wall_clock else 0.0
+            timestamps = precompute_timestamps(timestamp_start_s, frame_count, fps)
             for frame_index in range(frame_count):
-                jitter = get_jitter(use_stochastic_timestamps, fps)
+                jitter = (
+                    get_jitter(use_stochastic_timestamps, fps)
+                    if pace_against_wall_clock
+                    else 0.0
+                )
                 frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
+                if pace_against_wall_clock:
+                    remaining = frame_deadline - time.time()
+                    if remaining > 0:
+                        time.sleep(remaining)
                 if assert_deadline and use_stochastic_timestamps:
                     assert_on_schedule(
                         frame_deadline,
@@ -621,6 +657,8 @@ def run_threaded_logging(
                     )
                 if use_real_timestamps:
                     timestamp = None
+                elif not use_stochastic_timestamps:
+                    timestamp = timestamps[frame_index]
                 else:
                     intended = timestamp_start_s + (frame_index / fps)
                     timestamp = intended + jitter
@@ -915,14 +953,16 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             if expected_by_recording is not None:
                 from neuracore_types.utils import validate_safe_name
 
-                joint_ts = [
-                    recording_timestamp_start_s + i / case.joint_fps
-                    for i in range(spec.expected_joint_frames)
-                ]
-                video_ts = [
-                    recording_timestamp_start_s + i / case.video_fps
-                    for i in range(spec.expected_video_frames)
-                ]
+                joint_ts = precompute_timestamps(
+                    recording_timestamp_start_s,
+                    spec.expected_joint_frames,
+                    case.joint_fps,
+                )
+                video_ts = precompute_timestamps(
+                    recording_timestamp_start_s,
+                    spec.expected_video_frames,
+                    case.video_fps,
+                )
                 by_trace: dict[str, list[float]] = {}
                 for joint_name in joint_name_list:
                     safe = validate_safe_name(joint_name)
