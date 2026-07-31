@@ -7,6 +7,7 @@ import requests_mock
 
 import neuracore as nc
 from neuracore.api import core as api_core
+from neuracore.core import robot as core_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError
@@ -148,9 +149,16 @@ def test_login_version_check_connection_error_surfaces_cleanly(
 
 
 def test_connect_robot(
-    temp_config_dir, mock_auth_requests, reset_neuracore, mock_urdf, mocked_org_id
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    mocked_org_id,
+    monkeypatch,
 ):
     """Test robot connection."""
+    session_factory = Mock(wraps=core_robot.thread_local_session)
+    monkeypatch.setattr(core_robot, "thread_local_session", session_factory)
     # Ensure login first
     nc.login("test_api_key")
 
@@ -167,6 +175,7 @@ def test_connect_robot(
     # Verify robot connection
     assert robot is not None
     assert robot.name == "test_robot"
+    session_factory.assert_called_once_with(retry_transient=True)
 
 
 def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):
