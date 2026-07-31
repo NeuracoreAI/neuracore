@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+# cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -60,6 +61,10 @@ OS_WINDOWS = "win32"
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
+# video_pacing
+PACING_DEADLINE = "deadline"
+PACING_BURST = "burst"
+
 # timestamp_mode
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
@@ -94,6 +99,7 @@ MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
+VIDEO_PACINGS = (PACING_DEADLINE, PACING_BURST)
 TIMESTAMP_MODES = (
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_REAL,
@@ -111,6 +117,7 @@ StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 TimestampMode = Literal["manual", "real", "stochastic"]
 VideoDetail = Literal["realistic", "flat"]
+VideoPacing = Literal["deadline", "burst"]
 TestOs = Literal["linux", "darwin", "win32"]
 
 MAX_TIME_TO_START_S = 20.0

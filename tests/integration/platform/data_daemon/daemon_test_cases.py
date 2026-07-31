@@ -6,6 +6,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
     OS_EXCEPT_DARWIN,
+    PACING_BURST,
     PRODUCER_PER_THREAD,
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_STOCHASTIC,
@@ -86,6 +87,21 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         image_width=64,
         video_codec="h264_medium",
+    ),
+    DataDaemonTestCase(
+        # ~2.6 chunks at 640x480@30 (9.7s each); timestamp_mode defaults to
+        # MANUAL so the expected frame count stays exact.
+        duration_sec=25,
+        joint_count=7,
+        recording_count=1,
+        video_count=2,
+        image_width=640,
+        image_height=480,
+        video_fps=30,
+        joint_fps=30,
+        producer_channels=PRODUCER_PER_THREAD,
+        video_codec="h264_medium",  # activates assert_lossy_only_video_artifacts
+        video_pacing=PACING_BURST,
     ),
 )
 

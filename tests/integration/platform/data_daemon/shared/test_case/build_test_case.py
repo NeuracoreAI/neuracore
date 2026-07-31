@@ -33,6 +33,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_DEADLINE,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -45,6 +46,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TestOs,
     TimestampMode,
     VideoDetail,
+    VideoPacing,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +192,15 @@ class DataDaemonTestCase:
             because their per-pixel upload SLA
             (``STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S``) is calibrated
             against that content.
+        video_pacing: Controls whether the RGB producer thread paces itself to
+            ``video_fps``.  ``"deadline"`` (default) sleeps between frames so
+            delivery tracks wall-clock time, same as every other stream.
+            ``"burst"`` skips that sleep, so frames are pushed as fast as the
+            camera thread can render and log them, backlogging the writer
+            queue the way a real camera does when the encoder can't keep up.
+            Only affects the RGB thread under ``producer_channels="per_thread"``;
+            timestamps stay synthetic (``timestamp_start_s + frame_index / fps``)
+            regardless of delivery pacing.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -222,6 +233,7 @@ class DataDaemonTestCase:
     run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
+    video_pacing: VideoPacing = PACING_DEADLINE
 
     @property
     def runs_on_current_os(self) -> bool:
