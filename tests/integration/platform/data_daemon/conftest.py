@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -17,24 +18,35 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
+from tests.integration.platform.data_daemon.shared.reporting import (
+    PerformanceReportContext,
+    attach_json,
+    attach_text,
+    build_performance_metrics,
+    format_event_timeline,
+    format_metric_summary,
+    format_phase_summary,
+    load_performance_events,
+    performance_metrics_enabled,
+    report_headline_metrics,
+    summarize_performance_events,
+    write_metrics_artifact,
+)
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     SESSION_RUNS,
     DataDaemonTestCase,
     _format_timer_stats_line,
-)
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
-    ContextResult,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     apply_storage_state_action,
-    build_isolation_run_analysis,
+    set_case_analysis_report,
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
-# cspell:ignore nodeid getfixturevalue modifyitems callspec
+# cspell:ignore nodeid getfixturevalue modifyitems callspec addoption getgroup
 
 # Add the repo root to the path so sub workers on macos can unpickle pool tasks
 # correctly. pytest --import-mode=importlib imports tests files without touching the
@@ -48,6 +60,41 @@ if _REPO_ROOT not in sys.path:
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """Register the optional directory for stable per-case metric artifacts."""
+    parser.getgroup("data-daemon reporting").addoption(
+        "--performance-metrics-dir",
+        action="store",
+        default=None,
+        help="Write one performance metrics JSON file per data-daemon test case.",
+    )
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Fail fast when explicitly enabled phase capture cannot write events."""
+    del config
+    if not performance_metrics_enabled():
+        return
+    raw_path = os.environ.get("NCD_PERF_EVENTS_PATH")
+    if not raw_path:
+        raise pytest.UsageError(
+            "NCD_PERF_METRICS is enabled but NCD_PERF_EVENTS_PATH is not set"
+        )
+    event_path = Path(raw_path)
+    if not event_path.is_absolute():
+        raise pytest.UsageError(
+            "NCD_PERF_EVENTS_PATH must be absolute because the daemon runs in "
+            "a background process"
+        )
+    try:
+        event_path.parent.mkdir(parents=True, exist_ok=True)
+        event_path.touch(exist_ok=True)
+    except OSError as error:
+        raise pytest.UsageError(
+            f"cannot write NCD_PERF_EVENTS_PATH {event_path}: {error}"
+        ) from error
+
+
 @pytest.fixture(autouse=True)
 def login_parent_process() -> Iterator[None]:
     """Authenticate the parent pytest process for each test.
@@ -57,7 +104,11 @@ def login_parent_process() -> Iterator[None]:
     """
     ensure_login()
     yield
-    nc.logout()
+    # The dedicated local performance-report runner preserves the saved login
+    # across cases. Normal integration runs still exercise and time a fresh
+    # login per test exactly as before.
+    if os.environ.get("NCD_PRESERVE_TEST_LOGIN") != "1":
+        nc.logout()
 
 
 @pytest.fixture(autouse=True)
@@ -172,35 +223,124 @@ def test_wall_timer() -> Callable[[], float]:
     return lambda: time.perf_counter() - start
 
 
-@pytest.fixture()
-def log_run_analysis_on_teardown(
+@pytest.fixture(autouse=True)
+def correlate_performance_events(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Correlate opt-in daemon events to every pytest case before launch."""
+    if not performance_metrics_enabled():
+        yield
+        return
+    previous_case_id = os.environ.get("NCD_PERF_CASE_ID")
+    os.environ["NCD_PERF_CASE_ID"] = request.node.nodeid
+    try:
+        yield
+    finally:
+        if previous_case_id is None:
+            os.environ.pop("NCD_PERF_CASE_ID", None)
+        else:
+            os.environ["NCD_PERF_CASE_ID"] = previous_case_id
+
+
+@pytest.fixture(autouse=True)
+def install_performance_reporter(
     request: pytest.FixtureRequest,
-) -> Callable[[DataDaemonTestCase, list[ContextResult], float | None], None]:
-    """Register case+results to be passed to log_run_analysis at teardown."""
-    state: dict[str, any] = {}
+) -> Iterator[None]:
+    """Make generic metrics emission available to every case-reporting test."""
+    emitted = False
 
-    def register(
+    def emit_report(
+        *,
         case: DataDaemonTestCase,
-        results: list[ContextResult],
-        test_wall_s: float | None = None,
+        results: list[object],
+        test_wall_s: float | None,
+        analysis_report: str,
     ) -> None:
-        state["case"] = case
-        state["results"] = results
-        state["test_wall_s"] = test_wall_s
-
-    def finalizer() -> None:
-        if state.get("results"):
-            try:
-                request.node.run_analysis_report = build_isolation_run_analysis(
-                    case=state["case"],
-                    results=state["results"],
-                    test_wall_s=state.get("test_wall_s"),
+        nonlocal emitted
+        if emitted:
+            return
+        try:
+            request.node.run_analysis_report = analysis_report
+            metrics = build_performance_metrics(
+                case=case,
+                results=results,
+                timer_stats=Timer._stats,
+                test_wall_s=test_wall_s,
+            )
+            capture_enabled = performance_metrics_enabled()
+            events = (
+                load_performance_events(
+                    os.environ.get("NCD_PERF_EVENTS_PATH"),
+                    case_id=request.node.nodeid,
                 )
-            except Exception:  # noqa: BLE001
-                pass
+                if capture_enabled
+                else []
+            )
+            event_summary = summarize_performance_events(events)
+            event_summary["enabled"] = capture_enabled
+            metrics["structured_phase_events"] = event_summary
+            attach_text("Run timing analysis", analysis_report)
+            attach_text("Performance metrics", format_metric_summary(metrics))
+            if capture_enabled:
+                attach_text("Daemon phase summary", format_phase_summary(event_summary))
+                attach_text("Exact phase timeline", format_event_timeline(events))
+                attach_json("Structured phase events (JSON)", events)
+            attach_json("Performance metrics (JSON)", metrics)
+            report_headline_metrics(metrics)
+            metrics_dir = request.config.getoption("--performance-metrics-dir")
+            if metrics_dir:
+                write_metrics_artifact(
+                    metrics_dir,
+                    nodeid=request.node.nodeid,
+                    metrics=metrics,
+                )
+            emitted = True
+        except Exception:  # noqa: BLE001
+            # Opt-in capture is a promised test output, so never silently lose
+            # it in local reporting or staging CI. Preserve the historical
+            # best-effort behavior when structured capture is disabled.
+            if performance_metrics_enabled():
+                raise
 
-    request.addfinalizer(finalizer)
-    return register
+    attribute = "_data_daemon_performance_reporter"
+    setattr(request.node, attribute, emit_report)
+    try:
+        yield
+    finally:
+        if getattr(request.node, attribute, None) is emit_report:
+            delattr(request.node, attribute)
+
+
+@pytest.fixture()
+def performance_report(
+    request: pytest.FixtureRequest,
+) -> Callable[..., PerformanceReportContext]:
+    """Create a context-managed report for any data-daemon test case."""
+
+    def create(
+        case: DataDaemonTestCase,
+        *,
+        dataset_name: str | None = None,
+        label_prefix: str | None = None,
+    ) -> PerformanceReportContext:
+        def finalize(
+            finalized_case: DataDaemonTestCase,
+            results: list[object],
+            test_wall_s: float,
+        ) -> None:
+            set_case_analysis_report(
+                request=request,
+                case=finalized_case,
+                results=results,
+                label_prefix=label_prefix,
+                test_wall_s=test_wall_s,
+            )
+
+        return PerformanceReportContext(
+            case=case,
+            dataset_name=dataset_name,
+            finalize=finalize,
+        )
+
+    return create
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

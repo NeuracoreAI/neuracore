@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
-
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
@@ -10,6 +8,7 @@ from tests.integration.platform.data_daemon.daemon_test_cases import (
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
+from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -46,8 +45,7 @@ CASES = DataDaemonTestBatch(
 def test_cloud_upload_and_readiness_performance(
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
-    log_run_analysis_on_teardown,
-    test_wall_timer: Callable[[], float],
+    performance_report,
 ) -> None:
     """Record a high-volume online workload and verify cloud upload timing.
 
@@ -66,15 +64,29 @@ def test_cloud_upload_and_readiness_performance(
         )
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
-    results: list[ContextResult] = []
-    with scoped_storage_state(case, dataset_name=dataset_name):
-        try:
+    with performance_report(case, dataset_name=dataset_name) as report:
+        results: list[ContextResult] = []
+        with scoped_storage_state(case, dataset_name=dataset_name):
             with online_daemon_running():
-                results = run_case_contexts(case, specs=specs)
-                wait_for_dataset_ready(
-                    results[0].dataset_name,
-                    expected_recording_count=case.recording_count,
-                    timeout_s=case_timeout_seconds(case),
-                )
-        finally:
-            log_run_analysis_on_teardown(case, results, test_wall_s=test_wall_timer())
+                with report.step("Record workload and stop recordings"):
+                    with Timer(
+                        case_timeout_seconds(case),
+                        label="performance.recording_contexts",
+                        always_log=True,
+                        assert_deadline=False,
+                    ):
+                        results = report.capture_results(
+                            run_case_contexts(case, specs=specs)
+                        )
+                with report.step("Wait for cloud dataset readiness"):
+                    with Timer(
+                        case_timeout_seconds(case),
+                        label="performance.dataset_ready_wait",
+                        always_log=True,
+                        assert_deadline=False,
+                    ):
+                        wait_for_dataset_ready(
+                            results[0].dataset_name,
+                            expected_recording_count=case.recording_count,
+                            timeout_s=case_timeout_seconds(case),
+                        )

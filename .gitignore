@@ -121,6 +121,7 @@ examples/logs/
 examples/test_streaming/
 
 .data_daemon_test_state/
+.data_daemon_test_reports/
 
 # Bundled rust artefacts built into the package tree by
 # `rust/scripts/build_wheel_artefacts.sh`. Both are per-machine and per-build,

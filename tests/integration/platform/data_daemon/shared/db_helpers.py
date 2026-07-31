@@ -86,6 +86,9 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     normalize_recording_indexes,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.reporting import (
+    record_performance_event,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
 )
@@ -728,17 +731,67 @@ def wait_for_dataset_ready(
     wait_start = time.perf_counter()
     last_error: Exception | None = None
     recording_count: int | None = None
+    poll_count = 0
+    record_performance_event(
+        "backend_dataset_visibility",
+        "started",
+        details={"expected_recording_count": expected_recording_count},
+    )
     while True:
-        elapsed_s = time.perf_counter() - wait_start
+        poll_count += 1
+        poll_started = time.perf_counter()
         try:
             dataset = nc.get_dataset(dataset_name)
             recording_count = len(dataset)
+            poll_elapsed_s = time.perf_counter() - poll_started
+            record_performance_event(
+                "backend_dataset_visibility",
+                "poll",
+                elapsed_s=poll_elapsed_s,
+                details={
+                    "poll": poll_count,
+                    "recording_count": recording_count,
+                    "expected_recording_count": expected_recording_count,
+                    "outcome": "ok",
+                },
+            )
             if recording_count == expected_recording_count:
+                record_performance_event(
+                    "backend_dataset_visibility",
+                    "completed",
+                    elapsed_s=time.perf_counter() - wait_start,
+                    details={
+                        "poll_count": poll_count,
+                        "recording_count": recording_count,
+                        "outcome": "visible",
+                    },
+                )
                 return
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+            record_performance_event(
+                "backend_dataset_visibility",
+                "poll",
+                elapsed_s=time.perf_counter() - poll_started,
+                details={
+                    "poll": poll_count,
+                    "outcome": "error",
+                    "error_type": type(exc).__name__,
+                },
+            )
 
+        elapsed_s = time.perf_counter() - wait_start
         if elapsed_s >= timeout_s:
+            record_performance_event(
+                "backend_dataset_visibility",
+                "failed",
+                elapsed_s=elapsed_s,
+                details={
+                    "poll_count": poll_count,
+                    "recording_count": recording_count,
+                    "outcome": "timeout",
+                },
+            )
             raise TimeoutError(
                 f"Timed out waiting for dataset '{dataset_name}' to have "
                 f"{expected_recording_count} recording(s) after {timeout_s}s. "
