@@ -363,6 +363,7 @@ pooler
 popleft
 posinf
 precheck
+precomputes
 preds
 preemptible
 preexec

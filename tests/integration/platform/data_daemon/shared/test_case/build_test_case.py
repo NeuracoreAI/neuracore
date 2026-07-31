@@ -87,9 +87,11 @@ class DataDaemonTestCase:
     ``DataDaemonTestBatch`` that applies shared infrastructure parameters.
 
     Attributes:
-        duration_sec: Wall-clock duration logged per individual recording, in
-            seconds.  All frames are generated at ``fps`` Hz so the total
-            expected frame count is ``fps * duration_sec``.
+        duration_sec: Simulated capture duration per individual recording, in
+            seconds. All frames are generated at ``fps`` Hz so the total expected
+            frame count is ``fps * duration_sec``. Manual timestamp cases emit
+            those frames as quickly as the transport allows rather than waiting
+            for this amount of wall-clock time.
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
@@ -149,8 +151,9 @@ class DataDaemonTestCase:
             total expected video frame count as ``video_fps * duration_sec``.
             Ignored when ``video_count`` is ``0``.
         timestamp_mode: Controls how timestamps are assigned to logged frames.
-            ``"manual"`` (default) passes explicit monotonically-increasing
-            timestamps computed from ``timestamp_start_s + frame_index / fps``.
+            ``"manual"`` (default) precomputes explicit monotonically-increasing
+            timestamps from ``timestamp_start_s + frame_index / fps`` and emits
+            frames without wall-clock pacing.
             ``"real"`` omits the ``timestamp`` argument so the logging API uses
             the wall-clock time at the moment each frame is logged.
         skip: When ``True``, the case is skipped at collection time instead of

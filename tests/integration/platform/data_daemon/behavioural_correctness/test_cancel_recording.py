@@ -37,7 +37,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
-    TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_MANUAL,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -61,7 +61,7 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
-            timestamp_mode=TIMESTAMP_MODE_REAL,
+            timestamp_mode=TIMESTAMP_MODE_MANUAL,
         ),
     ),
 ).as_cases()

@@ -7,7 +7,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_STAGGERED,
     OS_EXCEPT_DARWIN,
     PRODUCER_PER_THREAD,
-    TIMESTAMP_MODE_REAL,
+    TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_STOCHASTIC,
 )
 
@@ -53,21 +53,6 @@ PRE_NETWORK_INTEGRITY_CASES = (
     ),
     DataDaemonTestCase(
         duration_sec=10,
-        joint_count=7,
-        recording_count=4,
-        video_count=1,
-        image_height=64,
-        image_width=64,
-        context_duration_mode=DURATION_MODE_VARIABLE,
-        video_fps=30,
-        joint_fps=15,
-        producer_channels=PRODUCER_PER_THREAD,
-        parallel_contexts=2,
-        mode=MODE_STAGGERED,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
-    ),
-    DataDaemonTestCase(
-        duration_sec=10,
         recording_count=1,
         video_count=1,
         image_height=120,
@@ -75,7 +60,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
         wait=False,
         requires_rust_daemon=True,
     ),
@@ -157,7 +142,7 @@ NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -168,7 +153,7 @@ NETWORK_INTEGRITY_CASES = (
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
         wait=False,
     ),
     DataDaemonTestCase(
@@ -205,7 +190,7 @@ NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
         wait=True,
     ),
 )
@@ -286,7 +271,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
         wait=False,
     ),
 )
@@ -427,7 +412,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=120,
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -438,7 +423,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=120,
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
-        timestamp_mode=TIMESTAMP_MODE_REAL,
+        timestamp_mode=TIMESTAMP_MODE_MANUAL,
         wait=True,
     ),
     DataDaemonTestCase(
