@@ -24,6 +24,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_FLAT,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -33,11 +34,16 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 # Cloud performance covers both nowait and wait=True because upload/registration
 # progress is asynchronous and both stop-recording modes must remain valid.
+#
+# Flat frame content, as in the pre-network performance suite: the per-pixel upload
+# SLA is calibrated against it, and realistic 1080p content would push this suite's
+# uploads into the hundreds of GB.
 CASES = DataDaemonTestBatch(
     cases=NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
     requires_rust_daemon=True,
+    video_detail=DETAIL_FLAT,
 ).as_cases()
 
 

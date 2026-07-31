@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MIN_ENCODED_BYTES_PER_PIXEL,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
     stochastic_jitter_window,
@@ -635,6 +636,73 @@ def _ffprobe_video_stream(video_path: Path) -> dict | None:
     return streams[0] if streams else None
 
 
+def _rgb_trace_dirs(recordings_root: Path) -> list[Path]:
+    """Return every ``RGB_IMAGES`` trace directory under the recordings root."""
+    return [
+        trace_dir
+        for recording_dir in sorted(recordings_root.iterdir())
+        if recording_dir.is_dir()
+        for rgb_dir in [recording_dir / "RGB_IMAGES"]
+        if rgb_dir.is_dir()
+        for trace_dir in sorted(rgb_dir.iterdir())
+        if trace_dir.is_dir()
+    ]
+
+
+def assert_encoded_video_not_trivial(min_trace_count: int = 1) -> None:
+    """Assert the encoded lossless video carries a realistic amount of data.
+
+    Guards the *frame content*, not the pipeline: solid-colour frames compress
+    ~620:1 losslessly, so a regression that quietly reverted the synthetic camera
+    frames to a flat fill would leave every other assertion in this suite passing
+    while the video pipeline did almost no work.
+
+    For every ``RGB_IMAGES`` trace, divides ``lossless.mp4``'s size by its frame
+    count and pixel count and requires the result to exceed
+    :data:`MIN_ENCODED_BYTES_PER_PIXEL`, which every resolution in this suite
+    clears by at least 11x while flat frames fall at least 3x below it.
+
+    Only meaningful for cases whose ``video_detail`` is ``DETAIL_REALISTIC`` and
+    which write a lossless archive, so callers must gate on both.
+
+    Args:
+        min_trace_count: Minimum number of RGB trace directories expected.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
+
+    trace_dirs = _rgb_trace_dirs(recordings_root)
+    assert len(trace_dirs) >= min_trace_count, (
+        f"expected at least {min_trace_count} RGB trace dir(s), "
+        f"found {len(trace_dirs)} under {recordings_root}"
+    )
+
+    for trace_dir in trace_dirs:
+        lossless_path = trace_dir / "lossless.mp4"
+        assert lossless_path.is_file(), f"missing lossless.mp4 in {trace_dir}"
+
+        stream = _ffprobe_video_stream(lossless_path)
+        if stream is None:
+            continue
+        width, height = stream.get("width"), stream.get("height")
+        nb_read_frames = stream.get("nb_read_frames")
+        if not width or not height or not nb_read_frames:
+            continue
+        frame_count, pixels = int(nb_read_frames), int(width) * int(height)
+        if frame_count <= 0 or pixels <= 0:
+            continue
+
+        encoded_bytes = lossless_path.stat().st_size
+        bytes_per_pixel = encoded_bytes / frame_count / pixels
+        assert bytes_per_pixel > MIN_ENCODED_BYTES_PER_PIXEL, (
+            f"{lossless_path} encodes {bytes_per_pixel:.4f} bytes/pixel "
+            f"({encoded_bytes} bytes, {frame_count} frames, {width}x{height}), "
+            f"at or below the {MIN_ENCODED_BYTES_PER_PIXEL} floor — the logged "
+            f"frames have regressed to near-trivial content and the video "
+            f"pipeline is not being exercised"
+        )
+
+
 def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
     """Assert every RGB video trace on disk is a single lossy H.264 video.
 
@@ -655,15 +723,7 @@ def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
     recordings_root = get_daemon_recordings_root_path()
     assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
 
-    trace_dirs = [
-        trace_dir
-        for recording_dir in sorted(recordings_root.iterdir())
-        if recording_dir.is_dir()
-        for rgb_dir in [recording_dir / "RGB_IMAGES"]
-        if rgb_dir.is_dir()
-        for trace_dir in sorted(rgb_dir.iterdir())
-        if trace_dir.is_dir()
-    ]
+    trace_dirs = _rgb_trace_dirs(recordings_root)
     assert len(trace_dirs) >= min_trace_count, (
         f"expected at least {min_trace_count} RGB trace dir(s), "
         f"found {len(trace_dirs)} under {recordings_root}"

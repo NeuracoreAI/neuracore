@@ -20,6 +20,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_FLAT,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -29,11 +30,18 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 # Performance workloads target the Rust daemon's throughput ceiling; the legacy
 # Python daemon cannot sustain them, so the whole suite is Rust-only.
+#
+# Flat frame content: this suite's budgets are calibrated against solid-fill
+# frames. STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S in particular is a
+# per-*pixel* cost, which realistic content raises by two orders of magnitude, and
+# the long 1080p cases would write hundreds of GB. Encoder realism is the
+# integrity suites' job; throughput scaling is this one's.
 _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
     requires_rust_daemon=True,
+    video_detail=DETAIL_FLAT,
 ).as_cases()
 
 

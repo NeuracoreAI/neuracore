@@ -28,6 +28,7 @@ from neuracore.core.config.config_manager import get_config_manager
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
@@ -43,6 +44,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     StorageStateAction,
     TestOs,
     TimestampMode,
+    VideoDetail,
 )
 
 logger = logging.getLogger(__name__)
@@ -179,6 +181,15 @@ class DataDaemonTestCase:
             recording, so RGB cameras upload a single lossy CRF-23 video and the
             lossless archive is dropped.  ``None`` keeps the default
             lossless+lossy behaviour.
+        video_detail: Content the synthetic camera frames carry.
+            ``DETAIL_REALISTIC`` (default) renders moving, textured, noisy frames
+            that cost the encoder roughly what a real camera does.
+            ``DETAIL_FLAT`` renders the solid-fill frames this suite used
+            historically, which compress ~620:1 and leave the video pipeline
+            idle.  The performance suites pin ``DETAIL_FLAT`` at the batch level
+            because their per-pixel upload SLA
+            (``STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S``) is calibrated
+            against that content.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -210,6 +221,7 @@ class DataDaemonTestCase:
     requires_rust_daemon: bool = False
     run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
+    video_detail: VideoDetail = DETAIL_REALISTIC
 
     @property
     def runs_on_current_os(self) -> bool:
@@ -280,6 +292,9 @@ class DataDaemonTestBatch:
             above this does *not* override the cases: any case with its own
             ``run_on_os`` keeps it.  ``None`` (default) leaves every case
             running on all platforms.
+        video_detail: Optional batch-level override for camera frame content.
+            When unset, each case keeps its own ``video_detail``.  See
+            ``DataDaemonTestCase.video_detail``.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -291,6 +306,7 @@ class DataDaemonTestBatch:
     skip: bool = False
     requires_rust_daemon: bool = False
     run_on_os: tuple[TestOs, ...] | None = None
+    video_detail: VideoDetail | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -302,6 +318,8 @@ class DataDaemonTestBatch:
         }
         if self.timestamp_mode is not None:
             batch_overrides["timestamp_mode"] = self.timestamp_mode
+        if self.video_detail is not None:
+            batch_overrides["video_detail"] = self.video_detail
         if self.skip:
             batch_overrides["skip"] = True
         if self.requires_rust_daemon:
@@ -352,6 +370,8 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+        if case.video_detail != DataDaemonTestCase.video_detail:
+            parts.append(f"{case.video_detail}frames")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:

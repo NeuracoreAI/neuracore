@@ -27,12 +27,14 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     ContextResult,
     build_context_specs,
     create_testing_dataset_name,
-    encode_frame_number,
     log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+)
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    encode_frame_number,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,

@@ -56,6 +56,10 @@ OS_LINUX = "linux"
 OS_DARWIN = "darwin"
 OS_WINDOWS = "win32"
 
+# video_detail
+DETAIL_REALISTIC = "realistic"
+DETAIL_FLAT = "flat"
+
 # timestamp_mode
 TIMESTAMP_MODE_MANUAL = "manual"
 TIMESTAMP_MODE_REAL = "real"
@@ -89,6 +93,7 @@ STORAGE_STATE_ACTIONS = (
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
+VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 TIMESTAMP_MODES = (
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_REAL,
@@ -105,6 +110,7 @@ OS_EXCEPT_DARWIN = (OS_LINUX, OS_WINDOWS)
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 TimestampMode = Literal["manual", "real", "stochastic"]
+VideoDetail = Literal["realistic", "flat"]
 TestOs = Literal["linux", "darwin", "win32"]
 
 MAX_TIME_TO_START_S = 20.0
@@ -123,3 +129,12 @@ FRAME_DEFAULT_FILL_VALUE = 100
 FRAME_MAX_COLOR_VALUE = 255
 FRAME_HALF_DIVISOR = 2
 FRAME_COLOR_CHANNELS = 3
+
+# Floor for encoded ``lossless.mp4`` bytes per pixel, asserted on realistic-detail
+# video cases. Measured across this matrix through the daemon's own ffmpeg
+# arguments: flat frames yield 0.005 (1920x1080) to 0.032 (64x64) bytes/pixel,
+# realistic frames 1.18 (1920x1080) to 2.07 (64x64). Small frames sit nearer the
+# floor from both directions because a keyframe amortises over fewer pixels, so
+# they set the margin: at least 3x above the flat ceiling and 11x below the
+# realistic floor.
+MIN_ENCODED_BYTES_PER_PIXEL = 0.1
