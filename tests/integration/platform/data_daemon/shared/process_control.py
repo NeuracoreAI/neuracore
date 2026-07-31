@@ -241,6 +241,44 @@ def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
 
 
 # ---------------------------------------------------------------------------
+# CPU load simulation
+# ---------------------------------------------------------------------------
+
+
+def _spin() -> None:
+    """Busy-loop until terminated. Runs in a dedicated process (see cpu_load)."""
+    while True:
+        pass
+
+
+# cspell:ignore RTDE
+@contextmanager
+def cpu_load() -> Generator[None]:
+    """Saturate all but one CPU core for the duration of the block.
+
+    Approximates the contention a real rig puts on the daemon (RTDE at
+    125 Hz, teleop, two RealSense drivers, the daemon's own ffmpeg), so a
+    test relying on the writer's compress pool backlogging under load
+    doesn't depend on how many idle cores the CI runner happens to have.
+    Separate processes rather than threads, so the load is real OS-level
+    core contention rather than contention for this process's own GIL.
+    """
+    workers = max((os.cpu_count() or 2) - 1, 1)
+    spinners = [
+        multiprocessing.Process(target=_spin, daemon=True) for _ in range(workers)
+    ]
+    for spinner in spinners:
+        spinner.start()
+    try:
+        yield
+    finally:
+        for spinner in spinners:
+            spinner.terminate()
+        for spinner in spinners:
+            spinner.join()
+
+
+# ---------------------------------------------------------------------------
 # Process introspection helpers
 # ---------------------------------------------------------------------------
 

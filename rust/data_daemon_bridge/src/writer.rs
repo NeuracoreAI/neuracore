@@ -600,12 +600,25 @@ extern "C" fn clear_queue_cache() {
 /// queue's admission backpressure (the writer never outruns the pool).
 const MAX_FRAMES_IN_FLIGHT: usize = 8;
 
+/// Environment override for the compression pool size.
+const COMPRESS_POOL_SIZE_ENV: &str = "NCD_COMPRESS_POOL_SIZE";
+
 /// PNG-compression worker threads feeding the writer. Compression (~24 ms for a
 /// detailed 720p frame) — not the NUT muxing — is the pipeline's dominant cost,
 /// so a single thread can't keep up with two 30 fps cameras; a small pool can,
 /// while the writer thread still owns all chunk state and ordering. Capped so it
 /// doesn't oversubscribe a small host against the daemon's transcode fleet.
+/// Tunable via `NCD_COMPRESS_POOL_SIZE` — e.g. pinning it to 1 turns flush
+/// duration into a fixed knob instead of a function of the host's core count,
+/// which matters for tests that depend on the writer queue backlogging under
+/// load.
 fn compress_pool_size() -> usize {
+    if let Some(workers) = std::env::var(COMPRESS_POOL_SIZE_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+    {
+        return workers.max(1);
+    }
     std::thread::available_parallelism()
         .map(|cores| (cores.get() / 2).clamp(2, 4))
         .unwrap_or(2)
