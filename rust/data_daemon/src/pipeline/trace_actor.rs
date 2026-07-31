@@ -34,6 +34,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::Value;
 use tokio::sync::{mpsc, watch, Semaphore};
@@ -861,6 +862,18 @@ impl ActorState {
     }
 
     async fn finalise_trace(&mut self, context: &Arc<TraceActorContext>) {
+        let started = Instant::now();
+        crate::perf_events::emit(
+            "trace_finalization",
+            "started",
+            Some(self.identity.key.recording_index),
+            Some(&self.identity.trace_id),
+            None,
+            serde_json::json!({
+                "data_type": self.identity.key.data_type,
+                "frame_count": self.frame_count,
+            }),
+        );
         let writer = std::mem::replace(&mut self.writer, TraceWriterKind::Pending);
         let finalise = self.finalise_writer(writer, context).await;
         match finalise {
@@ -877,6 +890,19 @@ impl ActorState {
                     total_bytes,
                     "trace finalised"
                 );
+                crate::perf_events::emit(
+                    "trace_finalization",
+                    "completed",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    Some(started.elapsed()),
+                    serde_json::json!({
+                        "data_type": self.identity.key.data_type,
+                        "frame_count": self.frame_count,
+                        "total_bytes": total_bytes,
+                        "outcome": "ok",
+                    }),
+                );
                 if let Some(bus) = context.event_bus.as_ref() {
                     bus.publish(crate::state::DaemonEvent::TraceWritten {
                         trace_id: self.identity.trace_id.clone(),
@@ -889,6 +915,18 @@ impl ActorState {
                     %error,
                     trace_id = self.identity.trace_id,
                     "failed to finalise trace artefacts"
+                );
+                crate::perf_events::emit(
+                    "trace_finalization",
+                    "failed",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    Some(started.elapsed()),
+                    serde_json::json!({
+                        "data_type": self.identity.key.data_type,
+                        "outcome": "error",
+                        "error_kind": error.to_string(),
+                    }),
                 );
                 self.mark_failed(context);
             }
@@ -919,6 +957,20 @@ impl ActorState {
                 mut completed_chunks,
                 mut pending_encodes,
             } => {
+                let encode_started = Instant::now();
+                let pending_encode_count = pending_encodes.len();
+                crate::perf_events::emit(
+                    "video_encoding",
+                    "started",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    None,
+                    serde_json::json!({
+                        "scope": "post_close_pending_encode_drain",
+                        "pending_encode_count": pending_encode_count,
+                        "already_completed_chunks": completed_chunks.len(),
+                    }),
+                );
                 // Drain every still-running encode. A failure here is
                 // terminal — without a complete chunk set the concat would
                 // produce a video with a missing range, which is worse than
@@ -938,6 +990,19 @@ impl ActorState {
                     let completed = result.outcome?;
                     completed_chunks.insert(result.chunk_index, completed);
                 }
+                crate::perf_events::emit(
+                    "video_encoding",
+                    "completed",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    Some(encode_started.elapsed()),
+                    serde_json::json!({
+                        "scope": "post_close_pending_encode_drain",
+                        "pending_encode_count": pending_encode_count,
+                        "completed_chunks": completed_chunks.len(),
+                        "outcome": "ok",
+                    }),
+                );
 
                 if completed_chunks.is_empty() {
                     // The trace allocated a Video writer but every chunk
@@ -989,6 +1054,18 @@ impl ActorState {
                 // Concat is stream-copy: cheap relative to encode but still
                 // bounded by an ffmpeg permit so a tail-stitch storm
                 // doesn't fork-bomb the host.
+                let concat_started = Instant::now();
+                crate::perf_events::emit(
+                    "video_concatenation",
+                    "started",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    None,
+                    serde_json::json!({
+                        "chunks": completed_chunks.len(),
+                        "lossy_only": lossy_only,
+                    }),
+                );
                 let permit = context
                     .ffmpeg_permits
                     .clone()
@@ -1031,16 +1108,30 @@ impl ActorState {
                 // signature for the recovery sweep.
                 let metadata_bytes = flush_metadata_blocking(metadata, trace_dir.clone()).await?;
 
+                let total_bytes = lossy_outcome
+                    .bytes
+                    .saturating_add(lossless_bytes)
+                    .saturating_add(metadata_bytes);
+                crate::perf_events::emit(
+                    "video_concatenation",
+                    "completed",
+                    Some(self.identity.key.recording_index),
+                    Some(&self.identity.trace_id),
+                    Some(concat_started.elapsed()),
+                    serde_json::json!({
+                        "chunks": completed_chunks.len(),
+                        "total_bytes": total_bytes,
+                        "outcome": "ok",
+                    }),
+                );
+
                 tracing::debug!(
                     trace_id = self.identity.trace_id,
                     chunks_encoded = completed_chunks.len(),
                     "video trace concatenated"
                 );
 
-                Ok(lossy_outcome
-                    .bytes
-                    .saturating_add(lossless_bytes)
-                    .saturating_add(metadata_bytes))
+                Ok(total_bytes)
             }
         }
     }

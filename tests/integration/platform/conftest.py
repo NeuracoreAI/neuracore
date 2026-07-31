@@ -64,8 +64,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo[None]):
     else:
         final_outcome = "PASSED"
 
+    total_duration_s = sum(float(report.duration) for report in reports)
+
     terminalreporter.write_line("")
     terminalreporter.write_line(f"[{final_outcome}] {item.nodeid}", bold=True)
+    terminalreporter.write_line(f"Test wall time: {total_duration_s:.3f}s")
 
     failure_report = next(
         (

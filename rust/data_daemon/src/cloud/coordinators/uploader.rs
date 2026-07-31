@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{broadcast, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -357,6 +358,18 @@ async fn upload_single(
         trace_id.to_string(),
     )
     .directory(recordings_root.as_path());
+    let upload_started = Instant::now();
+    crate::perf_events::emit(
+        "upload",
+        "started",
+        Some(trace.recording_index),
+        Some(trace_id),
+        None,
+        serde_json::json!({
+            "data_type": data_type,
+            "file_count": session_uris.len(),
+        }),
+    );
 
     // Upload each on-disk artefact under its session URI and persist the
     // refreshed URI back into the same slot (by index) for resume on retry.
@@ -379,6 +392,19 @@ async fn upload_single(
                 &format!("missing artefact {filename}"),
             )
             .await;
+            crate::perf_events::emit(
+                "upload",
+                "failed",
+                Some(trace.recording_index),
+                Some(trace_id),
+                Some(upload_started.elapsed()),
+                serde_json::json!({
+                    "outcome": "error",
+                    "reason": "missing_artefact",
+                    "filename": file_basename(&filename),
+                    "bytes_uploaded": total_uploaded,
+                }),
+            );
             return;
         }
 
@@ -417,6 +443,19 @@ async fn upload_single(
             }
             Err(error) => {
                 tracing::warn!(%error, trace_id, "upload failed; rolling back to retrying");
+                crate::perf_events::emit(
+                    "upload",
+                    "failed",
+                    Some(trace.recording_index),
+                    Some(trace_id),
+                    Some(upload_started.elapsed()),
+                    serde_json::json!({
+                        "outcome": "error",
+                        "reason": "transfer_failed",
+                        "filename": file_basename(&filename),
+                        "bytes_uploaded": total_uploaded,
+                    }),
+                );
                 let update = TraceUpdate {
                     upload_status: Some(TraceUploadStatus::Retrying),
                     error_message: Some(Some(error)),
@@ -430,6 +469,18 @@ async fn upload_single(
         }
     }
 
+    crate::perf_events::emit(
+        "upload",
+        "completed",
+        Some(trace.recording_index),
+        Some(trace_id),
+        Some(upload_started.elapsed()),
+        serde_json::json!({
+            "outcome": "ok",
+            "file_count": session_uris.len(),
+            "bytes_uploaded": total_uploaded,
+        }),
+    );
     finalise_upload(store, bus, status_tx, &trace, total_uploaded).await;
 }
 

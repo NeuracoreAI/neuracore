@@ -22,6 +22,7 @@ mod encoding;
 mod intervals;
 mod ipc;
 mod lifecycle;
+mod perf_events;
 mod pipeline;
 mod state;
 mod storage;

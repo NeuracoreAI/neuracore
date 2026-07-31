@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -157,6 +158,18 @@ async fn report_expected_trace_count(
         return;
     }
 
+    let request_started = Instant::now();
+    crate::perf_events::emit(
+        "progress_reporting",
+        "started",
+        Some(recording.recording_index),
+        None,
+        None,
+        serde_json::json!({
+            "operation": "expected_trace_count",
+            "trace_count": count,
+        }),
+    );
     match client
         .put_expected_trace_count(org_id, recording_id, count)
         .await
@@ -179,12 +192,37 @@ async fn report_expected_trace_count(
                 count,
                 "expected trace count reported"
             );
+            crate::perf_events::emit(
+                "progress_reporting",
+                "completed",
+                Some(recording.recording_index),
+                None,
+                Some(request_started.elapsed()),
+                serde_json::json!({
+                    "operation": "expected_trace_count",
+                    "trace_count": count,
+                    "outcome": "ok",
+                }),
+            );
         }
         Err(error) => {
             tracing::warn!(
                 %error,
                 recording_index = recording.recording_index,
                 "expected trace count PUT failed"
+            );
+            crate::perf_events::emit(
+                "progress_reporting",
+                "failed",
+                Some(recording.recording_index),
+                None,
+                Some(request_started.elapsed()),
+                serde_json::json!({
+                    "operation": "expected_trace_count",
+                    "trace_count": count,
+                    "outcome": "error",
+                    "error_kind": error.to_string(),
+                }),
             );
         }
     }
@@ -228,6 +266,18 @@ async fn report_progress(
         _ => return,
     }
 
+    let request_started = Instant::now();
+    crate::perf_events::emit(
+        "progress_reporting",
+        "started",
+        Some(recording.recording_index),
+        None,
+        None,
+        serde_json::json!({
+            "operation": "trace_metadata",
+            "trace_count": trace_map.len(),
+        }),
+    );
     match client
         .report_progress(org_id, recording_id, &trace_map)
         .await
@@ -245,9 +295,34 @@ async fn report_progress(
                 recording_id,
                 "progress report sent"
             );
+            crate::perf_events::emit(
+                "progress_reporting",
+                "completed",
+                Some(recording.recording_index),
+                None,
+                Some(request_started.elapsed()),
+                serde_json::json!({
+                    "operation": "trace_metadata",
+                    "trace_count": trace_map.len(),
+                    "outcome": "ok",
+                }),
+            );
         }
         Err(error) => {
             tracing::warn!(%error, recording_index = recording.recording_index, "progress report failed");
+            crate::perf_events::emit(
+                "progress_reporting",
+                "failed",
+                Some(recording.recording_index),
+                None,
+                Some(request_started.elapsed()),
+                serde_json::json!({
+                    "operation": "trace_metadata",
+                    "trace_count": trace_map.len(),
+                    "outcome": "error",
+                    "error_kind": error.to_string(),
+                }),
+            );
             let _ = store
                 .set_progress_report_status(
                     recording.recording_index,

@@ -689,6 +689,17 @@ impl Dispatcher {
         // `RecordingStopped` at retire time (only its row was marked), so this
         // is where it — like a normally-closed recording — becomes notifiable.
         tracing::info!(recording_index, "recording stopped");
+        crate::perf_events::emit(
+            "holdback",
+            "started",
+            Some(recording_index),
+            None,
+            None,
+            serde_json::json!({
+                "configured_holdback_ms": self.holdback.as_secs_f64() * 1_000.0,
+                "closing_retention_ms": (self.holdback * 2).as_secs_f64() * 1_000.0,
+            }),
+        );
         if let Some(bus) = self.context.event_bus.as_ref() {
             bus.publish(DaemonEvent::RecordingStopped { recording_index });
         }
@@ -775,6 +786,21 @@ impl Dispatcher {
                     .stop_recv_at
                     .is_some_and(|at| now.duration_since(at) >= retention);
                 if evict {
+                    let elapsed = window
+                        .stop_recv_at
+                        .map(|at| now.duration_since(at))
+                        .unwrap_or_default();
+                    crate::perf_events::emit(
+                        "holdback",
+                        "completed",
+                        Some(window.recording_index),
+                        None,
+                        Some(elapsed),
+                        serde_json::json!({
+                            "trace_actor_count": window.traces.len(),
+                            "configured_retention_ms": retention.as_secs_f64() * 1_000.0,
+                        }),
+                    );
                     for (_, handle) in window.traces.drain() {
                         closing_actors.push(handle);
                     }

@@ -17,11 +17,15 @@ from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_runn
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_daemon_cleanup,
 )
-from tests.integration.platform.data_daemon.shared.process_control import stop_daemon
+from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
+    stop_daemon,
+)
 from tests.integration.platform.data_daemon.shared.profiles import (
     scoped_offline_profile,
     scoped_online_mode,
 )
+from tests.integration.platform.data_daemon.shared.reporting import report_step
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
@@ -95,10 +99,26 @@ def online_daemon_running() -> Generator[None]:
     """
     with scoped_daemon_storage_env(), scoped_online_mode():
         try:
-            stop_daemon()
-            assert_daemon_cleanup()
-            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
+            with report_step("Start clean online daemon"):
+                with Timer(
+                    DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS + 15,
+                    label="daemon.online_startup",
+                    always_log=True,
+                    assert_deadline=False,
+                ):
+                    stop_daemon()
+                    assert_daemon_cleanup()
+                    ensure_daemon_running(
+                        timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
+                    )
             yield
         finally:
-            stop_daemon()
-            assert_daemon_cleanup()
+            with report_step("Gracefully stop online daemon"):
+                with Timer(
+                    30.0,
+                    label="daemon.online_shutdown",
+                    always_log=True,
+                    assert_deadline=False,
+                ):
+                    stop_daemon()
+                    assert_daemon_cleanup()
