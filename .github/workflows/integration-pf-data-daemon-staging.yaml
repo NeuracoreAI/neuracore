@@ -42,6 +42,7 @@ jobs:
     needs: pre-commit
     env:
       NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging
+      NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
       NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/daemon-phase-events.jsonl
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
@@ -119,20 +120,36 @@ jobs:
             --single-file \
             --output "$NCD_PERF_REPORT_DIR/allure-report" \
             "$NCD_PERF_REPORT_DIR/allure-results"
+          cp "$NCD_PERF_REPORT_DIR/allure-report/index.html" \
+            "$NCD_PERF_REPORT_HTML"
         else
           echo "No Allure results were produced"
         fi
 
-    - name: Upload data-daemon performance report
+    # Upload Allure's self-contained page directly, without archiving the raw
+    # results, generated assets, metrics, or logs alongside it.
+    - name: Upload HTML performance report
+      id: upload-performance-report
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
-        name: data-daemon-staging-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}
-        path: |
-          ${{ env.NCD_PERF_REPORT_DIR }}
-          .data_daemon_test_state/daemon.log
+        path: ${{ env.NCD_PERF_REPORT_HTML }}
+        archive: false
         if-no-files-found: warn
         retention-days: 14
+
+    - name: Add performance report to job summary
+      if: always() && steps.upload-performance-report.outputs.artifact-url != ''
+      env:
+        REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
+      run: |
+        {
+          echo "### Data-daemon performance report"
+          echo
+          echo "[Download the self-contained HTML report]($REPORT_URL)"
+          echo
+          echo "Download the HTML file and open it directly in a browser."
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Show disk space after tests
       if: always()
