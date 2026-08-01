@@ -64,17 +64,88 @@ HIGH_TIME_TO_DATASET_READY_S = 500
 # ---------------------------------------------------------------------------
 
 
+LATENCY_BUCKETS_S: tuple[float, ...] = (
+    0.0005,
+    0.001,
+    0.002,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+)
+"""Upper bounds of the latency histogram, in seconds.
+
+A histogram rather than retained samples because these stats are accumulated
+per worker *process* and merged by plain addition (:meth:`Timer.merge_stats`):
+bucket counts merge correctly that way, where percentiles computed per process
+could not be combined afterwards. It is also bounded — a 30 s burst-video case
+logs ~35k frames per label, and keeping every sample would ship megabytes back
+from each worker.
+
+Log-spaced so the interesting range for this suite (sub-millisecond enqueues up
+to second-long stalls) is covered at roughly 2x resolution.
+"""
+
+BUCKET_KEYS: tuple[str, ...] = tuple(f"le_{bound}" for bound in LATENCY_BUCKETS_S) + (
+    "gt_max",
+)
+"""Stat keys for the histogram, one per bucket plus an overflow bucket."""
+
+
+def _empty_stats() -> dict[str, float]:
+    """Return a zeroed stat accumulator for one label."""
+    stats = {"count": 0.0, "total": 0.0, "max": 0.0}
+    stats.update({key: 0.0 for key in BUCKET_KEYS})
+    return stats
+
+
+def _bucket_key(interval: float) -> str:
+    """Return the histogram key *interval* falls in."""
+    for bound, key in zip(LATENCY_BUCKETS_S, BUCKET_KEYS):
+        if interval <= bound:
+            return key
+    return "gt_max"
+
+
+def percentile_upper_bound(stats: dict[str, float], quantile: float) -> float | None:
+    """Return the bucket upper bound containing *quantile* of the samples.
+
+    Approximate by construction — the answer is a bucket edge, not an
+    interpolated value — so it is rendered as ``p99<=25ms``, never as an exact
+    figure. That is enough to see a tail move, which a single ``max`` (one draw
+    out of tens of thousands, dominated by scheduler noise) cannot show.
+
+    Returns ``None`` when the samples overflow the largest bucket, or when the
+    label has no histogram (stats merged from an older run).
+    """
+    count = stats.get("count", 0.0)
+    if count <= 0:
+        return None
+    target = quantile * count
+    seen = 0.0
+    for bound, key in zip(LATENCY_BUCKETS_S, BUCKET_KEYS):
+        seen += stats.get(key, 0.0)
+        if seen >= target:
+            return bound
+    return None
+
+
 class Timer:
     """Context manager that measures wall-clock elapsed time for a block.
 
-    Accumulates per-label statistics (count, total, max) in the class-level
-    ``_stats`` dictionary so that test suites can report aggregate timing at
-    the end of a run.  Optionally asserts that the block completed within
-    ``max_time`` seconds.
+    Accumulates per-label statistics (count, total, max, and a latency
+    histogram) in the class-level ``_stats`` dictionary so that test suites can
+    report aggregate timing at the end of a run.  Optionally asserts that the
+    block completed within ``max_time`` seconds.
 
     Attributes:
         _stats: Class-level dict mapping label strings to aggregate timing
-            statistics with keys ``"count"``, ``"total"``, and ``"max"``.
+            statistics with keys ``"count"``, ``"total"``, ``"max"``, and one
+            per :data:`BUCKET_KEYS` entry.
         max_time: Upper time limit in seconds.
         label: Human-readable name for this timer.  Pass ``None`` to skip
             stat accumulation.
@@ -112,12 +183,11 @@ class Timer:
         self.interval = self.end - self.start
         had_exception = len(args) > 0 and args[0] is not None
         if self.label:
-            stats = self._stats.setdefault(
-                self.label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
+            stats = self._stats.setdefault(self.label, _empty_stats())
             stats["count"] += 1
             stats["total"] += self.interval
             stats["max"] = max(stats["max"], self.interval)
+            stats[_bucket_key(self.interval)] += 1
 
             should_log = self.always_log
             if self.log_threshold is not None and self.interval >= self.log_threshold:
@@ -151,12 +221,15 @@ class Timer:
     def merge_stats(cls, stats: dict[str, dict[str, float]]) -> None:
         """Merge external timer stats (e.g. from a worker process) into the accumulator."""  # noqa: E501
         for label, incoming in stats.items():
-            existing = cls._stats.setdefault(
-                label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
+            existing = cls._stats.setdefault(label, _empty_stats())
             existing["count"] += incoming["count"]
             existing["total"] += incoming["total"]
             existing["max"] = max(existing["max"], incoming["max"])
+            # Bucket counts are additive, which is the whole reason the tail is
+            # tracked as a histogram: percentiles computed per worker could not
+            # be combined here.
+            for key in BUCKET_KEYS:
+                existing[key] += incoming.get(key, 0.0)
 
 
 def surface_worker_errors(fn):
