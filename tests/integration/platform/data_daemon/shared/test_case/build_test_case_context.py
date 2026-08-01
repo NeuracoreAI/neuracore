@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -75,6 +76,59 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
 
 
+class EmittedFrame(NamedTuple):
+    """One frame a continuous producer logged, bracketed on the wall clock.
+
+    The daemon routes a sample by a publish stamp taken *inside* the ``log_*``
+    call, so the test cannot observe that stamp — only that it lies somewhere in
+    ``[emitted_at, completed_at]``. Both edges are kept because the two
+    boundaries need opposite ones (see :func:`_classify_boundary_frames`).
+
+    Attributes:
+        timestamp: The frame's own capture timestamp — the value that reaches
+            disk, and the only field the assertion compares.
+        emitted_at: Wall clock immediately before the ``log_*`` call.
+        completed_at: Wall clock immediately after it returned.
+        handle: The SDK recording handle latched immediately before the call,
+            or ``None`` when no recording was active. This is the local logging
+            gate, not the daemon's window.
+    """
+
+    timestamp: float
+    emitted_at: float
+    completed_at: float
+    handle: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingControlBounds:
+    """Wall-clock brackets around the two control calls that bound a recording.
+
+    The daemon's window is ``[started_at_ns, stopped_at_ns)``, and both bounds
+    are stamped on the publish clock *inside* the producer-side
+    ``start_recording`` / ``stop_recording`` calls — never from the capture
+    timestamp the caller passes. Neither instant is visible from here, but each
+    is known to fall within the call that carries it, and the control thread can
+    stamp both edges of that call on the same clock the producer threads use.
+
+    Attributes:
+        handle: The SDK recording handle for this recording, as the producer
+            threads see it while it is current.
+        start_called_at: Wall clock immediately before ``nc.start_recording``.
+        start_returned_at: Wall clock immediately after it returned. The
+            window's lower bound is somewhere in between.
+        stop_called_at: Wall clock immediately before ``nc.stop_recording``.
+        stop_returned_at: Wall clock immediately after it returned. The window's
+            upper bound is somewhere in between.
+    """
+
+    handle: str | None
+    start_called_at: float
+    start_returned_at: float
+    stop_called_at: float
+    stop_returned_at: float
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingExpectedTimestamps:
     """Expected timestamps per trace for one recording, keyed by semantic trace name.
@@ -91,10 +145,18 @@ class RecordingExpectedTimestamps:
         by_trace_fps: Maps the same semantic trace key to the producer fps for
             that trace, so the stochastic assertion can size its jitter window
             from the case's frame rate.
+        by_trace_unknowable: Maps the same semantic trace key to timestamps
+            whose membership of this recording the test cannot determine —
+            frames whose ``log_*`` call straddled one of the two control calls
+            that carry the window's bounds (see
+            :func:`_classify_boundary_frames`). The assertion drops them from
+            both the expected and the on-disk list rather than tolerating them
+            on one. Empty for producers that log strictly within one recording.
     """
 
     by_trace: dict[str, list[float]]
     by_trace_fps: dict[str, int]
+    by_trace_unknowable: dict[str, set[float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -786,7 +848,7 @@ def run_continuous_logging(
     pacing: str,
     context_index: int,
     stop_event: threading.Event,
-) -> dict[str, dict[str, list[float]]]:
+) -> dict[str, list[EmittedFrame]]:
     """Log continuously for the whole context lifetime, independent of any
     single recording.
 
@@ -794,15 +856,16 @@ def run_continuous_logging(
     process lifetime: threads start before the first ``nc.start_recording()``
     and keep logging — paced by a session-wide, ever-increasing frame index —
     until *stop_event* is set, regardless of how many recordings start and stop
-    while they run. Each frame reads which recording (if any) is active via
-    ``robot.get_current_recording_id()`` before logging, so the caller can
-    build expected-timestamp maps from what the SDK actually admitted rather
-    than from a synthetic per-recording window.
+    while they run.
+
+    Every frame is reported, whichever recording was current and even when none
+    was: which of them belong to a recording is decided afterwards, from the
+    wall-clock brackets around that recording's control calls (see
+    :func:`_classify_boundary_frames`). Reporting only the frames logged during
+    a recording would hide the ones the daemon must be shown to have *rejected*.
 
     Returns:
-        Mapping of local recording handle -> trace key -> ordered list of
-        timestamps logged while that handle was current. Frames logged while
-        no recording is active (handle is ``None``) are dropped.
+        Mapping of trace key -> every frame logged for it, in order.
     """
     plans = build_stream_plans(
         joint_names=joint_names,
@@ -823,7 +886,7 @@ def run_continuous_logging(
         for plan in plans
     ]
     barrier = threading.Barrier(len(emitters))
-    report: dict[str, dict[str, list[float]]] = {}
+    report: dict[str, list[EmittedFrame]] = {}
     report_lock = threading.Lock()
 
     def worker(emitter: StreamEmitter) -> None:
@@ -842,20 +905,89 @@ def run_continuous_logging(
             if _await_frame_deadline(frame_deadline, pace=pace, stop_event=stop_event):
                 break
             timestamp = timestamp_start_s + (frame_index / fps) + jitter
-            # Latched before the frame is logged, so a recording that stops
-            # while the frame is in flight still owns it.
+            # The gate the SDK checks again inside `emit`, read here so the
+            # caller can tell a frame the gate had already refused from one it
+            # admitted.
             handle = robot.get_current_recording_id()
+            # Brackets the publish stamp the daemon routes on, which is taken
+            # inside the emit and is not observable from here.
+            emitted_at = time.time()
             emitter.emit(frame_index, timestamp)
-            if handle is not None:
-                with report_lock:
-                    bucket = report.setdefault(handle, {})
-                    for trace_key in emitter.plan.trace_keys:
-                        bucket.setdefault(trace_key, []).append(timestamp)
+            frame = EmittedFrame(
+                timestamp=timestamp,
+                emitted_at=emitted_at,
+                completed_at=time.time(),
+                handle=handle,
+            )
+            with report_lock:
+                for trace_key in emitter.plan.trace_keys:
+                    report.setdefault(trace_key, []).append(frame)
             frame_index += 1
 
     _run_stream_threads(emitters, worker, error_label="Continuous")
 
     return report
+
+
+def _classify_boundary_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> tuple[list[float], set[float]]:
+    """Split one trace's frames into those inside a recording and those unknowable.
+
+    A producer that logs across the recording lifecycle is mid-loop when each
+    boundary passes, and neither boundary is directly observable: the daemon
+    routes every sample by a publish stamp taken inside the ``log_*`` call, and
+    stamps the window's own bounds inside the ``start_recording`` /
+    ``stop_recording`` calls. The test resolves both the same way — by bracketing
+    each unobservable instant between two it can measure on the same clock — and
+    the same rule then decides every frame:
+
+    - **Inside**: the frame's whole ``log_*`` call ran after ``start_recording``
+      returned and finished before ``stop_recording`` was called, so its publish
+      stamp cannot be anything but within the window. The start compares the
+      emit interval's near edge and the stop its far edge; that opposition is
+      the whole of the symmetry.
+    - **Outside**: the call finished before ``start_recording`` was entered, so
+      the window did not yet exist; or the SDK's local logging gate had already
+      refused the frame at a point past the stop call. The gate is a deliberate
+      superset of the window at both ends, which makes a stale read of it
+      conclusive in exactly one direction at each end: a frame the gate *refused*
+      was emitted after the gate closed, hence after the window closed, so it
+      must not reach disk. A frame the gate *admitted* proves nothing at the
+      start, because the gate opens before the window does. Without the gate the
+      whole tail-chunk flush barrier — around a second of burst video, all of it
+      after the boundary — would be unknowable instead of asserted absent.
+    - **Unknowable**: everything else, i.e. the call straddled one of the two
+      brackets. The daemon's answer for those frames is correct either way, so
+      they are dropped from *both* sides of the comparison rather than tolerated
+      on one.
+
+    The ambiguous band is therefore measured, not guessed: it is as wide as the
+    control call that carries the boundary, which is why a frame count could not
+    size it — ``start_recording`` takes ~30 ms and a burst producer emits far
+    more than a frame or two inside it.
+
+    Returns:
+        ``(inside timestamps in order, unknowable timestamps)``. Frames that are
+        outside appear in neither, so the assertion requires them to be absent
+        from disk.
+    """
+    inside: list[float] = []
+    unknowable: set[float] = set()
+    for frame in frames:
+        is_inside = (
+            frame.emitted_at >= bounds.start_returned_at
+            and frame.completed_at <= bounds.stop_called_at
+        )
+        is_outside = frame.completed_at <= bounds.start_called_at or (
+            frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
+        )
+        if is_inside:
+            inside.append(frame.timestamp)
+        elif not is_outside:
+            unknowable.add(frame.timestamp)
+    return inside, unknowable
 
 
 def log_frames(
@@ -1019,7 +1151,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         continuous_stop_event: threading.Event | None = None
         continuous_thread: threading.Thread | None = None
         continuous_outcome: dict[str, object] = {}
-        handle_to_disk_key: dict[str, str] = {}
+        bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
+        recording_handle: str | None = None
         trace_key_to_fps: dict[str, int] = {}
 
         if case.producer_channels == PRODUCER_CONTINUOUS:
@@ -1074,6 +1207,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     else recording_capture_start_s + case.duration_sec
                 )
 
+                # Brackets the window's lower bound, which the daemon stamps
+                # somewhere inside the call (see `RecordingControlBounds`).
+                start_called_at = time.time()
                 with Timer(
                     MAX_TIME_TO_START_S,
                     label="nc.start_recording",
@@ -1083,8 +1219,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     nc.start_recording(
                         robot_name=spec.robot_name, timestamp=recording_capture_start_s
                     )
+                start_returned_at = time.time()
                 if wall_started_at is None:
-                    wall_started_at = time.time()
+                    wall_started_at = start_returned_at
 
                 if use_rust:
                     previous_index = recording_indexes[-1] if recording_indexes else 0
@@ -1106,9 +1243,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     disk_recording_key = recording_id
 
                 if case.producer_channels == PRODUCER_CONTINUOUS:
-                    handle = robot.get_current_recording_id()
-                    if handle is not None:
-                        handle_to_disk_key[handle] = disk_recording_key
+                    recording_handle = robot.get_current_recording_id()
                     time.sleep(case.duration_sec)
 
                 # Build per-recording expected timestamps once the recording key is
@@ -1172,6 +1307,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     if not marker_names:
                         marker_names = current_marker_names
 
+                # Brackets the window's upper bound, the mirror of the start.
+                stop_called_at = time.time()
                 with Timer(
                     case.stop_recording_sla_s,
                     label="nc.stop_recording",
@@ -1184,6 +1321,15 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                         timestamp=recording_capture_stop_s,
                     )
                 wall_stopped_at = time.time()
+
+                if case.producer_channels == PRODUCER_CONTINUOUS:
+                    bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
+                        handle=recording_handle,
+                        start_called_at=start_called_at,
+                        start_returned_at=start_returned_at,
+                        stop_called_at=stop_called_at,
+                        stop_returned_at=wall_stopped_at,
+                    )
 
             if continuous_stop_event is not None:
                 # Give the still-running producer threads time to log a few
@@ -1206,17 +1352,26 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 ) from continuous_error
 
             if expected_by_recording is not None:
-                report: dict[str, dict[str, list[float]]] = continuous_outcome.get(
+                report: dict[str, list[EmittedFrame]] = continuous_outcome.get(
                     "report", {}
                 )
-                for handle, disk_key in handle_to_disk_key.items():
-                    by_trace = report.get(handle, {})
+                # The producer reported every frame it logged over the whole
+                # context; each recording claims its own from the wall-clock
+                # brackets around its control calls.
+                for disk_key, bounds in bounds_by_disk_key.items():
+                    by_trace: dict[str, list[float]] = {}
+                    by_trace_unknowable: dict[str, set[float]] = {}
+                    for trace_key, frames in report.items():
+                        inside, unknowable = _classify_boundary_frames(frames, bounds)
+                        by_trace[trace_key] = inside
+                        by_trace_unknowable[trace_key] = unknowable
                     expected_by_recording[disk_key] = RecordingExpectedTimestamps(
                         by_trace=by_trace,
                         by_trace_fps={
                             trace_key: trace_key_to_fps[trace_key]
                             for trace_key in by_trace
                         },
+                        by_trace_unknowable=by_trace_unknowable,
                     )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
