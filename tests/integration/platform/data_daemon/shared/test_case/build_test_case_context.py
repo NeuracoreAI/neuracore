@@ -40,6 +40,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_id,
     generate_joint_values,
     joint_names_for_count,
+    resolve_producer_pacing,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CONTINUOUS_LOGGING_TAIL_S,
@@ -50,7 +51,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_VARIABLE_MIN_FACTOR,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
-    PACING_BURST,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
     PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     SCHEDULER_TOLERANCE_S,
@@ -122,7 +124,7 @@ class ContextCaseSpec:
     wait: bool
     timestamp_mode: str
     video_detail: str
-    video_pacing: str
+    producer_pacing: str
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -283,7 +285,7 @@ def build_context_specs(
                     wait=case.wait,
                     timestamp_mode=case.timestamp_mode,
                     video_detail=case.video_detail,
-                    video_pacing=case.video_pacing,
+                    producer_pacing=resolve_producer_pacing(case),
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -339,6 +341,15 @@ def precompute_timestamps(
     return [timestamp_start_s + frame_index / fps for frame_index in range(frame_count)]
 
 
+def _should_pace(pacing: str, is_rgb: bool) -> bool:
+    """Whether a stream sleeps to its wall-clock deadline under *pacing*."""
+    if pacing == PACING_DEADLINE:
+        return True
+    if pacing == PACING_BURST_VIDEO:
+        return not is_rgb
+    return False  # PACING_BURST_ALL
+
+
 def _await_frame_deadline(
     deadline: float, *, pace: bool, stop_event: threading.Event | None = None
 ) -> bool:
@@ -376,22 +387,23 @@ def log_synchronous_frames(
     marker_name: str,
     context_index: int,
     video_detail: str,
+    pacing: str,
     use_real_timestamps: bool = False,
     use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Joint and video frames are interleaved in timestamp order. Manual timestamps
-    are precomputed and emitted without wall-clock pacing; real and stochastic
-    modes retain the deadline scheduler used by their timing assertions.
+    Joint and video frames are interleaved in timestamp order, paced according
+    to *pacing*. There is only one thread here, so ``PACING_BURST_VIDEO`` has no
+    meaning and is rejected upstream by ``DataDaemonTestCase``.
     """
     camera_feed = make_camera_feed(
         bool(camera_name_list), image_width, image_height, video_detail
     )
 
-    pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
-    recording_wall_start = time.time() if pace_against_wall_clock else 0.0
+    pace = _should_pace(pacing, is_rgb=False)
+    recording_wall_start = time.time() if pace else 0.0
     joint_timestamps = precompute_timestamps(
         timestamp_start_s, joint_frame_count, joint_fps
     )
@@ -408,13 +420,9 @@ def log_synchronous_frames(
         video_due = camera_name_list and video_index < video_frame_count
         # One jitter is shared by both deadlines/timestamps this iteration, so
         # size it to the tighter (higher-fps) window to stay within both.
-        jitter = (
-            get_jitter(
-                use_stochastic_timestamps,
-                max(joint_fps, video_fps) if camera_name_list else joint_fps,
-            )
-            if pace_against_wall_clock
-            else 0.0
+        jitter = get_jitter(
+            use_stochastic_timestamps,
+            max(joint_fps, video_fps) if camera_name_list else joint_fps,
         )
 
         joint_deadline = (
@@ -429,10 +437,7 @@ def log_synchronous_frames(
         )
 
         if joint_deadline <= video_deadline:
-            if pace_against_wall_clock:
-                remaining = joint_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
+            _await_frame_deadline(joint_deadline, pace=pace)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
@@ -482,10 +487,7 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            if pace_against_wall_clock:
-                remaining = video_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
+            _await_frame_deadline(video_deadline, pace=pace)
             if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
@@ -621,15 +623,15 @@ def run_threaded_logging(
     image_width: int | None,
     image_height: int | None,
     video_detail: str,
+    pacing: str,
     use_real_timestamps: bool = False,
     use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
-    burst_video: bool = False,
 ) -> list[str]:
     """Run logging across multiple threads, one per data role.
 
-    Manual timestamps are precomputed per role and emitted without wall-clock
-    pacing. Real and stochastic modes keep their existing deadline scheduling.
+    Each role paces itself according to *pacing*, so ``PACING_BURST_VIDEO``
+    leaves the video thread free to outrun the joint threads.
     """
     roles = build_thread_roles(
         joint_names=joint_names, camera_name_list=camera_name_list
@@ -646,21 +648,14 @@ def run_threaded_logging(
         frame_count = video_frame_count if is_rgb else joint_frame_count
         fps = video_fps if is_rgb else joint_fps
         camera_feed = make_camera_feed(is_rgb, image_width, image_height, video_detail)
-        pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
-        thread_wall_start = time.time() if pace_against_wall_clock else 0.0
+        pace = _should_pace(pacing, is_rgb)
+        thread_wall_start = time.time() if pace else 0.0
         timestamps = precompute_timestamps(timestamp_start_s, frame_count, fps)
-        burst = is_rgb and burst_video
         for frame_index in range(frame_count):
-            jitter = (
-                get_jitter(use_stochastic_timestamps, fps)
-                if pace_against_wall_clock
-                else 0.0
-            )
+            jitter = get_jitter(use_stochastic_timestamps, fps)
             frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-            _await_frame_deadline(
-                frame_deadline, pace=pace_against_wall_clock and not burst
-            )
-            if assert_deadline and use_stochastic_timestamps and not burst:
+            _await_frame_deadline(frame_deadline, pace=pace)
+            if assert_deadline and use_stochastic_timestamps:
                 assert_on_schedule(
                     frame_deadline,
                     SCHEDULER_TOLERANCE_S,
@@ -763,7 +758,7 @@ def run_continuous_logging(
     video_detail: str,
     timestamp_start_s: float,
     use_stochastic_timestamps: bool,
-    burst_video: bool,
+    pacing: str,
     stop_event: threading.Event,
 ) -> dict[str, dict[str, list[float]]]:
     """Log continuously for the whole context lifetime, independent of any
@@ -806,15 +801,13 @@ def run_continuous_logging(
             "joint_velocities": nc.log_joint_velocities,
             "joint_torques": nc.log_joint_torques,
         }.get(role_name)
-        burst = is_rgb and burst_video
+        pace = _should_pace(pacing, is_rgb)
         thread_wall_start = time.time()
         frame_index = 0
         while not stop_event.is_set():
             jitter = get_jitter(use_stochastic_timestamps, fps)
             frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-            if _await_frame_deadline(
-                frame_deadline, pace=not burst, stop_event=stop_event
-            ):
+            if _await_frame_deadline(frame_deadline, pace=pace, stop_event=stop_event):
                 break
             timestamp = timestamp_start_s + (frame_index / fps) + jitter
 
@@ -899,10 +892,10 @@ def log_frames(
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
             video_detail=spec.case.video_detail,
+            pacing=spec.case.producer_pacing,
             use_real_timestamps=use_real_timestamps,
             use_stochastic_timestamps=use_stochastic_timestamps,
             assert_deadline=spec.assert_deadline,
-            burst_video=spec.case.video_pacing == PACING_BURST,
         )
 
     log_synchronous_frames(
@@ -920,6 +913,7 @@ def log_frames(
         marker_name=marker_name,
         context_index=spec.context_index,
         video_detail=spec.case.video_detail,
+        pacing=spec.case.producer_pacing,
         use_real_timestamps=use_real_timestamps,
         use_stochastic_timestamps=use_stochastic_timestamps,
         assert_deadline=spec.assert_deadline,
@@ -1057,7 +1051,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                         use_stochastic_timestamps=(
                             case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
                         ),
-                        burst_video=case.video_pacing == PACING_BURST,
+                        pacing=spec.case.producer_pacing,
                         stop_event=continuous_stop_event,
                     )
                 except BaseException as exc:  # noqa: BLE001

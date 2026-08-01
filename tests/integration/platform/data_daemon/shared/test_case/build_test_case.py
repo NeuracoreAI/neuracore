@@ -33,8 +33,11 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_ALL,
+    PACING_BURST_VIDEO,
     PACING_DEADLINE,
     PRODUCER_CONTINUOUS,
+    PRODUCER_PACINGS,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -42,12 +45,12 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_REAL,
     TIMESTAMP_MODE_STOCHASTIC,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     TestOs,
     TimestampMode,
     VideoDetail,
-    VideoPacing,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,16 +207,22 @@ class DataDaemonTestCase:
             because their per-pixel upload SLA
             (``STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S``) is calibrated
             against that content.
-        video_pacing: Controls whether the RGB producer thread paces itself to
-            ``video_fps``.  ``"deadline"`` (default) sleeps between frames so
-            delivery tracks wall-clock time, same as every other stream.
-            ``"burst"`` skips that sleep, so frames are pushed as fast as the
-            camera thread can render and log them, backlogging the writer
-            queue the way a real camera does when the encoder can't keep up.
-            Only affects the modes that give RGB a thread of its own
-            (``producer_channels="per_thread"`` or ``"continuous"``);
-            timestamps stay synthetic (``timestamp_start_s + frame_index / fps``)
-            regardless of delivery pacing.
+        producer_pacing: Which producer streams skip their wall-clock deadline,
+            i.e. how fast frames are handed to the SDK.  This is independent of
+            ``timestamp_mode``, which controls what timestamp a frame *carries*.
+            ``"deadline"`` paces every stream, so delivery tracks wall-clock
+            time.  ``"burst-video"`` un-paces the video streams only, so frames
+            are pushed as fast as the camera thread can render and log them
+            while joints stay paced — backlogging the writer queue the way a
+            real camera does when the encoder can't keep up.  ``"burst-all"``
+            un-paces everything, which is the fastest way to emit a fixed frame
+            count.  ``None`` (default) derives the value from ``timestamp_mode``
+            via :func:`resolve_producer_pacing`: manual timestamps are
+            independent of delivery time so they default to ``"burst-all"``,
+            while real and stochastic timestamps are wall-clock derived and so
+            default to ``"deadline"``.  Setting anything other than
+            ``"deadline"`` on a real or stochastic case is rejected, as is
+            ``"burst-video"`` without a separate video producer thread to race.
         cpu_load: When ``True``, all but one CPU core is saturated (see
             ``cpu_load()`` in ``shared/process_control.py``) for the duration
             of the recording contexts. Approximates the core contention a real
@@ -253,8 +262,37 @@ class DataDaemonTestCase:
     run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
-    video_pacing: VideoPacing = PACING_DEADLINE
+    producer_pacing: ProducerPacing | None = None
     cpu_load: bool = False
+
+    def __post_init__(self) -> None:
+        """Reject pacing choices the rest of the case cannot honour."""
+        pacing = self.producer_pacing
+        if pacing is None:
+            return
+        if pacing not in PRODUCER_PACINGS:
+            raise ValueError(
+                f"producer_pacing must be one of {PRODUCER_PACINGS}, got {pacing!r}"
+            )
+        if pacing != PACING_DEADLINE and self.timestamp_mode != TIMESTAMP_MODE_MANUAL:
+            raise ValueError(
+                f"producer_pacing={pacing!r} needs timestamp_mode="
+                f"{TIMESTAMP_MODE_MANUAL!r}: {self.timestamp_mode!r} timestamps are "
+                "wall-clock derived, so un-pacing them bunches every frame at the "
+                "start of the recording."
+            )
+        if pacing == PACING_BURST_VIDEO:
+            if self.producer_channels not in (PRODUCER_PER_THREAD, PRODUCER_CONTINUOUS):
+                raise ValueError(
+                    f"producer_pacing={PACING_BURST_VIDEO!r} needs producer_channels "
+                    f"in {(PRODUCER_PER_THREAD, PRODUCER_CONTINUOUS)!r}: without a "
+                    "video thread of its own there is nothing for video to race "
+                    "ahead of."
+                )
+            if not self.video_count:
+                raise ValueError(
+                    f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0"
+                )
 
     @property
     def runs_on_current_os(self) -> bool:
@@ -382,6 +420,23 @@ class DataDaemonTestBatch:
 # ---------------------------------------------------------------------------
 
 
+def resolve_producer_pacing(case: DataDaemonTestCase) -> str:
+    """Delivery pacing for *case*, derived from its timestamp mode when unset.
+
+    Manual timestamps are independent of when a frame reaches the SDK, so an
+    unset case defaults to un-paced delivery — the fastest way to emit a fixed
+    frame count. Real and stochastic timestamps are wall-clock derived, so they
+    default to pacing every stream.
+    """
+    if case.producer_pacing is not None:
+        return case.producer_pacing
+    return (
+        PACING_BURST_ALL
+        if case.timestamp_mode == TIMESTAMP_MODE_MANUAL
+        else PACING_DEADLINE
+    )
+
+
 def case_id(case: DataDaemonTestCase) -> str:
     """Generate a short human-readable ID for a test case."""
     mode_short = "seq" if case.mode == MODE_SEQUENTIAL else "stag"
@@ -409,6 +464,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("threaded")
     elif case.producer_channels == PRODUCER_CONTINUOUS:
         parts.append("continuous")
+    if case.producer_pacing is not None:
+        parts.append(case.producer_pacing)
     if case.timestamp_mode == TIMESTAMP_MODE_REAL:
         parts.append("realtime")
     elif case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC:

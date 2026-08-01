@@ -6,7 +6,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
     OS_EXCEPT_DARWIN,
-    PACING_BURST,
+    PACING_BURST_VIDEO,
     PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     TIMESTAMP_MODE_MANUAL,
@@ -102,7 +102,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_fps=30,
         producer_channels=PRODUCER_PER_THREAD,
         video_codec="h264_medium",  # activates assert_lossy_only_video_artifacts
-        video_pacing=PACING_BURST,
+        producer_pacing=PACING_BURST_VIDEO,
     ),
     DataDaemonTestCase(
         # Producer threads outlive any single recording; start_recording/
@@ -119,7 +119,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_fps=30,
         producer_channels=PRODUCER_CONTINUOUS,
         video_codec="h264_medium",
-        video_pacing=PACING_BURST,
+        producer_pacing=PACING_BURST_VIDEO,
     ),
 )
 

@@ -62,9 +62,10 @@ OS_WINDOWS = "win32"
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
-# video_pacing
-PACING_DEADLINE = "deadline"
-PACING_BURST = "burst"
+# producer_pacing — which streams skip their wall-clock deadline
+PACING_DEADLINE = "deadline"  # none; every stream paces
+PACING_BURST_VIDEO = "burst-video"  # video only; joints stay paced
+PACING_BURST_ALL = "burst-all"  # every stream
 
 # timestamp_mode
 TIMESTAMP_MODE_MANUAL = "manual"
@@ -100,7 +101,7 @@ MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD, PRODUCER_CONTINUOUS)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
-VIDEO_PACINGS = (PACING_DEADLINE, PACING_BURST)
+PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_BURST_ALL)
 TIMESTAMP_MODES = (
     TIMESTAMP_MODE_MANUAL,
     TIMESTAMP_MODE_REAL,
@@ -118,7 +119,7 @@ StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 TimestampMode = Literal["manual", "real", "stochastic"]
 VideoDetail = Literal["realistic", "flat"]
-VideoPacing = Literal["deadline", "burst"]
+ProducerPacing = Literal["deadline", "burst-video", "burst-all"]
 TestOs = Literal["linux", "darwin", "win32"]
 
 MAX_TIME_TO_START_S = 20.0
