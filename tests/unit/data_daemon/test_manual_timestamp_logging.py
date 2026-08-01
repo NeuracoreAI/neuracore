@@ -7,6 +7,10 @@ import pytest
 from tests.integration.platform.data_daemon.shared.test_case import (
     build_test_case_context as context_module,
 )
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_FLAT,
+    PACING_BURST_ALL,
+)
 
 
 def _fail_sleep(*args: object, **kwargs: object) -> None:
@@ -57,6 +61,8 @@ def test_synchronous_manual_logging_uses_precomputed_timestamps(
         video_fps=1,
         marker_name="marker",
         context_index=0,
+        video_detail=DETAIL_FLAT,
+        pacing=PACING_BURST_ALL,
     )
 
     expected_joint_timestamps = [10.0, 10.5, 11.0]
@@ -112,6 +118,8 @@ def test_threaded_manual_logging_uses_precomputed_timestamps(
         camera_name_list=["camera"],
         image_width=4,
         image_height=4,
+        video_detail=DETAIL_FLAT,
+        pacing=PACING_BURST_ALL,
     )
 
     expected_joint_timestamps = [20.0, 20.25, 20.5]
