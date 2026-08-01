@@ -112,13 +112,14 @@ PRE_NETWORK_INTEGRITY_CASES = (
         duration_sec=30,
         joint_count=7,
         recording_count=1,
-        video_count=1,
+        video_count=2,
         image_width=640,
         image_height=480,
         video_fps=30,
         joint_fps=30,
         producer_channels=PRODUCER_CONTINUOUS,
         video_codec="h264_medium",
+        video_pacing=PACING_BURST,
     ),
 )
 

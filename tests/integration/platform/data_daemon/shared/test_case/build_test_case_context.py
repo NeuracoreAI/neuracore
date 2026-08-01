@@ -14,6 +14,7 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -338,6 +339,27 @@ def precompute_timestamps(
     return [timestamp_start_s + frame_index / fps for frame_index in range(frame_count)]
 
 
+def _await_frame_deadline(
+    deadline: float, *, pace: bool, stop_event: threading.Event | None = None
+) -> bool:
+    """Wait until *deadline* when *pace* is set, otherwise return immediately.
+
+    Shared by :func:`run_threaded_logging` (bounded, no *stop_event*) and
+    :func:`run_continuous_logging` (unbounded, interruptible via *stop_event*).
+    Returns ``True`` if *stop_event* fired while waiting, meaning the caller's
+    loop should stop; always ``False`` otherwise.
+    """
+    if not pace:
+        return False
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        return False
+    if stop_event is not None:
+        return stop_event.wait(remaining)
+    time.sleep(remaining)
+    return False
+
+
 def log_synchronous_frames(
     *,
     robot_name: str,
@@ -551,6 +573,39 @@ def _role_trace_keys(role_spec: dict[str, object]) -> list[str]:
     ]
 
 
+def _run_role_threads(
+    roles: list[dict[str, object]],
+    worker: Callable[[dict[str, object]], None],
+    *,
+    error_label: str,
+) -> None:
+    """Run *worker* on one daemon thread per role, then join and surface errors.
+
+    Shared by :func:`run_threaded_logging` and :func:`run_continuous_logging`,
+    which differ only in what their *worker* does per frame.
+    """
+    thread_errors: list[BaseException] = []
+
+    def guarded(role_spec: dict[str, object]) -> None:
+        try:
+            worker(role_spec)
+        except BaseException as exc:  # noqa: BLE001
+            thread_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=guarded, args=(role,), daemon=True) for role in roles
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if thread_errors:
+        raise RuntimeError(
+            f"{error_label} producer failed: {thread_errors[0]}"
+        ) from thread_errors[0]
+
+
 def run_threaded_logging(
     *,
     robot_name: str,
@@ -580,137 +635,117 @@ def run_threaded_logging(
         joint_names=joint_names, camera_name_list=camera_name_list
     )
     barrier = threading.Barrier(len(roles))
-    thread_errors: list[BaseException] = []
 
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
-        try:
-            set_thread_policy_for_macos()  # set policy because new thread
-            barrier.wait()
-            role_name = str(role_spec["role"])
-            marker_name = str(role_spec["marker_name"])
-            is_rgb = role_name == "rgb"
-            frame_count = video_frame_count if is_rgb else joint_frame_count
-            fps = video_fps if is_rgb else joint_fps
-            camera_feed = make_camera_feed(
-                is_rgb, image_width, image_height, video_detail
+        set_thread_policy_for_macos()  # set policy because new thread
+        barrier.wait()
+        role_name = str(role_spec["role"])
+        marker_name = str(role_spec["marker_name"])
+        is_rgb = role_name == "rgb"
+        frame_count = video_frame_count if is_rgb else joint_frame_count
+        fps = video_fps if is_rgb else joint_fps
+        camera_feed = make_camera_feed(is_rgb, image_width, image_height, video_detail)
+        pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
+        thread_wall_start = time.time() if pace_against_wall_clock else 0.0
+        timestamps = precompute_timestamps(timestamp_start_s, frame_count, fps)
+        burst = is_rgb and burst_video
+        for frame_index in range(frame_count):
+            jitter = (
+                get_jitter(use_stochastic_timestamps, fps)
+                if pace_against_wall_clock
+                else 0.0
             )
-            pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
-            thread_wall_start = time.time() if pace_against_wall_clock else 0.0
-            timestamps = precompute_timestamps(timestamp_start_s, frame_count, fps)
-            burst = is_rgb and burst_video
-            for frame_index in range(frame_count):
-                jitter = (
-                    get_jitter(use_stochastic_timestamps, fps)
-                    if pace_against_wall_clock
-                    else 0.0
+            frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+            _await_frame_deadline(
+                frame_deadline, pace=pace_against_wall_clock and not burst
+            )
+            if assert_deadline and use_stochastic_timestamps and not burst:
+                assert_on_schedule(
+                    frame_deadline,
+                    SCHEDULER_TOLERANCE_S,
+                    label=f"{role_name} frame",
                 )
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                if pace_against_wall_clock and not burst:
-                    remaining = frame_deadline - time.time()
-                    if remaining > 0:
-                        time.sleep(remaining)
-                if assert_deadline and use_stochastic_timestamps and not burst:
-                    assert_on_schedule(
-                        frame_deadline,
-                        SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
+            if use_real_timestamps:
+                timestamp = None
+            elif not use_stochastic_timestamps:
+                timestamp = timestamps[frame_index]
+            else:
+                intended = timestamp_start_s + (frame_index / fps)
+                timestamp = intended + jitter
+            if is_rgb:
+                for camera_offset, camera_name in enumerate(role_spec["camera_names"]):
+                    camera_id = str(camera_name)
+                    camera_index = camera_name_list.index(camera_id) + camera_offset
+                    frame_code = (
+                        (context_index * 1_000_000_000)
+                        + (recording_index * 10_000_000)
+                        + (camera_index * 100_000)
+                        + frame_index
                     )
-                if use_real_timestamps:
-                    timestamp = None
-                elif not use_stochastic_timestamps:
-                    timestamp = timestamps[frame_index]
-                else:
-                    intended = timestamp_start_s + (frame_index / fps)
-                    timestamp = intended + jitter
-                if is_rgb:
-                    for camera_offset, camera_name in enumerate(
-                        role_spec["camera_names"]
+                    rgb_image = camera_feed.render(frame_index, frame_code)
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_rgb",
+                        assert_deadline=assert_deadline,
                     ):
-                        camera_id = str(camera_name)
-                        camera_index = camera_name_list.index(camera_id) + camera_offset
-                        frame_code = (
-                            (context_index * 1_000_000_000)
-                            + (recording_index * 10_000_000)
-                            + (camera_index * 100_000)
-                            + frame_index
+                        nc.log_rgb(
+                            camera_id,
+                            rgb_image,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
                         )
-                        rgb_image = camera_feed.render(frame_index, frame_code)
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_rgb",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_rgb(
-                                camera_id,
-                                rgb_image,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
+            else:
+                thread_joint_names = list(role_spec["joint_names"])
+                joint_values = generate_joint_values(
+                    frame_index, joint_fps, thread_joint_names
+                )
+                if role_name == "joint_positions":
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_joint_positions",
+                        assert_deadline=assert_deadline,
+                    ):
+                        nc.log_joint_positions(
+                            joint_values,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
+                elif role_name == "joint_velocities":
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_joint_velocities",
+                        assert_deadline=assert_deadline,
+                    ):
+                        nc.log_joint_velocities(
+                            joint_values,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
                 else:
-                    thread_joint_names = list(role_spec["joint_names"])
-                    joint_values = generate_joint_values(
-                        frame_index, joint_fps, thread_joint_names
-                    )
-                    if role_name == "joint_positions":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_positions",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_positions(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    elif role_name == "joint_velocities":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_velocities",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_velocities(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    else:
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_torques",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_torques(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_custom_1d",
-                    assert_deadline=assert_deadline,
-                ):
-                    nc.log_custom_1d(
-                        marker_name,
-                        np.array([float(frame_index)], dtype=np.float32),
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
-        except BaseException as exc:  # noqa: BLE001
-            thread_errors.append(exc)
+                    with Timer(
+                        MAX_TIME_TO_LOG_S,
+                        label="nc.log_joint_torques",
+                        assert_deadline=assert_deadline,
+                    ):
+                        nc.log_joint_torques(
+                            joint_values,
+                            robot_name=robot_name,
+                            timestamp=timestamp,
+                        )
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_custom_1d",
+                assert_deadline=assert_deadline,
+            ):
+                nc.log_custom_1d(
+                    marker_name,
+                    np.array([float(frame_index)], dtype=np.float32),
+                    robot_name=robot_name,
+                    timestamp=timestamp,
+                )
 
-    threads = [
-        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    if thread_errors:
-        raise RuntimeError(
-            f"Threaded producer failed: {thread_errors[0]}"
-        ) from thread_errors[0]
+    _run_role_threads(roles, worker, error_label="Threaded")
 
     return [str(role["marker_name"]) for role in roles]
 
@@ -752,97 +787,81 @@ def run_continuous_logging(
         joint_names=joint_names, camera_name_list=camera_name_list
     )
     barrier = threading.Barrier(len(roles))
-    thread_errors: list[BaseException] = []
     report: dict[str, dict[str, list[float]]] = {}
     report_lock = threading.Lock()
 
     def worker(role_spec: dict[str, object]) -> None:
-        try:
-            set_thread_policy_for_macos()
-            barrier.wait()
-            role_name = str(role_spec["role"])
-            marker_name = str(role_spec["marker_name"])
-            is_rgb = role_name == "rgb"
-            fps = video_fps if is_rgb else joint_fps
-            camera_feed = make_camera_feed(
-                is_rgb, image_width, image_height, video_detail
-            )
-            trace_keys = _role_trace_keys(role_spec)
-            camera_id = str(role_spec["camera_names"][0]) if is_rgb else ""
-            thread_joint_names = [] if is_rgb else list(role_spec["joint_names"])
-            log_joint_fn = {
-                "joint_positions": nc.log_joint_positions,
-                "joint_velocities": nc.log_joint_velocities,
-                "joint_torques": nc.log_joint_torques,
-            }.get(role_name)
-            burst = is_rgb and burst_video
-            thread_wall_start = time.time()
-            frame_index = 0
-            while not stop_event.is_set():
-                jitter = get_jitter(use_stochastic_timestamps, fps)
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                remaining = frame_deadline - time.time()
-                if remaining > 0 and not burst and stop_event.wait(remaining):
-                    break
-                timestamp = timestamp_start_s + (frame_index / fps) + jitter
+        set_thread_policy_for_macos()
+        barrier.wait()
+        role_name = str(role_spec["role"])
+        marker_name = str(role_spec["marker_name"])
+        is_rgb = role_name == "rgb"
+        fps = video_fps if is_rgb else joint_fps
+        camera_feed = make_camera_feed(is_rgb, image_width, image_height, video_detail)
+        trace_keys = _role_trace_keys(role_spec)
+        camera_id = str(role_spec["camera_names"][0]) if is_rgb else ""
+        thread_joint_names = [] if is_rgb else list(role_spec["joint_names"])
+        log_joint_fn = {
+            "joint_positions": nc.log_joint_positions,
+            "joint_velocities": nc.log_joint_velocities,
+            "joint_torques": nc.log_joint_torques,
+        }.get(role_name)
+        burst = is_rgb and burst_video
+        thread_wall_start = time.time()
+        frame_index = 0
+        while not stop_event.is_set():
+            jitter = get_jitter(use_stochastic_timestamps, fps)
+            frame_deadline = thread_wall_start + (frame_index / fps) + jitter
+            if _await_frame_deadline(
+                frame_deadline, pace=not burst, stop_event=stop_event
+            ):
+                break
+            timestamp = timestamp_start_s + (frame_index / fps) + jitter
 
-                handle = robot.get_current_recording_id()
+            handle = robot.get_current_recording_id()
 
-                if is_rgb:
-                    rgb_image = camera_feed.render(frame_index, frame_index)
-                    with Timer(
-                        MAX_TIME_TO_LOG_S, label="nc.log_rgb", assert_deadline=False
-                    ):
-                        nc.log_rgb(
-                            camera_id,
-                            rgb_image,
-                            robot_name=robot_name,
-                            timestamp=timestamp,
-                        )
-                else:
-                    joint_values = generate_joint_values(
-                        frame_index, fps, thread_joint_names
-                    )
-                    with Timer(
-                        MAX_TIME_TO_LOG_S,
-                        label=f"nc.{role_name}",
-                        assert_deadline=False,
-                    ):
-                        log_joint_fn(
-                            joint_values, robot_name=robot_name, timestamp=timestamp
-                        )
+            if is_rgb:
+                rgb_image = camera_feed.render(frame_index, frame_index)
                 with Timer(
-                    MAX_TIME_TO_LOG_S, label="nc.log_custom_1d", assert_deadline=False
+                    MAX_TIME_TO_LOG_S, label="nc.log_rgb", assert_deadline=False
                 ):
-                    nc.log_custom_1d(
-                        marker_name,
-                        np.array([float(frame_index)], dtype=np.float32),
+                    nc.log_rgb(
+                        camera_id,
+                        rgb_image,
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+            else:
+                joint_values = generate_joint_values(
+                    frame_index, fps, thread_joint_names
+                )
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label=f"nc.{role_name}",
+                    assert_deadline=False,
+                ):
+                    log_joint_fn(
+                        joint_values, robot_name=robot_name, timestamp=timestamp
+                    )
+            with Timer(
+                MAX_TIME_TO_LOG_S, label="nc.log_custom_1d", assert_deadline=False
+            ):
+                nc.log_custom_1d(
+                    marker_name,
+                    np.array([float(frame_index)], dtype=np.float32),
+                    robot_name=robot_name,
+                    timestamp=timestamp,
+                )
 
-                if handle is not None:
-                    with report_lock:
-                        bucket = report.setdefault(handle, {})
-                        for trace_key in trace_keys:
-                            bucket.setdefault(trace_key, []).append(timestamp)
+            if handle is not None:
+                with report_lock:
+                    bucket = report.setdefault(handle, {})
+                    for trace_key in trace_keys:
+                        bucket.setdefault(trace_key, []).append(timestamp)
 
-                frame_index += 1
-        except BaseException as exc:  # noqa: BLE001
-            thread_errors.append(exc)
+            frame_index += 1
 
-    threads = [
-        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    if thread_errors:
-        raise RuntimeError(
-            f"Continuous producer failed: {thread_errors[0]}"
-        ) from thread_errors[0]
+    _run_role_threads(roles, worker, error_label="Continuous")
 
     return report
 
