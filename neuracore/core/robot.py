@@ -309,17 +309,33 @@ class Robot:
 
         if is_rust_daemon_enabled():
             local_handle = str(uuid.uuid4())
-            self._get_daemon_recording_context().start_recording(
-                robot_id=self.id,
-                robot_instance=self.instance,
-                robot_name=self.name,
-                dataset_id=dataset_id,
-                dataset_name=None,
-                timestamp=timestamp,
-            )
+            # Open the local gate BEFORE announcing the window. Every `log_*`
+            # forwards to the daemon only while `get_current_recording_id()` is
+            # set, so if that flips after the announcement, data logged in
+            # between is discarded by the SDK even though the daemon's window is
+            # already open — and discarded silently, since nothing is published
+            # for the daemon to report as out-of-window. Opening first makes the
+            # gate a superset of the window: the daemon, which is the authority,
+            # then rejects the genuinely-early samples itself.
             get_recording_state_manager().recording_started(
                 robot_id=self.id, instance=self.instance, recording_id=local_handle
             )
+            try:
+                self._get_daemon_recording_context().start_recording(
+                    robot_id=self.id,
+                    robot_instance=self.instance,
+                    robot_name=self.name,
+                    dataset_id=dataset_id,
+                    dataset_name=None,
+                    timestamp=timestamp,
+                )
+            except Exception:
+                # The gate is open but no window exists, so every later `log_*`
+                # would publish into nothing. Close it again before surfacing.
+                get_recording_state_manager().recording_stopped(
+                    robot_id=self.id, instance=self.instance, recording_id=local_handle
+                )
+                raise
             return local_handle
 
         try:
@@ -397,12 +413,6 @@ class Robot:
 
         end_time = time.time()
         if is_rust_daemon_enabled():
-            active_handle = get_recording_state_manager().get_current_recording_id(
-                self.id, self.instance
-            )
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=active_handle
-            )
             self._drain_streams_and_notify_daemon(
                 recording_id,
                 wait_for_producer_drain=wait_for_producer_drain,
@@ -453,21 +463,51 @@ class Robot:
         wait_for_producer_drain: bool,
         timestamp: float | None = None,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon."""
+        """Stop all streams and send the recording-stopped IPC message to the daemon.
+
+        Under the Rust daemon the local ``log_*`` gate closes in the instant
+        between the window closing and the writer's tail-chunk barrier. Closing
+        it before the notify would silently discard data the daemon would still
+        have accepted — the window is open until it receives the stop. Closing it
+        after the barrier instead leaves it open for as long as the writer's
+        backlog takes to drain (over a second under burst logging), publishing
+        data the daemon has already stopped accepting and simply throws away.
+        """
         try:
             producer_stop_sequence_numbers = self._stop_all_streams(
                 wait_for_producer_drain=wait_for_producer_drain
             )
-            self._get_daemon_recording_context().stop_recording(
-                recording_id=recording_id,
-                producer_stop_sequence_numbers=producer_stop_sequence_numbers,
-                timestamp=timestamp,
-            )
+            context = self._get_daemon_recording_context()
+            try:
+                context.stop_recording(
+                    recording_id=recording_id,
+                    producer_stop_sequence_numbers=producer_stop_sequence_numbers,
+                    timestamp=timestamp,
+                )
+            finally:
+                # Both run even if the notify failed: leaving the gate open would
+                # keep forwarding into a window that may never close, and skipping
+                # the barrier would strand the spooled tail chunks. Both are
+                # no-ops off the Rust daemon.
+                if is_rust_daemon_enabled():
+                    self._close_local_recording_gate()
+                context.flush_source()
         except Exception:
             logger.exception(
                 "Failed to stop streams and notify daemon for recording_id=%s",
                 recording_id,
             )
+
+    def _close_local_recording_gate(self) -> None:
+        """Clear the local recording handle that gates ``log_*`` forwarding."""
+        if not self.id:
+            return
+        state = get_recording_state_manager()
+        state.recording_stopped(
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=state.get_current_recording_id(self.id, self.instance),
+        )
 
     def _register_remote_stop_handler(self) -> None:
         """Register a callback to drain streams when a remote stop arrives."""

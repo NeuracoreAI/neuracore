@@ -409,6 +409,39 @@ pub enum Envelope {
     /// recording window; the dispatcher handles it by refreshing the in-memory
     /// config (see `cloud::config_watcher`).
     RefreshConfig {},
+    /// Producer announces that it has finished announcing tail video chunks for
+    /// a source's just-stopped recording — the "end of stream" marker for that
+    /// window's late data.
+    ///
+    /// A [`Envelope::StopRecording`] is published *before* the producer's writer
+    /// flush barrier runs, so the tail chunks it seals are announced after their
+    /// own stop. The daemon therefore has to keep the closed window resolvable
+    /// for some time — but "how long" is a property of the producer's writer
+    /// backlog (queue depth, disk speed), which the daemon cannot observe. A
+    /// fixed retention is a guess, and a wrong guess silently orphans the tail
+    /// chunk and loses its frames.
+    ///
+    /// So the producer states it instead: the writer publishes this marker
+    /// immediately after the last tail chunk of the barrier, **on the same port
+    /// as the chunk announcements**, so it is ordered strictly behind every
+    /// chunk it vouches for. It is held for the same holdback as those chunks,
+    /// so by the time the daemon releases it, they have already routed. The
+    /// dispatcher then evicts the closing window with no timing assumption at
+    /// all.
+    ///
+    /// Best-effort by construction: a producer that dies mid-barrier never
+    /// sends it, so the daemon still bounds the wait (see the dispatcher's
+    /// flush-wait cap). Carries no window key — a source's stops are strictly
+    /// ordered, so markers match its closed windows oldest-first.
+    SourceFlushed {
+        robot_id: String,
+        robot_instance: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) at the marker's
+        /// send. Diagnostic only — it lies *after* the window it closes out (it
+        /// is stamped once the barrier is done), so it is deliberately not used
+        /// for window membership.
+        publish_timestamp_ns: i64,
+    },
 }
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
@@ -438,6 +471,7 @@ impl Envelope {
             Envelope::BatchedData { .. } => "batched_data",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
             Envelope::RefreshConfig {} => "refresh_config",
+            Envelope::SourceFlushed { .. } => "source_flushed",
         }
     }
 

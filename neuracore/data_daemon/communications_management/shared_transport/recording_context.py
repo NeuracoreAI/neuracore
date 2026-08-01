@@ -129,9 +129,13 @@ class RecordingContext:
         source ``(robot_id, robot_instance)``. No recording id is on the wire —
         the daemon allocates and owns recording identity.
 
-        ``timestamp`` optionally pins the recording window's lower bound (Unix
-        seconds), matching the ``log_*`` methods; when ``None`` the producer
-        stamps the publish clock now.
+        ``timestamp`` is the recording's *capture* start time (Unix seconds):
+        stored as ``start_timestamp_ns``, POSTed as the backend ``start_time``,
+        and returned as the marker that resolves this recording's cloud id
+        (:meth:`get_recording_id`). It does **not** bound the recording window —
+        the daemon routes on a publish stamp taken inside this call, so a
+        synthetic capture clock cannot shift the window or clip data. When
+        ``None`` the publish time is used as the capture time too.
         """
         if not self._rust_mode:
             return
@@ -278,10 +282,17 @@ class RecordingContext:
 
         Under the Rust daemon this publishes one ``StopRecording`` tagged with
         the source and the publish-clock stop boundary, which the daemon uses to
-        close the recording window. ``timestamp`` optionally pins that boundary
-        (Unix seconds), matching the ``log_*`` methods; when ``None`` the
-        producer stamps wall-clock now. ``recording_id`` /
+        close the recording window. ``timestamp`` is the recording's *capture*
+        stop time (Unix seconds) and is separate from that boundary: it is
+        stored as ``stop_timestamp_ns`` and POSTed as the backend ``end_time``,
+        never used for window membership. When ``None`` the publish time is used
+        as the capture time too. ``recording_id`` /
         ``producer_stop_sequence_numbers`` are only used by the legacy path.
+
+        Under the Rust daemon this publishes the stop only; :meth:`flush_source`
+        seals the writer's tail chunks and must be called straight after. The two
+        are split so the caller can close its own logging gate in between, at the
+        window boundary rather than after a backlog-length barrier.
         """
         if self._rust_mode:
             if not self._robot_id:
@@ -309,6 +320,17 @@ class RecordingContext:
             {"recording_stopped": recording_stopped_payload},
         )
         self.recording_id = effective_recording_id
+
+    def flush_source(self) -> None:
+        """Run the writer's deferred tail-chunk barrier for the bound source.
+
+        The second half of :meth:`stop_recording`, and mandatory after it — the
+        tail chunks are sealed nowhere else. No-op off the Rust daemon or before
+        a source is bound.
+        """
+        if not self._rust_mode or not self._robot_id:
+            return
+        _load_native().flush_source(self._robot_id, self._robot_instance)
 
     def get_recording_id(
         self,

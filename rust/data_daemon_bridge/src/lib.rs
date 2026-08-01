@@ -89,7 +89,7 @@ fn start_recording(
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StartRecording {
-            robot_id,
+            robot_id: robot_id.clone(),
             robot_instance,
             robot_name,
             dataset_id,
@@ -97,6 +97,14 @@ fn start_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // Tell the writer where the window opened so no video chunk spans the
+        // boundary. Fire-and-forget: it is applied lazily against frame publish
+        // stamps, so it costs the caller nothing and needs no barrier here.
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: publish_timestamp_ns,
+        });
         Ok(capture_timestamp_ns)
     })
 }
@@ -223,6 +231,10 @@ fn log_frame(
         sensor_name: name.to_string(),
         width,
         height,
+        // Stamped here, on the caller's thread, while the recording that owns
+        // this frame is still open — not on the writer thread, which may not
+        // reach the frame until well after the stop.
+        publish_ns: now_ns(),
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
         data,
@@ -338,14 +350,34 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
-        // Then barrier on the writer: it drains every frame still queued for
-        // this source (FIFO), seals the tail chunks and announces them, then
-        // acks. Blocking here means `stop_recording` still returns only once
-        // those chunks are durably spooled + announced, so a process exit right
-        // after the call can't lose them. The tail chunks ride the writer's
-        // port and land after this stop; the daemon's holdback + closing-window
-        // retention route them into the just-closed window by their in-window
-        // open timestamp.
+        // The writer's tail chunks are NOT sealed here — [`flush_source`] does
+        // that, and every caller must invoke it straight after this. The two are
+        // split so the caller can close its own logging gate in between, at the
+        // window boundary, rather than after a barrier that lasts as long as the
+        // writer's backlog; leaving a gate open that long publishes a second or
+        // more of data the daemon has already stopped accepting.
+        Ok(())
+    })
+}
+
+/// Run the writer's stop barrier for a source: drain every frame still queued
+/// for it (FIFO), seal and announce the tail chunks, and publish the
+/// `SourceFlushed` marker.
+///
+/// The second half of [`stop_recording`], and mandatory after it — the tail
+/// chunks are sealed nowhere else. Blocking, so once it returns those chunks are
+/// durably spooled and announced and a process exit cannot lose them. The chunks
+/// ride the writer's port and land after the stop; the daemon's holdback plus
+/// the `SourceFlushed` marker route them into the just-closed window by their
+/// in-window open timestamp. Idempotent — a source with nothing open seals
+/// nothing.
+#[pyfunction]
+fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::FlushSource {
@@ -354,8 +386,8 @@ fn stop_recording(
             ack: ack_tx,
         });
         let _ = ack_rx.recv();
-        Ok(())
-    })
+    });
+    Ok(())
 }
 
 /// Cancel a recording — drop the source's in-progress chunk state without
@@ -466,6 +498,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
