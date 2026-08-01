@@ -37,7 +37,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
-    TIMESTAMP_MODE_MANUAL,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -61,7 +60,6 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
-            timestamp_mode=TIMESTAMP_MODE_MANUAL,
         ),
     ),
 ).as_cases()
@@ -244,7 +242,7 @@ def test_cancel_then_start_new_recording(
                         context_index=0,
                         wall_started_at=wall_started_at,
                         wall_stopped_at=wall_stopped_at,
-                        timestamp_mode=case.timestamp_mode,
+                        random_phase=case.random_phase,
                     )
                 ]
                 verify_cloud_results(results=results, case=case)

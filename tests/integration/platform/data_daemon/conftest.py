@@ -162,22 +162,6 @@ def skip_marked_cases(request: pytest.FixtureRequest) -> None:
 
 
 @pytest.fixture(autouse=True)
-def skip_other_os_cases(request: pytest.FixtureRequest) -> None:
-    """Skip cases whose ``run_on_os`` does not include the running platform.
-
-    Cases default to every OS; a case (or its batch) narrows the selection when
-    the workload cannot hold its guarantees on a given platform — e.g.
-    stochastic-timestamp cases opt out of darwin, whose scheduler cannot meet
-    their per-frame deadlines.
-    """
-    if "case" not in request.fixturenames:
-        return
-    case = request.getfixturevalue("case")
-    if not case.runs_on_current_os:
-        pytest.skip(f"case does not run on {sys.platform} (run_on_os={case.run_on_os})")
-
-
-@pytest.fixture(autouse=True)
 def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
     """Apply local storage cleanup once before the first case in each batch.
 

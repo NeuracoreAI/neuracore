@@ -85,10 +85,6 @@ jobs:
         path: "."
         extras: dev
 
-    - name: Disable timer coalescing (macOS)
-      if: runner.os == 'macOS'
-      run: sudo sysctl -w kern.timer.coalescing_enabled=0
-
     - name: Prepare performance report directories
       run: mkdir -p "$NCD_PERF_REPORT_DIR/allure-results" "$NCD_PERF_REPORT_DIR/metrics"
 
