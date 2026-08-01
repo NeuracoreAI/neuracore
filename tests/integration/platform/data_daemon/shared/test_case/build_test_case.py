@@ -214,6 +214,13 @@ class DataDaemonTestCase:
             (``producer_channels="per_thread"`` or ``"continuous"``);
             timestamps stay synthetic (``timestamp_start_s + frame_index / fps``)
             regardless of delivery pacing.
+        cpu_load: When ``True``, all but one CPU core is saturated (see
+            ``cpu_load()`` in ``shared/process_control.py``) for the duration
+            of the recording contexts. Approximates the core contention a real
+            rig puts on the daemon, so a case relying on the writer's compress
+            pool backlogging under load doesn't depend on how many idle cores
+            the host happens to have. ``False`` (default) runs with no
+            injected contention.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -247,6 +254,7 @@ class DataDaemonTestCase:
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
     video_pacing: VideoPacing = PACING_DEADLINE
+    cpu_load: bool = False
 
     @property
     def runs_on_current_os(self) -> bool:
@@ -407,6 +415,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("stochastic")
     if case.wait:
         parts.append("wait")
+    if case.cpu_load:
+        parts.append("cpuload")
     return "-".join(parts)
 
 

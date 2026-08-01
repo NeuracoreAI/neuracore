@@ -35,7 +35,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_REALISTIC,
-    PACING_BURST,
     STOP_METHOD_CLI,
     STORAGE_STATE_PRESERVE,
 )
@@ -62,7 +61,6 @@ def test_disk_db_data_integrity(
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
     test_wall_timer: Callable[[], float],
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Record data in offline mode and verify local disk and DB state.
 
@@ -81,15 +79,6 @@ def test_disk_db_data_integrity(
     if case.preserve_artifacts_per_test:
         setup_per_test_artifact_dirs(case_id(case))
 
-    # Burst pacing backlogs the writer's compress pool on the assumption that
-    # the flush outlasts the daemon's holdback+retention window. On a fast /
-    # idle host the pool can drain the backlog before that window closes, so
-    # this pins the pool to one worker (NCD_COMPRESS_POOL_SIZE) and adds real
-    # core contention (cpu_load) to make the backlog host-independent.
-    burst_backlog = case.video_pacing == PACING_BURST
-    if burst_backlog:
-        monkeypatch.setenv("NCD_COMPRESS_POOL_SIZE", "1")
-
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
@@ -97,7 +86,7 @@ def test_disk_db_data_integrity(
         try:
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
-                with cpu_load() if burst_backlog else nullcontext():
+                with cpu_load() if case.cpu_load else nullcontext():
                     results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
