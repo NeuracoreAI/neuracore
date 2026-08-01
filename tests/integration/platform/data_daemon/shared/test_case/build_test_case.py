@@ -24,7 +24,12 @@ if TYPE_CHECKING:
     )
 
 from neuracore.core.config.config_manager import get_config_manager
-from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.process_control import (
+    BUCKET_KEYS,
+    LATENCY_BUCKETS_S,
+    Timer,
+    percentile_upper_bound,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
     DURATION_MODE_FIXED,
@@ -406,11 +411,53 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
 # ---------------------------------------------------------------------------
 
 
+MIN_SAMPLES_FOR_PERCENTILE = 100
+"""Below this sample count a percentile is not reported — it would just be the max."""
+
+
+def _percentile_text(stats: dict[str, float], quantile: float) -> str:
+    """Render one percentile column, or empty when it would say nothing.
+
+    Args:
+        stats: One label's accumulated timer stats.
+        quantile: The quantile to render, e.g. ``0.99``.
+    """
+    count = int(stats["count"])
+    label = f"p{int(quantile * 100)}"
+    if count < MIN_SAMPLES_FOR_PERCENTILE:
+        return ""
+    if not any(stats.get(key, 0.0) for key in BUCKET_KEYS):
+        return f"{label}=n/a"
+    bound = percentile_upper_bound(stats, quantile)
+    if bound is None:
+        return f"{label}>{LATENCY_BUCKETS_S[-1]:.3f}s"
+    # A bucket edge, not an interpolated value — "<=" keeps that honest.
+    return f"{label}<={min(bound, stats['max']):.3f}s"
+
+
 def _format_timer_stats_line(label: str, stats: dict[str, float]) -> str:
-    """Format a timer stats line for analysis output."""
+    """Format a timer stats line for analysis output.
+
+    Carries percentiles alongside ``avg``/``max`` because the two extremes
+    answer different questions and neither answers this one: ``avg`` is
+    insensitive to a tail (one slow call in 30k moves it by nothing) while
+    ``max`` is a single draw dominated by scheduler noise, so it swings 2x
+    between identical runs.
+
+    Both ``p95`` and ``p99``, because the buckets are log-spaced and the two
+    usually land in different ones — which separates a distribution that slid
+    as a whole from one call in a hundred stalling. A regression that slows
+    every call moves ``p95`` first.
+    """
     count = int(stats["count"])
     avg = stats["total"] / count if count > 0 else 0.0
-    return f"    {label:<42}  {count:3}x" f"  avg={avg:.3f}s  max={stats['max']:.3f}s"
+    p95_text = _percentile_text(stats, 0.95)
+    p99_text = _percentile_text(stats, 0.99)
+    return (
+        f"    {label:<42}  {count:3}x"
+        f"  avg={avg:.3f}s  {p95_text:<12}  {p99_text:<12}"
+        f"  max={stats['max']:.3f}s"
+    )
 
 
 def log_run_analysis(
