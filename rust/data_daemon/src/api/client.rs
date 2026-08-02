@@ -84,9 +84,9 @@ impl ApiClientError {
     ///
     /// The recording notifiers use this to treat "the recording is already not
     /// open on the backend" as the desired post-condition rather than a
-    /// failure: a cancel/stop POST that 404s means another path already closed
-    /// the recording (a benign race between the cancel-notifier sweep and the
-    /// start-notifier's `resolve_prior_pending`), so there is nothing left to do.
+    /// failure: a cancel/stop POST that 404s means the recording was already
+    /// closed, or that the backend reaped it as an abandoned pending recording,
+    /// so there is nothing left to do.
     pub fn is_not_found(&self) -> bool {
         matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
     }
@@ -325,13 +325,11 @@ impl ApiClient {
 
     /// `POST /org/{org}/recording/cancel` with a JSON body carrying
     /// `recording_id` and `end_time` (the cancel time, Unix seconds) — the same
-    /// body shape the backend now requires for `/recording/stop`.
+    /// body shape the backend requires for `/recording/stop`.
     ///
-    /// Cancels the recording server-side, which also clears it as the robot
-    /// instance's *pending* recording so the next `/recording/start` mints a
-    /// fresh id instead of reusing this one. The daemon's cancel notifier makes
-    /// this call best-effort once it knows the cloud `recording_id`; the SDK
-    /// no longer calls it inline.
+    /// Cancels the recording server-side, discarding its data. The daemon's
+    /// cancel notifier owns this call, making it best-effort once the cloud
+    /// `recording_id` is known.
     pub async fn recording_cancel(
         &self,
         org_id: &str,
