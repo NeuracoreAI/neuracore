@@ -51,29 +51,19 @@ DURATION_MODE_VARIABLE = "variable"
 DURATION_VARIABLE_MIN_FACTOR = 0.75
 DURATION_VARIABLE_MAX_FACTOR = 1.25
 
-# run_on_os (values match ``sys.platform``)
-OS_LINUX = "linux"
-OS_DARWIN = "darwin"
-OS_WINDOWS = "win32"
-
-# timestamp_mode
-TIMESTAMP_MODE_MANUAL = "manual"
-TIMESTAMP_MODE_REAL = "real"
-TIMESTAMP_MODE_STOCHASTIC = "stochastic"
-# Jitter amplitude as a proportion of half the inter-frame interval, so the
+# Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
-STOCHASTIC_JITTER_FACTOR = 0.5
-# OS-scheduler slack budget for the deadline-lateness assertion in stochastic mode.
-SCHEDULER_TOLERANCE_S = 0.05
+RANDOM_PHASE_JITTER_FACTOR = 0.5
 
 
-def stochastic_jitter_window(fps: int) -> float:
-    """Max jitter amplitude (seconds) for a stream running at ``fps``.
+def random_phase_jitter_window(fps: int) -> float:
+    """Max phase offset (seconds) for a stream running at ``fps``.
 
-    A fraction (:data:`STOCHASTIC_JITTER_FACTOR`) of half the inter-frame
-    interval, keeping jitter comfortably below the gap between frames.
+    A fraction (:data:`RANDOM_PHASE_JITTER_FACTOR`) of half the inter-frame
+    interval, keeping the offset comfortably below the gap between frames so it
+    can never reorder a stream.
     """
-    return 1 / fps / 2 * STOCHASTIC_JITTER_FACTOR
+    return 1 / fps / 2 * RANDOM_PHASE_JITTER_FACTOR
 
 
 # ---------------------------------------------------------------------------
@@ -89,14 +79,6 @@ STORAGE_STATE_ACTIONS = (
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
-TIMESTAMP_MODES = (
-    TIMESTAMP_MODE_MANUAL,
-    TIMESTAMP_MODE_REAL,
-    TIMESTAMP_MODE_STOCHASTIC,
-)
-OS_ALL = (OS_LINUX, OS_DARWIN, OS_WINDOWS)
-# The macOS scheduler cannot hold the per-frame deadlines stochastic cases assert.
-OS_EXCEPT_DARWIN = (OS_LINUX, OS_WINDOWS)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -104,8 +86,6 @@ OS_EXCEPT_DARWIN = (OS_LINUX, OS_WINDOWS)
 
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
-TimestampMode = Literal["manual", "real", "stochastic"]
-TestOs = Literal["linux", "darwin", "win32"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
