@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
@@ -36,13 +35,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
-    TIMESTAMP_MODE_MANUAL,
-    TIMESTAMP_MODE_REAL,
-    TIMESTAMP_MODE_STOCHASTIC,
     StopMethod,
     StorageStateAction,
-    TestOs,
-    TimestampMode,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,9 +83,10 @@ class DataDaemonTestCase:
     Attributes:
         duration_sec: Simulated capture duration per individual recording, in
             seconds. All frames are generated at ``fps`` Hz so the total expected
-            frame count is ``fps * duration_sec``. Manual timestamp cases emit
-            those frames as quickly as the transport allows rather than waiting
-            for this amount of wall-clock time.
+            frame count is ``fps * duration_sec``. Frames are emitted as quickly
+            as the transport allows rather than waiting for this amount of
+            wall-clock time — ``duration_sec`` sizes the workload, it does not
+            pace it.
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
@@ -100,10 +95,13 @@ class DataDaemonTestCase:
             each context gets ``recording_count // parallel_contexts`` recordings,
             and the first ``recording_count % parallel_contexts`` contexts each
             get one additional recording.
-        mode: Execution strategy for parallel contexts.  ``"sequential"``
-            starts each context only after the previous one has finished;
-            ``"staggered"`` starts contexts with a time offset so their active
-            windows overlap.  Single-context cases always use ``"sequential"``.
+        mode: Timestamp layout across parallel contexts — *not* an execution
+            order.  Every context in a multi-context case runs concurrently in
+            a multiprocessing pool regardless of this value.  ``"sequential"``
+            gives all contexts the same timestamp origin, so their recordings
+            cover the same span; ``"staggered"`` offsets context *i* by
+            ``duration_sec / 2 * i``, so consecutive contexts' spans partly
+            overlap.  Single-context cases always use ``"sequential"``.
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
@@ -150,23 +148,20 @@ class DataDaemonTestCase:
         video_fps: Frame rate in Hz for video/camera producers.  Determines the
             total expected video frame count as ``video_fps * duration_sec``.
             Ignored when ``video_count`` is ``0``.
-        timestamp_mode: Controls how timestamps are assigned to logged frames.
-            ``"manual"`` (default) precomputes explicit monotonically-increasing
-            timestamps from ``timestamp_start_s + frame_index / fps`` and emits
-            frames without wall-clock pacing.
-            ``"real"`` omits the ``timestamp`` argument so the logging API uses
-            the wall-clock time at the moment each frame is logged.
+        random_phase: Controls *where* the explicitly-supplied timestamps sit,
+            never *when* the producer runs — every case precomputes its full
+            timestamp sequence up front and emits frames as fast as the
+            transport allows.  ``False``
+            (default) puts frames on an exact ``timestamp_start_s +
+            frame_index / fps`` grid.  ``True`` offsets each frame by a
+            deterministic pseudo-random amount within
+            ``random_phase_jitter_window(fps)``, so the daemon sees
+            non-uniformly spaced timestamps.
         skip: When ``True``, the case is skipped at collection time instead of
             being executed.  Lets unstable or not-yet-validated workloads stay
             in the suite (documented and discoverable) without running.  A
             batch with ``skip=True`` forces every case to skip regardless of
             this per-case value.
-        run_on_os: Operating systems the case runs on, as ``sys.platform``
-            values (see ``OS_ALL`` / ``OS_EXCEPT_DARWIN``).  ``None`` (default)
-            means every OS; set a tuple to opt out of the platforms it omits, and
-            the case is skipped at collection time elsewhere.  A batch-level
-            ``run_on_os`` only fills in cases that leave this ``None``, so a
-            per-case selection always wins over the batch's.
         video_codec: When set (e.g. ``"h264_medium"``), the case selects that
             global video codec via ``nc.set_video_encoding_options`` before
             recording, so RGB cameras upload a single lossy CRF-23 video and the
@@ -177,8 +172,8 @@ class DataDaemonTestCase:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
         Both are computed from the base ``duration_sec`` separately (rather than
         stagger being a function of the calculated duration variation).
-        With a 50 % stagger and a 75 % duration floor, context 1's
-        start is guaranteed to fall before context 0's end.
+        With a 50 % stagger and a 75 % duration floor, context 1's timestamp
+        start is guaranteed to fall before context 0's timestamp end.
     """
 
     duration_sec: int = 5
@@ -198,15 +193,9 @@ class DataDaemonTestCase:
     wait: bool = False
     joint_fps: int = 60
     video_fps: int = 60
-    timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
+    random_phase: bool = False
     skip: bool = False
-    run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
-
-    @property
-    def runs_on_current_os(self) -> bool:
-        """Return True when this case is selected for the running platform."""
-        return self.run_on_os is None or sys.platform in self.run_on_os
 
     @property
     def has_video(self) -> bool:
@@ -258,16 +247,9 @@ class DataDaemonTestBatch:
             ``DataDaemonTestCase.preserve_artifacts_per_test``.
         stop_method: Propagated to every case; see
             ``DataDaemonTestCase.stop_method``.
-            timestamp_mode: Optional batch-level override for timestamp mode. When
-                unset, each case keeps its own ``timestamp_mode``.
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
-        run_on_os: Default OS selection for cases that do not specify one; see
-            ``DataDaemonTestCase.run_on_os``.  Unlike the infrastructure params
-            above this does *not* override the cases: any case with its own
-            ``run_on_os`` keeps it.  ``None`` (default) leaves every case
-            running on all platforms.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -275,9 +257,7 @@ class DataDaemonTestBatch:
     storage_state_action: StorageStateAction = STORAGE_STATE_EMPTY
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
-    timestamp_mode: TimestampMode | None = None
     skip: bool = False
-    run_on_os: tuple[TestOs, ...] | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -287,8 +267,6 @@ class DataDaemonTestBatch:
             "preserve_artifacts_per_test": self.preserve_artifacts_per_test,
             "stop_method": self.stop_method,
         }
-        if self.timestamp_mode is not None:
-            batch_overrides["timestamp_mode"] = self.timestamp_mode
         if self.skip:
             batch_overrides["skip"] = True
         return [
@@ -299,13 +277,6 @@ class DataDaemonTestBatch:
                     if f.name not in _BATCH_PARAMS
                 },
                 **batch_overrides,
-                # Batch OS selection is a default, not an override: a case that
-                # names its own platforms keeps them.
-                **(
-                    {"run_on_os": self.run_on_os}
-                    if self.run_on_os is not None and c.run_on_os is None
-                    else {}
-                ),
             })
             for c in self.cases
         ]
@@ -339,10 +310,8 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(case.video_codec)
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
-    if case.timestamp_mode == TIMESTAMP_MODE_REAL:
-        parts.append("realtime")
-    elif case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC:
-        parts.append("stochastic")
+    if case.random_phase:
+        parts.append("random-phase")
     if case.wait:
         parts.append("wait")
     return "-".join(parts)

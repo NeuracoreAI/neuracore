@@ -78,33 +78,9 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_VARIABLE_MIN_FACTOR,
     FRAME_BYTE_LENGTH,
     FRAME_GRID_SIZE,
-    MODE_SEQUENTIAL,
-    TIMESTAMP_MODE_REAL,
-    TIMESTAMP_MODE_STOCHASTIC,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def assert_context_mode(case: DataDaemonTestCase, results: list[ContextResult]) -> None:
-    """Assert that context timing matches the expected mode."""
-    active_results = [result for result in results if result.recording_indexes]
-    if len(active_results) < 2:
-        return
-
-    ordered_results = sorted(active_results, key=lambda result: result.context_index)
-    first = ordered_results[0]
-    second = ordered_results[1]
-    tolerance_s = 0.1
-    if case.mode == MODE_SEQUENTIAL:
-        assert abs(second.timestamp_start_s - first.timestamp_start_s) < tolerance_s
-        assert second.wall_started_at is not None
-        assert first.wall_stopped_at > second.wall_started_at
-        return
-
-    assert first.timestamp_end_s > second.timestamp_start_s
-    assert second.wall_started_at is not None
-    assert first.wall_stopped_at > second.wall_started_at
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +334,8 @@ def _assert_synced_episode_timestamps_are_sane(
     """Validate synchronized-episode timestamp sanity without sync-window coupling.
 
     Cloud integrity checks should not re-test the synchronization algorithm.
-    Keep this validation broad: values must be finite and non-decreasing, and
-    real-timestamp mode values must look like Unix epochs.
+    Keep this validation broad: values must be finite, and deterministic-phase
+    values must additionally be non-decreasing.
     """
     if not timestamps:
         return
@@ -369,15 +345,7 @@ def _assert_synced_episode_timestamps_are_sane(
         not non_finite
     ), f"Synced episode has non-finite timestamp(s): {non_finite[:5]}"
 
-    if result.timestamp_mode == TIMESTAMP_MODE_REAL:
-        epoch_floor = 946_684_800.0
-        non_epoch = [ts for ts in timestamps if ts < epoch_floor]
-        assert not non_epoch, (
-            f"Synced episode has {len(non_epoch)} timestamp(s) that are not "
-            f"valid epoch values (< year 2000) — e.g. {non_epoch[:5]}"
-        )
-
-    if result.timestamp_mode != TIMESTAMP_MODE_STOCHASTIC:
+    if not result.random_phase:
         non_monotonic = [
             (i, timestamps[i], timestamps[i + 1])
             for i in range(len(timestamps) - 1)

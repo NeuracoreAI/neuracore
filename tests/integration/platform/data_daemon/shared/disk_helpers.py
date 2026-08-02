@@ -12,11 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
-from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    TIMESTAMP_MODE_REAL,
-    TIMESTAMP_MODE_STOCHASTIC,
-    stochastic_jitter_window,
-)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
@@ -144,7 +139,7 @@ def _collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[fl
     return trace_timestamps
 
 
-def _assert_manual_timestamps(
+def _assert_timestamps_match(
     *,
     recording_id: str,
     trace_key: str,
@@ -153,7 +148,10 @@ def _assert_manual_timestamps(
     failures: list[TraceFailure],
     durations: dict[str, float],
 ) -> None:
-    """Assert all timestamps exactly match the expected manual list (no tolerance).
+    """Assert all timestamps exactly match the expected list (no tolerance).
+
+    Applies to both phase modes: the producer emitted this exact sequence, so
+    random-phase offsets need no tolerance window of their own.
 
     Appends :class:`TraceFailure` instances to *failures* so the caller can
     aggregate traces that share the same failure body (e.g. all joints failing
@@ -220,185 +218,22 @@ def _collapse_trace_failures(failures: list[TraceFailure]) -> list[str]:
     return lines
 
 
-def _assert_real_timestamps(
-    *,
-    recording_id: str,
-    trace_key: str,
-    timestamps: list[float],
-    wall_started_at: float | None,
-    wall_stopped_at: float,
-    duration_sec: int,
-    clock_tolerance_s: float,
-    failures: list[TraceFailure],
-    durations: dict[str, float],
-) -> None:
-    """Assert all timestamps are plausible wall-clock epoch values.
-
-    Validates that:
-
-    1. Every timestamp looks like a Unix epoch (> year-2000 threshold).
-    2. All timestamps fall within the wall-clock window ``[wall_started_at -
-       tol, wall_stopped_at + tol]``.
-    3. Timestamps are non-decreasing (monotonic).
-    4. The span from first to last timestamp is within a reasonable range
-       of the expected recording duration.
-    """
-    # 946684800 = 2000-01-01T00:00:00Z — any real timestamp must exceed this.
-    epoch_floor = 946_684_800.0
-    non_epoch = [ts for ts in timestamps if ts < epoch_floor]
-    if non_epoch:
-        failures.append(
-            TraceFailure(
-                trace_key=trace_key,
-                body=(
-                    f"{len(non_epoch)} timestamp(s) are not valid epoch"
-                    f" values (< year 2000) — "
-                    f"e.g. {non_epoch[:5]}"
-                ),
-            )
-        )
-        return
-
-    if wall_started_at is not None:
-        out_of_wall = [
-            ts
-            for ts in timestamps
-            if not (
-                wall_started_at - clock_tolerance_s
-                <= ts
-                <= wall_stopped_at + clock_tolerance_s
-            )
-        ]
-        if out_of_wall:
-            failures.append(
-                TraceFailure(
-                    trace_key=trace_key,
-                    body=(
-                        f"{len(out_of_wall)} timestamp(s) outside wall-clock window "
-                        f"[{wall_started_at - clock_tolerance_s:.2f}, "
-                        f"{wall_stopped_at + clock_tolerance_s:.2f}] — "
-                        f"e.g. {out_of_wall[:5]}"
-                    ),
-                )
-            )
-            return
-
-    sorted_ts = sorted(timestamps)
-    non_monotonic = [
-        (i, sorted_ts[i], sorted_ts[i + 1])
-        for i in range(len(sorted_ts) - 1)
-        if sorted_ts[i] > sorted_ts[i + 1]
-    ]
-    if non_monotonic:
-        failures.append(
-            TraceFailure(
-                trace_key=trace_key,
-                body=f"timestamps are not monotonic — e.g. {non_monotonic[:5]}",
-            )
-        )
-
-    actual_start_s = sorted_ts[0]
-    actual_end_s = sorted_ts[-1]
-    actual_duration_s = actual_end_s - actual_start_s
-    durations[f"{recording_id}:{trace_key}"] = actual_duration_s
-
-    expected_duration_s = float(duration_sec)
-    if not (
-        expected_duration_s - clock_tolerance_s
-        <= actual_duration_s
-        <= expected_duration_s + clock_tolerance_s
-    ):
-        recording_path = get_daemon_recordings_root_path() / recording_id
-        failures.append(
-            TraceFailure(
-                trace_key=trace_key,
-                body=(
-                    f"timestamp span {actual_duration_s:.3f}s outside expected "
-                    f"{expected_duration_s:.2f}s ± {clock_tolerance_s:.2f}s "
-                    f"[{expected_duration_s - clock_tolerance_s:.2f}s, "
-                    f"{expected_duration_s + clock_tolerance_s:.2f}s]; "
-                    f"recording data at {recording_path}"
-                ),
-            )
-        )
-
-
-def _assert_stochastic_timestamps(
-    *,
-    recording_id: str,
-    trace_key: str,
-    timestamps: list[float],
-    expected_timestamps: list[float],
-    failures: list[TraceFailure],
-    durations: dict[str, float],
-    fps: int,
-) -> None:
-    """Assert every timestamp is within the fps-derived jitter window.
-
-    The intended timestamps are the pre-jitter values (``start + i / fps``).
-    Each actual timestamp must satisfy ``|actual - intended| <= window``, where
-    ``window`` is :func:`stochastic_jitter_window` of the trace's ``fps``.
-    """
-    window = stochastic_jitter_window(fps)
-    if len(timestamps) != len(expected_timestamps):
-        failures.append(
-            TraceFailure(
-                trace_key=trace_key,
-                body=(
-                    f"timestamp count mismatch: expected"
-                    f" {len(expected_timestamps)}, got {len(timestamps)}"
-                ),
-            )
-        )
-        return
-
-    out_of_window = [
-        (i, actual, intended)
-        for i, (actual, intended) in enumerate(zip(timestamps, expected_timestamps))
-        if abs(actual - intended) > window
-    ]
-    if out_of_window:
-        examples = "; ".join(
-            f"[{i}] actual={actual:.6f} intended={intended:.6f}"
-            f" delta={actual - intended:+.6f}"
-            for i, actual, intended in out_of_window[:3]
-        )
-        body = (
-            f"{len(out_of_window)}/{len(timestamps)} timestamp(s) outside"
-            f" ±{window}s jitter window — {examples}"
-            + (f" (+ {len(out_of_window) - 3} more)" if len(out_of_window) > 3 else "")
-        )
-        failures.append(TraceFailure(trace_key=trace_key, body=body))
-        return
-
-    if timestamps:
-        durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
-
-
 def assert_disk_recording_properties(
     results: list[ContextResult],
-    clock_tolerance_s: float = 1.0,
 ) -> dict[str, float]:
-    """Assert on-disk trace timestamps fall within the expected recording window.
+    """Assert every on-disk trace holds exactly the timestamps that were logged.
 
-    Behaviour depends on ``result.timestamp_mode``:
-
-    - **manual** — every timestamp must lie within the synthetic window
-      ``[timestamp_start_s, timestamp_end_s]`` (plus tolerance).  Any
-      timestamp outside this range (e.g. a leaked wall-clock epoch) is an
-      explicit failure.
-    - **real** — every timestamp must be a valid Unix epoch, fall within
-      the wall-clock window ``[wall_started_at, wall_stopped_at]``, be
-      monotonically non-decreasing, and span approximately
-      ``duration_sec``.
+    Producers emit a sequence precomputed by ``context_worker``, which also
+    records it as ``result.expected_timestamps``.  Both phase modes are
+    therefore checked the same way — exact equality, no tolerance.  A leaked
+    wall-clock epoch, a dropped frame, or a reordered write all surface as a
+    mismatch.
 
     Must be called **after** :func:`wait_for_all_traces_written` so that all
     trace files are fully flushed to disk.
 
     Args:
         results: Per-context results from the completed recording workload.
-        clock_tolerance_s: Tolerance in seconds applied around the expected
-            timestamp window when filtering and asserting.
 
     Returns:
         Mapping of ``recording_id -> duration_s`` (``max - min`` of valid
@@ -417,8 +252,6 @@ def assert_disk_recording_properties(
     )
 
     for result in results:
-        use_real = result.timestamp_mode == TIMESTAMP_MODE_REAL
-        use_stochastic = result.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
         for recording_key, fetch_key in _result_recording_keys(result):
             recording_dir = recordings_root / recording_key
             if not recording_dir.exists():
@@ -473,81 +306,42 @@ def assert_disk_recording_properties(
 
             trace_failures: list[TraceFailure] = []
 
-            # Resolve mode-specific state once before iterating traces.
-            assert_ts = None
-            expected: dict[str, list[float]] = {}
-            if not use_real:
-                assert_ts = (
-                    _assert_stochastic_timestamps
-                    if use_stochastic
-                    else _assert_manual_timestamps
-                )
-                per_recording = (
-                    result.expected_timestamps.by_recording.get(recording_key)
-                    if result.expected_timestamps is not None
-                    else None
-                )
-                if per_recording is None:
-                    known = (
-                        sorted(result.expected_timestamps.by_recording)
-                        if result.expected_timestamps
-                        else []
+            per_recording = result.expected_timestamps.by_recording.get(recording_key)
+            if per_recording is None:
+                all_failures.append(
+                    RecordingFailures(
+                        recording_id=recording_key,
+                        recording_error=(
+                            f"no expected timestamps — known recording_index"
+                            f" keys: {sorted(result.expected_timestamps.by_recording)}"
+                        ),
+                        trace_failures=[],
                     )
-                    all_failures.append(
-                        RecordingFailures(
-                            recording_id=recording_key,
-                            recording_error=(
-                                f"no expected timestamps —"
-                                f" known recording_index keys: {known}"
+                )
+                continue
+            expected = per_recording.by_trace
+
+            for trace_key, timestamps in mapped_trace_timestamps.items():
+                if trace_key not in expected:
+                    trace_failures.append(
+                        TraceFailure(
+                            trace_key=trace_key,
+                            body=(
+                                f"found on disk but has no expected"
+                                f" timestamps — known traces:"
+                                f" {sorted(expected)}"
                             ),
-                            trace_failures=[],
                         )
                     )
                     continue
-                expected = per_recording.by_trace
-
-            for trace_key, timestamps in mapped_trace_timestamps.items():
-                if use_real:
-                    _assert_real_timestamps(
-                        recording_id=recording_key,
-                        trace_key=trace_key,
-                        timestamps=timestamps,
-                        wall_started_at=result.wall_started_at,
-                        wall_stopped_at=result.wall_stopped_at,
-                        duration_sec=result.duration_sec,
-                        clock_tolerance_s=clock_tolerance_s,
-                        failures=trace_failures,
-                        durations=durations,
-                    )
-                else:
-                    if trace_key not in expected:
-                        trace_failures.append(
-                            TraceFailure(
-                                trace_key=trace_key,
-                                body=(
-                                    f"found on disk but has no expected"
-                                    f" timestamps — known traces:"
-                                    f" {sorted(expected)}"
-                                ),
-                            )
-                        )
-                        continue
-                    # The stochastic assertion sizes its tolerance from the
-                    # trace's fps; the manual assertion takes no tolerance.
-                    extra = (
-                        {"fps": per_recording.by_trace_fps[trace_key]}
-                        if use_stochastic
-                        else {}
-                    )
-                    assert_ts(
-                        recording_id=recording_key,
-                        trace_key=trace_key,
-                        timestamps=timestamps,
-                        expected_timestamps=expected[trace_key],
-                        failures=trace_failures,
-                        durations=durations,
-                        **extra,
-                    )
+                _assert_timestamps_match(
+                    recording_id=recording_key,
+                    trace_key=trace_key,
+                    timestamps=timestamps,
+                    expected_timestamps=expected[trace_key],
+                    failures=trace_failures,
+                    durations=durations,
+                )
 
             if trace_failures:
                 all_failures.append(

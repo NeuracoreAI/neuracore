@@ -206,8 +206,8 @@ export RUST_BACKTRACE=1
 #
 # The 300s (5-minute) 1920x1080 performance cases are pulled OUT of the normal
 # order and run last (see `run_tests`): they dominate wall time and their
-# stochastic-timing / upload-readiness budgets are the most fragile under host
-# load, so every cheaper test gets a chance to fail fast first. The 300s
+# upload-readiness budgets are the most fragile under host load, so every
+# cheaper test gets a chance to fail fast first. The 300s
 # pre-network (disk-only) cases run immediately before their network (upload)
 # equivalents. Both perf files keep their case-ids containing "300s", which is
 # the keyword the two phases select on.

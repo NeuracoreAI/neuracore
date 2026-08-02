@@ -20,15 +20,10 @@ import numpy as np
 
 import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
-from tests.integration.platform.data_daemon.shared.assertions import assert_context_mode
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
-from tests.integration.platform.data_daemon.shared.macos_helpers import (
-    set_thread_policy_for_macos,
-)
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
     Timer,
-    assert_on_schedule,
     init_worker_logging,
     relayed_worker_logs,
     surface_worker_errors,
@@ -54,20 +49,21 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
-    SCHEDULER_TOLERANCE_S,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
-    TIMESTAMP_MODE_REAL,
-    TIMESTAMP_MODE_STOCHASTIC,
-    stochastic_jitter_window,
+    random_phase_jitter_window,
 )
 
 logger = logging.getLogger(__name__)
 
 CONTEXT_DURATION_RANDOM = random.Random(0)
-STOCHASTIC_TIMESTAMP_RANDOM = random.Random(1)
+
+# Stream discriminators feeding ``stream_phase_seed`` so a recording's joint and
+# video streams draw independent phase offsets.
+JOINT_STREAM = 0
+VIDEO_STREAM = 1
 
 
 def encode_frame_number(
@@ -156,20 +152,17 @@ class RecordingExpectedTimestamps:
 
     Produced during the recording loop (once the recording key is known) and
     consumed by :func:`~disk_helpers.assert_disk_recording_properties`
-    to verify on-disk trace.json files match the manually-supplied timestamps
-    that were logged.
+    to verify on-disk trace.json files match the timestamps that were logged.
+    These are the *same lists* the producer emitted, so the assertion is exact
+    equality regardless of ``random_phase``.
 
     Attributes:
         by_trace: Maps semantic trace key (e.g. ``"JOINT_POSITIONS"``,
             ``"camera_0"``) to the ordered list of expected timestamps for
             that trace within this recording.
-        by_trace_fps: Maps the same semantic trace key to the producer fps for
-            that trace, so the stochastic assertion can size its jitter window
-            from the case's frame rate.
     """
 
     by_trace: dict[str, list[float]]
-    by_trace_fps: dict[str, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +189,7 @@ class ContextCaseSpec:
     joint_fps: int
     video_fps: int
     wait: bool
-    timestamp_mode: str
+    random_phase: bool
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -274,8 +267,10 @@ class ContextResult:
     context_index: int
     wall_started_at: float | None
     wall_stopped_at: float
-    timestamp_mode: str
-    expected_timestamps: ContextExpectedTimestamps | None = None
+    random_phase: bool
+    expected_timestamps: ContextExpectedTimestamps = field(
+        default_factory=lambda: ContextExpectedTimestamps(by_recording={})
+    )
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recording_indexes: list[int] = field(default_factory=list)
     source: tuple[str, int] = ("", 0)
@@ -292,7 +287,6 @@ class ContextSpec:
     expected_video_frames: int
     timestamp_start_s: float
     timestamp_end_s: float
-    start_delay_s: float
     assert_deadline: bool = False
 
 
@@ -304,7 +298,6 @@ def build_context_specs(
     """Build per-context worker specs for a matrix case."""
     specs: list[ContextSpec] = []
     timestamp_stagger_s = case.duration_sec / 2.0
-    wall_stagger_s = 0.5
     base_recordings_per_context = case.recording_count // case.parallel_contexts
     recording_remainder = case.recording_count % case.parallel_contexts
     shared_dataset_name = (
@@ -313,10 +306,8 @@ def build_context_specs(
 
     for context_index in range(case.parallel_contexts):
         timestamp_start_s = 0.0
-        start_delay_s = 0.0
         if context_index > 0 and case.mode == MODE_STAGGERED:
             timestamp_start_s = float(timestamp_stagger_s * context_index)
-            start_delay_s = wall_stagger_s * context_index
 
         if case.context_duration_mode == DURATION_MODE_VARIABLE:
             context_duration_sec = max(
@@ -350,7 +341,7 @@ def build_context_specs(
                     joint_fps=case.joint_fps,
                     video_fps=case.video_fps,
                     wait=case.wait,
-                    timestamp_mode=case.timestamp_mode,
+                    random_phase=case.random_phase,
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -362,7 +353,6 @@ def build_context_specs(
                 timestamp_end_s=(
                     timestamp_start_s + context_duration_sec * recordings_for_context
                 ),
-                start_delay_s=start_delay_s,
                 assert_deadline=assert_deadline,
             )
         )
@@ -392,103 +382,90 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
-def get_jitter(use_stochastic_timestamps: bool, fps: int) -> float:
-    if use_stochastic_timestamps:
-        window = stochastic_jitter_window(fps)
-        return STOCHASTIC_TIMESTAMP_RANDOM.uniform(-window, window)
-    return 0.0
+def stream_phase_seed(context_index: int, recording_ordinal: int, stream: int) -> int:
+    """Return a stable RNG seed for one recording's stream.
+
+    Distinct per (context, recording, stream) so parallel contexts and the joint
+    and video streams within a recording all draw independent phase offsets,
+    while a rerun of the same case reproduces them exactly.
+    """
+    return (context_index * 1_000 + recording_ordinal) * 2 + stream
 
 
 def precompute_timestamps(
-    timestamp_start_s: float, frame_count: int, fps: int
+    timestamp_start_s: float,
+    frame_count: int,
+    fps: int,
+    random_phase: bool = False,
+    seed: int = 0,
 ) -> list[float]:
-    """Return the complete synthetic timestamp sequence for one stream."""
-    return [timestamp_start_s + frame_index / fps for frame_index in range(frame_count)]
+    """Return the complete synthetic timestamp sequence for one stream.
+
+    Frames sit on an exact ``timestamp_start_s + frame_index / fps`` grid.  With
+    *random_phase* each frame is additionally offset by a pseudo-random amount
+    within :func:`random_phase_jitter_window`, so the daemon sees non-uniformly
+    spaced timestamps.  The offsets are drawn from a *seed*-derived RNG, which is
+    what lets the caller hand the very same list to both the producer and the
+    on-disk expectation.
+    """
+    if not random_phase:
+        return [
+            timestamp_start_s + frame_index / fps for frame_index in range(frame_count)
+        ]
+
+    rng = random.Random(seed)
+    window = random_phase_jitter_window(fps)
+    return [
+        timestamp_start_s + frame_index / fps + rng.uniform(-window, window)
+        for frame_index in range(frame_count)
+    ]
 
 
 def log_synchronous_frames(
     *,
     robot_name: str,
-    joint_frame_count: int,
-    video_frame_count: int,
+    joint_timestamps: list[float],
+    video_timestamps: list[float],
     recording_index: int,
-    timestamp_start_s: float,
     joint_names: list[str],
     camera_name_list: list[str],
     image_width: int | None,
     image_height: int | None,
     joint_fps: int,
-    video_fps: int,
     marker_name: str,
     context_index: int,
-    use_real_timestamps: bool = False,
-    use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Joint and video frames are interleaved in timestamp order. Manual timestamps
-    are precomputed and emitted without wall-clock pacing; real and stochastic
-    modes retain the deadline scheduler used by their timing assertions.
+    Both timestamp sequences are precomputed by the caller and emitted as fast
+    as the transport allows — there is no wall-clock pacing.  Frames are
+    interleaved in timestamp order so the daemon receives them the way a
+    real producer would order them.
     """
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
     )
 
-    pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
-    recording_wall_start = time.time() if pace_against_wall_clock else 0.0
-    joint_timestamps = precompute_timestamps(
-        timestamp_start_s, joint_frame_count, joint_fps
-    )
-    video_timestamps = precompute_timestamps(
-        timestamp_start_s, video_frame_count, video_fps
-    )
+    joint_frame_count = len(joint_timestamps)
+    video_frame_count = len(video_timestamps) if camera_name_list else 0
     joint_index = 0
     video_index = 0
 
-    while joint_index < joint_frame_count or video_index < (
-        video_frame_count if camera_name_list else 0
-    ):
-        joint_due = joint_index < joint_frame_count
-        video_due = camera_name_list and video_index < video_frame_count
-        # One jitter is shared by both deadlines/timestamps this iteration, so
-        # size it to the tighter (higher-fps) window to stay within both.
-        jitter = (
-            get_jitter(
-                use_stochastic_timestamps,
-                max(joint_fps, video_fps) if camera_name_list else joint_fps,
-            )
-            if pace_against_wall_clock
-            else 0.0
-        )
-
-        joint_deadline = (
-            recording_wall_start + (joint_index / joint_fps) + jitter
-            if joint_due
+    while joint_index < joint_frame_count or video_index < video_frame_count:
+        next_joint = (
+            joint_timestamps[joint_index]
+            if joint_index < joint_frame_count
             else float("inf")
         )
-        video_deadline = (
-            recording_wall_start + (video_index / video_fps) + jitter
-            if video_due
+        next_video = (
+            video_timestamps[video_index]
+            if video_index < video_frame_count
             else float("inf")
         )
 
-        if joint_deadline <= video_deadline:
-            if pace_against_wall_clock:
-                remaining = joint_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    joint_deadline, SCHEDULER_TOLERANCE_S, label="joint frame"
-                )
-            if use_real_timestamps:
-                timestamp = None
-            elif not use_stochastic_timestamps:
-                timestamp = joint_timestamps[joint_index]
-            else:
-                intended = timestamp_start_s + (joint_index / joint_fps)
-                timestamp = intended + jitter
+        if next_joint <= next_video:
+            timestamp = next_joint
             joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
             with Timer(
                 MAX_TIME_TO_LOG_S,
@@ -527,22 +504,7 @@ def log_synchronous_frames(
                 )
             joint_index += 1
         else:
-            if pace_against_wall_clock:
-                remaining = video_deadline - time.time()
-                if remaining > 0:
-                    time.sleep(remaining)
-            if assert_deadline and use_stochastic_timestamps:
-                assert_on_schedule(
-                    video_deadline, SCHEDULER_TOLERANCE_S, label="video frame"
-                )
-            if use_real_timestamps:
-                timestamp = None
-            elif not use_stochastic_timestamps:
-                timestamp = video_timestamps[video_index]
-            else:
-                intended = timestamp_start_s + (video_index / video_fps)
-                timestamp = intended + jitter
-
+            timestamp = next_video
             for camera_index, camera_name in enumerate(camera_name_list):
                 frame_code = (
                     (context_index * 1_000_000_000)
@@ -592,25 +554,23 @@ def build_thread_roles(
 def run_threaded_logging(
     *,
     robot_name: str,
-    joint_frame_count: int,
-    video_frame_count: int,
+    joint_timestamps: list[float],
+    video_timestamps: list[float],
     recording_index: int,
-    timestamp_start_s: float,
     joint_fps: int,
-    video_fps: int,
     context_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
     image_width: int | None,
     image_height: int | None,
-    use_real_timestamps: bool = False,
-    use_stochastic_timestamps: bool = False,
     assert_deadline: bool = False,  # only set by performance tests
 ) -> list[str]:
     """Run logging across multiple threads, one per data role.
 
-    Manual timestamps are precomputed per role and emitted without wall-clock
-    pacing. Real and stochastic modes keep their existing deadline scheduling.
+    Every role emits the timestamp sequence its stream was given, as fast as the
+    transport allows — there is no wall-clock pacing.  All joint roles share the
+    joint sequence, so the three joint data types stay aligned exactly as they
+    do in the synchronous producer.
     """
     roles = build_thread_roles(
         joint_names=joint_names, camera_name_list=camera_name_list
@@ -621,41 +581,13 @@ def run_threaded_logging(
     def worker(role_spec: dict[str, object]) -> None:
         """Execute logging for a single thread role."""
         try:
-            set_thread_policy_for_macos()  # set policy because new thread
             barrier.wait()
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
-            frame_count = video_frame_count if is_rgb else joint_frame_count
-            fps = video_fps if is_rgb else joint_fps
+            timestamps = video_timestamps if is_rgb else joint_timestamps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
-            pace_against_wall_clock = use_real_timestamps or use_stochastic_timestamps
-            thread_wall_start = time.time() if pace_against_wall_clock else 0.0
-            timestamps = precompute_timestamps(timestamp_start_s, frame_count, fps)
-            for frame_index in range(frame_count):
-                jitter = (
-                    get_jitter(use_stochastic_timestamps, fps)
-                    if pace_against_wall_clock
-                    else 0.0
-                )
-                frame_deadline = thread_wall_start + (frame_index / fps) + jitter
-                if pace_against_wall_clock:
-                    remaining = frame_deadline - time.time()
-                    if remaining > 0:
-                        time.sleep(remaining)
-                if assert_deadline and use_stochastic_timestamps:
-                    assert_on_schedule(
-                        frame_deadline,
-                        SCHEDULER_TOLERANCE_S,
-                        label=f"{role_name} frame",
-                    )
-                if use_real_timestamps:
-                    timestamp = None
-                elif not use_stochastic_timestamps:
-                    timestamp = timestamps[frame_index]
-                else:
-                    intended = timestamp_start_s + (frame_index / fps)
-                    timestamp = intended + jitter
+            for frame_index, timestamp in enumerate(timestamps):
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
                         role_spec["camera_names"]
@@ -750,6 +682,35 @@ def run_threaded_logging(
     return [str(role["marker_name"]) for role in roles]
 
 
+def recording_timestamps(
+    spec: ContextSpec, recording_index: int
+) -> tuple[list[float], list[float]]:
+    """Return the ``(joint, video)`` timestamp sequences for one recording.
+
+    A pure function of ``(spec, recording_index)``, so :func:`context_worker`
+    can call it to build the on-disk expectation and :func:`log_frames` can call
+    it to decide what to emit, with no way for the two to drift apart.
+    """
+    case = spec.case
+    start_s = spec.timestamp_start_s + recording_index * case.duration_sec
+    return (
+        precompute_timestamps(
+            start_s,
+            spec.expected_joint_frames,
+            case.joint_fps,
+            random_phase=case.random_phase,
+            seed=stream_phase_seed(spec.context_index, recording_index, JOINT_STREAM),
+        ),
+        precompute_timestamps(
+            start_s,
+            spec.expected_video_frames,
+            case.video_fps,
+            random_phase=case.random_phase,
+            seed=stream_phase_seed(spec.context_index, recording_index, VIDEO_STREAM),
+        ),
+    )
+
+
 def log_frames(
     spec: ContextSpec,
     *,
@@ -758,51 +719,40 @@ def log_frames(
 ) -> list[str]:
     """Log all frames for one recording, dispatching based on producer_channels.
 
-    Derives timestamp mode and all frame parameters from *spec*.
+    Timestamps come from :func:`recording_timestamps`, which the caller may also
+    use to build the matching on-disk expectation.
     """
-    use_real_timestamps = spec.case.timestamp_mode == TIMESTAMP_MODE_REAL
-    use_stochastic_timestamps = spec.case.timestamp_mode == TIMESTAMP_MODE_STOCHASTIC
-    recording_timestamp_start_s = (
-        spec.timestamp_start_s + recording_index * spec.case.duration_sec
-    )
+    joint_timestamps, video_timestamps = recording_timestamps(spec, recording_index)
     joint_name_list = joint_names_for_count(spec.case.joint_count)
     camera_name_list = camera_names(spec.case.video_count)
 
     if spec.case.producer_channels == PRODUCER_PER_THREAD:
         return run_threaded_logging(
             robot_name=spec.robot_name,
-            joint_frame_count=spec.expected_joint_frames,
-            video_frame_count=spec.expected_video_frames,
+            joint_timestamps=joint_timestamps,
+            video_timestamps=video_timestamps,
             recording_index=recording_index,
-            timestamp_start_s=recording_timestamp_start_s,
             joint_fps=spec.case.joint_fps,
-            video_fps=spec.case.video_fps,
             context_index=spec.context_index,
             joint_names=joint_name_list,
             camera_name_list=camera_name_list,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
-            use_real_timestamps=use_real_timestamps,
-            use_stochastic_timestamps=use_stochastic_timestamps,
             assert_deadline=spec.assert_deadline,
         )
 
     log_synchronous_frames(
         robot_name=spec.robot_name,
-        joint_frame_count=spec.expected_joint_frames,
-        video_frame_count=spec.expected_video_frames,
+        joint_timestamps=joint_timestamps,
+        video_timestamps=video_timestamps,
         recording_index=recording_index,
-        timestamp_start_s=recording_timestamp_start_s,
         joint_names=joint_name_list,
         camera_name_list=camera_name_list,
         image_width=spec.case.image_width,
         image_height=spec.case.image_height,
         joint_fps=spec.case.joint_fps,
-        video_fps=spec.case.video_fps,
         marker_name=marker_name,
         context_index=spec.context_index,
-        use_real_timestamps=use_real_timestamps,
-        use_stochastic_timestamps=use_stochastic_timestamps,
         assert_deadline=spec.assert_deadline,
     )
     return [marker_name]
@@ -844,15 +794,12 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     On Linux, Pool uses fork so workers inherit a copy of the parent's
     Timer._stats. Clearing it here ensures workers only capture their own
     timers and the parent's pre-fork timers (e.g. nc.login) are not
-    double-counted when stats are merged back. The stochastic-timestamp RNG
-    is reseeded per-context so parallel workers produce independent jitter
-    sequences instead of replaying the parent's seed. Spawned workers
-    (macOS) additionally re-authenticate, as they do not inherit the
-    parent's in-process auth state.
+    double-counted when stats are merged back. Spawned workers (macOS)
+    additionally re-authenticate, as they do not inherit the parent's
+    in-process auth state.
     """
     multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
-    STOCHASTIC_TIMESTAMP_RANDOM.seed(1 + spec.context_index)
     ensure_login()
     return context_worker(spec)
 
@@ -863,18 +810,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         wait_for_recording_index_for_source,
     )
 
-    set_thread_policy_for_macos()
     case = spec.case
-    use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
     marker_names: list[str] = []
     recording_ids: list[str] = []
     recording_indexes: list[int] = []
     robot = None
-
-    if spec.start_delay_s > 0.0:
-        time.sleep(spec.start_delay_s)
 
     wall_started_at: float | None = None
     wall_stopped_at: float = 0.0
@@ -891,20 +833,14 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
-        expected_by_recording: dict[str, RecordingExpectedTimestamps] | None = (
-            {} if not use_real_timestamps else None
-        )
+        expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
 
         for recording_ordinal in range(spec.recordings_per_context):
-            recording_timestamp_start_s = (
-                spec.timestamp_start_s + recording_ordinal * case.duration_sec
-            )
-            recording_capture_start_s = None if use_real_timestamps else time.time()
-            recording_capture_stop_s = (
-                None
-                if recording_capture_start_s is None
-                else recording_capture_start_s + case.duration_sec
-            )
+            recording_capture_start_s = time.time()
+            recording_capture_stop_s = recording_capture_start_s + case.duration_sec
+
+            # The very sequences log_frames will emit below.
+            joint_ts, video_ts = recording_timestamps(spec, recording_ordinal)
 
             with Timer(
                 MAX_TIME_TO_START_S,
@@ -932,59 +868,41 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
             disk_recording_key = str(daemon_recording_index)
 
-            # Build per-recording expected timestamps once the recording key is
-            # known. Trace keys use "data_type/data_type_name" to match the
-            # semantic keys resolved from the DB in disk_helpers. data_type_name is
-            # the storage name produced by validate_safe_name (e.g.
-            # "vx300s_left\waist" for joint names).
-            if expected_by_recording is not None:
-                from neuracore_types.utils import validate_safe_name
+            # Map the two stream sequences onto every trace they feed, now that
+            # the recording key is known. Trace keys use
+            # "data_type/data_type_name" to match the semantic keys resolved
+            # from the DB in disk_helpers. data_type_name is the storage name
+            # produced by validate_safe_name (e.g. "vx300s_left\waist").
+            from neuracore_types.utils import validate_safe_name
 
-                joint_ts = precompute_timestamps(
-                    recording_timestamp_start_s,
-                    spec.expected_joint_frames,
-                    case.joint_fps,
-                )
-                video_ts = precompute_timestamps(
-                    recording_timestamp_start_s,
-                    spec.expected_video_frames,
-                    case.video_fps,
-                )
-                by_trace: dict[str, list[float]] = {}
-                for joint_name in joint_name_list:
-                    safe = validate_safe_name(joint_name)
-                    by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
-                    by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
-                    by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
-                for camera in camera_name_list:
-                    safe_cam = validate_safe_name(camera)
-                    by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
-                # CUSTOM_1D marker — name depends on producer_channels mode
-                if case.producer_channels == PRODUCER_PER_THREAD:
-                    # One marker per joint data type thread
-                    for role_name in (
-                        "joint_positions",
-                        "joint_velocities",
-                        "joint_torques",
-                    ):
-                        safe_marker = validate_safe_name(f"marker_{role_name}")
-                        by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                    for camera in camera_name_list:
-                        safe_marker = validate_safe_name(f"marker_{camera}")
-                        by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
-                else:
-                    safe_marker = validate_safe_name("marker_synchronous")
+            by_trace: dict[str, list[float]] = {}
+            for joint_name in joint_name_list:
+                safe = validate_safe_name(joint_name)
+                by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
+                by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
+                by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
+            for camera in camera_name_list:
+                safe_cam = validate_safe_name(camera)
+                by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
+            # CUSTOM_1D marker — name depends on producer_channels mode
+            if case.producer_channels == PRODUCER_PER_THREAD:
+                # One marker per joint data type thread
+                for role_name in (
+                    "joint_positions",
+                    "joint_velocities",
+                    "joint_torques",
+                ):
+                    safe_marker = validate_safe_name(f"marker_{role_name}")
                     by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                by_trace_fps = {
-                    trace_key: (
-                        case.video_fps if timestamps is video_ts else case.joint_fps
-                    )
-                    for trace_key, timestamps in by_trace.items()
-                }
-                expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
-                    by_trace=by_trace,
-                    by_trace_fps=by_trace_fps,
-                )
+                for camera in camera_name_list:
+                    safe_marker = validate_safe_name(f"marker_{camera}")
+                    by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
+            else:
+                safe_marker = validate_safe_name("marker_synchronous")
+                by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
+            expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
+                by_trace=by_trace,
+            )
 
             current_marker_names = log_frames(
                 spec,
@@ -1028,11 +946,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             context_index=spec.context_index,
             wall_started_at=wall_started_at,
             wall_stopped_at=wall_stopped_at,
-            timestamp_mode=case.timestamp_mode,
-            expected_timestamps=(
-                ContextExpectedTimestamps(by_recording=expected_by_recording)
-                if expected_by_recording is not None
-                else None
+            random_phase=case.random_phase,
+            expected_timestamps=ContextExpectedTimestamps(
+                by_recording=expected_by_recording
             ),
             timer_stats=captured_timer_stats,
         )
@@ -1056,23 +972,20 @@ def run_case_contexts(
     case: DataDaemonTestCase,
     *,
     specs: list[ContextSpec] | None = None,
-    assert_mode: bool = True,
     wait_for_traces: bool = False,
 ) -> list[ContextResult]:
     """Run all parallel contexts for a matrix test case.
 
-    Executes each context spec either sequentially (when parallel_contexts==1)
-    or concurrently via a multiprocessing pool. Sequential execution avoids
-    pool overhead and simplifies debugging for single-context cases.
+    Executes each context spec in-process (when parallel_contexts==1) or
+    concurrently via a multiprocessing pool. The in-process path avoids pool
+    overhead and simplifies debugging for single-context cases.
 
     Args:
         case: The test case defining parallelism level and context matrix.
         specs: Pre-built context specs to run. If None, built from ``case``
             via :func:`build_context_specs`.
-        assert_mode: When ``True`` (default), calls :func:`assert_context_mode`
-            after running to verify expected parallelization behaviour.
         wait_for_traces: When ``True``, waits for all traces to be written to
-            disk after running (implies ``assert_mode``).
+            disk after running.
 
     Returns:
         List of result dicts from each context worker, one per spec.
@@ -1105,9 +1018,6 @@ def run_case_contexts(
                 )
         for result in results:
             Timer.merge_stats(result.timer_stats)
-
-    if assert_mode or wait_for_traces:
-        assert_context_mode(case, results)
 
     if wait_for_traces:
         from tests.integration.platform.data_daemon.shared.db_helpers import (
