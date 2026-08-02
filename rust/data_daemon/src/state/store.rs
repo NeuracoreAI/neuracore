@@ -220,22 +220,6 @@ pub trait StateStore: Send + Sync {
     /// server-side; the start notifier fills it first, then this sweep fires).
     async fn recordings_pending_stop_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
-    /// List earlier recordings for `(robot_id, robot_instance)` that are still
-    /// *pending* on the backend: they have a cloud `recording_id` (so they were
-    /// opened server-side), are resolved locally (`cancelled_at` or `stopped_at`
-    /// is set), but have not yet had their backend cancel/stop notification
-    /// delivered. The backend dedupes pending recordings per robot instance —
-    /// it returns the existing pending recording for an instance instead of
-    /// minting a new one — so these must be closed server-side before the next
-    /// recording's `/recording/start`, or that start reuses their cloud id.
-    /// Restricted to `recording_index < before_index`, ordered oldest first.
-    async fn recordings_pending_backend_resolution_for_source(
-        &self,
-        robot_id: &str,
-        robot_instance: i64,
-        before_index: i64,
-    ) -> Result<Vec<RecordingRow>, StateStoreError>;
-
     /// List every recording row currently in the DB.
     ///
     /// Used by the progress reporter to discover stopped recordings whose
@@ -1404,34 +1388,6 @@ impl StateStore for SqliteStateStore {
                 AND cancelled_at IS NULL \
            ORDER BY stopped_at ASC",
         )
-        .fetch_all(&self.read_pool)
-        .await?;
-        rows.iter()
-            .map(RecordingRow::from_row)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    async fn recordings_pending_backend_resolution_for_source(
-        &self,
-        robot_id: &str,
-        robot_instance: i64,
-        before_index: i64,
-    ) -> Result<Vec<RecordingRow>, StateStoreError> {
-        let rows = sqlx::query(
-            "SELECT * FROM recordings \
-              WHERE robot_id = ? \
-                AND robot_instance = ? \
-                AND recording_index < ? \
-                AND recording_id IS NOT NULL \
-                AND backend_stop_notified_at IS NULL \
-                AND backend_cancel_notified_at IS NULL \
-                AND (cancelled_at IS NOT NULL OR stopped_at IS NOT NULL) \
-           ORDER BY recording_index ASC",
-        )
-        .bind(robot_id)
-        .bind(robot_instance)
-        .bind(before_index)
         .fetch_all(&self.read_pool)
         .await?;
         rows.iter()

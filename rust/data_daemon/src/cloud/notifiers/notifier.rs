@@ -206,9 +206,10 @@ impl LifecycleKind {
 /// Run the shared stop/cancel backend-notify flow for one recording.
 ///
 /// Idempotent and self-logging (the spawn loop never inspects the result): a
-/// 404 is treated as success (the start notifier's prior-pending resolution
-/// already closed the recording server-side), and a persist failure after a
-/// successful POST is left for the next sweep since the POST is idempotent.
+/// 404 is treated as success (the recording is already closed server-side, or
+/// the backend reaped it as an abandoned pending recording), and a persist
+/// failure after a successful POST is left for the next sweep since the POST is
+/// idempotent.
 pub async fn notify_recording_lifecycle(
     kind: LifecycleKind,
     store: &Arc<SqliteStateStore>,
@@ -287,9 +288,9 @@ pub async fn notify_recording_lifecycle(
 
     let mark_result = match &post_result {
         Ok(()) => mark_notified(kind, store, recording_index).await,
-        // 404 means the backend no longer has this recording open — the
-        // start-notifier's `resolve_prior_pending` already closed it. That is
-        // the post-condition we wanted, so record it rather than re-sweeping.
+        // 404 means the backend does not have this recording open — already
+        // closed, or reaped as an abandoned pending recording. That is the
+        // post-condition we wanted, so record it rather than re-sweeping.
         Err(error) if error.is_not_found() => mark_notified(kind, store, recording_index).await,
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, "failed to notify backend of recording {action}");
