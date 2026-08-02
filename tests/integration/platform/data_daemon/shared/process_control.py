@@ -21,20 +21,15 @@ import time
 import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
-from pathlib import Path
 
-from neuracore.data_daemon.const import SOCKET_PATH
+from neuracore.data_daemon.daemon_control import (
+    ensure_daemon_running,
+    pid_is_running,
+    read_pid_from_file,
+)
 from neuracore.data_daemon.helpers import (
     get_daemon_pid_path,
     get_daemon_recordings_root_path,
-)
-from neuracore.data_daemon.lifecycle.daemon_os_control import (
-    ensure_daemon_running,
-    force_kill,
-    pid_is_running,
-    read_pid_from_file,
-    terminate_pid,
-    wait_for_exit,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -42,6 +37,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_SIGKILL,
     STOP_METHOD_SIGTERM,
 )
+
+# cspell:ignore WNOHANG waitpid
 
 logger = logging.getLogger(__name__)
 
@@ -246,12 +243,10 @@ def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
 
 
 def get_runner_pids() -> set[int]:
-    """Return the PIDs of all running neuracore data-daemon runner processes.
+    """Return the PIDs of all running neuracore data-daemon processes.
 
-    Matches either the Python runner entry point
-    (``neuracore.data_daemon.runner_entry``) or the bundled Rust binary
-    (``neuracore/data_daemon/bin/data-daemon``) — the latter is what runs
-    when ``NCD_RUST_DAEMON=1`` and the wheel includes the compiled binary.
+    Matches the bundled daemon binary
+    (``neuracore/data_daemon/bin/data-daemon``).
     """
     env = {**os.environ, "COLUMNS": "32768"}
     output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, env=env)
@@ -261,10 +256,7 @@ def get_runner_pids() -> set[int]:
         if len(parts) != 2:
             continue
         pid_text, args = parts
-        if (
-            "neuracore.data_daemon.runner_entry" in args
-            or "neuracore/data_daemon/bin/data-daemon" in args
-        ):
+        if "neuracore/data_daemon/bin/data-daemon" in args:
             runner_pids.add(int(pid_text))
     return runner_pids
 
@@ -332,16 +324,51 @@ def _wait_and_escalate(candidate_pids: set[int], *, graceful_timeout_s: float) -
                 wait_for_exit(pid, timeout_s=5.0)
 
 
+def terminate_pid(pid_value: int) -> bool:
+    """Send SIGTERM to the given PID."""
+    try:
+        os.kill(pid_value, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def force_kill(pid_value: int) -> bool:
+    """Send SIGKILL to the given PID."""
+    try:
+        os.kill(pid_value, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+
+
+def _try_reap_zombie_child(pid_value: int) -> bool:
+    """Non-blocking waitpid to reap a zombie child; True when reaped."""
+    try:
+        reaped_pid, _ = os.waitpid(pid_value, os.WNOHANG)
+        return reaped_pid != 0
+    except (ChildProcessError, OSError):
+        return False
+
+
+def wait_for_exit(pid_value: int, *, timeout_s: float) -> bool:
+    """Wait for a PID to stop running until a timeout elapses."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _try_reap_zombie_child(pid_value) or not pid_is_running(pid_value):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _remove_ipc_artefacts() -> None:
-    """Remove the PID file and Unix socket, ignoring missing-file errors."""
-    pid_path = get_daemon_pid_path()
-    socket_path = Path(SOCKET_PATH)
+    """Remove the PID file, ignoring missing-file errors."""
     try:
-        pid_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    try:
-        socket_path.unlink(missing_ok=True)
+        get_daemon_pid_path().unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -437,15 +464,13 @@ def wait_for_daemon_shutdown(
         TimeoutError: When the daemon has not fully exited within ``timeout_s``.
     """
     pid_path = get_daemon_pid_path()
-    socket_path = Path(SOCKET_PATH)
     deadline = time.monotonic() + timeout_s
 
     while True:
         live_pids = _collect_candidate_pids()
         pid_file_gone = not pid_path.exists()
-        socket_gone = not socket_path.exists()
 
-        if not live_pids and pid_file_gone and socket_gone:
+        if not live_pids and pid_file_gone:
             return
 
         if time.monotonic() >= deadline:
@@ -455,8 +480,6 @@ def wait_for_daemon_shutdown(
                 details.append(f"live PIDs: {sorted(still_running)}")
             if not pid_file_gone:
                 details.append(f"PID file still present: {pid_path}")
-            if not socket_gone:
-                details.append(f"socket still present: {socket_path}")
             raise TimeoutError(
                 f"Daemon did not shut down within {timeout_s}s — " + ", ".join(details)
             )

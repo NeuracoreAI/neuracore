@@ -6,12 +6,10 @@ URDF/MJCF model uploads, data stream management, and coordinates recording
 state across multiple robot instances.
 """
 
-import functools
 import io
 import logging
 import os
 import tempfile
-import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -19,24 +17,19 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
-from warnings import warn
 
 import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.streaming.data_stream import DataStream, MissingProducerChannelError
+from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.http_session import thread_local_session
-from neuracore.data_daemon.communications_management.shared_transport import (
-    recording_context,
-)
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
+from neuracore.data_daemon import bridge as recording_context
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
 from .exceptions import RobotError, ValidationError
-from .utils.http_errors import extract_error_detail
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
@@ -242,22 +235,6 @@ class Robot:
         self._data_stream_counts[stream.data_type] += 1
         self._data_streams[stream_id] = stream
 
-    def _remove_data_stream(self, stream_id: str, stream: DataStream) -> None:
-        """Remove a stream from the robot registry and evict its cached bindings."""
-        if self._data_streams.get(stream_id) is not stream:
-            return
-
-        self._data_streams.pop(stream_id)
-        if self._data_stream_counts[stream.data_type] > 0:
-            self._data_stream_counts[stream.data_type] -= 1
-
-        bindings = self._joint_stream_bindings.get(stream.data_type)
-        if bindings:
-            for joint_name, binding in list(bindings.items()):
-                if binding.stream is stream:
-                    bindings.pop(joint_name)
-        self._joint_group_cache.pop(stream.data_type, None)
-
     def get_data_stream(self, stream_id: str) -> DataStream | None:
         """Retrieve a data stream by its identifier.
 
@@ -288,88 +265,39 @@ class Robot:
         Args:
             dataset_id: Unique identifier of the dataset to record into.
             timestamp: Optional capture time (Unix seconds) for the recording's
-                start, matching the ``log_*`` methods. Under the Rust daemon it
-                pins the window's lower bound (the producer stamps wall-clock
-                now when omitted); under the legacy daemon it is the
-                ``start_time`` sent to the backend (defaults to ``time.time()``).
+                start, matching the ``log_*`` methods. It pins the window's
+                lower bound; the producer stamps wall-clock now when omitted.
 
         Returns:
-            Under the legacy Python daemon, the backend recording ID for the
-            session. Under the Rust daemon the daemon owns recording identity
-            and assigns it asynchronously, so there is nothing to return at
-            call time — a local correlation handle is returned for convenience.
+            A local correlation handle. The daemon owns recording identity and
+            assigns the cloud recording id asynchronously, so there is nothing
+            authoritative to return at call time — see
+            :meth:`get_cloud_recording_id`.
 
         Raises:
             RobotError: If the robot is not initialized or if
                 the recording fails to start.
-            ConfigError: If there is an error trying to get the current org
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        if is_rust_daemon_enabled():
-            local_handle = str(uuid.uuid4())
-            self._get_daemon_recording_context().start_recording(
-                robot_id=self.id,
-                robot_instance=self.instance,
-                robot_name=self.name,
-                dataset_id=dataset_id,
-                dataset_name=None,
-                timestamp=timestamp,
-            )
-            get_recording_state_manager().recording_started(
-                robot_id=self.id, instance=self.instance, recording_id=local_handle
-            )
-            return local_handle
-
-        try:
-            start_time = timestamp if timestamp is not None else time.time()
-            session = thread_local_session()
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/start",
-                headers=self._auth.get_headers(),
-                json={
-                    "robot_id": self.id,
-                    "instance": self.instance,
-                    "dataset_id": dataset_id,
-                    "start_time": start_time,
-                },
-            )
-            response.raise_for_status()
-
-            recording_details = response.json()
-            recording_id = recording_details["id"]
-            assert isinstance(recording_id, str)
-
-            # The backend returns the existing pending recording (with its
-            # original start_time) when one is already active for this robot
-            # instance, instead of creating a new one.
-            returned_start_time = recording_details.get("start_time")
-            if (
-                returned_start_time is not None
-                and abs(returned_start_time - start_time) > 1e-3
-            ):
-                warn("This recording had already been started!")
-
-            get_recording_state_manager().recording_started(
-                robot_id=self.id, instance=self.instance, recording_id=recording_id
-            )
-            return recording_id
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            detail = None
-            if e.response is not None:
-                detail = extract_error_detail(e.response)
-            raise RobotError(f"Failed to start recording: {detail or str(e)}")
+        local_handle = str(uuid.uuid4())
+        self._get_daemon_recording_context().start_recording(
+            robot_id=self.id,
+            robot_instance=self.instance,
+            robot_name=self.name,
+            dataset_id=dataset_id,
+            dataset_name=None,
+            timestamp=timestamp,
+        )
+        get_recording_state_manager().recording_started(
+            robot_id=self.id, instance=self.instance, recording_id=local_handle
+        )
+        return local_handle
 
     def stop_recording(
         self,
         recording_id: str | None = None,
-        wait_for_producer_drain: bool = True,
         timestamp: float | None = None,
     ) -> None:
         """Stop an active recording session.
@@ -378,91 +306,35 @@ class Robot:
         data collection from all streams.
 
         Args:
-            recording_id: Unused under the Rust daemon (the daemon stops the
-                active recording for this source); the legacy daemon uses it to
-                address the backend stop POST.
+            recording_id: Unused — the daemon stops the active recording for
+                this source. Retained for call-site compatibility.
             timestamp: Optional capture time (Unix seconds) for the recording's
-                stop, matching the ``log_*`` methods. Under the Rust daemon it
-                pins the window's upper bound (the producer stamps wall-clock
-                now when omitted); under the legacy daemon it is the
-                ``end_time`` sent to the backend (defaults to ``time.time()``).
+                stop, matching the ``log_*`` methods. It pins the window's upper
+                bound; the producer stamps wall-clock now when omitted.
 
         Raises:
-            RobotError: If the robot is not initialized, if the recording cannot
-                be stopped, or if storage limits are exceeded.
-            ConfigError: If there is an error trying to get the current org
+            RobotError: If the robot is not initialized.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        end_time = time.time()
-        if is_rust_daemon_enabled():
-            active_handle = get_recording_state_manager().get_current_recording_id(
-                self.id, self.instance
-            )
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=active_handle
-            )
-            self._drain_streams_and_notify_daemon(
-                recording_id,
-                wait_for_producer_drain=wait_for_producer_drain,
-                timestamp=timestamp,
-            )
-            return
-
+        active_handle = get_recording_state_manager().get_current_recording_id(
+            self.id, self.instance
+        )
         get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=recording_id
+            robot_id=self.id, instance=self.instance, recording_id=active_handle
         )
-        self._drain_streams_and_notify_daemon(
-            recording_id,
-            wait_for_producer_drain=wait_for_producer_drain,
-            timestamp=timestamp,
-        )
-
-        try:
-            session = thread_local_session()
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/stop",
-                headers=self._auth.get_headers(),
-                json={
-                    "recording_id": recording_id,
-                    "end_time": timestamp if timestamp is not None else end_time,
-                },
-            )
-
-            response.raise_for_status()
-
-            if response.json() == "WrongUser":
-                raise RobotError("Cannot stop recording initiated by another user")
-
-            if response.json() == "UsageLimitExceeded":
-                raise RobotError("Storage limit exceeded. Please upgrade your plan.")
-
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to stop recording: {str(e)}")
+        self._drain_streams_and_notify_daemon(recording_id, timestamp=timestamp)
 
     def _drain_streams_and_notify_daemon(
         self,
         recording_id: str | None,
-        *,
-        wait_for_producer_drain: bool,
         timestamp: float | None = None,
     ) -> None:
         """Stop all streams and send the recording-stopped IPC message to the daemon."""
         try:
-            producer_stop_sequence_numbers = self._stop_all_streams(
-                wait_for_producer_drain=wait_for_producer_drain
-            )
-            self._get_daemon_recording_context().stop_recording(
-                recording_id=recording_id,
-                producer_stop_sequence_numbers=producer_stop_sequence_numbers,
-                timestamp=timestamp,
-            )
+            self._stop_all_streams()
+            self._get_daemon_recording_context().stop_recording(timestamp=timestamp)
         except Exception:
             logger.exception(
                 "Failed to stop streams and notify daemon for recording_id=%s",
@@ -475,42 +347,16 @@ class Robot:
         get_recording_state_manager().register_remote_stop_handler(
             robot_id=self.id,
             instance=self.instance,
-            callback=functools.partial(
-                self._drain_streams_and_notify_daemon, wait_for_producer_drain=False
-            ),
+            callback=self._drain_streams_and_notify_daemon,
         )
 
-    def _stop_all_streams(
-        self,
-        wait_for_producer_drain: bool = True,
-    ) -> dict[str, int]:
+    def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
-        producer_stop_sequence_numbers: dict[str, int] = {}
-
         for stream_id, stream in list(self._data_streams.items()):
             try:
-
-                (producer_channel, stop_cutoff_sequence_number) = (
-                    stream.prepare_recording_stopped()
-                )
-
-                if producer_channel is not None:
-                    producer_stop_sequence_numbers[producer_channel.channel_id] = (
-                        stop_cutoff_sequence_number
-                    )
-
-                stream.stop_recording(
-                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-                    wait_for_producer_drain=wait_for_producer_drain,
-                )
-
-            except MissingProducerChannelError as exc:
-                logger.info("Removing stale data stream %s: %s", stream_id, exc)
-                self._remove_data_stream(stream_id, stream)
+                stream.stop_recording()
             except Exception:
                 logger.exception("Failed to stop data stream %s", stream_id)
-
-        return producer_stop_sequence_numbers
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -529,8 +375,8 @@ class Robot:
 
         Returns:
             The current recording ID if the robot is recording, None otherwise.
-            Under the Rust daemon this is a local correlation handle, not the
-            cloud recording id — use :meth:`get_cloud_recording_id` for that.
+            This is a local correlation handle, not the cloud recording id —
+            use :meth:`get_cloud_recording_id` for that.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
@@ -543,18 +389,14 @@ class Robot:
     ) -> str | None:
         """Resolve the daemon-owned cloud recording id for a recording window.
 
-        Under the Rust daemon the daemon allocates the cloud recording id
-        asynchronously, so this asks the daemon (it may block) for the id of the
-        recording whose window brackets ``timestamp_ns`` for this source
-        (defaulting to the most recently started recording). For
-        non-performance-critical use only (tests, ``stop_recording(wait=True)``).
-        Returns ``None`` under the legacy daemon (use
-        :meth:`get_current_recording_id`).
+        The daemon allocates the cloud recording id asynchronously, so this asks
+        the daemon (it may block) for the id of the recording whose window
+        brackets ``timestamp_ns`` for this source (defaulting to the most
+        recently started recording). For non-performance-critical use only
+        (tests, ``stop_recording(wait=True)``).
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        if not is_rust_daemon_enabled():
-            return self.get_current_recording_id()
         return self._get_daemon_recording_context().get_recording_id(
             timestamp_ns=timestamp_ns, timeout_s=timeout_s
         )
@@ -819,71 +661,32 @@ class Robot:
         """Cancel an active recording without saving any data.
 
         Args:
-            recording_id: Unused under the Rust daemon (the daemon cancels the
-                active recording for this source); the legacy daemon uses it to
-                address the backend cancel POST.
+            recording_id: Unused — the daemon cancels the active recording for
+                this source. Retained for call-site compatibility.
             timestamp: Optional capture time (Unix seconds) for the cancel,
-                mirroring ``stop_recording``. Under the Rust daemon it is the
-                recording's captured stop time (producer stamps now when
-                omitted); under the legacy daemon it is the ``end_time`` sent to
-                the backend (defaults to ``time.time()``).
+                mirroring ``stop_recording``: the recording's captured stop
+                time, with the producer stamping now when omitted.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        end_time = time.time()
         self._stop_all_streams()
-        daemon_context = self._get_daemon_recording_context()
-
-        if is_rust_daemon_enabled():
-            daemon_context.cancel_recording(timestamp=timestamp)
-            active_handle = get_recording_state_manager().get_current_recording_id(
-                self.id, self.instance
-            )
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=active_handle
-            )
-            return
-
-        daemon_context.stop_recording(recording_id=recording_id)
-
-        try:
-            session = thread_local_session()
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/cancel",
-                headers=self._auth.get_headers(),
-                json={
-                    "recording_id": recording_id,
-                    "end_time": timestamp if timestamp is not None else end_time,
-                },
-            )
-            response.raise_for_status()
-
-            if response.json() == "WrongUser":
-                raise RobotError("Cannot cancel recording initiated by another user")
-
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=recording_id
-            )
-        except requests.exceptions.ConnectionError:
-            raise RobotError(
-                "Failed to connect to neuracore server, "
-                "please check your internet connection and try again."
-            )
-        except requests.exceptions.RequestException as e:
-            raise RobotError(f"Failed to cancel recording: {str(e)}")
+        self._get_daemon_recording_context().cancel_recording(timestamp=timestamp)
+        active_handle = get_recording_state_manager().get_current_recording_id(
+            self.id, self.instance
+        )
+        get_recording_state_manager().recording_stopped(
+            robot_id=self.id, instance=self.instance, recording_id=active_handle
+        )
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
         """Return a reusable daemon recording context, creating it lazily."""
         if self._daemon_recording_context is None:
-            if is_rust_daemon_enabled():
-                if self.id is None:
-                    raise RobotError("Robot not initialized. Call init() first.")
-                context = DaemonRecordingContext()
-                context.bind_source(self.id, self.instance)
-                self._daemon_recording_context = context
-            else:
-                self._daemon_recording_context = DaemonRecordingContext()
+            if self.id is None:
+                raise RobotError("Robot not initialized. Call init() first.")
+            context = DaemonRecordingContext()
+            context.bind_source(self.id, self.instance)
+            self._daemon_recording_context = context
         return self._daemon_recording_context
 
     def _cleanup_daemon_recording_context(self) -> None:

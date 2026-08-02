@@ -5,7 +5,7 @@
 #
 #   neuracore/data_daemon/bin/data-daemon
 #
-# Re-exec'd by neuracore/data_daemon/__main__.py when NCD_RUST_DAEMON is truthy.
+# The binary it produces is what neuracore/data_daemon/__main__.py execs.
 #
 # The producer cdylib (_data_bridge) is NOT built here — maturin builds it from
 # rust/data_daemon_bridge and names it correctly per platform. This script

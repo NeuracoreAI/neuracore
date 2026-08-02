@@ -1,13 +1,14 @@
-"""Helper functions for the data daemon."""
+"""On-disk path resolution shared with the data daemon.
 
-import logging
+These mirror the daemon's own resolvers in
+[rust/data_daemon_shared/src/paths.rs](../../rust/data_daemon_shared/src/paths.rs)
+— the SDK needs the same answers to launch it and to find its state.
+"""
+
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
 from neuracore.data_daemon.const import DEFAULT_DAEMON_DB_PATH
-
-logger = logging.getLogger(__name__)
 
 
 def get_daemon_pid_path() -> Path:
@@ -24,18 +25,6 @@ def get_daemon_pid_path() -> Path:
             str(Path.home() / ".neuracore" / "daemon.pid"),
         )
     )
-
-
-def env_float(name: str, default: float) -> float:
-    """Read a float override from the environment, falling back safely."""
-    raw = os.getenv(name)
-    if raw is None:
-        return float(default)
-    try:
-        return float(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %s", name, raw, default)
-        return float(default)
 
 
 def get_daemon_db_path() -> Path:
@@ -64,13 +53,3 @@ def get_daemon_recordings_root_path() -> Path:
             str(default_root),
         )
     )
-
-
-def is_debug_mode() -> bool:
-    """Return True if the daemon is running in debug mode."""
-    return os.environ.get("NDD_DEBUG", "false").lower() == "true"
-
-
-def utc_now() -> datetime:
-    """Return the current time as a Unix timestamp or datetime object."""
-    return datetime.now(timezone.utc)

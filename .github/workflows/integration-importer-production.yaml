@@ -107,7 +107,6 @@ jobs:
 
       - name: Run Importer Integration Tests
         env:
-          NCD_RUST_DAEMON: "1"
           NEURACORE_API_URL: https://api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
           NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}

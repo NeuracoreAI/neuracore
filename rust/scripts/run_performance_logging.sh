@@ -3,11 +3,9 @@
 #
 # This is the timing/logging harness (not a pass/fail gate): it runs every
 # data-integrity case and, via perf_logging_plugin.py, appends one CSV row per
-# case capturing the daemon under test, the result (or failure summary), the
-# case wall time, and the aggregate nc.log_* call timings (avg/max, call count,
-# and per-label detail). Rows append across invocations, so running it twice —
-# once with NCD_RUST_DAEMON=1 and once with NCD_RUST_DAEMON=0 — accumulates a
-# rust-vs-python comparison in a single CSV.
+# case capturing the result (or failure summary), the case wall time, and the
+# aggregate nc.log_* call timings (avg/max, call count, and per-label detail).
+# Rows append across invocations, so repeated runs accumulate in a single CSV.
 #
 # Logging defaults to RUST_LOG=warn / NDD_DEBUG=false so per-frame daemon
 # logging does not skew the measured latencies; override either for diagnosis.
@@ -97,7 +95,6 @@ cleanup_state() {
 # ---------------------------------------------------------------------------
 
 export NEURACORE_API_URL="https://staging.api.neuracore.com/api"
-export NCD_RUST_DAEMON="${NCD_RUST_DAEMON:-1}"
 
 export NEURACORE_CONSUME_LIVE_DATA=no
 export NEURACORE_PROVIDE_LIVE_DATA=no
@@ -109,19 +106,11 @@ export RUST_LOG="${RUST_LOG:-warn}"
 export PYTHONUNBUFFERED=1
 export RUST_BACKTRACE=1
 
-# Daemon label for the CSV.
-if [[ "$NCD_RUST_DAEMON" =~ ^(1|true|yes|on|TRUE|True)$ ]]; then
-  daemon_label="rust"
-else
-  daemon_label="python"
-fi
-
 # Wire the CSV-recording plugin in non-invasively.
 export PYTHONPATH="$script_dir${PYTHONPATH:+:$PYTHONPATH}"
 export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -p perf_logging_plugin"
 export NDD_CSV_PATH="$csv_path"
 export NDD_RUN_INDEX="$run_stamp"
-export NDD_DAEMON="$daemon_label"
 export NDD_STARTED_AT="$started_at"
 
 data_integrity_targets=(
@@ -135,7 +124,7 @@ data_integrity_targets=(
 
 main() {
   log "==== data-integrity timing run starting ===="
-  log "daemon=$daemon_label RUST_LOG=$RUST_LOG NDD_DEBUG=$NDD_DEBUG"
+  log "RUST_LOG=$RUST_LOG NDD_DEBUG=$NDD_DEBUG"
   log "csv: $csv_path"
   log "stdout log: $log_file"
 
@@ -157,7 +146,7 @@ main() {
 
   log "==== data-integrity timing run finished (exit=$exit_code) ===="
   if [[ -f "$csv_path" ]]; then
-    log "rows for this run ($daemon_label):"
+    log "rows for this run:"
     python3 - "$csv_path" "$run_stamp" <<'PY' | tee -a "$log_file"
 import csv, sys
 path, run_index = sys.argv[1], sys.argv[2]

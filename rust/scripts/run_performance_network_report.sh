@@ -70,9 +70,9 @@ sys.exit(0 if api_key and org_id else 1)
 fi
 
 if perf_metrics_enabled && ! "$python_bin" -c '
-from neuracore.data_daemon.rust_selection import rust_daemon_binary_path
+from neuracore.data_daemon.binary import data_daemon_binary_path
 
-binary = rust_daemon_binary_path()
+binary = data_daemon_binary_path()
 if binary is None:
     raise SystemExit(1)
 raise SystemExit(0 if b"NCD_PERF_EVENTS_PATH" in binary.read_bytes() else 1)
@@ -84,7 +84,6 @@ fi
 
 mkdir -p "$allure_results" "$metrics_dir" "$daemon_state_dir"
 
-export NCD_RUST_DAEMON="${NCD_RUST_DAEMON:-1}"
 export NCD_PRESERVE_TEST_LOGIN=1
 export NCD_PERF_METRICS="$perf_metrics"
 export NCD_PERF_EVENTS_PATH="$events_path"
@@ -97,7 +96,6 @@ export PYTHONUNBUFFERED=1
 echo "Running network performance tests only"
 echo "  target:  $test_target"
 echo "  output:  $run_dir"
-echo "  daemon:  NCD_RUST_DAEMON=$NCD_RUST_DAEMON"
 echo "  phase metrics: NCD_PERF_METRICS=$NCD_PERF_METRICS"
 if perf_metrics_enabled; then
   echo "  events:  $events_path"

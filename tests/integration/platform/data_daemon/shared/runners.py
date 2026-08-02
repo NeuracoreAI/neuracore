@@ -13,7 +13,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 
 from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
-from neuracore.data_daemon.lifecycle.daemon_os_control import ensure_daemon_running
+from neuracore.data_daemon.daemon_control import ensure_daemon_running
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_daemon_cleanup,
 )
