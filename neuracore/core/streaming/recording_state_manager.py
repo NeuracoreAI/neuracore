@@ -12,6 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from typing import NamedTuple
 
 from aiohttp import ClientSession
 from neuracore_types import (
@@ -36,6 +37,29 @@ from neuracore.data_daemon import bridge as _recording_context
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
+
+# The producer stamps a recording's start as `int(start_time * 1e9)`, so the
+# value echoed back in a notification can sit a nanosecond below the one held
+# locally. Staleness comparisons allow this much slack — far above that
+# truncation, far below any real gap between two recordings of one instance.
+STALE_START_TOLERANCE_S = 1e-3
+
+
+class TrackedRecording(NamedTuple):
+    """The recording currently tracked for one robot instance.
+
+    Attributes:
+        recording_id: The local correlation handle minted by
+            ``Robot.start_recording``, replaced by the backend's cloud recording
+            id once a START notification for the same recording arrives.
+        start_time: The recording window's lower bound, on the same clock the
+            backend reports in ``RecordingStartPayload.start_time``. Orders
+            notifications against each other: one describing a recording that
+            began earlier than this belongs to an already-finished recording.
+    """
+
+    recording_id: str
+    start_time: float
 
 
 def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
@@ -107,7 +131,18 @@ class RecordingStateManager(BaseSSEConsumer):
         self.auth = auth if auth is not None else get_auth()
 
         self._connected_robot_id: str | None = None
-        self.recording_robot_instances: dict[RobotInstanceIdentifier, str] = dict()
+        # Guards the read-modify-write sequences over `recording_robot_instances`.
+        # Local `nc.start_recording` / `nc.stop_recording` run on the caller's
+        # thread while notifications are applied on the event loop thread, and
+        # both decide what to do from the map's current contents. Reentrant
+        # because `updated_recording_state` holds it across `recording_stopped`.
+        #
+        # Not taken by `get_current_recording_id` / `is_recording`: those sit on
+        # the `log_*` hot path and a single dict lookup is already atomic.
+        self._state_lock = threading.RLock()
+        self.recording_robot_instances: dict[
+            RobotInstanceIdentifier, TrackedRecording
+        ] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
@@ -126,7 +161,8 @@ class RecordingStateManager(BaseSSEConsumer):
         instance_key = RobotInstanceIdentifier(
             robot_id=robot_id, robot_instance=instance
         )
-        return self.recording_robot_instances.get(instance_key, None)
+        tracked = self.recording_robot_instances.get(instance_key, None)
+        return tracked.recording_id if tracked is not None else None
 
     def is_recording(self, robot_id: str, instance: int) -> bool:
         """Check if a robot instance is currently recording.
@@ -155,7 +191,7 @@ class RecordingStateManager(BaseSSEConsumer):
         return recording_id in self._expired_recording_ids
 
     def recording_started(
-        self, robot_id: str, instance: int, recording_id: str
+        self, robot_id: str, instance: int, recording_id: str, start_time: float
     ) -> None:
         """Handle recording start for a robot instance.
 
@@ -165,26 +201,63 @@ class RecordingStateManager(BaseSSEConsumer):
         are retired — the instance is never transiently cleared, so a concurrent
         ``log_*`` cannot observe a ``None`` recording id and drop a frame.
 
+        Publishes the tracked state under :attr:`_state_lock` before starting the
+        daemon. Notifications are resolved against this map on another thread, so
+        an instance missing from it can have a notification for a different
+        recording adopted in its place.
+
         Args:
             robot_id: Robot ID
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
+            start_time: The recording's window lower bound — see
+                :class:`TrackedRecording`. Callers reacting to a notification
+                must pass the value the backend reported, so subsequent
+                notifications can be ordered against it.
         """
-        instance_key = RobotInstanceIdentifier(
-            robot_id=robot_id, robot_instance=instance
-        )
-        previous_recording_id = self.recording_robot_instances.get(instance_key, None)
+        with self._state_lock:
+            self._track_recording_started(
+                robot_id=robot_id,
+                instance=instance,
+                recording_id=recording_id,
+                start_time=start_time,
+            )
+        # After the state is visible, and outside the lock: this takes a few
+        # milliseconds of filesystem work, which is long enough for a
+        # notification to arrive and be resolved against the tracked recording.
+        self._ensure_daemon_for_recording()
 
-        if previous_recording_id == recording_id:
-            return
+    def _ensure_daemon_for_recording(self) -> None:
+        """Start the data daemon if it is not already running.
 
+        Never raises: the recording proceeds either way, since abandoning it here
+        would silently turn every subsequent ``log_*`` into a no-op.
+        """
         try:
             ensure_daemon_running()
         except Exception:
             logger.exception("Failed to ensure data daemon is running")
+
+    def _track_recording_started(
+        self, robot_id: str, instance: int, recording_id: str, start_time: float
+    ) -> None:
+        """Make ``recording_id`` this instance's tracked recording.
+
+        Pure state transition plus timer bookkeeping — no blocking work, so it is
+        safe to call with :attr:`_state_lock` held. The caller must hold it.
+        """
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
+        )
+        previous = self.recording_robot_instances.get(instance_key, None)
+        previous_recording_id = previous.recording_id if previous is not None else None
+
+        if previous_recording_id == recording_id:
             return
 
-        self.recording_robot_instances[instance_key] = recording_id
+        self.recording_robot_instances[instance_key] = TrackedRecording(
+            recording_id=recording_id, start_time=start_time
+        )
         if previous_recording_id is not None:
             self._cancel_recording_timers(previous_recording_id)
         self._schedule_recording_timers(
@@ -264,10 +337,11 @@ class RecordingStateManager(BaseSSEConsumer):
         instance_key = RobotInstanceIdentifier(
             robot_id=robot_id, robot_instance=instance
         )
-        current_recording = self.recording_robot_instances.get(instance_key, None)
-        if current_recording != recording_id:
-            return
-        self.recording_robot_instances.pop(instance_key, None)
+        with self._state_lock:
+            current = self.recording_robot_instances.get(instance_key, None)
+            if current is None or current.recording_id != recording_id:
+                return
+            self.recording_robot_instances.pop(instance_key, None)
         # Data-bridge stop is driven by the recording context or expiry timer —
         # not here — so the daemon gets exactly one StopRecording with the
         # correct data-clock boundary.
@@ -282,18 +356,32 @@ class RecordingStateManager(BaseSSEConsumer):
         Processes recording state changes from remote notifications and calls
         appropriate start/stop methods if the state actually changed.
 
+        Runs under :attr:`_state_lock` so each decision and the state change it
+        implies are atomic against a concurrent local start or stop. Blocking
+        work is done before the lock is taken.
+
         Args:
             is_recording: Whether the robot should be recording
             details: Recording details including robot ID, instance, and recording ID
         """
+        if is_recording and details.robot_id == self._connected_robot_id:
+            self._ensure_daemon_for_recording()
+        with self._state_lock:
+            self._apply_recording_notification(is_recording, details)
+
+    def _apply_recording_notification(
+        self, is_recording: bool, details: BaseRecodingUpdatePayload
+    ) -> None:
+        """Apply one notification. Caller must hold :attr:`_state_lock`."""
         robot_id = details.robot_id
         instance = details.instance
         recording_id = details.recording_id
 
-        previous_recording_id = self.recording_robot_instances.get(
+        previous = self.recording_robot_instances.get(
             RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance),
             None,
         )
+        previous_recording_id = previous.recording_id if previous is not None else None
         was_recording = previous_recording_id is not None
 
         if was_recording == is_recording and previous_recording_id == recording_id:
@@ -309,6 +397,26 @@ class RecordingStateManager(BaseSSEConsumer):
             if robot_id != self._connected_robot_id:
                 return
 
+            # A START describing a recording that began before the tracked one
+            # is a late notification for an already-finished recording: the
+            # org-wide stream can lag a fast stop-then-start cycle by a whole
+            # recording. Adopting it would hand this instance a finished
+            # recording, whose STOP would then drain the live one.
+            if (
+                previous is not None
+                and details.start_time < previous.start_time - STALE_START_TOLERANCE_S
+            ):
+                logger.debug(
+                    "ignoring stale recording start notification: "
+                    "recording_id=%s start_time=%s is older than tracked "
+                    "recording_id=%s start_time=%s",
+                    recording_id,
+                    details.start_time,
+                    previous.recording_id,
+                    previous.start_time,
+                )
+                return
+
             assert (
                 len(details.dataset_ids) == 1
             ), "Recording can only be started in one dataset"
@@ -322,10 +430,12 @@ class RecordingStateManager(BaseSSEConsumer):
                 dataset_id,
                 recording_id,
             )
-            self.recording_started(
+            # Daemon already ensured above; this is the state transition only.
+            self._track_recording_started(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
+                start_time=details.start_time,
             )
         else:
             instance_key = RobotInstanceIdentifier(

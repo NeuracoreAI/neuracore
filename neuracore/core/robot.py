@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -282,6 +283,11 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         local_handle = str(uuid.uuid4())
+        # The recording window's lower bound, on the same clock the backend
+        # reports for it. Without an explicit timestamp the producer stamps
+        # wall-clock now, which is at or after this value, so notifications stay
+        # orderable against it.
+        start_time = timestamp if timestamp is not None else time.time()
         self._get_daemon_recording_context().start_recording(
             robot_id=self.id,
             robot_instance=self.instance,
@@ -291,7 +297,10 @@ class Robot:
             timestamp=timestamp,
         )
         get_recording_state_manager().recording_started(
-            robot_id=self.id, instance=self.instance, recording_id=local_handle
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=local_handle,
+            start_time=start_time,
         )
         return local_handle
 

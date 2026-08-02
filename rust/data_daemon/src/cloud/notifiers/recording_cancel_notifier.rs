@@ -249,8 +249,8 @@ mod tests {
 
     #[tokio::test]
     async fn treats_backend_404_as_already_cancelled() {
-        // The start-notifier's `resolve_prior_pending` may have closed this
-        // recording on the backend first (cancel-then-start with no gap), so a
+        // The recording may already be closed on the backend — an earlier POST
+        // whose response was lost, or the backend reaping it as abandoned — so a
         // 404 here is the desired post-condition, not a failure: the row must
         // still be marked notified so the sweep stops re-posting.
         let server = MockServer::start().await;
