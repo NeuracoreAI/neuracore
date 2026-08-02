@@ -4,7 +4,6 @@ from collections.abc import Callable
 
 import pytest
 
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     PRE_NETWORK_INTEGRITY_CASES,
 )
@@ -54,21 +53,12 @@ def _assert_online_verification_invariants(
     in the platform DB.  Must be called before cloud frame verification so
     that downloaded data reflects the fully-committed upload state.
 
-    Upload completion is tracked in the daemon DB by the active correlation key:
-    the local ``recording_index`` under the Rust daemon, the cloud
-    ``recording_id`` under the legacy daemon.
+    Upload completion is tracked in the daemon DB by the local
+    ``recording_index`` correlation key.
     """
     for result in results:
-        if is_rust_daemon_enabled():
-            for recording_index in result.recording_indexes:
-                wait_for_upload_complete_in_db(
-                    recording_index, timeout_s=timeout_seconds
-                )
-        else:
-            for recording_id in result.recording_ids:
-                wait_for_upload_complete_in_db(
-                    str(recording_id), timeout_s=timeout_seconds
-                )
+        for recording_index in result.recording_indexes:
+            wait_for_upload_complete_in_db(recording_index, timeout_s=timeout_seconds)
 
 
 # ---------------------------------------------------------------------------

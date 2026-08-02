@@ -2,8 +2,8 @@
 """Pytest plugin that records per-test-case timing to a CSV.
 
 Used by ``run_performance_logging.sh`` to capture, for every data-integrity
-case, the daemon under test, pass/fail (or the failure summary), the case wall
-time, and the aggregate ``nc.log_*`` call timings (avg/max + per-label detail).
+case, pass/fail (or the failure summary), the case wall time, and the
+aggregate ``nc.log_*`` call timings (avg/max + per-label detail).
 
 It is non-invasive: loaded via ``PYTEST_ADDOPTS="-p perf_logging_plugin"`` with
 this directory on ``PYTHONPATH``, and writes nothing unless ``NDD_CSV_PATH`` is
@@ -12,7 +12,6 @@ case's timer stats have been recorded into the suite's ``SESSION_RUNS``).
 
 Env:
   NDD_CSV_PATH     CSV file to append per-case rows to (enables recording)
-  NDD_DAEMON       "rust" / "python" (recorded in each row)
   NDD_RUN_INDEX    run identifier recorded in each row
   NDD_STARTED_AT   ISO timestamp of the run
   NDD_CSV_JSON_DIR optional dir for a per-process JSON backup
@@ -30,7 +29,6 @@ from pathlib import Path
 CSV_COLUMNS = [
     "run_index",
     "started_at",
-    "daemon",
     "result",
     "issue_type",
     "case_id",
@@ -139,7 +137,6 @@ def _build_row(report: dict, matched_runs: list[dict]) -> dict:
     row = {
         "run_index": os.environ.get("NDD_RUN_INDEX", ""),
         "started_at": os.environ.get("NDD_STARTED_AT", ""),
-        "daemon": os.environ.get("NDD_DAEMON", ""),
         "result": report.get("outcome", "unknown"),
         "issue_type": report.get("issue") or "",
         "case_id": _param_id(report["nodeid"]) or "",

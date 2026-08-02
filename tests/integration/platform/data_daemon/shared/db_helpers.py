@@ -41,7 +41,6 @@ if TYPE_CHECKING:
 
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_db_path
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_EXPECTED_TRACE_COUNT,
     COLUMN_EXPECTED_TRACE_COUNT_REPORTED,
@@ -80,9 +79,7 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     TRACES_TABLE,
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
-    list_recording_ids_on_disk,
     list_recording_indexes_on_disk,
-    normalize_recording_ids,
     normalize_recording_indexes,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
@@ -97,14 +94,12 @@ logger = logging.getLogger(__name__)
 
 
 def _recording_correlation_column() -> str:
-    """Return the recordings/traces correlation column for the active daemon.
+    """Return the recordings/traces correlation column.
 
-    Rust daemon: recordings are keyed by the local INTEGER ``recording_index``
-    (the cloud ``recording_id`` is a separate, nullable column). Legacy Python
-    daemon: recordings are keyed by the cloud ``recording_id`` (TEXT PK), which
-    is also the traces foreign key.
+    Recordings are keyed by the local INTEGER ``recording_index``; the cloud
+    ``recording_id`` is a separate, nullable column.
     """
-    return COLUMN_RECORDING_INDEX if is_rust_daemon_enabled() else COLUMN_RECORDING_ID
+    return COLUMN_RECORDING_INDEX
 
 
 class DaemonDbStore:
@@ -172,9 +167,8 @@ class DaemonDbStore:
     def fetch_recording(self, recording_key: int | str) -> dict[str, Any] | None:
         """Return the recording row for ``recording_key`` if it exists.
 
-        ``recording_key`` is the daemon's correlation key for the active mode:
-        the local INTEGER ``recording_index`` under the Rust daemon, or the cloud
-        ``recording_id`` (TEXT) under the legacy Python daemon.
+        ``recording_key`` is the daemon's correlation key: the local INTEGER
+        ``recording_index``.
         """
         correlation_column = _recording_correlation_column()
         with closing(self.connect()) as conn:
@@ -213,9 +207,8 @@ class DaemonDbStore:
     ) -> list[dict[str, Any]]:
         """Return trace rows for one recording, limited to available columns.
 
-        Traces join to recordings on the active correlation column: the integer
-        ``recording_index`` under the Rust daemon, or the cloud ``recording_id``
-        under the legacy Python daemon.
+        Traces join to recordings on the correlation column, the integer
+        ``recording_index``.
         """
         correlation_column = _recording_correlation_column()
         with closing(self.connect_read_only()) as conn:
@@ -289,7 +282,7 @@ def sqlite_table_columns(
 
 
 def fetch_recording(recording_key: int | str) -> dict[str, Any] | None:
-    """Return the recording row for the active-mode correlation key, if present."""
+    """Return the recording row for the ``recording_index`` key, if present."""
     return _TEST_STORE.fetch_recording(recording_key)
 
 
@@ -361,19 +354,14 @@ def wait_for_recording_index_for_source(
 def assert_offline_recordings_pending(results: list[ContextResult]) -> None:
     """Assert offline recordings exist by ``recording_index`` with cloud id NULL.
 
-    Rust daemon only: in offline mode the daemon assigns ``recording_index``
-    immediately but the cloud ``recording_id`` stays NULL until the daemon is
-    online and ``/recording/start`` lands. This confirms that contract per
-    ``recording_index`` captured by each worker. Under the legacy daemon the
-    cloud ``recording_id`` is the recording's identity from the moment recording
-    starts, so this offline-NULL contract does not apply and the check is a
-    no-op.
+    In offline mode the daemon assigns ``recording_index`` immediately but the
+    cloud ``recording_id`` stays NULL until the daemon is online and
+    ``/recording/start`` lands. This confirms that contract per
+    ``recording_index`` captured by each worker.
 
     Raises:
         AssertionError: If a recording row is missing or already has a cloud id.
     """
-    if not is_rust_daemon_enabled():
-        return
     for result in results:
         rows_by_index = {
             row[COLUMN_RECORDING_INDEX]: row
@@ -396,13 +384,9 @@ def resolve_cloud_recording_ids(
     *,
     timeout_s: float = 60.0,
 ) -> list[ContextResult]:
-    """Return copies of *results* with cloud ``recording_ids`` resolved per mode.
+    """Return copies of *results* with cloud ``recording_ids`` resolved.
 
-    Legacy Python daemon: ``nc.start_recording()`` already returns the cloud
-    ``recording_id``, so ``result.recording_ids`` is authoritative and the
-    results are returned unchanged.
-
-    Rust daemon: the cloud ``recording_id`` is populated asynchronously by the
+    The cloud ``recording_id`` is populated asynchronously by the
     start-notifier once the daemon is online, so the captured ids may have been
     NULL at record time. This reads the daemon DB directly by ``recording_index``
     (which the recording worker already captured) and waits until each row's
@@ -417,9 +401,6 @@ def resolve_cloud_recording_ids(
     Raises:
         AssertionError: If any recording's cloud id is not populated in time.
     """
-    if not is_rust_daemon_enabled():
-        return results
-
     resolved: list[ContextResult] = []
     for result in results:
         cloud_ids: list[str] = []
@@ -466,9 +447,7 @@ def fetch_trace_registration_stats(recording_key: int | str) -> tuple[int, int]:
     plus the subset whose ``registration_status`` is not ``"pending"``.
 
     Args:
-        recording_key: The active-mode correlation key (``recording_index``
-            under the Rust daemon, cloud ``recording_id`` under the legacy
-            daemon) to query.
+        recording_key: The ``recording_index`` correlation key to query.
 
     Returns:
         A two-tuple of ``(total_trace_count, non_pending_registration_count)``.
@@ -489,9 +468,7 @@ def fetch_expected_trace_count_reported(recording_key: int | str) -> int | None:
     """Return the ``expected_trace_count_reported`` value for a recording row.
 
     Args:
-        recording_key: The active-mode correlation key (``recording_index``
-            under the Rust daemon, cloud ``recording_id`` under the legacy
-            daemon) to look up.
+        recording_key: The ``recording_index`` correlation key to look up.
 
     Returns:
         The integer value of ``expected_trace_count_reported``, or ``None``
@@ -514,9 +491,7 @@ def fetch_recording_online_verification_stats(
     default dict.
 
     Args:
-        recording_key: The active-mode correlation key (``recording_index``
-            under the Rust daemon, cloud ``recording_id`` under the legacy
-            daemon) to inspect.
+        recording_key: The ``recording_index`` correlation key to inspect.
 
     Returns:
         A dict with the following keys:
@@ -610,9 +585,7 @@ def fetch_recording_trace_upload_stats(
     per-trace row snapshots.  Handles missing tables and columns gracefully.
 
     Args:
-        recording_key: The active-mode correlation key (``recording_index``
-            under the Rust daemon, cloud ``recording_id`` under the legacy
-            daemon) to inspect.
+        recording_key: The ``recording_index`` correlation key to inspect.
 
     Returns:
         A dict containing:
@@ -879,8 +852,7 @@ def wait_for_offline_db_ready(
         expected_recording_keys: When supplied, also waits until at least one of
             the expected recording directories exists on disk, preventing a
             false-positive ``ready`` result from an empty-but-initialised DB.
-            Keys are ``recording_index`` values under the Rust daemon and cloud
-            ``recording_id`` strings under the legacy daemon.
+            Keys are ``recording_index`` values.
 
     Raises:
         AssertionError: If the DB is not ready within ``timeout_s`` seconds.
@@ -891,20 +863,8 @@ def wait_for_offline_db_ready(
         RECORDINGS_TABLE,
         TRACES_TABLE,
     }
-    if is_rust_daemon_enabled():
-        target_recording_keys: set[int] | set[str] = normalize_recording_indexes(
-            expected_recording_keys
-        )
-        list_on_disk: Callable[[], set[int]] | Callable[[], set[str]] = (
-            list_recording_indexes_on_disk
-        )
-    else:
-        target_recording_keys = normalize_recording_ids(
-            None
-            if expected_recording_keys is None
-            else (str(key) for key in expected_recording_keys)
-        )
-        list_on_disk = list_recording_ids_on_disk
+    target_recording_keys = normalize_recording_indexes(expected_recording_keys)
+    list_on_disk = list_recording_indexes_on_disk
 
     with Timer(timeout_s, label="daemon.offline_db_ready", always_log=True):
         while time.monotonic() < deadline:
@@ -952,10 +912,9 @@ def wait_for_all_traces_written(
 ) -> None:
     """Block until every trace for every recording in *results* has been written.
 
-    Recordings are correlated by the active daemon's key: the daemon-assigned
-    INTEGER ``recording_index`` under the Rust daemon (the on-disk directory name
-    and the traces join key, since the cloud ``recording_id`` is nullable / minted
-    async), or the cloud ``recording_id`` under the legacy Python daemon. The
+    Recordings are correlated by the daemon-assigned INTEGER
+    ``recording_index`` — the on-disk directory name and the traces join key,
+    since the cloud ``recording_id`` is nullable / minted async. The
     recordings root directory is the source of truth for which keys to check —
     this catches recordings the daemon started that the client-side results may
     not reflect (e.g. an ``already_started`` race on reconnect).
@@ -977,22 +936,10 @@ def wait_for_all_traces_written(
     min_poll_interval_s = 0.05
     max_poll_interval_s = 1.0
 
-    use_rust = is_rust_daemon_enabled()
-    correlation_column = COLUMN_RECORDING_INDEX if use_rust else COLUMN_RECORDING_ID
-
-    def _raw_keys() -> list:
-        if use_rust:
-            return [key for result in results for key in result.recording_indexes]
-        return [key for result in results for key in result.recording_ids]
-
-    if use_rust:
-        expected_keys: set[int] | set[str] = normalize_recording_indexes(_raw_keys())
-        list_keys_on_disk: Callable[[], set[int]] | Callable[[], set[str]] = (
-            list_recording_indexes_on_disk
-        )
-    else:
-        expected_keys = normalize_recording_ids(_raw_keys())
-        list_keys_on_disk = list_recording_ids_on_disk
+    correlation_column = COLUMN_RECORDING_INDEX
+    raw_keys = [key for result in results for key in result.recording_indexes]
+    expected_keys = normalize_recording_indexes(raw_keys)
+    list_keys_on_disk = list_recording_indexes_on_disk
 
     deadline = time.monotonic() + timeout_s
     poll_interval_s = min_poll_interval_s
@@ -1112,10 +1059,7 @@ def wait_for_all_traces_written(
         for recording_key in recording_keys
         if not any(trace[correlation_column] == recording_key for trace in traces)
     )
-    all_raw_keys = _raw_keys()
-    duplicate_keys = sorted(
-        {key for key in all_raw_keys if all_raw_keys.count(key) > 1}
-    )
+    duplicate_keys = sorted({key for key in raw_keys if raw_keys.count(key) > 1})
     raise AssertionError(
         f"Daemon did not finish writing all traces within {timeout_s}s.\n"
         f"  Duplicate recording keys across contexts: {duplicate_keys}\n"
@@ -1232,9 +1176,7 @@ def wait_for_upload_complete_in_db(
     verify that data is present in the cloud.
 
     Args:
-        recording_key: The active-mode correlation key (``recording_index``
-            under the Rust daemon, cloud ``recording_id`` under the legacy
-            daemon) to wait on.
+        recording_key: The ``recording_index`` correlation key to wait on.
         timeout_s: Base no-progress timeout in seconds.
 
     Raises:

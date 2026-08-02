@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 import neuracore as nc
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
 )
@@ -37,11 +36,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
-)
-
-pytestmark = pytest.mark.skipif(
-    not is_rust_daemon_enabled(),
-    reason="Same-source multiprocess producers require NCD_RUST_DAEMON",
 )
 
 _PRODUCER_COUNT = 3
@@ -219,7 +213,6 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
         duration_sec=1,
         parallel_contexts=_PRODUCER_COUNT,
         joint_count=0,
-        requires_rust_daemon=True,
         storage_state_action=STORAGE_STATE_DELETE,
     )
 

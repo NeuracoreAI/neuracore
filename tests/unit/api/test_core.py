@@ -216,41 +216,6 @@ def test_update_robot_name_forwards_arguments(monkeypatch):
     assert robot_id == "robot_id_123"
 
 
-def test_get_active_data_traces_uses_request_timeout(monkeypatch) -> None:
-    response = Mock(status_code=200)
-    response.json.return_value = []
-
-    session = Mock()
-    session.get.return_value = response
-
-    auth = Mock()
-    auth.get_headers.return_value = {"Authorization": "Bearer test-token"}
-
-    monkeypatch.setattr(
-        api_core.backend_utils,
-        "thread_local_session",
-        lambda: session,
-    )
-    monkeypatch.setattr(
-        api_core.backend_utils,
-        "get_current_org",
-        lambda: "org-123",
-    )
-    monkeypatch.setattr(
-        api_core.backend_utils,
-        "get_auth",
-        lambda: auth,
-    )
-
-    result = api_core.backend_utils.get_active_data_traces("recording-123")
-
-    assert result == []
-    session.get.assert_called_once()
-
-    request_kwargs = session.get.call_args.kwargs
-    assert request_kwargs.get("timeout") == 10
-
-
 @pytest.mark.parametrize("complete", [True, False])
 def test_is_recording_upload_complete_returns_backend_state(
     monkeypatch,
@@ -346,14 +311,15 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         def get_current_recording_id(self) -> str:
             return "rec-123"
 
+        def get_cloud_recording_id(self) -> str:
+            return "rec-123"
+
         def stop_recording(
             self,
             recording_id: str,
-            *,
-            wait_for_producer_drain: bool = True,
             timestamp: float | None = None,
         ) -> None:
-            calls.append((recording_id, wait_for_producer_drain))
+            calls.append(recording_id)
 
     def is_upload_complete(recording_id: str) -> bool:
         completion_checks.append(recording_id)
@@ -365,11 +331,6 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         lambda robot_name, instance: _FakeRobot(),
     )
     monkeypatch.setattr(
-        api_core,
-        "is_rust_daemon_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
         api_core.backend_utils,
         "is_recording_upload_complete",
         is_upload_complete,
@@ -378,10 +339,7 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
     nc.stop_recording(wait=False)
     nc.stop_recording(wait=True)
 
-    assert calls == [
-        ("rec-123", False),
-        ("rec-123", True),
-    ]
+    assert calls == ["rec-123", "rec-123"]
     assert completion_checks == ["rec-123"]
 
 
@@ -397,11 +355,12 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         def get_current_recording_id(self) -> str:
             return "rec-123"
 
+        def get_cloud_recording_id(self) -> str:
+            return "rec-123"
+
         def stop_recording(
             self,
             recording_id: str,
-            *,
-            wait_for_producer_drain: bool = True,
             timestamp: float | None = None,
         ) -> None:
             pass
@@ -423,11 +382,6 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         api_core,
         "_get_robot",
         lambda robot_name, instance: _FakeRobot(),
-    )
-    monkeypatch.setattr(
-        api_core,
-        "is_rust_daemon_enabled",
-        lambda: False,
     )
     monkeypatch.setattr(
         api_core.backend_utils,

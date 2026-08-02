@@ -32,21 +32,16 @@ It does not explain internal implementation details.
 pip install -e .
 ```
 
-Recommended for video recording, and **required** when running the Rust daemon
-(the default):
+**Required** for video recording:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
 ```
 
-Both daemons encode video with the `ffmpeg` CLI, but they differ when `ffmpeg`
-is missing or fails to initialise:
-- The **Rust daemon** shells out to `ffmpeg` and runs a preflight at startup; if
-  the binary is missing or the build is incompatible it fails fast with a clear
-  message rather than starting and dropping every video recording. Install
-  `ffmpeg` before launching.
-- The **legacy Python daemon** prefers the `ffmpeg` CLI but automatically falls
-  back to PyAV when `ffmpeg` is unavailable or the encoder fails to initialise.
+The daemon encodes video by shelling out to the `ffmpeg` CLI and runs a
+preflight at startup; if the binary is missing or the build is incompatible it
+fails fast with a clear message rather than starting and dropping every video
+recording. Install `ffmpeg` before launching.
 
 ### 2) Launch the daemon
 
@@ -123,20 +118,15 @@ When you run:
 neuracore data-daemon launch
 ```
 
-the CLI launches the daemon as a separate background process. There are two
-daemon implementations and the launcher picks one (see
-[rust_data_daemon_development.md](rust_data_daemon_development.md)):
+the CLI launches the daemon as a separate background process. It `exec`s the
+native binary bundled in the `neuracore` wheel (Linux x86_64 and Apple-Silicon
+macOS) at `neuracore/data_daemon/bin/data-daemon`; see
+[rust_data_daemon_development.md](rust_data_daemon_development.md). When that
+binary is absent — a source install that never ran
+`rust/scripts/build_wheel_artefacts.sh`, or a platform with no published wheel —
+the launch fails with build/install instructions.
 
-- **Rust daemon (default)** — the launcher `exec`s the native binary bundled in
-  the `neuracore` wheel (Linux x86_64 and Apple-Silicon macOS) at
-  `neuracore/data_daemon/bin/data-daemon`. This is the implementation described
-  throughout this guide.
-- **Legacy Python daemon** — used when `NCD_RUST_DAEMON` is set to a falsy value
-  (`0`, `false`, `no`, `n`), or when the bundled binary is not present at all —
-  a source install that never ran `rust/scripts/build_wheel_artefacts.sh`, or a
-  platform with no published wheel.
-
-Either daemon process:
+The daemon process:
 - boots the internal components it needs
 - starts its main loop
 - stays running until you stop it (or the machine shuts down)
@@ -547,15 +537,10 @@ neuracore data-daemon launch
 
 ### Which video encoder backend is being used
 
-Both daemons encode video with `ffmpeg`, but they handle a missing or broken
-`ffmpeg` differently:
-- **Rust daemon** (default) — verifies `ffmpeg` at startup. If the
-  binary is missing from `PATH`, or the local build cannot run the encode the
-  daemon needs, the preflight fails and the daemon refuses to start (rather than
-  starting and silently dropping every video recording).
-- **Legacy Python daemon** — uses the `ffmpeg` CLI when it is on
-  `PATH` and falls back to PyAV when `ffmpeg` is unavailable or fails to
-  initialise.
+The daemon encodes video with `ffmpeg` and verifies it at startup. If the binary
+is missing from `PATH`, or the local build cannot run the encode the daemon
+needs, the preflight fails and the daemon refuses to start (rather than starting
+and silently dropping every video recording).
 
 Confirm `ffmpeg` is installed and runnable:
 
@@ -563,7 +548,7 @@ Confirm `ffmpeg` is installed and runnable:
 ffmpeg -version
 ```
 
-If that command fails, install `ffmpeg` (see [Quick start](#1-install-from-repo-root)) for the Rust daemon, or rely on the PyAV fallback under the Python daemon.
+If that command fails, install `ffmpeg` (see [Quick start](#1-install-from-repo-root)).
 
 ### Migration issues on startup
 

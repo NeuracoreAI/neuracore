@@ -82,8 +82,8 @@ jobs:
       # --import-mode=importlib keeps the repo root off sys.path. Without it
       # pytest prepends it (tests/ is a package up to the root) and `import
       # neuracore` resolves to the checked-out source instead of the installed
-      # wheel — where the bundled daemon binary is gitignored, so the Rust
-      # daemon is unreachable and the suite falls back to Python.
+      # wheel — where the bundled daemon binary is gitignored, so the daemon
+      # would be unreachable.
       run: >-
         pytest -o log_cli=true --log-cli-level=INFO
         --import-mode=importlib

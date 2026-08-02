@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import json
-import struct
-
 import numpy as np
 import pytest
 from neuracore_types import DataType, JointData
@@ -12,113 +9,6 @@ from neuracore.core.streaming.data_stream import (
     JointDataStream,
     RGBDataStream,
 )
-from neuracore.data_daemon.communications_management.producer.producer_channel import (
-    producer_transport_args_for_data_type,
-)
-from neuracore.data_daemon.const import (
-    DEFAULT_VIDEO_CHUNK_SIZE,
-    DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE,
-    DEFAULT_VIDEO_SLOT_SIZE,
-)
-
-
-class _FakeProducerChannel:
-    instances: list[_FakeProducerChannel] = []
-
-    def __init__(
-        self,
-        *,
-        data_type: DataType,
-        id: str | None = None,
-        recording_id: str | None = None,
-        chunk_size: int | None = None,
-        send_queue_maxsize: int | None = None,
-        shared_memory_size: int | None = None,
-        **_: object,
-    ) -> None:
-        default_chunk_size, default_shared_memory_size, default_send_queue_maxsize = (
-            producer_transport_args_for_data_type(data_type)
-        )
-        self.id = id
-        self.recording_id = recording_id
-        self.data_type = data_type
-        self.chunk_size = default_chunk_size if chunk_size is None else chunk_size
-        self.send_queue_maxsize = (
-            default_send_queue_maxsize
-            if send_queue_maxsize is None
-            else send_queue_maxsize
-        )
-        self.init_shared_memory_size: int | None = None
-        self.default_shared_memory_size = (
-            default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
-        )
-        self.opened_shared_memory_sizes: list[int] = []
-        self.send_data_parts_calls: list[dict[str, object]] = []
-        self.cleanup_wait_for_slot_drain_calls: list[bool] = []
-        self.stop_wait_for_slot_drain_calls: list[bool] = []
-        self.trace_id = None
-        _FakeProducerChannel.instances.append(self)
-
-    def start_recording_session(
-        self,
-        *,
-        recording_id: str | None = None,
-        shared_memory_size: int | None = None,
-    ) -> None:
-        if recording_id is not None:
-            self.recording_id = recording_id
-        self.trace_id = "trace-1"
-        self.opened_shared_memory_sizes.append(
-            self.default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
-        )
-
-    def initialize_new_producer_channel(
-        self, shared_memory_size: int | None = None
-    ) -> None:
-        self.init_shared_memory_size = (
-            self.default_shared_memory_size
-            if shared_memory_size is None
-            else shared_memory_size
-        )
-
-    def set_recording_id(self, recording_id: str | None) -> None:
-        self.recording_id = recording_id
-
-    def start_producer_channel(self) -> None:
-        return
-
-    def stop_producer_channel(
-        self,
-        *,
-        wait_for_slot_drain: bool = True,
-    ) -> None:
-        self.stop_wait_for_slot_drain_calls.append(wait_for_slot_drain)
-        return
-
-    def open_fixed_shared_slots(self, slot_size: int | None = None) -> None:
-        self.opened_shared_memory_sizes.append(
-            self.default_shared_memory_size if slot_size is None else slot_size
-        )
-
-    def start_new_trace(self) -> None:
-        self.trace_id = "trace-1"
-
-    def cleanup_producer_channel(
-        self,
-        *,
-        stop_cutoff_sequence_number: int | None = None,
-        wait_for_slot_drain: bool = True,
-    ) -> None:
-        del stop_cutoff_sequence_number
-        self.cleanup_wait_for_slot_drain_calls.append(wait_for_slot_drain)
-        return
-
-    def send_data_parts(self, **kwargs: object) -> None:
-        self.send_data_parts_calls.append(kwargs)
 
 
 class _DummyCameraData:
@@ -148,144 +38,29 @@ def _context(recording_id: str = "rec-1") -> DataRecordingContext:
     )
 
 
-@pytest.fixture(autouse=True)
-def use_python_daemon(monkeypatch) -> None:
-    """Pin the module to the legacy zmq producer channel.
-
-    The rust daemon is the default at runtime, so without this the file's
-    coverage would swing with whether a daemon binary happens to be installed.
-    Cases that want the rust path call ``_use_rust_daemon`` to re-patch.
-    """
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
-        lambda: False,
-    )
-
-
-def test_rgb_stream_uses_video_specific_producer_settings(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-
-    stream = RGBDataStream("front_camera", width=3840, height=2160)
-    stream.start_recording(_context())
-
-    producer = _FakeProducerChannel.instances[0]
-    assert producer.data_type == DataType.RGB_IMAGES
-    assert producer.chunk_size == DEFAULT_VIDEO_CHUNK_SIZE
-    assert producer.send_queue_maxsize == DEFAULT_VIDEO_SEND_QUEUE_MAXSIZE
-    assert producer.opened_shared_memory_sizes == [DEFAULT_VIDEO_SLOT_SIZE]
-
-
-def test_rgb_stream_sends_frame_as_multipart_payload(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-
+def test_stream_tracks_recording_state_and_latest_sample() -> None:
+    """A stream owns no transport — the daemon interface lives at the logging
+    layer (RecordingContext), so a stream only tracks state and latest data."""
     width, height = 4, 3
     stream = RGBDataStream("front_camera", width=width, height=height)
     stream.start_recording(_context())
 
-    metadata = _DummyCameraData(timestamp=123.0)
+    assert stream.is_recording() is True
+    assert stream.get_recording_context() is not None
+
+    metadata = _DummyCameraData(timestamp=1.0)
     frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
     stream.log(metadata, frame)
 
-    producer = _FakeProducerChannel.instances[0]
-    assert len(producer.send_data_parts_calls) == 1
+    assert stream.get_latest_data() is metadata
 
-    send_call = producer.send_data_parts_calls[0]
-    parts = send_call["parts"]
-    total_bytes = send_call["total_bytes"]
+    stream.stop_recording()
 
-    assert isinstance(parts, tuple)
-    assert len(parts) == 3
-    header, metadata_json, frame_view = parts
-
-    expected_metadata = {
-        "timestamp": 123.0,
-        "width": width,
-        "height": height,
-        "frame_nbytes": frame.nbytes,
-    }
-    expected_metadata_json = json.dumps(expected_metadata).encode("utf-8")
-
-    assert header == struct.pack("<I", len(expected_metadata_json))
-    assert metadata_json == expected_metadata_json
-    assert isinstance(frame_view, memoryview)
-    assert len(frame_view) == frame.nbytes
-    assert total_bytes == len(header) + len(metadata_json) + frame.nbytes
-
-
-def test_stream_stop_recording_wait_false_skips_slot_drain(monkeypatch) -> None:
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-
-    stream = RGBDataStream("front_camera", width=640, height=480)
-    stream.start_recording(_context())
-
-    producer = _FakeProducerChannel.instances[0]
-    stream.stop_recording(
-        stop_cutoff_sequence_number=0,
-        wait_for_producer_drain=False,
-    )
-
-    assert producer.cleanup_wait_for_slot_drain_calls == [False]
-    assert producer.stop_wait_for_slot_drain_calls == [False]
-    assert stream.get_recording_context() is None
-    assert stream.get_producer_channel() is None
-    assert stream.is_recording() is False
-
-
-def test_rgb_stream_owns_no_channel_under_rust_daemon(monkeypatch) -> None:
-    """Under the rust daemon a stream owns no producer channel — the daemon
-    interface lives at the logging layer (RecordingContext), not the stream."""
-    _FakeProducerChannel.instances.clear()
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.ProducerChannel",
-        _FakeProducerChannel,
-    )
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
-        lambda: True,
-    )
-
-    width, height = 4, 3
-    stream = RGBDataStream("front_camera", width=width, height=height)
-    stream.start_recording(_context())
-
-    # No legacy channel is created, yet the stream tracks recording state.
-    assert _FakeProducerChannel.instances == []
-    assert stream.get_producer_channel() is None
-    assert stream.is_recording() is True
-
-    # Logging only updates the local latest-data cache; no channel I/O.
-    frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
-    stream.log(_DummyCameraData(timestamp=1.0), frame)
-    assert stream.get_producer_channel() is None
-
-    # Stop is clean even though there was never a channel to tear down.
-    stream.stop_recording(stop_cutoff_sequence_number=0)
     assert stream.is_recording() is False
     assert stream.get_recording_context() is None
 
 
-def _use_rust_daemon(monkeypatch) -> None:
-    """Route streams through the rust daemon so log() needs no legacy channel."""
-    monkeypatch.setattr(
-        "neuracore.core.streaming.data_stream.is_rust_daemon_enabled",
-        lambda: True,
-    )
-
-
-def test_video_stream_rejects_non_increasing_timestamp(monkeypatch) -> None:
-    _use_rust_daemon(monkeypatch)
+def test_video_stream_rejects_non_increasing_timestamp() -> None:
     stream = RGBDataStream("front_camera", width=4, height=3)
     stream.start_recording(_context())
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
@@ -299,10 +74,7 @@ def test_video_stream_rejects_non_increasing_timestamp(monkeypatch) -> None:
         stream.log(_DummyCameraData(timestamp=1.5), frame)
 
 
-def test_joint_stream_record_scalar_rejects_non_increasing_timestamp(
-    monkeypatch,
-) -> None:
-    _use_rust_daemon(monkeypatch)
+def test_joint_stream_record_scalar_rejects_non_increasing_timestamp() -> None:
     stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
     stream.start_recording(_context())
 
@@ -313,8 +85,7 @@ def test_joint_stream_record_scalar_rejects_non_increasing_timestamp(
         stream.record_scalar(2.0, 0.7)
 
 
-def test_joint_stream_log_rejects_non_increasing_timestamp(monkeypatch) -> None:
-    _use_rust_daemon(monkeypatch)
+def test_joint_stream_log_rejects_non_increasing_timestamp() -> None:
     stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
     stream.start_recording(_context())
 
@@ -324,9 +95,19 @@ def test_joint_stream_log_rejects_non_increasing_timestamp(monkeypatch) -> None:
         stream.log(JointData(timestamp=0.9, value=0.6))
 
 
-def test_monotonic_check_is_per_stream(monkeypatch) -> None:
+def test_joint_stream_materialises_deferred_scalar_on_demand() -> None:
+    stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
+    stream.start_recording(_context())
+
+    stream.record_scalar(1.0, 0.5)
+
+    latest = stream.get_latest_data()
+    assert isinstance(latest, JointData)
+    assert (latest.timestamp, latest.value) == (1.0, 0.5)
+
+
+def test_monotonic_check_is_per_stream() -> None:
     """Each stream keeps its own timeline — sharing a timestamp is fine."""
-    _use_rust_daemon(monkeypatch)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
     front = RGBDataStream("front_camera", width=4, height=3)
     wrist = RGBDataStream("wrist_camera", width=4, height=3)
@@ -339,9 +120,8 @@ def test_monotonic_check_is_per_stream(monkeypatch) -> None:
     wrist.log(_DummyCameraData(timestamp=2.0), frame)
 
 
-def test_monotonic_check_skipped_when_not_recording(monkeypatch) -> None:
+def test_monotonic_check_skipped_when_not_recording() -> None:
     """Outside a recording there is no timeline to enforce."""
-    _use_rust_daemon(monkeypatch)
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
@@ -349,15 +129,14 @@ def test_monotonic_check_skipped_when_not_recording(monkeypatch) -> None:
     stream.log(_DummyCameraData(timestamp=1.0), frame)
 
 
-def test_start_recording_resets_monotonic_timeline(monkeypatch) -> None:
+def test_start_recording_resets_monotonic_timeline() -> None:
     """A new recording is an independent timeline that may restart lower."""
-    _use_rust_daemon(monkeypatch)
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
     stream.start_recording(_context("rec-1"))
     stream.log(_DummyCameraData(timestamp=5.0), frame)
-    stream.stop_recording(stop_cutoff_sequence_number=0)
+    stream.stop_recording()
 
     stream.start_recording(_context("rec-2"))
     stream.log(_DummyCameraData(timestamp=1.0), frame)

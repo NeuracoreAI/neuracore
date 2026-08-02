@@ -161,13 +161,6 @@ class DataDaemonTestCase:
             in the suite (documented and discoverable) without running.  A
             batch with ``skip=True`` forces every case to skip regardless of
             this per-case value.
-        requires_rust_daemon: When ``True``, the case only runs against the
-            Rust data daemon and is skipped when the legacy Python daemon is
-            active (``NCD_RUST_DAEMON`` falsy, or no bundled binary to run).
-            High-contention, high-rate, and
-            long-running workloads that the Python daemon cannot sustain use
-            this flag so they still exercise the Rust daemon in CI without
-            failing the legacy suite.
         run_on_os: Operating systems the case runs on, as ``sys.platform``
             values (see ``OS_ALL`` / ``OS_EXCEPT_DARWIN``).  ``None`` (default)
             means every OS; set a tuple to opt out of the platforms it omits, and
@@ -207,7 +200,6 @@ class DataDaemonTestCase:
     video_fps: int = 60
     timestamp_mode: TimestampMode = TIMESTAMP_MODE_MANUAL
     skip: bool = False
-    requires_rust_daemon: bool = False
     run_on_os: tuple[TestOs, ...] | None = None
     video_codec: str | None = None
 
@@ -271,10 +263,6 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
-        requires_rust_daemon: When ``True``, every case in the batch runs only
-            against the Rust data daemon and is skipped on the legacy Python
-            daemon.  When ``False`` (default), each case keeps its own per-case
-            ``requires_rust_daemon`` value.
         run_on_os: Default OS selection for cases that do not specify one; see
             ``DataDaemonTestCase.run_on_os``.  Unlike the infrastructure params
             above this does *not* override the cases: any case with its own
@@ -289,7 +277,6 @@ class DataDaemonTestBatch:
     stop_method: StopMethod = STOP_METHOD_CLI
     timestamp_mode: TimestampMode | None = None
     skip: bool = False
-    requires_rust_daemon: bool = False
     run_on_os: tuple[TestOs, ...] | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
@@ -304,8 +291,6 @@ class DataDaemonTestBatch:
             batch_overrides["timestamp_mode"] = self.timestamp_mode
         if self.skip:
             batch_overrides["skip"] = True
-        if self.requires_rust_daemon:
-            batch_overrides["requires_rust_daemon"] = True
         return [
             DataDaemonTestCase(**{
                 **{

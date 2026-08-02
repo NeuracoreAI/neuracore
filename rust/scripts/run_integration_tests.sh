@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Run the data-daemon integration tests against staging with the Rust daemon
-# enabled (NCD_RUST_DAEMON=1).
 #
 # This script does not build anything: build + install the merged wheel once
 # first (bash rust/scripts/build_wheel_artefacts.sh && pip install .) so the
@@ -97,12 +96,9 @@ stop_daemon() {
   # Try the CLI first; falls through silently if no daemon is up.
   neuracore data-daemon stop >>"$log_file" 2>&1 || true
 
-  # Belt-and-braces: kill anything the CLI missed by name. The Rust binary is
-  # 'data-daemon'; the Python entry point is '-m neuracore.data_daemon'.
-  pkill -TERM -f 'neuracore[.]data_daemon' 2>/dev/null || true
+  # Belt-and-braces: kill anything the CLI missed by name.
   pkill -TERM -x 'data-daemon' 2>/dev/null || true
   sleep 1
-  pkill -KILL -f 'neuracore[.]data_daemon' 2>/dev/null || true
   pkill -KILL -x 'data-daemon' 2>/dev/null || true
 }
 
@@ -118,8 +114,6 @@ cleanup_state() {
   purge_path "$ndd_base_dir"
 
   log "removing neuracore shared-memory segments from /dev/shm"
-  # _NEURACORE_SHARED_SLOT_PREFIX in
-  # neuracore/data_daemon/lifecycle/runtime_recovery.py.
   purge_glob '/dev/shm/neuracore-*'
   # iceoryx2 also stores its shared memory under /dev/shm.
   purge_glob '/dev/shm/iox2_*'
@@ -155,11 +149,11 @@ import os
 import sys
 
 try:
-    from neuracore.data_daemon.rust_selection import rust_daemon_binary_path
+    from neuracore.data_daemon.binary import data_daemon_binary_path
 except ImportError as error:
     sys.exit(f"neuracore is not installed: {error}")
 
-binary = rust_daemon_binary_path()
+binary = data_daemon_binary_path()
 if binary is None:
     sys.exit("installed neuracore does not bundle the data-daemon binary")
 if not os.access(binary, os.X_OK):
@@ -180,18 +174,15 @@ PY
 # Environment
 # ---------------------------------------------------------------------------
 
-# Staging API endpoint and Rust-daemon selection per the task brief.
+# Staging API endpoint per the task brief.
 export NEURACORE_API_URL="https://staging.api.neuracore.com/api"
-# Default to the Rust daemon, but honour a caller-provided value so the same
-# script can also exercise the Python daemon (NCD_RUST_DAEMON=0) on repeat runs.
-export NCD_RUST_DAEMON="${NCD_RUST_DAEMON:-1}"
 
 # Quiet the SSE consumer + WebRTC producer loops for the duration of the
 # integration suite.
 export NEURACORE_CONSUME_LIVE_DATA=no
 export NEURACORE_PROVIDE_LIVE_DATA=no
 
-# Highest level of logging across the Python and Rust surfaces.
+# Highest level of logging across the SDK and daemon surfaces.
 # Honour a caller-provided value so a harness can disable debug logging.
 export NDD_DEBUG="${NDD_DEBUG:-true}"
 export PYTHONUNBUFFERED=1
@@ -269,7 +260,7 @@ run_pytest_phase() {
 }
 
 run_tests() {
-  log "running pytest with NCD_RUST_DAEMON=$NCD_RUST_DAEMON, NEURACORE_API_URL=$NEURACORE_API_URL"
+  log "running pytest with NEURACORE_API_URL=$NEURACORE_API_URL"
   log "stdout log: $log_file"
   log "pytest --log-file: $pytest_log_file (per-phase _phase1 / _phase2 suffix)"
 

@@ -179,8 +179,7 @@ class ContextExpectedTimestamps:
     Attributes:
         by_recording: Maps the on-disk recording directory name to its
             :class:`RecordingExpectedTimestamps`. The directory name is the
-            integer ``recording_index`` (as a string) under the Rust daemon, or
-            the cloud ``recording_id`` under the legacy daemon.
+            integer ``recording_index`` as a string.
     """
 
     by_recording: dict[str, RecordingExpectedTimestamps]
@@ -246,14 +245,9 @@ class ContextResult:
 
     - ``recording_ids`` — the cloud ``recording_id`` (TEXT) for each recording.
       These are what cloud verification (``verify_cloud_results``) matches
-      against the dataset's ``recording.id``. Under the legacy daemon
-      ``nc.start_recording()`` returns this directly. Under the Rust daemon the
-      daemon mints it asynchronously, so an entry may be an empty string until
-      the test resolves it (via ``resolve_cloud_recording_ids``) once online.
-
-    The remaining fields apply only under the Rust daemon (the daemon owns
-    recording identity); they are left empty under the legacy daemon, which uses
-    ``recording_ids`` for every correlation:
+      against the dataset's ``recording.id``. The daemon mints them
+      asynchronously, so an entry may be an empty string until the test
+      resolves it (via ``resolve_cloud_recording_ids``) once online.
 
     - ``recording_indexes`` — the daemon-assigned local INTEGER
       ``recording_index`` for each recording, resolved from the source DB.
@@ -865,12 +859,10 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
 
 def context_worker(spec: ContextSpec) -> ContextResult:
     """Execute recordings for a single parallel context."""
-    from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         wait_for_recording_index_for_source,
     )
 
-    use_rust = is_rust_daemon_enabled()
     set_thread_policy_for_macos()
     case = spec.case
     use_real_timestamps = case.timestamp_mode == TIMESTAMP_MODE_REAL
@@ -926,24 +918,19 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             if wall_started_at is None:
                 wall_started_at = time.time()
 
-            if use_rust:
-                previous_index = recording_indexes[-1] if recording_indexes else 0
-                daemon_recording_index = wait_for_recording_index_for_source(
-                    source[0],
-                    source[1],
-                    after_index=previous_index,
-                    timeout_s=MAX_TIME_TO_START_S,
-                )
-                recording_indexes.append(daemon_recording_index)
+            previous_index = recording_indexes[-1] if recording_indexes else 0
+            daemon_recording_index = wait_for_recording_index_for_source(
+                source[0],
+                source[1],
+                after_index=previous_index,
+                timeout_s=MAX_TIME_TO_START_S,
+            )
+            recording_indexes.append(daemon_recording_index)
 
-                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
-                recording_ids.append(str(cloud_recording_id or ""))
+            cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+            recording_ids.append(str(cloud_recording_id or ""))
 
-                disk_recording_key = str(daemon_recording_index)
-            else:
-                recording_id = str(robot.get_current_recording_id() or "")
-                recording_ids.append(recording_id)
-                disk_recording_key = recording_id
+            disk_recording_key = str(daemon_recording_index)
 
             # Build per-recording expected timestamps once the recording key is
             # known. Trace keys use "data_type/data_type_name" to match the

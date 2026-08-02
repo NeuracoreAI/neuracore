@@ -2,7 +2,6 @@ from collections.abc import Callable
 
 import pytest
 
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     verify_cloud_results,
@@ -89,12 +88,8 @@ def test_offline_pending_data_recovers_when_online(
 
             with online_daemon_running():
                 for result in results:
-                    if is_rust_daemon_enabled():
-                        for recording_index in result.recording_indexes:
-                            wait_for_upload_complete_in_db(recording_index)
-                    else:
-                        for recording_id in result.recording_ids:
-                            wait_for_upload_complete_in_db(str(recording_id))
+                    for recording_index in result.recording_indexes:
+                        wait_for_upload_complete_in_db(recording_index)
 
                 results = resolve_cloud_recording_ids(results)
                 verify_cloud_results(results=results, case=case)

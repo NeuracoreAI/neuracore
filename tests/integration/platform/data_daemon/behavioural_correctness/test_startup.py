@@ -7,8 +7,8 @@ These tests force online mode so startup never inherits an offline profile.
 
 import psutil
 
+from neuracore.data_daemon.daemon_control import pid_is_running
 from neuracore.data_daemon.helpers import get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_os_control import pid_is_running
 from tests.integration.platform.data_daemon.shared.process_control import (
     collect_daemon_pids_from_parallel_startup,
     get_runner_pids,

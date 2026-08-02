@@ -20,9 +20,7 @@ use iceoryx2::config::Config;
 use crate::cli::stop;
 use crate::config::env::{db_path, pid_path, recordings_root_path};
 
-/// Prefix iceoryx2 gives the Python producer's shared frame slots in
-/// `/dev/shm` (`_NEURACORE_SHARED_SLOT_PREFIX` in
-/// `data_daemon/lifecycle/runtime_recovery.py`).
+/// Prefix iceoryx2 gives the producer's shared frame slots in `/dev/shm`.
 const NEURACORE_SHM_PREFIX: &str = "neuracore-";
 
 /// POSIX shared-memory mount where both iceoryx2 and the producer place their

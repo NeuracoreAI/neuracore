@@ -339,7 +339,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_string_values_match_python() {
+    fn enum_string_values_match_on_disk_contract() {
         // Spot-check a few values that integration tests assert on.
         assert_eq!(
             TraceWriteStatus::PendingMetadata.as_str(),

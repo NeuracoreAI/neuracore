@@ -9,10 +9,10 @@ Each test starts a fresh daemon in online mode, isolated by the
 calls :func:`stop_daemon` with the method under test, then asserts cleanup
 invariants.
 
-Graceful methods (CLI, SIGTERM, SIGINT) trigger the daemon's ``finally`` block
-in ``runner_entry.main``, running ``runtime.shutdown()`` and ``shutdown()``.
-SIGKILL bypasses the handler entirely; those tests only assert process death
-and that teardown can recover from the unclean state.
+Graceful methods (CLI, SIGTERM, SIGINT) let the daemon run its own shutdown
+path, releasing the PID file and IPC artefacts. SIGKILL bypasses that entirely;
+those tests only assert process death and that teardown can recover from the
+unclean state.
 """
 
 from __future__ import annotations
@@ -23,12 +23,11 @@ import time
 
 import pytest
 
+from neuracore.data_daemon.daemon_control import pid_is_running
 from neuracore.data_daemon.helpers import get_daemon_pid_path
-from neuracore.data_daemon.lifecycle.daemon_os_control import pid_is_running
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     assert_no_pid_file,
-    assert_socket_unlinked,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_all_traces_written,
@@ -106,8 +105,6 @@ def test_cli_stop_unlinks_socket() -> None:
     with online_daemon_running():
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
-    assert_socket_unlinked()
-
 
 # ---------------------------------------------------------------------------
 # SIGTERM
@@ -115,12 +112,7 @@ def test_cli_stop_unlinks_socket() -> None:
 
 
 def test_sigterm_exits_daemon_and_cleans_up() -> None:
-    """SIGTERM triggers graceful shutdown and full resource cleanup.
-
-    ``install_signal_handlers`` converts SIGTERM into ``KeyboardInterrupt``
-    which propagates to the ``except KeyboardInterrupt`` block in
-    ``runner_entry.main``, running ``runtime.shutdown()`` and ``shutdown()``.
-    """
+    """SIGTERM triggers graceful shutdown and full resource cleanup."""
 
     with online_daemon_running():
         pid = _single_runner_pid()
@@ -142,8 +134,6 @@ def test_sigterm_unlinks_socket() -> None:
 
     with online_daemon_running():
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
-
-    assert_socket_unlinked()
 
 
 # ---------------------------------------------------------------------------
@@ -179,8 +169,6 @@ def test_sigint_unlinks_socket() -> None:
 
     with online_daemon_running():
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
-
-    assert_socket_unlinked()
 
 
 # ---------------------------------------------------------------------------

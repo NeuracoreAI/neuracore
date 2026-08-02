@@ -218,16 +218,12 @@ maturin develop
 python -c "import neuracore.data_daemon._data_bridge as p; print(p)"
 ```
 
-The SDK routes through the data bridge by default. To pin a run to the legacy zmq producer and the Python daemon instead, set the rollout flag falsy:
-
-```bash
-export NCD_RUST_DAEMON=0
-python your_script.py
-```
-
-Selection logic lives in [neuracore/data_daemon/rust_selection.py](../neuracore/data_daemon/rust_selection.py); both the daemon binary handoff and the SDK's `DataStream` construction read it. A small shim bridges the data bridge to the Python `ProducerChannel` contract.
-
-With the flag unset, the default is gated on the daemon binary actually being present. This matters during development because `maturin develop` builds only the `_data_bridge` extension — the binary comes from `rust/scripts/build_wheel_artefacts.sh`. Without that gate, a bridge-only build would put the SDK on the Rust producer while the *Python* daemon consumed the other end. Run the artefacts script (or set `NCD_RUST_DAEMON=1` deliberately) when you want the Rust daemon in a source checkout.
+`maturin develop` builds only the `_data_bridge` extension — the daemon binary
+itself comes from `rust/scripts/build_wheel_artefacts.sh`. A source checkout
+without that script having been run has the bridge but no daemon to talk to, so
+launching one fails with an explicit build/install message from
+[neuracore/data_daemon/binary.py](../neuracore/data_daemon/binary.py). Run the
+artefacts script when you want a working daemon in a source checkout.
 
 ---
 
@@ -244,12 +240,13 @@ The two Rust artefacts and how `neuracore` finds them:
 
 | Artefact | Location (inside the wheel) | Source crate | Reached via |
 |---|---|---|---|
-| Daemon binary | `neuracore/data_daemon/bin/data-daemon` | `data-daemon` (bin) | `rust_selection.rust_daemon_binary_path()` → `files("neuracore.data_daemon")/"bin"/"data-daemon"` |
-| Producer extension | `neuracore/data_daemon/_data_bridge*.so` | `data_daemon_bridge` (cdylib) | `recording_context._load_native()` → `import neuracore.data_daemon._data_bridge` |
+| Daemon binary | `neuracore/data_daemon/bin/data-daemon` | `data-daemon` (bin) | `binary.data_daemon_binary_path()` → `files("neuracore.data_daemon")/"bin"/"data-daemon"` |
+| Producer extension | `neuracore/data_daemon/_data_bridge*.so` | `data_daemon_bridge` (cdylib) | `bridge._load_native()` → `import neuracore.data_daemon._data_bridge` |
 
-Both lookups degrade gracefully when the artefacts are absent — e.g. a source
-build without the daemon binary (binary path → `None`, extension import → a
-helpful `RuntimeError`).
+Both lookups fail loudly with install instructions when the artefacts are
+absent — e.g. a source build without the daemon binary
+(`require_data_daemon_binary()` → `DaemonBinaryNotFoundError`, extension import
+→ a helpful `RuntimeError`). There is no fallback implementation.
 
 The extension is built by maturin itself (`module-name`/`manifest-path` in
 `[tool.maturin]`); the daemon binary is a *separate* crate maturin doesn't

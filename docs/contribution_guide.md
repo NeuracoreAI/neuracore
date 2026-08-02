@@ -336,7 +336,7 @@ pre-commit install
 
 ### Rust toolchain (data daemon)
 
-The data daemon is being rewritten in Rust under [rust/](../rust/). The pre-commit configuration runs `cargo fmt` and `cargo clippy` against the `data_daemon` crate, and CI ([.github/workflows/rust-data-daemon.yaml](../.github/workflows/rust-data-daemon.yaml)) builds and tests it on every PR that touches `rust/data_daemon/**`.
+The data daemon is implemented in Rust under [rust/](../rust/). The pre-commit configuration runs `cargo fmt` and `cargo clippy` against the `data_daemon` crate, and CI ([.github/workflows/rust-data-daemon.yaml](../.github/workflows/rust-data-daemon.yaml)) builds and tests it on every PR that touches `rust/data_daemon/**`.
 
 The hooks invoke `cargo` from your `PATH` (`language: system`), so you need a working Rust toolchain locally to commit changes that touch the crate. Install one via [rustup](https://rustup.rs/):
 

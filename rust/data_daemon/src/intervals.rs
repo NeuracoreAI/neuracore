@@ -55,5 +55,5 @@ pub const RECORDING_RECLAIM: Duration = Duration::from_secs(60);
 /// how quickly a stuck recording becomes reclaimable again.
 pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 
-/// Connection health probe — matches the Python `connection_manager.py` cadence.
+/// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);
