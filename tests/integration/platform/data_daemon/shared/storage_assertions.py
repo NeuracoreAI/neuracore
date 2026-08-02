@@ -15,7 +15,6 @@ from neuracore.data_daemon.helpers import (
     get_daemon_db_path,
     get_daemon_recordings_root_path,
 )
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
@@ -33,7 +32,7 @@ def harness_db_path() -> Path:
     target the wrong folder. When the Rust daemon is active and the env var is
     unset, resolve the real shared test-state path the daemon actually used.
     """
-    if is_rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_DB_PATH"):
+    if not os.getenv("NEURACORE_DAEMON_DB_PATH"):
         return OFFLINE_DB_PATH
     return get_daemon_db_path()
 
@@ -43,7 +42,7 @@ def harness_recordings_root() -> Path:
 
     See :func:`harness_db_path` for why the Rust daemon needs special handling.
     """
-    if is_rust_daemon_enabled() and not os.getenv("NEURACORE_DAEMON_RECORDINGS_ROOT"):
+    if not os.getenv("NEURACORE_DAEMON_RECORDINGS_ROOT"):
         return OFFLINE_RECORDINGS_ROOT
     return get_daemon_recordings_root_path()
 
@@ -72,8 +71,6 @@ def assert_recordings_folder_absent() -> None:
 _INFRA_TABLES = frozenset({
     # sqlx migration bookkeeping (Rust daemon)
     "_sqlx_migrations",
-    # Alembic migration bookkeeping (legacy Python daemon)
-    "alembic_version",
     # SQLite internal sequence table
     "sqlite_sequence",
 })
@@ -82,8 +79,8 @@ _INFRA_TABLES = frozenset({
 def assert_db_empty() -> None:
     """Fail if any user-data daemon DB tables contain rows.
 
-    Migration-bookkeeping tables (``_sqlx_migrations``, ``alembic_version``)
-    and SQLite's internal ``sqlite_sequence`` are excluded — they're owned
+    The migration-bookkeeping table (``_sqlx_migrations``) and SQLite's
+    internal ``sqlite_sequence`` are excluded — they're owned
     by the migration framework, not by the daemon's domain model, so a
     non-zero row count there is expected after the daemon has started even
     once.

@@ -20,7 +20,6 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 )
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
@@ -345,20 +344,11 @@ def stop_recording(
         raise ValueError("wait_timeout_s must be non-negative")
 
     wait_deadline = time.monotonic() + wait_timeout_s if wait else None
-    if is_rust_daemon_enabled():
-        cloud_recording_id = robot.get_cloud_recording_id() if wait else None
-        robot.stop_recording(
-            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
-        )
-        if not wait or not cloud_recording_id:
-            return
-        recording_id = cloud_recording_id
-    else:
-        robot.stop_recording(
-            recording_id, wait_for_producer_drain=wait, timestamp=timestamp
-        )
-        if not wait:
-            return
+    cloud_recording_id = robot.get_cloud_recording_id() if wait else None
+    robot.stop_recording(recording_id, timestamp=timestamp)
+    if not wait or not cloud_recording_id:
+        return
+    recording_id = cloud_recording_id
 
     assert wait_deadline is not None
 
@@ -386,9 +376,9 @@ def get_cloud_recording_id(
 ) -> str | None:
     """Resolve the daemon-owned cloud recording id for a robot's recording.
 
-    Under the Rust daemon the cloud recording id is assigned asynchronously by
-    the daemon. This asks the daemon (it may block up to ``timeout_s``) for the
-    id of the recording whose window brackets ``timestamp_ns`` for this source
+    The cloud recording id is assigned asynchronously by the daemon. This asks
+    the daemon (it may block up to ``timeout_s``) for the id of the recording
+    whose window brackets ``timestamp_ns`` for this source
     (defaulting to the most recently started recording). For
     non-performance-critical use only (tests, ``stop_recording(wait=True)``).
 
@@ -400,7 +390,7 @@ def get_cloud_recording_id(
         timeout_s: Maximum time to wait for the daemon to mint the id.
 
     Returns:
-        The cloud recording id, or ``None`` on timeout / legacy daemon.
+        The cloud recording id, or ``None`` on timeout.
     """
     robot = _get_robot(robot_name, instance)
     return robot.get_cloud_recording_id(timestamp_ns=timestamp_ns, timeout_s=timeout_s)

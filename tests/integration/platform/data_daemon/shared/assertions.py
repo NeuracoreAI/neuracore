@@ -9,7 +9,7 @@ not) running:
 :func:`assert_no_producer_processes`.
 
 **File and socket assertions** — verify artefact clean-up:
-:func:`assert_no_pid_file`, :func:`assert_socket_unlinked`,
+:func:`assert_no_pid_file`,
 :func:`assert_db_absent`, :func:`assert_recordings_folder_absent`,
 :func:`assert_recordings_folder_empty`.
 
@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import logging
 import math
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -46,9 +45,7 @@ from neuracore_types import Dataset, DataType
 
 import neuracore as nc
 from neuracore.core.data.recording import Recording
-from neuracore.data_daemon.const import SOCKET_PATH
 from neuracore.data_daemon.helpers import get_daemon_pid_path
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
@@ -91,10 +88,7 @@ logger = logging.getLogger(__name__)
 
 def assert_context_mode(case: DataDaemonTestCase, results: list[ContextResult]) -> None:
     """Assert that context timing matches the expected mode."""
-    if is_rust_daemon_enabled():
-        active_results = [result for result in results if result.recording_indexes]
-    else:
-        active_results = [result for result in results if result.recording_ids]
+    active_results = [result for result in results if result.recording_indexes]
     if len(active_results) < 2:
         return
 
@@ -178,18 +172,6 @@ def assert_no_pid_file() -> None:
     ), f"PID file was not cleaned up after daemon shutdown: {pid_path}"
 
 
-def assert_socket_unlinked() -> None:
-    """Fail if the daemon Unix socket path still exists.
-
-    Raises:
-        AssertionError: When the socket file is still present.
-    """
-    socket_path = Path(str(SOCKET_PATH))
-    assert (
-        not socket_path.exists()
-    ), f"Unix socket was not unlinked after daemon shutdown: {socket_path}"
-
-
 __all__ = [
     "assert_db_absent",
     "assert_db_empty",
@@ -214,7 +196,6 @@ def assert_daemon_cleanup() -> None:
     """
     assert_no_daemon_pids()
     assert_no_pid_file()
-    assert_socket_unlinked()
     assert_no_producer_processes()
 
 

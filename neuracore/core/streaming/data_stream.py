@@ -1,30 +1,23 @@
-"""Data stream classes for recording and uploading robot sensor data.
+"""Data stream classes for recording robot sensor data.
 
 This module provides abstract and concrete data stream implementations for
 recording various types of robot sensor data including JSON events, RGB video,
-and depth data. All streams support recording lifecycle management and
-daemon-based data persistence.
+and depth data.
+
+Streams own no transport of their own: the daemon interface lives at the
+logging-function layer (:class:`~neuracore.data_daemon.bridge.RecordingContext`),
+so a stream only tracks recording state and the latest sample for live-data
+consumers.
 """
 
-import json
 import logging
-import struct
-import uuid
 from abc import ABC
 from dataclasses import dataclass
 
 import numpy as np
 from neuracore_types import CameraData, DataType, JointData, NCData, PointCloudData
-from neuracore_types.nc_data.point_cloud_data import encode_point_cloud_frame_parts
-
-from neuracore.data_daemon.communications_management.producer import ProducerChannel
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 
 logger = logging.getLogger(__name__)
-
-
-class MissingProducerChannelError(RuntimeError):
-    """Raised when a stream is stopped without an active producer channel."""
 
 
 @dataclass
@@ -46,14 +39,8 @@ class DataRecordingContext:
 class DataStream(ABC):
     """Base class for data streams.
 
-    Provides common functionality for managing recording state and data
-    storage across different types of sensor data streams.
-
-    Under the legacy daemon each stream owns a :class:`ProducerChannel` that
-    forwards its data over ZMQ. Under the Rust daemon the stream owns *no*
-    channel — the daemon interface lives at the logging-function layer
-    (``RecordingContext``) — so the stream only tracks recording state and the
-    latest sample for live-data consumers.
+    Provides common functionality for managing recording state and the latest
+    sample across different types of sensor data streams.
     """
 
     def __init__(self, data_type: DataType, stream_name: str) -> None:
@@ -71,8 +58,6 @@ class DataStream(ABC):
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
-        self._producer_channel: ProducerChannel | None = None
-        self._use_data_bridge = is_rust_daemon_enabled()
         self._last_logged_timestamp: float | None = None
 
     @property
@@ -83,100 +68,18 @@ class DataStream(ABC):
     def start_recording(self, context: DataRecordingContext) -> None:
         """Start recording data for this stream.
 
-        If the stream is already recording, stop it first. Then set the
-        recording state to True and store the recording context.
-
         Args:
             context: Recording context containing identifiers for the recording
                 session, robot, and dataset.
         """
-        if self.is_recording():
-            _, stop_cutoff_sequence_number = self.prepare_recording_stopped()
-            self.stop_recording(
-                wait_for_producer_drain=False,
-                stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-            )
         self._recording = True
         self._last_logged_timestamp = None
         self._context = context
-        self._handle_ensure_producer_channel(context)
 
-    def _handle_ensure_producer_channel(self, context: DataRecordingContext) -> None:
-        """Ensure a legacy producer channel exists for this data stream.
-
-        Under the Rust daemon the stream owns no channel — lifecycle and data
-        envelopes are published by ``RecordingContext`` from the logging layer
-        — so this is a no-op and ``_producer_channel`` stays ``None``.
-
-        Args:
-            context: Recording context containing identifiers for
-                the recording session, robot, and dataset.
-        """
-        if self._use_data_bridge:
-            return
-        if self._producer_channel is None:
-            channel_id = f"{self._data_type.value}:\
-            {self._stream_name}:{uuid.uuid4().hex[:8]}"
-            self._producer_channel = ProducerChannel(
-                id=channel_id,
-                recording_id=context.recording_id,
-                data_type=self._data_type,
-            )
-
-        self._producer_channel.start_recording_session(
-            recording_id=context.recording_id
-        )
-
-    def prepare_recording_stopped(self) -> tuple[ProducerChannel | None, int]:
-        """Mark the producer channel as stopping and return it.
-
-        Under the Rust daemon there is no channel, so this returns ``(None, 0)``.
-        Under the legacy daemon a missing channel means the stream is stale, so
-        it raises :class:`MissingProducerChannelError` to have it pruned.
-        """
-        producer_channel = self.get_producer_channel()
-        if producer_channel is None:
-            if not is_rust_daemon_enabled():
-                raise MissingProducerChannelError(
-                    "stream has no active producer channel"
-                )
-            return None, 0
-
-        stop_cutoff_sequence_number = producer_channel.mark_recording_stop_requested()
-
-        return producer_channel, stop_cutoff_sequence_number
-
-    def stop_recording(
-        self,
-        stop_cutoff_sequence_number: int,
-        wait_for_producer_drain: bool = True,
-    ) -> None:
-        """Stop recording data and tear down the active producer, if any."""
+    def stop_recording(self) -> None:
+        """Stop recording data for this stream."""
         self._recording = False
         self._context = None
-        producer_channel = self._producer_channel
-        self._producer_channel = None
-
-        if producer_channel is None:
-            if not is_rust_daemon_enabled():
-                # Legacy daemon: a stream with no producer channel is stale —
-                # raise so the caller prunes it.
-                raise MissingProducerChannelError(
-                    "stream has no active producer channel"
-                )
-            # Rust daemon: the stream never owned a channel — nothing to drain.
-            return
-
-        try:
-            if producer_channel.trace_id:
-                producer_channel.cleanup_producer_channel(
-                    stop_cutoff_sequence_number=stop_cutoff_sequence_number,
-                    wait_for_slot_drain=wait_for_producer_drain,
-                )
-        finally:
-            producer_channel.stop_producer_channel(
-                wait_for_slot_drain=wait_for_producer_drain,
-            )
 
     def is_recording(self) -> bool:
         """Check if recording is active.
@@ -193,10 +96,6 @@ class DataStream(ABC):
             Optional[NCData]: The most recently logged data item
         """
         return self._latest_data
-
-    def get_producer_channel(self) -> ProducerChannel | None:
-        """Return the active producer channel for this stream, if present."""
-        return self._producer_channel
 
     def get_recording_context(self) -> DataRecordingContext | None:
         """Return the active recording context for this stream, if present."""
@@ -229,56 +128,13 @@ class DataStream(ABC):
             )
         self._last_logged_timestamp = timestamp
 
-    def _send_to_daemon(self, data: bytes) -> None:
-        """Send data to the daemon via the legacy producer channel.
-
-        A no-op when there is no channel — which is always the case under the
-        Rust daemon, where the logging layer delivers data via
-        ``RecordingContext`` instead.
-
-        Args:
-            data: Serialized data bytes to send.
-        """
-        if self._producer_channel is None or self._context is None:
-            return
-        self._producer_channel.send_data(
-            data=data,
-            data_type=self._data_type,
-            robot_instance=self._context.robot_instance,
-            data_type_name=self._stream_name,
-            robot_id=self._context.robot_id,
-            robot_name=self._context.robot_name,
-            dataset_id=self._context.dataset_id,
-            dataset_name=self._context.dataset_name,
-        )
-
-    def _send_to_daemon_parts(
-        self,
-        parts: tuple[bytes | memoryview, ...],
-        *,
-        total_bytes: int,
-    ) -> None:
-        """Send a logical payload assembled from multiple byte-like parts."""
-        if self._producer_channel is None or self._context is None:
-            return
-        self._producer_channel.send_data_parts(
-            parts=parts,
-            total_bytes=total_bytes,
-            data_type=self._data_type,
-            robot_instance=self._context.robot_instance,
-            data_type_name=self._stream_name,
-            robot_id=self._context.robot_id,
-            robot_name=self._context.robot_name,
-            dataset_id=self._context.dataset_id,
-            dataset_name=self._context.dataset_name,
-        )
-
 
 class JsonDataStream(DataStream):
-    """Stream that logs and sends structured JSON data to the daemon.
+    """Stream that tracks structured JSON data.
 
-    Records arbitrary structured data as JSON and sends it to the daemon
-    for persistence during recording sessions.
+    The sample itself is persisted by the logging layer via
+    ``RecordingContext.log_json``; this keeps the latest value for live-data
+    consumers.
     """
 
     def __init__(self, data_type: DataType, data_type_name: str):
@@ -290,25 +146,14 @@ class JsonDataStream(DataStream):
         """
         super().__init__(data_type=data_type, stream_name=data_type_name)
 
-    def log(self, data: NCData, *, send_to_daemon: bool = True) -> None:
-        """Log structured data as JSON.
+    def log(self, data: NCData) -> None:
+        """Log structured data.
 
         Args:
             data: Data object implementing NCData interface
-            send_to_daemon: Whether to forward the serialized payload to the daemon
         """
         self._enforce_monotonic_timestamp(data.timestamp)
         self._latest_data = data
-        if not self.is_recording() or not send_to_daemon:
-            return
-        if self._use_data_bridge:
-            # Rust daemon: the logging layer delivers the sample to the daemon
-            # via RecordingContext; the stream only keeps `_latest_data`.
-            return
-
-        # Serialize to JSON bytes and send to daemon
-        json_bytes = json.dumps(data.model_dump(mode="json")).encode("utf-8")
-        self._send_to_daemon(json_bytes)
 
 
 class JointDataStream(JsonDataStream):
@@ -348,10 +193,10 @@ class JointDataStream(JsonDataStream):
         self._pending_value = value
         self._has_pending_latest = True
 
-    def log(self, data: NCData, *, send_to_daemon: bool = True) -> None:
+    def log(self, data: NCData) -> None:
         """Log a materialised sample, superseding any deferred scalar."""
         self._has_pending_latest = False
-        super().log(data=data, send_to_daemon=send_to_daemon)
+        super().log(data=data)
 
     def get_latest_data(self) -> NCData | None:
         """Return the latest sample, materialising a deferred scalar on demand."""
@@ -365,7 +210,7 @@ class JointDataStream(JsonDataStream):
 
 
 class PointCloudDataStream(DataStream):
-    """Stream that sends point cloud data with a JSON metadata header and raw arrays."""
+    """Stream that tracks point cloud data."""
 
     def __init__(self, data_type_name: str):
         """Initialize the point cloud data stream.
@@ -376,32 +221,21 @@ class PointCloudDataStream(DataStream):
         super().__init__(data_type=DataType.POINT_CLOUDS, stream_name=data_type_name)
 
     def log(self, data: PointCloudData) -> None:
-        """Log point cloud data using the binary wire format.
+        """Log point cloud data.
 
         Args:
             data: Point cloud data to log
         """
         self._enforce_monotonic_timestamp(data.timestamp)
         self._latest_data = data
-        if not self.is_recording():
-            return
-
-        header, metadata_json, points_view, rgb_view = encode_point_cloud_frame_parts(
-            data
-        )
-        parts = tuple(
-            p for p in (header, metadata_json, points_view, rgb_view) if p is not None
-        )
-        total_bytes = sum(len(p) for p in parts)
-        self._send_to_daemon_parts(parts, total_bytes=total_bytes)
 
 
 class VideoDataStream(DataStream):
-    """Stream that sends video frame data to the daemon.
+    """Stream that tracks video frame data.
 
-    Base class for video streams. Frame data is sent raw to the daemon
-    which handles storage. Video encoding is done by the loader when
-    uploading to the backend.
+    Base class for video streams. Frames are delivered to the daemon by the
+    logging layer (``RecordingContext.log_frame``); this keeps the latest frame
+    for live-data consumers.
     """
 
     def __init__(
@@ -430,39 +264,10 @@ class VideoDataStream(DataStream):
         self._enforce_monotonic_timestamp(metadata.timestamp)
         metadata.frame = frame
         self._latest_data = metadata
-        if not self.is_recording():
-            return
-        if self._use_data_bridge:
-            # Rust daemon: the frame is delivered to the daemon by the logging
-            # layer (RecordingContext.log_frame); the stream only keeps
-            # `_latest_data` for live-data consumers.
-            return
-
-        frame_source = (
-            frame if frame.flags.c_contiguous else np.ascontiguousarray(frame)
-        )
-        frame_view = memoryview(frame_source).cast("B")
-
-        # Legacy daemon: pack [metadata_len (4 bytes)] [metadata_json] [frame_bytes]
-        metadata_dict = metadata.model_dump(mode="json", exclude={"frame"})
-        metadata_dict["width"] = self.width
-        metadata_dict["height"] = self.height
-        metadata_dict["frame_nbytes"] = int(frame.size * frame.itemsize)
-        metadata_json = json.dumps(metadata_dict).encode("utf-8")
-        header = struct.pack("<I", len(metadata_json))
-        total_bytes = len(header) + len(metadata_json) + len(frame_view)
-        self._send_to_daemon_parts(
-            (header, metadata_json, frame_view),
-            total_bytes=total_bytes,
-        )
 
 
 class DepthDataStream(VideoDataStream):
-    """Stream that sends depth data to the daemon.
-
-    Handles depth camera data. The raw depth data is sent to the daemon
-    for storage and later processing by the loader.
-    """
+    """Stream that tracks depth camera data."""
 
     def __init__(self, camera_id: str, width: int = 640, height: int = 480):
         """Initialize the depth data stream.
@@ -481,11 +286,7 @@ class DepthDataStream(VideoDataStream):
 
 
 class RGBDataStream(VideoDataStream):
-    """Stream that sends RGB video data to the daemon.
-
-    Handles RGB camera data. The raw frame data is sent to the daemon
-    for storage and later processing by the loader.
-    """
+    """Stream that tracks RGB camera data."""
 
     def __init__(self, camera_id: str, width: int = 640, height: int = 480):
         """Initialize the RGB data stream.

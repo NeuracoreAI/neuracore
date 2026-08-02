@@ -9,15 +9,16 @@ from pathlib import Path
 import pytest
 
 import neuracore as nc
-from neuracore.data_daemon.config_manager.profiles import ProfileManager
 from neuracore.data_daemon.const import active_profile_name
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import Timer
-from tests.integration.platform.data_daemon.shared.profiles import cleanup_test_profiles
+from tests.integration.platform.data_daemon.shared.profiles import (
+    cleanup_test_profiles,
+    profile_path,
+)
 from tests.integration.platform.data_daemon.shared.reporting import (
     PerformanceReportContext,
     attach_json,
@@ -131,18 +132,18 @@ def reset_video_codec():
     ``video_codec`` key on a developer's default profile that had none. Only
     writes when the test actually changed the file, so non-video tests are free.
     """
-    profile_path = ProfileManager()._get_profile_path(active_profile_name())
-    original_bytes = profile_path.read_bytes() if profile_path.exists() else None
+    active_path = profile_path(active_profile_name())
+    original_bytes = active_path.read_bytes() if active_path.exists() else None
     try:
         yield
     finally:
-        current_bytes = profile_path.read_bytes() if profile_path.exists() else None
+        current_bytes = active_path.read_bytes() if active_path.exists() else None
         if current_bytes == original_bytes:
             return
         if original_bytes is not None:
-            profile_path.write_bytes(original_bytes)
-        elif profile_path.exists():
-            profile_path.unlink()
+            active_path.write_bytes(original_bytes)
+        elif active_path.exists():
+            active_path.unlink()
 
 
 @pytest.fixture(autouse=True)
@@ -158,20 +159,6 @@ def skip_marked_cases(request: pytest.FixtureRequest) -> None:
     case = request.getfixturevalue("case")
     if getattr(case, "skip", False):
         pytest.skip("case marked skip=True")
-
-
-@pytest.fixture(autouse=True)
-def skip_rust_only_cases(request: pytest.FixtureRequest) -> None:
-    """Skip cases flagged ``requires_rust_daemon`` on the legacy Python daemon.
-
-    Gating them on the active daemon keeps them running under Rust while restoring the
-    Python suite to its green baseline.
-    """
-    if "case" not in request.fixturenames:
-        return
-    case = request.getfixturevalue("case")
-    if getattr(case, "requires_rust_daemon", False) and not is_rust_daemon_enabled():
-        pytest.skip("case requires the Rust data daemon (NCD_RUST_DAEMON)")
 
 
 @pytest.fixture(autouse=True)

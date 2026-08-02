@@ -17,6 +17,17 @@ TEST_PROFILE_PATHS: set[Path] = set()
 """Tracks daemon profile files created by tests for cleanup on teardown."""
 
 
+def profile_path(profile_name: str) -> Path:
+    """Return the on-disk YAML path for a daemon profile.
+
+    Mirrors the daemon's own resolution (see
+    ``rust/data_daemon_shared/src/config/profile.rs``).
+    """
+    return (
+        Path.home() / ".neuracore" / "data_daemon" / "profiles" / f"{profile_name}.yaml"
+    )
+
+
 def cleanup_test_profiles() -> None:
     """Delete all daemon profile files created by tests in this session."""
     for profile_path in list(TEST_PROFILE_PATHS):
@@ -44,12 +55,10 @@ def scoped_offline_profile() -> Generator[None]:
         while the body executes.
     """
     profile_name = f"offline_profile_{uuid.uuid4().hex[:8]}"
-    profile_path = (
-        Path.home() / ".neuracore" / "data_daemon" / "profiles" / f"{profile_name}.yaml"
-    )
-    profile_path.parent.mkdir(parents=True, exist_ok=True)
-    profile_path.write_text("offline: true\n", encoding="utf-8")
-    TEST_PROFILE_PATHS.add(profile_path)
+    offline_profile_path = profile_path(profile_name)
+    offline_profile_path.parent.mkdir(parents=True, exist_ok=True)
+    offline_profile_path.write_text("offline: true\n", encoding="utf-8")
+    TEST_PROFILE_PATHS.add(offline_profile_path)
 
     previous_profile = os.environ.get("NEURACORE_DAEMON_PROFILE")
     os.environ["NEURACORE_DAEMON_PROFILE"] = profile_name

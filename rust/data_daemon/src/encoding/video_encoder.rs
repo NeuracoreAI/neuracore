@@ -12,8 +12,8 @@
 //! - `chunk_NNNN_lossless.mp4` — `libx264rgb` `-pix_fmt rgb24 -preset
 //!   ultrafast -qp 0` for mathematically-lossless archival. Encoding the
 //!   captured rgb24 frames directly (rather than converting to a YUV format)
-//!   keeps the output bit-exact to the captured pixels, encodes ~2.5× faster
-//!   than a `yuv444p10le` pass, and matches the Python reference encoder.
+//!   keeps the output bit-exact to the captured pixels and encodes ~2.5×
+//!   faster than a `yuv444p10le` pass.
 //!   `ffv1` would also be lossless but is incompatible with the `.mp4`
 //!   container the on-disk layout contract requires.
 //!
@@ -595,9 +595,8 @@ impl VideoEncoder {
                 .arg("passthrough")
                 .arg("-enc_time_base")
                 .arg(&enc_time_base)
-                // libx264rgb encodes the rgb24 frames directly: bit-exact to the
-                // captured pixels, ~2.5× faster than a yuv444p10le pass, and the
-                // format the Python reference encoder writes.
+                // libx264rgb encodes the rgb24 frames directly: bit-exact to
+                // the captured pixels and ~2.5× faster than a yuv444p10le pass.
                 .arg("-c:v")
                 .arg("libx264rgb")
                 .arg("-threads")

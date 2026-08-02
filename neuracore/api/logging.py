@@ -52,17 +52,8 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.core.video_encoding import Codec
-from neuracore.data_daemon.communications_management.shared_transport.recording_context import (  # noqa: E501
-    notify_daemon_config_changed,
-)
-from neuracore.data_daemon.config_manager.video_codec import (
-    set_active_profile_video_codec,
-)
-from neuracore.data_daemon.models import (
-    BatchedJointDataItemPayload,
-    BatchedJointDataPayload,
-)
-from neuracore.data_daemon.rust_selection import is_rust_daemon_enabled
+from neuracore.data_daemon.bridge import notify_daemon_config_changed
+from neuracore.data_daemon.video_codec import set_active_profile_video_codec
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +74,6 @@ class JointStreamBinding:
     stream_id: str
     storage_name: str
     stream: JointDataStream
-
-
-@dataclass(frozen=True)
-class LoggedJointData:
-    """Result of logging one joint sample into the local stream graph."""
-
-    binding: JointStreamBinding
-    data: JointData
-    trace_id: str | None
 
 
 _JOINT_SAMPLE_SIZE = 8
@@ -126,7 +108,7 @@ class ResolvedJointGroup:
     Attributes:
         joint_names: The frame's joint names in order (``tuple(joint_data)``).
         bindings: The frame's bindings in order (``list(JointStreamBinding)``).
-        joined_names: ``\0``-joined storage names for the batched rust
+        joined_names: ``\0``-joined storage names for the batched
             ``log_joints`` call.
         started_recording_id: The recording the bindings' streams were started
             for (``None`` when not recording).
@@ -236,7 +218,7 @@ def _record_json_to_daemon(
     ),
     timestamp: float,
 ) -> None:
-    """Forward one JSON sample to the Rust daemon's recording pipeline.
+    """Forward one JSON sample to the daemon's recording pipeline.
 
     The generic counterpart to :func:`_publish_json_to_p2p`: where that feeds
     live consumers, this persists the sample into the active recording. Every
@@ -244,8 +226,7 @@ def _record_json_to_daemon(
     ``log_json`` entry point is datatype-agnostic, so adding a new JSON type
     needs no daemon-side change.
 
-    A no-op unless the Rust daemon is active and a recording is in progress
-    (the legacy daemon is fed by :meth:`JsonDataStream.log` instead).
+    A no-op unless a recording is in progress.
 
     Args:
         robot: Robot instance owning the daemon recording context.
@@ -254,7 +235,7 @@ def _record_json_to_daemon(
         data: Data object to serialize and persist.
         timestamp: Capture timestamp in seconds.
     """
-    if not (is_rust_daemon_enabled() and robot.get_current_recording_id() is not None):
+    if robot.get_current_recording_id() is None:
         return
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
     robot._get_daemon_recording_context().log_json(
@@ -339,37 +320,6 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
         data_stream.start_recording(_build_recording_context(robot, current_recording))
 
 
-def _log_single_joint_data(
-    data_type: DataType,
-    name: str,
-    value: float,
-    robot: Robot,
-    timestamp: float,
-    dry_run: bool = False,
-) -> None:
-    """Log single joint data for a robot.
-
-    Args:
-        data_type: Type of joint data (e.g. DataType.JOINT_POSITIONS)
-        name: Name of the joint
-        value: Joint data value
-        robot: Robot instance
-        timestamp: Timestamp of the data
-        dry_run: If True, skip actual logging (validation only)
-    """
-    if dry_run:
-        return
-
-    _log_joint_data_point(
-        data_type=data_type,
-        name=name,
-        value=value,
-        robot=robot,
-        timestamp=timestamp,
-        send_to_daemon=True,
-    )
-
-
 def _get_or_create_joint_stream(
     data_type: DataType,
     name: str,
@@ -389,45 +339,6 @@ def _get_or_create_joint_stream(
         stream_id=str_id,
         storage_name=storage_name,
         stream=joint_stream,
-    )
-
-
-def _log_joint_data_point(
-    *,
-    data_type: DataType,
-    name: str,
-    value: float,
-    robot: Robot,
-    timestamp: float,
-    send_to_daemon: bool,
-) -> LoggedJointData:
-    """Log one joint sample into the local stream graph and live publishers."""
-    joint_stream_binding = _get_or_create_joint_stream(data_type, name, robot)
-    joint_stream = joint_stream_binding.stream
-    start_stream(robot, joint_stream)
-
-    data = JointData(
-        timestamp=timestamp,
-        value=value,
-    )
-    joint_stream.log(data=data, send_to_daemon=send_to_daemon)
-
-    if robot.id is None:
-        raise RobotError("Robot not initialized. Call init() first.")
-
-    _publish_json_to_p2p(robot, joint_stream_binding.stream_id, data_type, data)
-
-    producer_channel = joint_stream.get_producer_channel()
-    trace_id = (
-        producer_channel.trace_id
-        if producer_channel is not None
-        and joint_stream.get_recording_context() is not None
-        else None
-    )
-    return LoggedJointData(
-        binding=joint_stream_binding,
-        data=data,
-        trace_id=trace_id,
     )
 
 
@@ -469,7 +380,6 @@ def _log_group_of_joint_data(
     _smoke_validate_joint_values(joint_data)
 
     robot = _get_robot(robot_name, instance)
-    rust_mode = is_rust_daemon_enabled()
 
     binding_cache = robot._joint_stream_bindings
     bindings_for_type = binding_cache.get(data_type)
@@ -492,7 +402,7 @@ def _log_group_of_joint_data(
         current_recording_id,
     )
 
-    if rust_mode and live_data_orchestrator is None:
+    if live_data_orchestrator is None:
         native_values = list(joint_data.values())
         for binding, joint_value in zip(group.bindings, native_values):
             binding.stream.record_scalar(timestamp, joint_value)
@@ -503,16 +413,13 @@ def _log_group_of_joint_data(
         return
 
     native_values = []
-    batched_items: list[BatchedJointDataItemPayload] = []
-    batch_transport_stream: JsonDataStream | None = None
 
-    for (joint_name, joint_value), binding in zip(joint_data.items(), group.bindings):
-        joint_stream = binding.stream
-        if live_data_orchestrator is not None and robot_id is not None:
+    for joint_value, binding in zip(joint_data.values(), group.bindings):
+        if robot_id is not None:
             # A live consumer needs the materialised sample now, so build it and
             # publish it; the stream keeps it as its latest data.
             data = JointData(timestamp=timestamp, value=joint_value)
-            joint_stream.log(data=data, send_to_daemon=False)
+            binding.stream.log(data=data)
             live_data_orchestrator.get_provider_manager(
                 robot_id, robot_instance
             ).get_json_source(
@@ -524,57 +431,15 @@ def _log_group_of_joint_data(
             # No live consumer: stash the raw scalar and defer building the
             # JointData to get_latest_data(), keeping the per-joint hot path
             # allocation-free (see JointDataStream).
-            joint_stream.record_scalar(timestamp, joint_value)
+            binding.stream.record_scalar(timestamp, joint_value)
 
-        if rust_mode:
-            if current_recording_id is not None:
-                native_values.append(joint_value)
-            continue
+        if current_recording_id is not None:
+            native_values.append(joint_value)
 
-        producer_channel = joint_stream.get_producer_channel()
-        if producer_channel is None or joint_stream.get_recording_context() is None:
-            continue
-        trace_id = producer_channel.trace_id
-        if trace_id is None:
-            continue
-        if batch_transport_stream is None:
-            batch_transport_stream = joint_stream
-        batched_items.append(
-            BatchedJointDataItemPayload(
-                trace_id=trace_id,
-                data_type_name=binding.storage_name,
-                value=joint_value,
-            )
+    if native_values:
+        robot._get_daemon_recording_context().log_joints(
+            data_type.value, timestamp, group.joined_names, native_values
         )
-
-    if rust_mode:
-        if native_values:
-            robot._get_daemon_recording_context().log_joints(
-                data_type.value, timestamp, group.joined_names, native_values
-            )
-        return
-
-    if batch_transport_stream is None or not batched_items:
-        return
-
-    batch_context = batch_transport_stream.get_recording_context()
-    batch_transport_channel = batch_transport_stream.get_producer_channel()
-    if batch_context is None or batch_transport_channel is None:
-        return
-
-    batch_transport_channel.send_batched_joint_data(
-        BatchedJointDataPayload(
-            recording_id=batch_context.recording_id,
-            timestamp=timestamp,
-            dataset_id=batch_context.dataset_id,
-            dataset_name=batch_context.dataset_name,
-            robot_name=batch_context.robot_name,
-            robot_id=batch_context.robot_id,
-            robot_instance=batch_context.robot_instance,
-            data_type=data_type,
-            items=batched_items,
-        )
-    )
 
 
 def _validate_extrinsics_intrinsics(
@@ -667,7 +532,7 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
 
-    if is_rust_daemon_enabled() and robot.get_current_recording_id() is not None:
+    if robot.get_current_recording_id() is not None:
         contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
         robot._get_daemon_recording_context().log_frame(
             camera_type.value,
