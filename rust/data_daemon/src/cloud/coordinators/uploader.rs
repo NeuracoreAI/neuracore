@@ -30,11 +30,10 @@ use crate::state::{
 };
 use crate::storage::paths::TracePath;
 
-/// Maximum number of traces uploading concurrently. With 8 parallel contexts
-/// each queuing ~128 traces simultaneously (1024 total), 32 slots serialise
-/// into ~32 rounds × 300 ms ≈ 9.6 s. 128 slots cuts that to ~8 rounds ×
-/// 300 ms ≈ 2.4 s, giving ~6 s headroom against the 9 s stop-recording SLA.
-pub const MAX_CONCURRENT_UPLOADS: usize = 128;
+/// Maximum number of traces uploading concurrently. A trade-off: more slots
+/// drain a large backlog in fewer rounds, but oversubscribing the link inflates
+/// per-request latency and its p95/p99 tail, which drives timeouts and retries.
+pub const MAX_CONCURRENT_UPLOADS: usize = 16;
 
 /// Handle returned by [`spawn_uploader`].
 pub struct UploaderHandle {
