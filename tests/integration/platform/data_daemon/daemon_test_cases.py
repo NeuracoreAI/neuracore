@@ -111,11 +111,16 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
     ),
-    # Large number of joints without cameras (1000 joints)
+    # Large number of joints without cameras
     # Tests: high joint dimensionality, memory efficiency, sensor-only workload
+    #
+    # TODO: restore joint_count=1000 once per-trace upload overhead is fixed.
+    # One trace is produced per joint per data type and each pays a fixed
+    # upload cost regardless of size, so 1000 joints dominates the suite's
+    # runtime and puts enough load on the backend to destabilise it.
     DataDaemonTestCase(
         duration_sec=30,
-        joint_count=1000,
+        joint_count=100,
         video_count=0,
         parallel_contexts=1,
         recording_count=3,
@@ -214,18 +219,23 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=30,
         wait=True,
     ),
-    # Large number of joints without cameras (1000 joints)
+    # Large number of joints without cameras
     # Tests: high joint dimensionality, memory efficiency, sensor-only workload
+    #
+    # TODO: restore joint_count=1000 once per-trace upload overhead is fixed.
+    # One trace is produced per joint per data type and each pays a fixed
+    # upload cost regardless of size, so 1000 joints dominates the suite's
+    # runtime and puts enough load on the backend to destabilise it.
     DataDaemonTestCase(
         duration_sec=30,
-        joint_count=1000,
+        joint_count=100,
         video_count=0,
         parallel_contexts=1,
         recording_count=3,
     ),
     DataDaemonTestCase(
         duration_sec=30,
-        joint_count=1000,
+        joint_count=100,
         video_count=0,
         parallel_contexts=1,
         recording_count=3,
