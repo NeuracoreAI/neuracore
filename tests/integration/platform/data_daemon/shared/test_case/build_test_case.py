@@ -181,6 +181,13 @@ class DataDaemonTestCase:
             solid-fill frames for cases that only care about frame counts.
             Frame identity is embedded either way, so the disk timestamp and
             frame-code assertions are unaffected by this choice.
+        cpu_load: When ``True``, all but one CPU core is saturated (see
+            ``cpu_load()`` in ``shared/process_control.py``) for the duration
+            of the recording contexts. Approximates the core contention a real
+            rig puts on the daemon, so a case relying on the writer's compress
+            pool backlogging under load doesn't depend on how many idle cores
+            the host happens to have. ``False`` (default) runs with no
+            injected contention.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -211,6 +218,7 @@ class DataDaemonTestCase:
     skip: bool = False
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
+    cpu_load: bool = False
 
     @property
     def has_video(self) -> bool:
@@ -329,6 +337,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("random-phase")
     if case.wait:
         parts.append("wait")
+    if case.cpu_load:
+        parts.append("cpuload")
     return "-".join(parts)
 
 

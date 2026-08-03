@@ -87,6 +87,7 @@ Conq
 contype
 Conv
 convnet
+cpuload
 CREAT
 ctrllimited
 ctrlrange

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import pytest
 
@@ -18,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_encoded_video_not_trivial,
     assert_lossy_only_video_artifacts,
 )
+from tests.integration.platform.data_daemon.shared.process_control import cpu_load
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -84,7 +86,8 @@ def test_disk_db_data_integrity(
         try:
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs)
+                with cpu_load() if case.cpu_load else nullcontext():
+                    results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
                 if case.lossy_only:
