@@ -16,9 +16,10 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from subprocess import Popen
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import requests
 from neuracore_types import DataType, EmbodimentDescription, SynchronizedPoint
@@ -27,6 +28,9 @@ from neuracore.core.utils.http_session import thread_local_session
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
+
+    from neuracore.ml.utils.real_time_chunking import RTCConfig
+    from neuracore.ml.utils.rtc_controller import RealTimeChunker
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
@@ -210,6 +214,109 @@ class DirectPolicy(Policy):
         sync_point.data = filtered_data
 
         return self._policy(sync_point)
+
+
+class RealTimePolicy(DirectPolicy):
+    """Direct policy that can also drive real-time chunked execution.
+
+    Real-time chunking guides the denoising loop with the previous action chunk,
+    which needs autograd through the model and therefore in-process inference.
+    That is why this builds on :class:`DirectPolicy` and has no server variant.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        """Initialize and verify the model supports real-time chunking.
+
+        Args:
+            *args: Forwarded to :class:`DirectPolicy`.
+            **kwargs: Forwarded to :class:`DirectPolicy`.
+
+        Raises:
+            EndpointError: If the loaded model has no real-time chunking hooks.
+        """
+        super().__init__(*args, **kwargs)
+        if not self._policy.supports_real_time_chunking:
+            raise EndpointError(
+                "Real-time chunking requires a diffusion policy; the loaded "
+                f"model is a {type(self._policy.model).__name__}."
+            )
+
+    @property
+    def prediction_horizon(self) -> int:
+        """Number of actions in a chunk, as the model was trained."""
+        return self._policy.prediction_horizon
+
+    @property
+    def action_names(self) -> list[tuple[DataType, str | None]]:
+        """Column layout of a raw action chunk."""
+        return self._policy.output_action_names()
+
+    def make_chunker(
+        self,
+        observation_fn: Callable[[], SynchronizedPoint],
+        config: "RTCConfig",
+        *,
+        control_hz: float,
+        adapt_inference_delay: bool = True,
+    ) -> "RealTimeChunker":
+        """Build an asynchronous chunk controller for this policy.
+
+        Args:
+            observation_fn: Builds a sync point from the caller's latest sensors.
+            config: Real-time chunking configuration.
+            control_hz: Rate at which actions will be consumed.
+            adapt_inference_delay: Track measured latency with the delay ``d``.
+
+        Returns:
+            RealTimeChunker: Not yet started; call ``start()`` on it.
+        """
+        from neuracore.ml.utils.rtc_controller import RealTimeChunker
+
+        return RealTimeChunker(
+            self._policy,
+            observation_fn,
+            config,
+            control_hz=control_hz,
+            adapt_inference_delay=adapt_inference_delay,
+        )
+
+    def benchmark(
+        self,
+        sync_point: SynchronizedPoint,
+        config: "RTCConfig",
+        iterations: int = 10,
+    ) -> list[float]:
+        """Time guided inference so a caller can size its execution horizon.
+
+        The first iteration is discarded as warm-up, since it pays for lazy CUDA
+        initialisation and any cuDNN autotuning.
+
+        Args:
+            sync_point: A representative observation.
+            config: The configuration that will be used in the rollout.
+            iterations: Timed iterations to run, after the warm-up.
+
+        Returns:
+            list[float]: Per-iteration durations in seconds, ascending.
+        """
+        import time
+
+        import numpy as np
+        import torch
+
+        horizon = self.prediction_horizon
+        action_dim = len(self.action_names)
+        prev_chunk = np.zeros((horizon, action_dim), dtype=np.float32)
+
+        durations = []
+        for index in range(iterations + 1):
+            started = time.monotonic()
+            self._policy.predict_action_chunk(sync_point, prev_chunk, config)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            if index > 0:
+                durations.append(time.monotonic() - started)
+        return sorted(durations)
 
 
 class ServerPolicy(Policy):
@@ -666,6 +773,57 @@ def policy(
         raise ValueError("Must specify either train_run_name or model_file")
 
     return DirectPolicy(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        input_preprocessing_config=input_preprocessing_config,
+        org_id=org_id,
+        job_id=job_id,
+        model_path=model_path,
+        device=device,
+        robot_id=robot_id,
+    )
+
+
+def policy_realtime(
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
+    input_preprocessing_config: PreprocessingConfiguration | None = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
+    robot_id: str | None = None,
+) -> RealTimePolicy:
+    """Launch an in-process policy that supports real-time chunked execution.
+
+    Args:
+        input_embodiment_description: Specification of the order that will
+            be fed into the model
+        output_embodiment_description: Specification of the order that will
+            be output from the model
+        input_preprocessing_config: Preprocessing configuration for the input data.
+        train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive
+            when embodiment descriptions are not explicitly provided.
+
+    Returns:
+        RealTimePolicy instance that can build a real-time chunk controller.
+
+    Raises:
+        ValueError: If neither train_run_name nor model_file is provided.
+    """
+    org_id = get_current_org()
+    job_id = None
+    if train_run_name is not None:
+        job_id = _get_job_id(train_run_name, org_id)
+        model_path = _download_model(job_id, org_id)
+    elif model_file is not None:
+        model_path = Path(model_file)
+    else:
+        raise ValueError("Must specify either train_run_name or model_file")
+
+    return RealTimePolicy(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
         input_preprocessing_config=input_preprocessing_config,

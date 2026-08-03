@@ -20,9 +20,15 @@ from neuracore.api.core import _get_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
-from neuracore.core.endpoint import DirectPolicy, LocalServerPolicy, RemoteServerPolicy
+from neuracore.core.endpoint import (
+    DirectPolicy,
+    LocalServerPolicy,
+    RealTimePolicy,
+    RemoteServerPolicy,
+)
 from neuracore.core.endpoint import policy as _policy
 from neuracore.core.endpoint import policy_local_server as _policy_local_server
+from neuracore.core.endpoint import policy_realtime as _policy_realtime
 from neuracore.core.endpoint import policy_remote_server as _policy_remote_server
 from neuracore.core.get_latest_sync_point import (
     check_remote_nodes_connected as _check_remote_nodes_connected,
@@ -105,6 +111,71 @@ def policy(
             )
 
     return _policy(
+        input_embodiment_description=input_embodiment_description,
+        output_embodiment_description=output_embodiment_description,
+        train_run_name=train_run_name,
+        model_file=model_file,
+        device=device,
+        robot_id=robot_id,
+    )
+
+
+def policy_realtime(
+    input_embodiment_description: EmbodimentDescription | None = None,
+    output_embodiment_description: EmbodimentDescription | None = None,
+    train_run_name: str | None = None,
+    model_file: str | None = None,
+    device: str | None = None,
+    robot_id: str | None = None,
+    robot_name: str | None = None,
+    instance: int = 0,
+) -> RealTimePolicy:
+    """Launch an in-process policy that supports real-time chunked execution.
+
+    Real-time chunking (arXiv:2506.07339) generates the next action chunk while
+    the current one is still executing, freezing the actions guaranteed to have
+    run and inpainting the rest so the robot never pauses for inference and
+    never jumps at a chunk boundary.
+
+    Guiding the denoiser requires autograd through the model, so this runs the
+    model in-process. There is no server or remote-endpoint equivalent, and it
+    is currently supported for diffusion policies only.
+
+    Args:
+        input_embodiment_description: Specification of the model input data order.
+        output_embodiment_description: Specification of the model output data order.
+        train_run_name: Name of the training run to load the model from.
+        model_file: Path to the model file to load.
+        device: Torch device to run the model on (CPU or GPU, or MPS).
+        robot_id: Robot ID used to select embodiments from the model archive when
+            input/output embodiments are not provided. If both robot_id and
+            robot_name are omitted, the active robot is used as a fallback.
+        robot_name: Robot name to resolve to robot_id before model loading.
+        instance: Robot instance number used with robot_name resolution.
+
+    Returns:
+        RealTimePolicy that can build a real-time chunk controller.
+
+    Raises:
+        EndpointError: If the model download or initialization fails, or the
+            model does not support real-time chunking.
+        ConfigError: If there is an error trying to get the current org.
+        ValueError: If the embodiment descriptions cannot be resolved.
+    """
+    if not (input_embodiment_description and output_embodiment_description):
+        try:
+            robot_id = _resolve_robot_id(robot_id, robot_name, instance)
+        except Exception:
+            raise ValueError(
+                "Missing input_embodiment_description or "
+                "output_embodiment_description for policy inference. "
+                "Tried to load from training metadata or the model archive "
+                "using robot_id/robot_name/active robot, but failed. "
+                "Please provide a robot_id/robot_name or connect to "
+                "a robot first."
+            )
+
+    return _policy_realtime(
         input_embodiment_description=input_embodiment_description,
         output_embodiment_description=output_embodiment_description,
         train_run_name=train_run_name,

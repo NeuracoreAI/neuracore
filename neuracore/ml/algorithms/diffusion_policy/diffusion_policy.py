@@ -522,20 +522,17 @@ class DiffusionPolicy(NeuracoreModel):
         else:
             raise ValueError(f"Unsupported noise scheduler type {noise_scheduler_type}")
 
-    def _predict_action(
-        self,
-        batch: BatchedInferenceInputs,
-        prediction_horizon: int,
-    ) -> torch.Tensor:
-        """Predict action sequence from observations.
+    def _build_global_cond(self, batch: BatchedInferenceInputs) -> torch.Tensor:
+        """Encode observations into the UNet's global conditioning vector.
+
+        Shared by inference, training, and real-time chunking so the image
+        encoders are described in exactly one place.
 
         Args:
-            batch: Input observations
-            prediction_horizon: action sequence prediction horizon
+            batch: Input observations.
 
         Returns:
-            torch.FloatTensor: Predicted action sequence with shape
-            (B, prediction_horizon, action_dim)
+            torch.Tensor: Global conditioning with shape (B, global_cond_dim).
         """
         batch_size = len(batch)
         # Normalize and combine joint states
@@ -561,9 +558,28 @@ class DiffusionPolicy(NeuracoreModel):
         else:
             global_cond = joint_states  # proprio-only model, dims already match
 
+        return global_cond
+
+    def _predict_action(
+        self,
+        batch: BatchedInferenceInputs,
+        prediction_horizon: int,
+    ) -> torch.Tensor:
+        """Predict action sequence from observations.
+
+        Args:
+            batch: Input observations
+            prediction_horizon: action sequence prediction horizon
+
+        Returns:
+            torch.FloatTensor: Predicted action sequence with shape
+            (B, prediction_horizon, action_dim)
+        """
         # run sampling
         actions = self._conditional_sample(
-            batch_size, prediction_horizon, global_cond=global_cond
+            len(batch),
+            prediction_horizon,
+            global_cond=self._build_global_cond(batch),
         )
 
         return actions
@@ -583,8 +599,20 @@ class DiffusionPolicy(NeuracoreModel):
         action_preds = self._predict_action(batch, prediction_horizon)
 
         # (B, T, action_dim)
-        predictions = self.action_normalizer.unnormalize(action_preds)
+        return self._split_outputs(self.action_normalizer.unnormalize(action_preds))
 
+    def _split_outputs(
+        self, predictions: torch.Tensor
+    ) -> dict[DataType, list[BatchedNCData]]:
+        """Split an unnormalized action tensor into per-sensor batched outputs.
+
+        Args:
+            predictions: Unnormalized actions with shape (B, T, action_dim).
+
+        Returns:
+            dict[DataType, list[BatchedNCData]]: One entry per output sensor,
+            ordered by the tensor column layout in ``self.output_dims``.
+        """
         output_tensors: dict[DataType, list[BatchedNCData]] = {}
 
         for data_type in self.ordered_output_data_types:
@@ -709,25 +737,7 @@ class DiffusionPolicy(NeuracoreModel):
             batch_size=batch.batch_size,
         )
 
-        joint_states = self._combine_proprio(inference_sample)
-        if (
-            DataType.RGB_IMAGES in self.input_data_types
-            and DataType.RGB_IMAGES in batch.inputs
-        ):
-            global_cond = self._prepare_global_conditioning(
-                joint_states,
-                batch.inputs[DataType.RGB_IMAGES],
-                batch.inputs_mask[DataType.RGB_IMAGES],
-            )
-        elif DataType.RGB_IMAGES in self.input_data_types:
-            # RGB configured but absent in this batch: zero-pad to full cond dim
-            global_cond = torch.zeros(
-                batch.batch_size, self.global_cond_dim, device=self.device
-            )
-            if joint_states is not None:
-                global_cond[:, : joint_states.shape[-1]] = joint_states
-        else:
-            global_cond = joint_states  # proprio-only model, dims already match
+        global_cond = self._build_global_cond(inference_sample)
 
         # Concatenate all output actions; zero-fill types absent from this batch
         action_targets = []
