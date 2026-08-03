@@ -65,18 +65,19 @@ class TrackedRecording(NamedTuple):
 def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
     """Tell the producer a source's recording has been locally auto-expired.
 
-    Calls the native ``stop_recording`` for the source so the producer flushes
-    any in-progress NUT chunk and publishes ``StopRecording``. The daemon is
-    idempotent, so a later explicit ``nc.stop_recording`` that races this is a
-    no-op. The stop boundary is wall-clock here (the expiry path has no access
-    to the recording context's tracked data-clock timestamp) — acceptable for a
-    forced 5-minute timeout. Failures are logged and swallowed: the local
-    expiry must always succeed.
+    Calls the native ``stop_recording`` for the source to publish
+    ``StopRecording``, then ``flush_source`` to seal and announce its
+    in-progress NUT chunk — the barrier is not part of the stop, and nothing
+    else seals those chunks. The daemon is idempotent, so a later explicit
+    ``nc.stop_recording`` that races this is a no-op. The stop boundary is
+    wall-clock here (the expiry path has no access to the recording context's
+    tracked data-clock timestamp) — acceptable for a forced 5-minute timeout.
+    Failures are logged and swallowed: the local expiry must always succeed.
     """
     try:
-        _recording_context._load_native().stop_recording(
-            robot_id, instance, time.time_ns()
-        )
+        native = _recording_context._load_native()
+        native.stop_recording(robot_id, instance, time.time_ns())
+        native.flush_source(robot_id, instance)
     except Exception:
         logger.exception(
             "Failed to notify data bridge of recording expiry for %s:%s",
