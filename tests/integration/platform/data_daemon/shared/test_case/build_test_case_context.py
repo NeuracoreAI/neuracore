@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -37,6 +38,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONTINUOUS_BURST_LOOKAHEAD_S,
+    CONTINUOUS_LOGGING_TAIL_S,
     DATASET_POLL_INTERVAL_S,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
@@ -46,6 +49,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_STAGGERED,
     PACING_BURST_VIDEO,
     PACING_DEADLINE,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -73,6 +77,59 @@ LOG_LOOP_FREQUENCY_HZ = 120
 LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
 
 
+class EmittedFrame(NamedTuple):
+    """One frame a continuous producer logged, bracketed on the wall clock.
+
+    The daemon routes a sample by a publish stamp taken *inside* the ``log_*``
+    call, so the test cannot observe that stamp — only that it lies somewhere in
+    ``[emitted_at, completed_at]``. Both edges are kept because the two
+    boundaries need opposite ones (see :func:`_classify_boundary_frames`).
+
+    Attributes:
+        timestamp: The frame's own capture timestamp — the value that reaches
+            disk, and the only field the assertion compares.
+        emitted_at: Wall clock immediately before the ``log_*`` call.
+        completed_at: Wall clock immediately after it returned.
+        handle: The SDK recording handle latched immediately before the call,
+            or ``None`` when no recording was active. This is the local logging
+            gate, not the daemon's window.
+    """
+
+    timestamp: float
+    emitted_at: float
+    completed_at: float
+    handle: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingControlBounds:
+    """Wall-clock brackets around the two control calls that bound a recording.
+
+    The daemon's window is ``[started_at_ns, stopped_at_ns)``, and both bounds
+    are stamped on the publish clock *inside* the producer-side
+    ``start_recording`` / ``stop_recording`` calls — never from the capture
+    timestamp the caller passes. Neither instant is visible from here, but each
+    is known to fall within the call that carries it, and the control thread can
+    stamp both edges of that call on the same clock the producer threads use.
+
+    Attributes:
+        handle: The SDK recording handle for this recording, as the producer
+            threads see it while it is current.
+        start_called_at: Wall clock immediately before ``nc.start_recording``.
+        start_returned_at: Wall clock immediately after it returned. The
+            window's lower bound is somewhere in between.
+        stop_called_at: Wall clock immediately before ``nc.stop_recording``.
+        stop_returned_at: Wall clock immediately after it returned. The window's
+            upper bound is somewhere in between.
+    """
+
+    handle: str | None
+    start_called_at: float
+    start_returned_at: float
+    stop_called_at: float
+    stop_returned_at: float
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingExpectedTimestamps:
     """Expected timestamps per trace for one recording, keyed by semantic trace name.
@@ -87,9 +144,17 @@ class RecordingExpectedTimestamps:
         by_trace: Maps semantic trace key (e.g. ``"JOINT_POSITIONS"``,
             ``"camera_0"``) to the ordered list of expected timestamps for
             that trace within this recording.
+        by_trace_unknowable: Maps the same semantic trace key to timestamps
+            whose membership of this recording the test cannot determine —
+            frames whose ``log_*`` call straddled one of the two control calls
+            that carry the window's bounds (see
+            :func:`_classify_boundary_frames`). The assertion drops them from
+            both the expected and the on-disk list rather than tolerating them
+            on one. Empty for producers that log strictly within one recording.
     """
 
     by_trace: dict[str, list[float]]
+    by_trace_unknowable: dict[str, set[float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,13 +434,37 @@ def _should_pace(pacing: str, is_rgb: bool) -> bool:
     return False  # PACING_BURST_ALL
 
 
-def _await_frame_deadline(deadline: float, *, pace: bool) -> None:
-    """Wait until *deadline* when *pace* is set, otherwise return immediately."""
-    if not pace:
-        return
-    remaining = deadline - time.time()
-    if remaining > 0:
-        time.sleep(remaining)
+def _await_frame_deadline(
+    deadline: float,
+    *,
+    pace: bool,
+    stop_event: threading.Event | None = None,
+    burst_lookahead_s: float | None = None,
+) -> bool:
+    """Wait until *deadline* when *pace* is set, otherwise return immediately.
+
+    Shared by :func:`run_threaded_logging` (bounded, no *stop_event*) and
+    :func:`run_continuous_logging` (unbounded, interruptible via *stop_event*).
+    Returns ``True`` if *stop_event* fired while waiting, meaning the caller's
+    loop should stop; always ``False`` otherwise.
+
+    *burst_lookahead_s* only applies when *pace* is ``False``: it caps how far
+    ahead of *deadline*'s schedule an un-paced caller may race before waiting
+    for real time to catch up, so a producer with no fixed frame count (i.e.
+    :func:`run_continuous_logging`) can't outrun the daemon indefinitely. Unset
+    for :func:`run_threaded_logging`, whose un-paced streams are already
+    bounded by a fixed per-recording frame count.
+    """
+    if not pace and burst_lookahead_s is None:
+        return False
+    wait_until = deadline if pace else deadline - burst_lookahead_s
+    remaining = wait_until - time.time()
+    if remaining <= 0:
+        return False
+    if stop_event is not None:
+        return stop_event.wait(remaining)
+    time.sleep(remaining)
+    return False
 
 
 def log_synchronous_frames(
@@ -468,6 +557,30 @@ class StreamPlan:
     def is_rgb(self) -> bool:
         """Whether this stream logs camera frames rather than joint data."""
         return self.name == "rgb"
+
+    @property
+    def trace_keys(self) -> list[str]:
+        """Semantic trace keys one logged frame from this stream touches.
+
+        Matches the ``data_type/data_type_name`` keys resolved from the DB in
+        disk_helpers — one entry per named channel per data type, plus this
+        stream's own ``CUSTOM_1D`` marker when it has one.
+        """
+        from neuracore_types.utils import validate_safe_name
+
+        data_types = (
+            ["RGB_IMAGES"]
+            if self.is_rgb
+            else [_JOINT_DATA_TYPES[kind] for kind in self.joint_kinds]
+        )
+        keys = [
+            f"{data_type}/{validate_safe_name(name)}"
+            for data_type in data_types
+            for name in self.channel_names
+        ]
+        if self.marker_name is not None:
+            keys.append(f"CUSTOM_1D/{validate_safe_name(self.marker_name)}")
+        return keys
 
 
 def build_stream_plans(
@@ -712,6 +825,173 @@ def run_threaded_logging(
     return [plan.marker_name for plan in plans]
 
 
+def run_continuous_logging(
+    *,
+    robot: object,
+    robot_name: str,
+    joint_names: list[str],
+    camera_name_list: list[str],
+    image_width: int | None,
+    image_height: int | None,
+    joint_fps: int,
+    video_fps: int,
+    video_detail: str,
+    timestamp_start_s: float,
+    random_phase: bool,
+    pacing: str,
+    context_index: int,
+    stop_event: threading.Event,
+) -> dict[str, list[EmittedFrame]]:
+    """Log continuously for the whole context lifetime, independent of any
+    single recording.
+
+    Mirrors real deployments where camera/proprioception loops run for the
+    process lifetime: threads start before the first ``nc.start_recording()``
+    and keep logging — paced by a session-wide, ever-increasing frame index —
+    until *stop_event* is set, regardless of how many recordings start and stop
+    while they run.
+
+    Every frame is reported, whichever recording was current and even when none
+    was: which of them belong to a recording is decided afterwards, from the
+    wall-clock brackets around that recording's control calls (see
+    :func:`_classify_boundary_frames`). Reporting only the frames logged during
+    a recording would hide the ones the daemon must be shown to have *rejected*.
+
+    Returns:
+        Mapping of trace key -> every frame logged for it, in order.
+    """
+    plans = build_stream_plans(
+        joint_names=joint_names,
+        camera_name_list=camera_name_list,
+        joint_fps=joint_fps,
+        video_fps=video_fps,
+    )
+    # These producers outlive any single recording, so no recording_index is
+    # known up front. Frame codes stay unique regardless: the frame index is
+    # session-wide and never resets, and context_index separates the contexts.
+    emitters = [
+        StreamEmitter(
+            plan=plan,
+            robot_name=robot_name,
+            context_index=context_index,
+            recording_index=0,
+        )
+        for plan in plans
+    ]
+    barrier = threading.Barrier(len(emitters))
+    report: dict[str, list[EmittedFrame]] = {}
+    report_lock = threading.Lock()
+
+    def worker(emitter: StreamEmitter) -> None:
+        barrier.wait()
+        emitter.prepare(image_width, image_height, video_detail)
+        fps = emitter.plan.fps
+        pace = _should_pace(pacing, emitter.plan.is_rgb)
+        thread_wall_start = time.time()
+        stream = VIDEO_STREAM if emitter.plan.is_rgb else JOINT_STREAM
+        phase_rng = random.Random(stream_phase_seed(context_index, 0, stream))
+        phase_window = random_phase_jitter_window(fps)
+        frame_index = 0
+        # An un-paced stream still waits once it has raced more than
+        # CONTINUOUS_BURST_LOOKAHEAD_S ahead of its nominal schedule, so a
+        # producer with no fixed frame count can't outrun the daemon for the
+        # whole context lifetime — see CONTINUOUS_BURST_LOOKAHEAD_S.
+        while not stop_event.is_set():
+            frame_deadline = thread_wall_start + (frame_index / fps)
+            if _await_frame_deadline(
+                frame_deadline,
+                pace=pace,
+                stop_event=stop_event,
+                burst_lookahead_s=CONTINUOUS_BURST_LOOKAHEAD_S,
+            ):
+                break
+            phase_offset = (
+                phase_rng.uniform(-phase_window, phase_window) if random_phase else 0.0
+            )
+            timestamp = timestamp_start_s + (frame_index / fps) + phase_offset
+            # The gate the SDK checks again inside `emit`, read here so the
+            # caller can tell a frame the gate had already refused from one it
+            # admitted.
+            handle = robot.get_current_recording_id()
+            # Brackets the publish stamp the daemon routes on, which is taken
+            # inside the emit and is not observable from here.
+            emitted_at = time.time()
+            emitter.emit(frame_index, timestamp)
+            frame = EmittedFrame(
+                timestamp=timestamp,
+                emitted_at=emitted_at,
+                completed_at=time.time(),
+                handle=handle,
+            )
+            with report_lock:
+                for trace_key in emitter.plan.trace_keys:
+                    report.setdefault(trace_key, []).append(frame)
+            frame_index += 1
+
+    _run_stream_threads(emitters, worker, error_label="Continuous")
+
+    return report
+
+
+def _classify_boundary_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> tuple[list[float], set[float]]:
+    """Split one trace's frames into those inside a recording and those unknowable.
+
+    A producer that logs across the recording lifecycle is mid-loop when each
+    boundary passes, and neither boundary is directly observable: the daemon
+    routes every sample by a publish stamp taken inside the ``log_*`` call, and
+    stamps the window's own bounds inside the ``start_recording`` /
+    ``stop_recording`` calls. The test resolves both the same way — by bracketing
+    each unobservable instant between two it can measure on the same clock — and
+    the same rule then decides every frame:
+
+    - **Inside**: the frame's whole ``log_*`` call ran after ``start_recording``
+      returned and finished before ``stop_recording`` was called, so its publish
+      stamp cannot be anything but within the window. The start compares the
+      emit interval's near edge and the stop its far edge; that opposition is
+      the whole of the symmetry.
+    - **Outside**: the call finished before ``start_recording`` was entered, so
+      the window did not yet exist; or the SDK's local logging gate had already
+      refused the frame at a point past the stop call. The gate is a deliberate
+      superset of the window at both ends, which makes a stale read of it
+      conclusive in exactly one direction at each end: a frame the gate *refused*
+      was emitted after the gate closed, hence after the window closed, so it
+      must not reach disk. A frame the gate *admitted* proves nothing at the
+      start, because the gate opens before the window does.
+    - **Unknowable**: everything else, i.e. the call straddled one of the two
+      brackets. The daemon's answer for those frames is correct either way, so
+      they are dropped from *both* sides of the comparison rather than tolerated
+      on one.
+
+    The ambiguous band is therefore measured, not guessed: it is as wide as the
+    control call that carries the boundary, which is why a frame count could not
+    size it — ``start_recording`` takes ~30 ms and a burst producer emits far
+    more than a frame or two inside it.
+
+    Returns:
+        ``(inside timestamps in order, unknowable timestamps)``. Frames that are
+        outside appear in neither, so the assertion requires them to be absent
+        from disk.
+    """
+    inside: list[float] = []
+    unknowable: set[float] = set()
+    for frame in frames:
+        is_inside = (
+            frame.emitted_at >= bounds.start_returned_at
+            and frame.completed_at <= bounds.stop_called_at
+        )
+        is_outside = frame.completed_at <= bounds.start_called_at or (
+            frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
+        )
+        if is_inside:
+            inside.append(frame.timestamp)
+        elif not is_outside:
+            unknowable.add(frame.timestamp)
+    return inside, unknowable
+
+
 def recording_timestamps(
     spec: ContextSpec, recording_index: int
 ) -> tuple[list[float], list[float]]:
@@ -875,95 +1155,192 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
 
-        for recording_ordinal in range(spec.recordings_per_context):
-            recording_capture_start_s = time.time()
-            recording_capture_stop_s = recording_capture_start_s + case.duration_sec
+        continuous = case.producer_channels == PRODUCER_CONTINUOUS
+        continuous_stop_event: threading.Event | None = None
+        continuous_thread: threading.Thread | None = None
+        continuous_outcome: dict[str, object] = {}
+        bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
+        recording_handle: str | None = None
 
-            # The very sequences log_frames will emit below.
-            joint_ts, video_ts = recording_timestamps(spec, recording_ordinal)
-
-            with Timer(
-                MAX_TIME_TO_START_S,
-                label="nc.start_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.start_recording(
-                    robot_name=spec.robot_name, timestamp=recording_capture_start_s
-                )
-            if wall_started_at is None:
-                wall_started_at = time.time()
-
-            previous_index = recording_indexes[-1] if recording_indexes else 0
-            daemon_recording_index = wait_for_recording_index_for_source(
-                source[0],
-                source[1],
-                after_index=previous_index,
-                timeout_s=MAX_TIME_TO_START_S,
+        if continuous:
+            plans = build_stream_plans(
+                joint_names=joint_name_list,
+                camera_name_list=camera_name_list,
+                joint_fps=case.joint_fps,
+                video_fps=case.video_fps,
             )
-            recording_indexes.append(daemon_recording_index)
+            marker_names = [plan.marker_name for plan in plans]
+            continuous_stop_event = threading.Event()
 
-            cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
-            recording_ids.append(str(cloud_recording_id or ""))
+            def _run_continuous() -> None:
+                try:
+                    continuous_outcome["report"] = run_continuous_logging(
+                        robot=robot,
+                        robot_name=spec.robot_name,
+                        joint_names=joint_name_list,
+                        camera_name_list=camera_name_list,
+                        image_width=case.image_width,
+                        image_height=case.image_height,
+                        joint_fps=case.joint_fps,
+                        video_fps=case.video_fps,
+                        video_detail=case.video_detail,
+                        timestamp_start_s=spec.timestamp_start_s,
+                        random_phase=case.random_phase,
+                        pacing=case.producer_pacing,
+                        context_index=spec.context_index,
+                        stop_event=continuous_stop_event,
+                    )
+                except BaseException as exc:  # noqa: BLE001
+                    continuous_outcome["error"] = exc
 
-            disk_recording_key = str(daemon_recording_index)
+            continuous_thread = threading.Thread(target=_run_continuous, daemon=True)
+            continuous_thread.start()
 
-            # Map the two stream sequences onto every trace they feed, now that
-            # the recording key is known. Trace keys use
-            # "data_type/data_type_name" to match the semantic keys resolved
-            # from the DB in disk_helpers. data_type_name is the storage name
-            # produced by validate_safe_name (e.g. "vx300s_left\waist").
-            from neuracore_types.utils import validate_safe_name
+        try:
+            for recording_ordinal in range(spec.recordings_per_context):
+                recording_capture_start_s = time.time()
+                recording_capture_stop_s = recording_capture_start_s + case.duration_sec
 
-            by_trace: dict[str, list[float]] = {}
-            for joint_name in joint_name_list:
-                safe = validate_safe_name(joint_name)
-                by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
-                by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
-                by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
-            for camera in camera_name_list:
-                safe_cam = validate_safe_name(camera)
-                by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
-            # CUSTOM_1D marker — name depends on producer_channels mode
-            if case.producer_channels == PRODUCER_PER_THREAD:
-                # One marker per joint data type thread
-                for role_name in (
-                    "joint_positions",
-                    "joint_velocities",
-                    "joint_torques",
+                # Brackets the window's lower bound, which the daemon stamps
+                # somewhere inside the call (see `RecordingControlBounds`).
+                start_called_at = time.time()
+                with Timer(
+                    MAX_TIME_TO_START_S,
+                    label="nc.start_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
                 ):
-                    safe_marker = validate_safe_name(f"marker_{role_name}")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                for camera in camera_name_list:
-                    safe_marker = validate_safe_name(f"marker_{camera}")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
-            else:
-                safe_marker = validate_safe_name("marker_synchronous")
-                by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-            expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
-                by_trace=by_trace,
-            )
+                    nc.start_recording(
+                        robot_name=spec.robot_name, timestamp=recording_capture_start_s
+                    )
+                start_returned_at = time.time()
+                if wall_started_at is None:
+                    wall_started_at = start_returned_at
 
-            current_marker_names = log_frames(
-                spec,
-                recording_index=recording_ordinal,
-                marker_name="marker_synchronous",
-            )
-            if not marker_names:
-                marker_names = current_marker_names
-
-            with Timer(
-                case.stop_recording_sla_s,
-                label="nc.stop_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.stop_recording(
-                    robot_name=spec.robot_name,
-                    wait=case.wait,
-                    timestamp=recording_capture_stop_s,
+                previous_index = recording_indexes[-1] if recording_indexes else 0
+                daemon_recording_index = wait_for_recording_index_for_source(
+                    source[0],
+                    source[1],
+                    after_index=previous_index,
+                    timeout_s=MAX_TIME_TO_START_S,
                 )
-            wall_stopped_at = time.time()
+                recording_indexes.append(daemon_recording_index)
+
+                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                recording_ids.append(str(cloud_recording_id or ""))
+
+                disk_recording_key = str(daemon_recording_index)
+
+                if continuous:
+                    # Producers are already running and own their own schedule;
+                    # this thread only holds the window open for the case's
+                    # duration and records where its boundaries fell.
+                    recording_handle = robot.get_current_recording_id()
+                    time.sleep(case.duration_sec)
+                else:
+                    # The very sequences log_frames will emit below.
+                    joint_ts, video_ts = recording_timestamps(spec, recording_ordinal)
+
+                    # Map the two stream sequences onto every trace they feed,
+                    # now that the recording key is known. Trace keys use
+                    # "data_type/data_type_name" to match the semantic keys
+                    # resolved from the DB in disk_helpers. data_type_name is the
+                    # storage name produced by validate_safe_name (e.g.
+                    # "vx300s_left\waist").
+                    from neuracore_types.utils import validate_safe_name
+
+                    by_trace: dict[str, list[float]] = {}
+                    for joint_name in joint_name_list:
+                        safe = validate_safe_name(joint_name)
+                        by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
+                        by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
+                        by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
+                    for camera in camera_name_list:
+                        safe_cam = validate_safe_name(camera)
+                        by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
+                    # CUSTOM_1D marker — name depends on producer_channels mode
+                    if case.producer_channels == PRODUCER_PER_THREAD:
+                        # One marker per joint data type thread
+                        for kind in JOINT_KINDS:
+                            safe_marker = validate_safe_name(f"marker_{kind}")
+                            by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
+                        for camera in camera_name_list:
+                            safe_marker = validate_safe_name(f"marker_{camera}")
+                            by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
+                    else:
+                        safe_marker = validate_safe_name("marker_synchronous")
+                        by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
+                    expected_by_recording[disk_recording_key] = (
+                        RecordingExpectedTimestamps(by_trace=by_trace)
+                    )
+
+                    current_marker_names = log_frames(
+                        spec,
+                        recording_index=recording_ordinal,
+                        marker_name="marker_synchronous",
+                    )
+                    if not marker_names:
+                        marker_names = current_marker_names
+
+                # Brackets the window's upper bound, the mirror of the start.
+                stop_called_at = time.time()
+                with Timer(
+                    case.stop_recording_sla_s,
+                    label="nc.stop_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
+                ):
+                    nc.stop_recording(
+                        robot_name=spec.robot_name,
+                        wait=case.wait,
+                        timestamp=recording_capture_stop_s,
+                    )
+                wall_stopped_at = time.time()
+
+                if continuous:
+                    bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
+                        handle=recording_handle,
+                        start_called_at=start_called_at,
+                        start_returned_at=start_returned_at,
+                        stop_called_at=stop_called_at,
+                        stop_returned_at=wall_stopped_at,
+                    )
+
+            if continuous_stop_event is not None:
+                # Give the still-running producer threads time to log a few
+                # more frames after the last stop_recording, exactly as a real
+                # camera would keep running past the end of a recording.
+                time.sleep(CONTINUOUS_LOGGING_TAIL_S)
+        finally:
+            # Always stop and join the continuous producer threads — even when
+            # the loop above raised — so no producer thread outlives this
+            # worker and confuses the daemon-cleanup assertions that run next.
+            if continuous_thread is not None:
+                continuous_stop_event.set()
+                continuous_thread.join()
+
+        if continuous_thread is not None:
+            continuous_error = continuous_outcome.get("error")
+            if continuous_error is not None:
+                raise RuntimeError(
+                    f"Continuous producer failed: {continuous_error}"
+                ) from continuous_error
+
+            report: dict[str, list[EmittedFrame]] = continuous_outcome.get("report", {})
+            # The producer reported every frame it logged over the whole
+            # context; each recording claims its own from the wall-clock
+            # brackets around its control calls.
+            for disk_key, bounds in bounds_by_disk_key.items():
+                inside_by_trace: dict[str, list[float]] = {}
+                unknowable_by_trace: dict[str, set[float]] = {}
+                for trace_key, frames in report.items():
+                    inside, unknowable = _classify_boundary_frames(frames, bounds)
+                    inside_by_trace[trace_key] = inside
+                    unknowable_by_trace[trace_key] = unknowable
+                expected_by_recording[disk_key] = RecordingExpectedTimestamps(
+                    by_trace=inside_by_trace,
+                    by_trace_unknowable=unknowable_by_trace,
+                )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
