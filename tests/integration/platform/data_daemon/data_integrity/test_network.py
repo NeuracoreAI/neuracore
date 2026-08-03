@@ -31,6 +31,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    PACING_BURST_VIDEO,
+    PRODUCER_CONTINUOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -43,6 +45,8 @@ _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    producer_pacing=PACING_BURST_VIDEO,
+    producer_channels=PRODUCER_CONTINUOUS,
 ).as_cases()
 
 
