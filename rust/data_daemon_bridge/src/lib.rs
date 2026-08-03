@@ -317,16 +317,11 @@ fn log_json(
 /// chunks are *not* sealed here — [`flush_source`] does that, and every caller
 /// must invoke it straight after this call.
 ///
-/// The stop is published BEFORE the writer flush barrier because it shares the
-/// calling thread's publisher with `StartRecording`, so sending it first is
-/// what guarantees the daemon sees this stop ahead of the next recording's
-/// start. Stamping the boundary early but sending after the flush let the stop
-/// reach the wire behind the following start, and the daemon then retired the
-/// wrong window and dropped both recordings' data.
-/// Late tail chunks (announced on the writer's port after this stop, by the
-/// flush barrier below) route into the just-closed window by the daemon's
-/// holdback + the `SourceFlushed` marker, so chunk-before-stop ordering is not
-/// required.
+/// The stop goes out BEFORE the writer flush barrier because it shares the
+/// calling thread's publisher with `StartRecording`: sending it first is what
+/// keeps the daemon from seeing this stop after the next recording's start.
+/// Late tail chunks still route into the just-closed window, via the daemon's
+/// holdback and the `SourceFlushed` marker.
 ///
 /// The producer stamps the window's upper bound on the publish clock here
 /// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
@@ -376,14 +371,27 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
-        // Then barrier on the writer: it drains every frame still queued for
-        // this source (FIFO), seals the tail chunks and announces them,
-        // publishes the `SourceFlushed` marker, then acks. Blocking here means
-        // `stop_recording` still returns only once those chunks are durably
-        // spooled + announced, so a process exit right after the call can't
-        // lose them. The tail chunks ride the writer's port and land after this
-        // stop; the daemon's holdback + that marker route them into the
-        // just-closed window by their in-window open timestamp.
+        // Split from [`flush_source`] so the caller can close its logging gate
+        // in between, rather than after a backlog-length barrier.
+        Ok(())
+    })
+}
+
+/// Run the writer's stop barrier for a source: drain every frame still queued
+/// for it (FIFO), seal and announce the tail chunks, publish the
+/// `SourceFlushed` marker, and drain the data publisher's queue onto the wire.
+///
+/// Mandatory after [`stop_recording`] — the tail chunks are sealed nowhere
+/// else. Blocking, so once it returns a process exit cannot lose them; the
+/// daemon's holdback and the `SourceFlushed` marker route them into the
+/// just-closed window. Idempotent.
+#[pyfunction]
+fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::FlushSource {
@@ -396,8 +404,8 @@ fn stop_recording(
         // onto the data publisher's queue, so the ack above means spooled and
         // queued, not published. Drain once more to put them on the wire.
         flush_published_data();
-        Ok(())
-    })
+    });
+    Ok(())
 }
 
 /// Cancel a recording — drop the source's in-progress chunk state without
@@ -548,6 +556,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
