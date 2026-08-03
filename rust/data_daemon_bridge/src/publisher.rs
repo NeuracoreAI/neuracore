@@ -524,6 +524,33 @@ fn clock_fallback_ns() -> i64 {
     BASE_NS.saturating_add(ANCHOR.elapsed().as_nanos() as i64)
 }
 
+fn send_until_delivered<F>(
+    mut send_once: F,
+    timeout: std::time::Duration,
+    retry_delay: std::time::Duration,
+) -> Result<(), ProducerError>
+where
+    F: FnMut() -> Result<usize, ProducerError>,
+{
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let recipients = send_once()?;
+
+        if recipients > 0 {
+            return Ok(());
+        }
+
+        if Instant::now() >= deadline {
+            return Err(ProducerError::Send(format!(
+                "no data-daemon command subscriber connected within {timeout:?}"
+            )));
+        }
+
+        std::thread::sleep(retry_delay);
+    }
+}
+
 /// Encode `envelope` and publish it on the commands service.
 pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     let bytes = envelope.encode()?;
@@ -535,14 +562,21 @@ pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
     }
     with_producer(|state| {
         let publisher = &state.commands_publisher;
-        let sample = publisher
-            .loan_slice_uninit(bytes.len())
-            .map_err(|error| ProducerError::Loan(error.to_string()))?;
-        let sample = sample.write_from_slice(&bytes);
-        sample
-            .send()
-            .map_err(|error| ProducerError::Send(error.to_string()))?;
-        Ok(())
+
+        send_until_delivered(
+            || {
+                let sample = publisher
+                    .loan_slice_uninit(bytes.len())
+                    .map_err(|error| ProducerError::Loan(error.to_string()))?;
+                let sample = sample.write_from_slice(&bytes);
+
+                sample
+                    .send()
+                    .map_err(|error| ProducerError::Send(error.to_string()))
+            },
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(10),
+        )
     })
 }
 
@@ -574,5 +608,22 @@ mod tests {
             let bytes = serde_json::to_vec(&ScalarFrameEntry { timestamp, value }).expect("encode");
             assert_eq!(String::from_utf8(bytes).unwrap(), expected);
         }
+    }
+
+    #[test]
+    fn command_send_retries_until_a_subscriber_receives_it() {
+        let mut attempts = 0;
+
+        let result = send_until_delivered(
+            || {
+                attempts += 1;
+                Ok(if attempts == 3 { 1 } else { 0 })
+            },
+            std::time::Duration::from_millis(50),
+            std::time::Duration::ZERO,
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(attempts, 3);
     }
 }

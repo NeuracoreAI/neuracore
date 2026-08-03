@@ -12,6 +12,8 @@ import logging
 from importlib import import_module
 from types import ModuleType
 
+from neuracore.data_daemon.daemon_control import ensure_daemon_running
+
 logger = logging.getLogger(__name__)
 
 _DATA_BRIDGE_MODULE: ModuleType | None = None
@@ -104,6 +106,7 @@ class RecordingContext:
         seconds), matching the ``log_*`` methods; when ``None`` the producer
         stamps the publish clock now.
         """
+        ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
         timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
 
