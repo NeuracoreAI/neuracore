@@ -77,6 +77,28 @@ LOG_LOOP_FREQUENCY_HZ = 60
 LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
 
 
+def rgb_frame_code(
+    *,
+    context_index: int,
+    recording_index: int,
+    camera_index: int,
+    frame_index: int,
+) -> int:
+    """Return the integer painted into a camera frame's pixels.
+
+    Frame codes must stay unique across contexts, recordings and cameras:
+    ``assertions.decode_frame_number`` reads them back out of the uploaded video
+    to identify frames. The single definition of that packing, so the producer
+    that paints a code and the assertion that predicts one cannot disagree.
+    """
+    return (
+        (context_index * 1_000_000_000)
+        + (recording_index * 10_000_000)
+        + (camera_index * 100_000)
+        + frame_index
+    )
+
+
 class EmittedFrame(NamedTuple):
     """One frame a continuous producer logged, bracketed on the wall clock.
 
@@ -87,7 +109,11 @@ class EmittedFrame(NamedTuple):
 
     Attributes:
         timestamp: The frame's own capture timestamp — the value that reaches
-            disk, and the only field the assertion compares.
+            disk, and the only field the on-disk assertion compares.
+        frame_index: The producer's session-wide frame index, which never resets
+            across recordings. Recovers the painted frame code (see
+            :func:`rgb_frame_code`) for the cloud assertion, which cannot derive
+            it from the recording ordinal the way bounded producers allow.
         emitted_at: Wall clock immediately before the ``log_*`` call.
         completed_at: Wall clock immediately after it returned.
         handle: The SDK recording handle latched immediately before the call,
@@ -96,9 +122,32 @@ class EmittedFrame(NamedTuple):
     """
 
     timestamp: float
+    frame_index: int
     emitted_at: float
     completed_at: float
     handle: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedFrameCodes:
+    """Camera frame codes one recording claimed, per camera name.
+
+    A continuous producer's frame index is session-wide, so the codes it painted
+    into a given recording's frames cannot be reconstructed from the recording
+    ordinal the way a bounded producer's can. The classification that decides
+    which frames the recording owns (:func:`_classify_boundary_frames`) already
+    knows them, so it reports them here instead.
+
+    Attributes:
+        inside: Codes of frames the recording provably owns, in emission order.
+            The cloud assertion requires every one of them to be present.
+        unknowable: Codes of frames logged while a boundary was passing. Allowed
+            to be present or absent — the same rule the on-disk assertion
+            applies to their timestamps.
+    """
+
+    inside: dict[str, list[int]]
+    unknowable: dict[str, set[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,6 +317,14 @@ class ContextResult:
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recording_indexes: list[int] = field(default_factory=list)
     source: tuple[str, int] = ("", 0)
+    observed_frame_codes: dict[str, ObservedFrameCodes] = field(default_factory=dict)
+    """Painted camera frame codes per recording, keyed by ``recording_index``.
+
+    Only populated for ``producer_channels="continuous"``, whose session-wide
+    frame index makes the codes unpredictable from the recording ordinal.
+    Empty for bounded producers, where ``assertions`` derives the expected codes
+    from the ordinal as before.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,13 +750,11 @@ class StreamEmitter:
         for camera_name, camera_index in zip(
             self.plan.channel_names, self.plan.camera_indexes
         ):
-            # Frame codes must stay unique across contexts, recordings and
-            # cameras: they are read back to identify frames.
-            frame_code = (
-                (self.context_index * 1_000_000_000)
-                + (self.recording_index * 10_000_000)
-                + (camera_index * 100_000)
-                + frame_index
+            frame_code = rgb_frame_code(
+                context_index=self.context_index,
+                recording_index=self.recording_index,
+                camera_index=camera_index,
+                frame_index=frame_index,
             )
             rgb_image = self.feed.render(frame_index, frame_code)
             with Timer(
@@ -933,6 +988,7 @@ def run_continuous_logging(
             emitter.emit(frame_index, timestamp)
             frame = EmittedFrame(
                 timestamp=timestamp,
+                frame_index=frame_index,
                 emitted_at=emitted_at,
                 completed_at=time.time(),
                 handle=handle,
@@ -950,7 +1006,7 @@ def run_continuous_logging(
 def _classify_boundary_frames(
     frames: list[EmittedFrame],
     bounds: RecordingControlBounds,
-) -> tuple[list[float], set[float]]:
+) -> tuple[list[EmittedFrame], list[EmittedFrame]]:
     """Split one trace's frames into those inside a recording and those unknowable.
 
     A producer that logs across the recording lifecycle is mid-loop when each
@@ -985,12 +1041,13 @@ def _classify_boundary_frames(
     more than a frame or two inside it.
 
     Returns:
-        ``(inside timestamps in order, unknowable timestamps)``. Frames that are
-        outside appear in neither, so the assertion requires them to be absent
-        from disk.
+        ``(inside frames in order, unknowable frames)``. Frames that are outside
+        appear in neither, so the assertions require them to be absent. Whole
+        frames rather than bare timestamps because the cloud assertion needs
+        their frame indexes too (see :func:`rgb_frame_code`).
     """
-    inside: list[float] = []
-    unknowable: set[float] = set()
+    inside: list[EmittedFrame] = []
+    unknowable: list[EmittedFrame] = []
     for frame in frames:
         is_inside = (
             frame.emitted_at >= bounds.start_returned_at
@@ -1000,9 +1057,9 @@ def _classify_boundary_frames(
             frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
         )
         if is_inside:
-            inside.append(frame.timestamp)
+            inside.append(frame)
         elif not is_outside:
-            unknowable.add(frame.timestamp)
+            unknowable.append(frame)
     return inside, unknowable
 
 
@@ -1173,6 +1230,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
+        observed_frame_codes: dict[str, ObservedFrameCodes] = {}
 
         continuous = case.producer_channels == PRODUCER_CONTINUOUS
         continuous_stop_event: threading.Event | None = None
@@ -1345,20 +1403,55 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     f"Continuous producer failed: {continuous_error}"
                 ) from continuous_error
 
+            from neuracore_types.utils import validate_safe_name
+
             report: dict[str, list[EmittedFrame]] = continuous_outcome.get("report", {})
+            # Camera trace key -> (camera name, camera index), so the classified
+            # frames of an RGB trace can be turned back into painted frame codes.
+            rgb_trace_cameras = {
+                f"RGB_IMAGES/{validate_safe_name(camera)}": (camera, camera_index)
+                for camera_index, camera in enumerate(camera_name_list)
+            }
             # The producer reported every frame it logged over the whole
             # context; each recording claims its own from the wall-clock
             # brackets around its control calls.
             for disk_key, bounds in bounds_by_disk_key.items():
                 inside_by_trace: dict[str, list[float]] = {}
                 unknowable_by_trace: dict[str, set[float]] = {}
+                codes_inside: dict[str, list[int]] = {}
+                codes_unknowable: dict[str, set[int]] = {}
                 for trace_key, frames in report.items():
                     inside, unknowable = _classify_boundary_frames(frames, bounds)
-                    inside_by_trace[trace_key] = inside
-                    unknowable_by_trace[trace_key] = unknowable
+                    inside_by_trace[trace_key] = [f.timestamp for f in inside]
+                    unknowable_by_trace[trace_key] = {f.timestamp for f in unknowable}
+
+                    camera = rgb_trace_cameras.get(trace_key)
+                    if camera is None:
+                        continue
+                    camera_name, camera_index = camera
+
+                    def _codes(frames: list[EmittedFrame], index: int = camera_index):
+                        return [
+                            rgb_frame_code(
+                                context_index=spec.context_index,
+                                # Matches run_continuous_logging's emitter, which
+                                # has no recording to name.
+                                recording_index=0,
+                                camera_index=index,
+                                frame_index=frame.frame_index,
+                            )
+                            for frame in frames
+                        ]
+
+                    codes_inside[camera_name] = _codes(inside)
+                    codes_unknowable[camera_name] = set(_codes(unknowable))
+
                 expected_by_recording[disk_key] = RecordingExpectedTimestamps(
                     by_trace=inside_by_trace,
                     by_trace_unknowable=unknowable_by_trace,
+                )
+                observed_frame_codes[disk_key] = ObservedFrameCodes(
+                    inside=codes_inside, unknowable=codes_unknowable
                 )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
@@ -1387,6 +1480,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 by_recording=expected_by_recording
             ),
             timer_stats=captured_timer_stats,
+            observed_frame_codes=observed_frame_codes,
         )
     except Exception:
         if robot is not None:
