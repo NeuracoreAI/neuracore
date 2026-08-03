@@ -934,7 +934,7 @@ impl ActorState {
     }
 
     async fn finalise_writer(
-        &self,
+        &mut self,
         writer: TraceWriterKind,
         context: &Arc<TraceActorContext>,
     ) -> Result<u64, FrameAppendError> {
@@ -990,6 +990,18 @@ impl ActorState {
                     let completed = result.outcome?;
                     completed_chunks.insert(result.chunk_index, completed);
                 }
+                // Restate the frame count from the finished chunk set rather
+                // than trusting the running total. That total is only bumped by
+                // `drain_completed_encodes`, the opportunistic mid-recording
+                // drain, so every chunk finished by the loop above — which is
+                // most of them for a short or bursty recording — was missing
+                // from it, and the finalise log under-reported by whole chunks.
+                // `completed_chunks` holds them all by this point, so it is the
+                // one place the true count is known.
+                self.frame_count = completed_chunks
+                    .values()
+                    .map(|chunk| chunk.frame_count as u64)
+                    .sum();
                 crate::perf_events::emit(
                     "video_encoding",
                     "completed",
@@ -1477,6 +1489,17 @@ mod tests {
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert!(trace.total_bytes > 0);
+
+        // Both chunks' frames must be counted. The running total is only bumped
+        // by the opportunistic mid-recording drain, so a chunk whose encode is
+        // still in flight when the window closes — both of them here — used to
+        // be missing from it, and the "trace finalised" log under-reported by
+        // whole chunks while the video on disk was complete.
+        assert_eq!(
+            state.frame_count, 8,
+            "finalised frame count must cover every chunk, not just those \
+             drained before close"
+        );
     }
 
     #[tokio::test]
