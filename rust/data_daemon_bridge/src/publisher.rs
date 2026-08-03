@@ -29,6 +29,12 @@
 //! publisher is safe. The queue is unbounded: messages are small/infrequent and
 //! the thread keeps up in steady state; a transient daemon stall buffers only a
 //! few hundred small items.
+//!
+//! Nothing bounds how much is pending at process exit, and no `Drop` impl,
+//! join, or `atexit` hook drains the queue — anything still in it when the
+//! process dies is discarded silently, never reaching the daemon.
+//! [`flush_published_data`] is the barrier against that; `stop_recording` calls
+//! it, so a recording's data is on the wire before the call returns.
 
 use std::cell::RefCell;
 use std::sync::mpsc::{Receiver, Sender};
@@ -138,6 +144,14 @@ pub(crate) enum PublishMsg {
     /// A pre-built `VideoChunkReady` envelope to announce (built by the writer
     /// thread once the chunk is sealed on disk).
     Announce(Envelope),
+    /// FIFO barrier: acked once every message queued *before* it has been
+    /// published. Because the queue is FIFO, the ack drains exactly the backlog
+    /// that existed at the moment the barrier was pushed — concurrent producers
+    /// enqueueing behind it cannot livelock the waiter.
+    Flush {
+        /// Signalled after the preceding backlog has been published.
+        ack: Sender<()>,
+    },
 }
 
 /// Process-wide publisher handle, healed across `fork` via `owner_pid` (mirrors
@@ -213,6 +227,26 @@ fn publisher_tx_global() -> (Sender<PublishMsg>, bool) {
     }
 }
 
+/// Block until every data envelope queued so far has been published.
+///
+/// The publisher thread is the only place `BatchedData` / `Data` /
+/// `VideoChunkReady` envelopes reach iceoryx2, and its queue is unbounded and
+/// undrained at exit — so a caller that needs its data to survive the process
+/// must reach this barrier first.
+///
+/// Returns `false` if the publisher thread is gone (spawn failure), so callers
+/// proceed rather than hang — a lost ack must never wedge `stop_recording`.
+pub(crate) fn flush_published_data() -> bool {
+    let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+    if publisher_tx()
+        .send(PublishMsg::Flush { ack: ack_tx })
+        .is_err()
+    {
+        return false;
+    }
+    ack_rx.recv().is_ok()
+}
+
 /// The publisher thread's run loop: publish every queued data envelope. Exits
 /// when the last [`Sender`] is dropped (the channel closes).
 fn publish_loop(rx: Receiver<PublishMsg>) {
@@ -279,6 +313,12 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 payload,
             }),
             PublishMsg::Announce(envelope) => publish(&envelope),
+            PublishMsg::Flush { ack } => {
+                // Everything queued ahead of this barrier has now been
+                // published. A dropped receiver just means the waiter gave up.
+                let _ = ack.send(());
+                Ok(())
+            }
         };
         if let Err(error) = result {
             tracing::warn!(%error, "failed to publish data envelope");
