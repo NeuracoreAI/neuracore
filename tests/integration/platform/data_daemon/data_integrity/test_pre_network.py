@@ -15,6 +15,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_disk_recording_properties,
+    assert_encoded_video_not_trivial,
     assert_lossy_only_video_artifacts,
 )
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
@@ -31,6 +32,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_REALISTIC,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -86,7 +88,9 @@ def test_disk_db_data_integrity(
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
                 if case.lossy_only:
-                    assert_lossy_only_video_artifacts()
+                    assert_lossy_only_video_artifacts(results)
+                elif case.has_video and case.video_detail == DETAIL_REALISTIC:
+                    assert_encoded_video_not_trivial(results)
 
         finally:
             set_case_analysis_report(

@@ -37,15 +37,10 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATASET_POLL_INTERVAL_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
-    FRAME_BYTE_LENGTH,
-    FRAME_COLOR_CHANNELS,
-    FRAME_DEFAULT_FILL_VALUE,
-    FRAME_GRID_SIZE,
-    FRAME_HALF_DIVISOR,
-    FRAME_MAX_COLOR_VALUE,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
@@ -54,6 +49,10 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
     random_phase_jitter_window,
+)
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    make_camera_feed,
+    prewarm_frame_bank,
 )
 
 logger = logging.getLogger(__name__)
@@ -68,86 +67,6 @@ VIDEO_STREAM = 1
 # Producer pacing for the performance suites
 LOG_LOOP_FREQUENCY_HZ = 60
 LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
-
-
-def encode_frame_number(
-    frame_num: int, width: int, height: int, out: np.ndarray | None = None
-) -> np.ndarray:
-    """Encode a frame number into the pixel data of a synthetic video frame.
-
-    The 16-byte big-endian representation of ``frame_num`` is written into the
-    top-left 4x4 grid of the image. For each pixel at ``(row, col)`` in that
-    grid the byte value is mapped to the RGB channels as follows:
-
-    - Red channel = ``byte_value``
-    - Green channel = ``FRAME_MAX_COLOR_VALUE - byte_value``
-    - Blue channel = ``byte_value // FRAME_HALF_DIVISOR``
-
-    The remaining pixels are filled with :data:`FRAME_DEFAULT_FILL_VALUE`.
-
-    Args:
-        frame_num: The frame number to embed. Must fit in 16 bytes (i.e.
-            less than ``2 ** 128``).
-        width: Frame width in pixels.
-        height: Frame height in pixels.
-        out: If given, write into this preallocated ``(height, width, 3)``
-            ``uint8`` array instead of allocating a new one, and skip the
-            fill (every grid cell is always overwritten below, so a buffer
-            filled once and reused is never left with stale pixels). Callers
-            that pass ``out`` must never retain the returned array past the
-            point where its contents may next be overwritten.
-
-    Returns:
-        A NumPy array with shape ``(height, width, 3)`` and dtype ``uint8``.
-    """
-    if out is None:
-        img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
-        img.fill(FRAME_DEFAULT_FILL_VALUE)
-    else:
-        img = out
-
-    frame_bytes = frame_num.to_bytes(FRAME_BYTE_LENGTH, byteorder="big")
-
-    for row in range(FRAME_GRID_SIZE):
-        for col in range(FRAME_GRID_SIZE):
-            idx = row * FRAME_GRID_SIZE + col
-            if idx < len(frame_bytes):
-                pixel_value = frame_bytes[idx]
-                img[row, col, 0] = pixel_value
-                img[row, col, 1] = FRAME_MAX_COLOR_VALUE - pixel_value
-                img[row, col, 2] = pixel_value // FRAME_HALF_DIVISOR
-
-    return img
-
-
-def preallocate_frame_buffer(
-    should_allocate: bool, image_width: int | None, image_height: int | None
-) -> np.ndarray | None:
-    """Preallocate and fill a reusable frame buffer, or return ``None``.
-
-    Callers that log video frames reuse a single buffer across iterations
-    (via :func:`encode_frame_number`'s ``out`` param) instead of allocating a
-    new one per frame, for a reduced memory footprint.
-
-    Args:
-        should_allocate: Whether this caller needs a buffer at all (e.g. the
-            recording has cameras, or this thread's role is "rgb").
-        image_width: Frame width in pixels, or ``None`` if not video.
-        image_height: Frame height in pixels, or ``None`` if not video.
-
-    Returns:
-        A preallocated, pre-filled ``(image_height, image_width, 3)``
-        ``uint8`` array, or ``None`` if ``should_allocate`` is ``False`` or
-        either dimension is ``None``.
-    """
-    if not should_allocate or image_width is None or image_height is None:
-        return None
-    frame_buffer = np.zeros(
-        (image_height, image_width, FRAME_COLOR_CHANNELS), dtype=np.uint8
-    )
-    frame_buffer.fill(FRAME_DEFAULT_FILL_VALUE)
-    encode_frame_number(0, image_width, image_height, out=frame_buffer)
-    return frame_buffer
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +113,7 @@ class ContextCaseSpec:
     video_fps: int
     wait: bool
     random_phase: bool
+    video_detail: str
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -353,6 +273,7 @@ def build_context_specs(
                     video_fps=case.video_fps,
                     wait=case.wait,
                     random_phase=case.random_phase,
+                    video_detail=case.video_detail,
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -446,6 +367,7 @@ def log_synchronous_frames(
     joint_fps: int,
     marker_name: str,
     context_index: int,
+    video_detail: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> None:
@@ -457,8 +379,8 @@ def log_synchronous_frames(
     Frames are interleaved in timestamp order so the daemon receives them the
     way a real producer would order them.
     """
-    frame_buffer = preallocate_frame_buffer(
-        bool(camera_name_list), image_width, image_height
+    camera_feed = make_camera_feed(
+        bool(camera_name_list), image_width, image_height, video_detail
     )
 
     joint_frame_count = len(joint_timestamps)
@@ -526,9 +448,9 @@ def log_synchronous_frames(
                     + (camera_index * 100_000)
                     + video_index
                 )
-                rgb_image = encode_frame_number(
-                    frame_code, image_width, image_height, out=frame_buffer
-                )
+                # video_index, not camera_index: every camera shows the same
+                # instant, distinguished only by its embedded frame code.
+                rgb_image = camera_feed.render(video_index, frame_code)
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
@@ -580,6 +502,7 @@ def run_threaded_logging(
     camera_name_list: list[str],
     image_width: int | None,
     image_height: int | None,
+    video_detail: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> list[str]:
@@ -607,7 +530,9 @@ def run_threaded_logging(
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
             timestamps = video_timestamps if is_rgb else joint_timestamps
-            frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            camera_feed = make_camera_feed(
+                is_rgb, image_width, image_height, video_detail
+            )
             for frame_index, timestamp in enumerate(timestamps):
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
@@ -621,9 +546,7 @@ def run_threaded_logging(
                             + (camera_index * 100_000)
                             + frame_index
                         )
-                        rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height, out=frame_buffer
-                        )
+                        rgb_image = camera_feed.render(frame_index, frame_code)
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
@@ -761,6 +684,7 @@ def log_frames(
             camera_name_list=camera_name_list,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
+            video_detail=spec.case.video_detail,
             assert_deadline=spec.assert_deadline,
             log_interval_s=spec.log_interval_s,
         )
@@ -777,6 +701,7 @@ def log_frames(
         joint_fps=spec.case.joint_fps,
         marker_name=marker_name,
         context_index=spec.context_index,
+        video_detail=spec.case.video_detail,
         assert_deadline=spec.assert_deadline,
         log_interval_s=spec.log_interval_s,
     )
@@ -838,6 +763,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     case = spec.case
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
+    if camera_name_list and case.video_detail == DETAIL_REALISTIC:
+        # Render the frame bank before anything is timed. It costs ~3.5s at
+        # 1080p, and the threaded producer's start barrier releases before each
+        # thread builds its feed — so a lazy build inside the camera thread would
+        # start the video stream seconds behind the joint streams, breaking the
+        # exact RGB-frames-per-sync-point match cloud verification asserts.
+        prewarm_frame_bank(case.image_width, case.image_height)
     marker_names: list[str] = []
     recording_ids: list[str] = []
     recording_indexes: list[int] = []

@@ -32,6 +32,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
@@ -42,6 +43,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     StopMethod,
     StorageStateAction,
+    VideoDetail,
 )
 
 logger = logging.getLogger(__name__)
@@ -172,6 +174,13 @@ class DataDaemonTestCase:
             recording, so RGB cameras upload a single lossy CRF-23 video and the
             lossless archive is dropped.  ``None`` keeps the default
             lossless+lossy behaviour.
+        video_detail: Pixel content of the synthetic camera frames.
+            ``"realistic"`` (default) renders a textured scene with a moving
+            object and sensor noise, so PNG compression and the daemon's encode
+            cost what they cost on a real camera.  ``"flat"`` keeps the cheap
+            solid-fill frames for cases that only care about frame counts.
+            Frame identity is embedded either way, so the disk timestamp and
+            frame-code assertions are unaffected by this choice.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -201,6 +210,7 @@ class DataDaemonTestCase:
     random_phase: bool = False
     skip: bool = False
     video_codec: str | None = None
+    video_detail: VideoDetail = DETAIL_REALISTIC
 
     @property
     def has_video(self) -> bool:

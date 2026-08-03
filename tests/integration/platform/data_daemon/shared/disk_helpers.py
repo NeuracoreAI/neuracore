@@ -12,6 +12,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MIN_ENCODED_BYTES_PER_PIXEL,
+)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
@@ -399,7 +402,91 @@ def _ffprobe_video_stream(video_path: Path) -> dict | None:
     return streams[0] if streams else None
 
 
-def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
+def _rgb_trace_dirs(
+    recordings_root: Path, results: Iterable[ContextResult]
+) -> list[Path]:
+    """Return the ``RGB_IMAGES`` trace directories of the recordings in *results*.
+
+    Scoped to *results* rather than walking the whole recordings root: under
+    ``storage_state_action="preserve"`` the root still holds every earlier
+    case's recordings, and those were made with a different codec and frame
+    content, so judging this case against them is meaningless.
+    """
+    recording_dirs = sorted({
+        recordings_root / recording_key
+        for result in results
+        for recording_key, _ in _result_recording_keys(result)
+    })
+    return [
+        trace_dir
+        for recording_dir in recording_dirs
+        for rgb_dir in [recording_dir / "RGB_IMAGES"]
+        if rgb_dir.is_dir()
+        for trace_dir in sorted(rgb_dir.iterdir())
+        if trace_dir.is_dir()
+    ]
+
+
+def assert_encoded_video_not_trivial(
+    results: list[ContextResult], min_trace_count: int = 1
+) -> None:
+    """Assert the encoded lossless video carries a realistic amount of data.
+
+    Guards the *frame content*, not the pipeline: solid-colour frames compress
+    ~620:1 losslessly, so a regression that quietly reverted the synthetic camera
+    frames to a flat fill would leave every other assertion in this suite passing
+    while the video pipeline did almost no work.
+
+    For every ``RGB_IMAGES`` trace, divides ``lossless.mp4``'s size by its frame
+    count and pixel count and requires the result to exceed
+    :data:`MIN_ENCODED_BYTES_PER_PIXEL`, which every resolution in this suite
+    clears by at least 11x while flat frames fall at least 3x below it.
+
+    Only meaningful for cases whose ``video_detail`` is ``DETAIL_REALISTIC`` and
+    which write a lossless archive, so callers must gate on both.
+
+    Args:
+        results: Per-context results whose recordings scope the check.
+        min_trace_count: Minimum number of RGB trace directories expected.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
+
+    trace_dirs = _rgb_trace_dirs(recordings_root, results)
+    assert len(trace_dirs) >= min_trace_count, (
+        f"expected at least {min_trace_count} RGB trace dir(s), "
+        f"found {len(trace_dirs)} under {recordings_root}"
+    )
+
+    for trace_dir in trace_dirs:
+        lossless_path = trace_dir / "lossless.mp4"
+        assert lossless_path.is_file(), f"missing lossless.mp4 in {trace_dir}"
+
+        stream = _ffprobe_video_stream(lossless_path)
+        if stream is None:
+            continue
+        width, height = stream.get("width"), stream.get("height")
+        nb_read_frames = stream.get("nb_read_frames")
+        if not width or not height or not nb_read_frames:
+            continue
+        frame_count, pixels = int(nb_read_frames), int(width) * int(height)
+        if frame_count <= 0 or pixels <= 0:
+            continue
+
+        encoded_bytes = lossless_path.stat().st_size
+        bytes_per_pixel = encoded_bytes / frame_count / pixels
+        assert bytes_per_pixel > MIN_ENCODED_BYTES_PER_PIXEL, (
+            f"{lossless_path} encodes {bytes_per_pixel:.4f} bytes/pixel "
+            f"({encoded_bytes} bytes, {frame_count} frames, {width}x{height}), "
+            f"at or below the {MIN_ENCODED_BYTES_PER_PIXEL} floor — the logged "
+            f"frames have regressed to near-trivial content and the video "
+            f"pipeline is not being exercised"
+        )
+
+
+def assert_lossy_only_video_artifacts(
+    results: list[ContextResult], min_trace_count: int = 1
+) -> None:
     """Assert every RGB video trace on disk is a single lossy H.264 video.
 
     For a recording made with ``nc.Codec.H264_MEDIUM`` the daemon writes only
@@ -410,24 +497,14 @@ def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
     - (when ffprobe is available) the video is H.264 and its frame count matches
       the per-frame ``trace.json`` sidecar.
 
-    Works identically for the Python and Rust daemons (both write the same
-    on-disk artefact layout).
-
     Args:
+        results: Per-context results whose recordings scope the check.
         min_trace_count: Minimum number of RGB trace directories expected.
     """
     recordings_root = get_daemon_recordings_root_path()
     assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
 
-    trace_dirs = [
-        trace_dir
-        for recording_dir in sorted(recordings_root.iterdir())
-        if recording_dir.is_dir()
-        for rgb_dir in [recording_dir / "RGB_IMAGES"]
-        if rgb_dir.is_dir()
-        for trace_dir in sorted(rgb_dir.iterdir())
-        if trace_dir.is_dir()
-    ]
+    trace_dirs = _rgb_trace_dirs(recordings_root, results)
     assert len(trace_dirs) >= min_trace_count, (
         f"expected at least {min_trace_count} RGB trace dir(s), "
         f"found {len(trace_dirs)} under {recordings_root}"
