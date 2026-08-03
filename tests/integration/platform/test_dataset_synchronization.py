@@ -60,6 +60,9 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_recordings_finalized,
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -269,6 +272,7 @@ def _collected_dataset(name_prefix: str) -> Iterator[Dataset]:
                 dataset.delete()
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to clean up dataset %s", dataset.id)
+        delete_cloud_robot(robot_name)
 
 
 # ---------------------------------------------------------------------------
@@ -440,3 +444,4 @@ def test_dataset_synchronization_after_mutation() -> None:
                 dataset.delete()
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to clean up dataset %s", dataset.id)
+        delete_cloud_robot(robot_name)

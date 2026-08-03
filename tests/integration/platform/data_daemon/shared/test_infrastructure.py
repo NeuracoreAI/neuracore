@@ -11,7 +11,7 @@ import logging
 import os
 import sqlite3
 import sys
-from collections.abc import Generator
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
+from neuracore.core.robot import Robot, get_robot_id_from_name
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case import build_test_case
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
+        ContextSpec,
     )
 
     DataDaemonTestCase = build_test_case.DataDaemonTestCase
@@ -104,24 +106,19 @@ def setup_per_test_artifact_dirs(
 
 
 @contextmanager
-def scoped_storage_state(
-    case: DataDaemonTestCase,
-    *,
-    dataset_name: str | None = None,
-) -> Generator[None]:
-    """Apply storage cleanup before and after the block.
+def scoped_storage_state(case: DataDaemonTestCase) -> Generator[None]:
+    """Apply local storage cleanup before and after the block.
 
-    ``"delete"`` removes the DB file, recordings folder, and the cloud dataset
-    (when ``dataset_name`` is provided).  ``"empty"`` clears DB tables and
-    deletes recordings folder contents.  ``"preserve"`` leaves all storage
-    untouched.
+    ``"delete"`` removes the DB file and recordings folder.  ``"empty"`` clears
+    DB tables and deletes recordings folder contents.  ``"preserve"`` leaves all
+    local storage untouched.
 
-    Does **not** start, stop, or signal any daemon process.
+    Does **not** start, stop, or signal any daemon process, and does not touch
+    cloud resources. Wrap it in cloud_resource_deleter to delete the cloud
+    dataset and robots.
 
     Args:
-        case: Test case whose ``storage_state_action`` controls cleanup.
-        dataset_name: Optional cloud dataset name to delete when
-            ``storage_state_action`` is ``"delete"``.
+        case: Test case whose ``storage_state_action`` controls local cleanup.
 
     Yields:
         ``None``.
@@ -145,18 +142,6 @@ def scoped_storage_state(
                 assert_deadline=False,
             ):
                 apply_storage_state_action(case.storage_state_action)
-        if (
-            dataset_name is not None
-            and case.storage_state_action == STORAGE_STATE_DELETE
-        ):
-            with report_step("Delete cloud test dataset"):
-                with Timer(
-                    60.0,
-                    label="cloud.dataset_delete",
-                    always_log=True,
-                    assert_deadline=False,
-                ):
-                    delete_cloud_dataset(dataset_name)
         assert_post_test_storage_state(
             storage_state_action=case.storage_state_action,
         )
@@ -228,7 +213,7 @@ def apply_storage_state_action(storage_state_action: str) -> None:
 
 
 def delete_cloud_dataset(dataset_name: str) -> None:
-    """Delete a cloud dataset when the storage action demands it.
+    """Delete a cloud dataset, logging a warning when the delete fails.
 
     Args:
         dataset_name: Name of the cloud dataset to delete.
@@ -236,11 +221,89 @@ def delete_cloud_dataset(dataset_name: str) -> None:
     try:
         ensure_login()
         nc.get_dataset(dataset_name).delete()
-        logger.info(
-            "Deleted cloud dataset %r (storage_state_action=delete)", dataset_name
-        )
+        logger.info("Deleted cloud dataset %r", dataset_name)
     except Exception:  # noqa: BLE001
         logger.warning("Failed to delete cloud dataset %r", dataset_name, exc_info=True)
+
+
+def delete_cloud_robot(robot_name: str) -> None:
+    """Delete a cloud robot by name, logging a warning when the delete fails.
+
+    Args:
+        robot_name: Name of the cloud robot to delete.
+    """
+    try:
+        ensure_login()
+        robot = Robot(robot_name, instance=0)
+        robot.id = get_robot_id_from_name(robot_name)
+        robot.delete()
+        logger.info("Deleted cloud robot %r", robot_name)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to delete cloud robot %r", robot_name, exc_info=True)
+
+
+def delete_cloud_resources(
+    dataset_name: str | None = None,
+    robot_names: Sequence[str] = (),
+) -> None:
+    """Delete the named cloud dataset and robots.
+
+    Args:
+        dataset_name: Name of the cloud dataset to delete, or None to skip.
+        robot_names: Names of the cloud robots to delete.
+    """
+    if dataset_name is not None:
+        delete_cloud_dataset(dataset_name)
+    for robot_name in robot_names:
+        delete_cloud_robot(robot_name)
+
+
+def cloud_resource_names(
+    specs: Sequence[ContextSpec],
+) -> tuple[str | None, list[str]]:
+    """Return the cloud dataset name and robot names the context specs refer to.
+
+    Args:
+        specs: Context specs to read the resource names from.
+
+    Returns:
+        A (dataset_name, robot_names) tuple. The dataset name is None when specs
+        is empty.
+    """
+    if not specs:
+        return None, []
+    return specs[0].dataset_name, [spec.robot_name for spec in specs]
+
+
+@contextmanager
+def cloud_resource_deleter(
+    dataset_name: str | None = None,
+    robot_names: Sequence[str] = (),
+) -> Generator[None]:
+    """Delete the named cloud dataset and robots when the block exits.
+
+    Cleanup runs whether the body succeeds or raises, and is skipped entirely
+    when no names are given.
+
+    Args:
+        dataset_name: Name of the cloud dataset to delete, or None to skip.
+        robot_names: Names of the cloud robots to delete.
+
+    Yields:
+        None.
+    """
+    try:
+        yield
+    finally:
+        if dataset_name is not None or robot_names:
+            with report_step("Delete cloud test resources"):
+                with Timer(
+                    60.0,
+                    label="cloud.resource_delete",
+                    always_log=True,
+                    assert_deadline=False,
+                ):
+                    delete_cloud_resources(dataset_name, robot_names)
 
 
 # ---------------------------------------------------------------------------
