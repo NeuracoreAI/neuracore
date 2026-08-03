@@ -49,7 +49,20 @@ logger = logging.getLogger(__name__)
 # cspell:ignore nstat retrans unacked
 
 HANG_DIAGNOSTICS_ENV = "NCD_HANG_DIAGNOSTICS"
-"""Set to ``1`` to dump socket and stack state while a call is still blocked."""
+"""Set to ``0`` to suppress socket and stack dumps for calls that are stuck.
+
+On by default: the stall this captures is rare and leaves no server-side trace,
+so a run that happens to hit one is worth catching first time.
+"""
+
+HANG_DIAGNOSTIC_MIN_BUDGET_S = 10.0
+"""Only watch calls whose own budget is at least this long.
+
+:class:`Timer` wraps every ``nc.log_*`` call — tens of thousands per case — so
+arming timers indiscriminately would cost far more than the diagnostics are
+worth. The stalls under investigation are cloud calls with budgets measured in
+tens of seconds, which this admits while excluding the per-frame logging path.
+"""
 
 HANG_DIAGNOSTIC_DELAYS_S = (15.0, 60.0, 240.0)
 """Seconds after a timed call starts at which to capture state, if still running.
@@ -118,14 +131,23 @@ def _dump_hang_diagnostics(label: str | None, waited_s: float) -> None:
     )
 
 
-def arm_hang_watchdogs(label: str | None) -> tuple[threading.Timer, ...]:
+def arm_hang_watchdogs(
+    label: str | None, budget_s: float
+) -> tuple[threading.Timer, ...]:
     """Schedule state captures for a call that has not returned yet.
+
+    Args:
+        label: The timer's label, used to identify the stuck call.
+        budget_s: The call's own deadline. Calls budgeted below
+            :data:`HANG_DIAGNOSTIC_MIN_BUDGET_S` are not watched.
 
     Returns:
         The scheduled timers, so the caller cancels them once the call
-        completes. Empty when diagnostics are disabled.
+        completes. Empty when diagnostics are off or the call is short.
     """
-    if os.environ.get(HANG_DIAGNOSTICS_ENV) != "1":
+    if os.environ.get(HANG_DIAGNOSTICS_ENV, "1") != "1":
+        return ()
+    if budget_s < HANG_DIAGNOSTIC_MIN_BUDGET_S:
         return ()
     watchdogs = []
     for delay_s in HANG_DIAGNOSTIC_DELAYS_S:
@@ -195,7 +217,7 @@ class Timer:
     def __enter__(self) -> Timer:
         self.wall_start = time.time()
         self.start = time.perf_counter()
-        self._hang_watchdogs = arm_hang_watchdogs(self.label)
+        self._hang_watchdogs = arm_hang_watchdogs(self.label, self.max_time)
         return self
 
     def __exit__(self, *args: object) -> bool | None:
