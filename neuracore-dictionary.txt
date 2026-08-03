@@ -60,6 +60,8 @@ childbody
 childinertia
 chonk
 chrono
+chunker
+chunker's
 CLIPMLP
 clippy
 CLOEXEC
@@ -82,8 +84,8 @@ concats
 condim
 condvar
 connectionstatechange
-conq
 Conq
+conq
 contype
 Conv
 convnet
@@ -100,8 +102,8 @@ dataformats
 dataid
 ddim
 DDIM
-ddpm
 DDPM
+ddpm
 debouncer
 delenv
 demux
@@ -110,6 +112,9 @@ demuxers
 demuxes
 denoise
 denoised
+denoiser
+denoiser's
+denoisers
 denoising
 Deque
 descheduled
@@ -146,8 +151,8 @@ execv
 expanduser
 extr
 extractall
-extrinsics
 Extrinsics
+extrinsics
 faceadr
 facecolor
 facenum
@@ -185,6 +190,7 @@ frontleft
 frontright
 fspath
 ftruncate
+Galliker
 gdown
 geglu
 gelu
@@ -200,8 +206,8 @@ ghjdidnia
 gitignored
 gptj
 GPTJ
-groot
 Groot
+groot
 hdlc
 hookwrapper
 hparams
@@ -222,6 +228,7 @@ imshow
 inertiafromgeom
 inertiagrouprange
 initargs
+inpainting
 inproc
 inspectable
 ipython
@@ -248,8 +255,8 @@ kwargs
 lavfi
 layernorm
 lecun
-lerobot
 LEROBOT
+lerobot
 levelname
 libavformat
 libc
@@ -276,8 +283,8 @@ manylinux
 matplotlib
 maturin
 maxs
-mcap
 MCAP
+mcap
 meanpooling
 memfd
 meshgrid
@@ -298,8 +305,8 @@ mpsa
 mpsc
 Mujoco
 mujocoinclude
-multihead
 Multihead
+multihead
 multinode
 multirun
 muxer
@@ -336,8 +343,8 @@ oneshot
 openarm
 openarm_description
 opencv
-openpi
 OPENPI
+openpi
 optim
 osmesa
 outc
@@ -345,6 +352,8 @@ outut
 overfit
 packb
 paligemma
+parameterisation
+parameterised
 parentbody
 parentid
 patchelf
@@ -448,9 +457,9 @@ setpriority
 setsid
 setuptools
 shadowsize
+SIGLIP
 siglip
 Siglip
-SIGLIP
 silu
 softmax
 solimp
@@ -474,8 +483,8 @@ teleop
 temb
 tensorboard
 testsrc
-tfds
 TFDS
+tfds
 tfrecord
 thiserror
 threadid
