@@ -52,7 +52,9 @@ use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
-use crate::publisher::{now_ns, publish, publisher_tx, ProducerError, PublishMsg};
+use crate::publisher::{
+    flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
+};
 use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
 use crate::writer::{writer_queue, FrameJob, WriterMsg};
 
@@ -291,8 +293,18 @@ fn log_json(
     Ok(())
 }
 
-/// Publish one `StopRecording`, then flush any tail video chunks for the
-/// source before returning. The stop is published BEFORE the flush barrier:
+/// Drain the data publisher, publish one `StopRecording`, then flush any tail
+/// video chunks for the source before returning.
+///
+/// Three barriers, in order: the data publisher's queue is drained first (so
+/// the recording's joint/JSON tail is on the wire before the window's upper
+/// bound is stamped), then the stop is published, then the writer is flushed
+/// and its chunk announcements drained. Together these make the call's
+/// post-condition uniform across every data path — once `stop_recording`
+/// returns, nothing belonging to the recording is still sitting in an
+/// in-process queue that a subsequent process exit would discard.
+///
+/// The stop is published BEFORE the writer flush barrier:
 /// it shares the calling thread's publisher with `StartRecording`, so sending
 /// it first guarantees the daemon sees this stop ahead of the next recording's
 /// start. Stamping the boundary early but sending only after a slow flush
@@ -322,6 +334,18 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
+        // Drain the data publisher before stamping the window's upper bound.
+        // `log_joint_*` / `log_json` only hand their envelope to the background
+        // publisher thread's unbounded queue, which nothing drains at process
+        // exit — so the recording's samples are only durable once this returns.
+        // Draining before the stop (rather than after) also puts them ahead of
+        // it on the wire, so they never depend on the daemon's closing-window
+        // retention to be routed.
+        //
+        // Ordering with the stop below is unaffected: data rides the background
+        // publisher's port, while `StartRecording`/`StopRecording` share the
+        // calling thread's own publisher and stay in program order on it.
+        flush_published_data();
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
@@ -354,6 +378,10 @@ fn stop_recording(
             ack: ack_tx,
         });
         let _ = ack_rx.recv();
+        // The writer announces its sealed tail chunks by pushing `Announce`
+        // onto the data publisher's queue, so the ack above means spooled and
+        // queued, not published. Drain once more to put them on the wire.
+        flush_published_data();
         Ok(())
     })
 }

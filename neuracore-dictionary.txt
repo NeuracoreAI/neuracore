@@ -20,6 +20,7 @@ asarray
 ascontiguousarray
 assimp
 asyncio
+atexit
 atfork
 attns
 autocast
@@ -262,6 +263,7 @@ libx
 linalg
 lineno
 listconfig
+livelock
 llava
 Llava
 logdir
