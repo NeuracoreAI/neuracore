@@ -73,6 +73,7 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
+        ObservedFrameCodes,
     )
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -368,19 +369,36 @@ def _assert_synced_camera_codes_are_sane(
     recording_index: int,
     camera_index: int,
     expected_video_frame_count: int,
+    observed_codes: ObservedFrameCodes | None = None,
 ) -> None:
     """Validate decoded camera frame codes without asserting sync-frame mapping.
 
     Only checks that synchronized episode camera frames still belong to the
     expected recording/camera code namespace, remain monotonic, and that no
     expected frame codes are missing.
+
+    *observed_codes* carries the codes a continuous producer actually painted
+    into this recording's frames. Such a producer numbers frames session-wide
+    rather than per recording, so the contiguous ``[base_code, base_code +
+    video_fps * duration - 1]`` range a bounded producer guarantees does not
+    apply and the codes are taken as reported instead. Its ``unknowable`` codes —
+    frames logged while a boundary was passing — are permitted but not required,
+    matching how ``disk_helpers`` treats their timestamps. ``None`` for bounded
+    producers, whose codes are still derived from the recording ordinal.
     """
-    base_code = frame_code_base(
-        context_index=context_index,
-        recording_ordinal=recording_index,
-        camera_index=camera_index,
-    )
-    max_code = base_code + max(expected_video_frame_count - 1, 0)
+    if observed_codes is not None:
+        expected_codes = set(observed_codes.inside.get(camera_name, ()))
+        tolerated_codes = expected_codes | set(
+            observed_codes.unknowable.get(camera_name, ())
+        )
+    else:
+        base_code = frame_code_base(
+            context_index=context_index,
+            recording_ordinal=recording_index,
+            camera_index=camera_index,
+        )
+        expected_codes = set(range(base_code, base_code + expected_video_frame_count))
+        tolerated_codes = expected_codes
 
     assert isinstance(actual_codes, list), (
         f"Frame codes for camera {camera_name!r} must be a list, "
@@ -399,13 +417,14 @@ def _assert_synced_camera_codes_are_sane(
             parts.append(f"*{entry}*" if j in highlight else entry)
         return "  ".join(parts)
 
-    def _out_of_range(codes, lo, hi):
-        return [(i, code) for i, code in enumerate(codes) if not (lo <= code <= hi)]
-
-    range_violations = _out_of_range(actual_codes, base_code, max_code)
+    range_violations = [
+        (i, code) for i, code in enumerate(actual_codes) if code not in tolerated_codes
+    ]
     assert not range_violations, "\n".join([
-        f"Frame codes out of expected recording range for camera {camera_name!r}:",
-        f"  expected all in [{base_code}, {max_code}],"
+        f"Frame codes outside this recording's own codes for camera "
+        f"{camera_name!r}:",
+        f"  expected all within {len(tolerated_codes)} code(s) spanning"
+        f" [{min(tolerated_codes)}, {max(tolerated_codes)}],"
         f" got {len(range_violations)} violation(s):",
         *[
             f"  [{i}]={c}\n    context: {_ctx(actual_codes, {i})}"
@@ -430,7 +449,6 @@ def _assert_synced_camera_codes_are_sane(
         ],
     ])
 
-    expected_codes = set(range(base_code, base_code + expected_video_frame_count))
     missing_codes = expected_codes - set(actual_codes)
 
     sample = []
@@ -559,6 +577,14 @@ def _verify_synched_episode_summary(
     # survive round-trip. Frame *counts* are asserted above either way.
     if case.lossy_only:
         return
+    # Continuous producers report the codes they actually painted, per recording;
+    # bounded ones leave this empty and the codes stay derived from the ordinal.
+    disk_key = (
+        str(result.recording_indexes[recording_index])
+        if recording_index < len(result.recording_indexes)
+        else ""
+    )
+    observed_codes = result.observed_frame_codes.get(disk_key)
     for camera_index, camera_name in enumerate(result.camera_names):
         _assert_synced_camera_codes_are_sane(
             actual_codes=summary["frame_codes"].get(camera_name),
@@ -567,6 +593,7 @@ def _verify_synched_episode_summary(
             recording_index=recording_index,
             camera_index=camera_index,
             expected_video_frame_count=result.video_frame_count,
+            observed_codes=observed_codes,
         )
 
 
