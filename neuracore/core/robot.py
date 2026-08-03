@@ -268,9 +268,8 @@ class Robot:
 
         Args:
             dataset_id: Unique identifier of the dataset to record into.
-            timestamp: Optional capture time (Unix seconds) for the recording's
-                start, matching the ``log_*`` methods. It pins the window's
-                lower bound; the producer stamps wall-clock now when omitted.
+
+
 
         Returns:
             A local correlation handle. The daemon owns recording identity and
@@ -291,20 +290,30 @@ class Robot:
         # wall-clock now, which is at or after this value, so notifications stay
         # orderable against it.
         start_time = timestamp if timestamp is not None else time.time()
-        self._get_daemon_recording_context().start_recording(
-            robot_id=self.id,
-            robot_instance=self.instance,
-            robot_name=self.name,
-            dataset_id=dataset_id,
-            dataset_name=None,
-            timestamp=timestamp,
-        )
+        # Open the local gate BEFORE announcing the window: opening it second
+        # would have the SDK silently discard in-window data. The gate is a
+        # deliberate superset, leaving the daemon to reject the early samples.
         get_recording_state_manager().recording_started(
             robot_id=self.id,
             instance=self.instance,
             recording_id=local_handle,
             start_time=start_time,
         )
+        try:
+            self._get_daemon_recording_context().start_recording(
+                robot_id=self.id,
+                robot_instance=self.instance,
+                robot_name=self.name,
+                dataset_id=dataset_id,
+                dataset_name=None,
+                timestamp=timestamp,
+            )
+        except Exception:
+            # The gate is open with no window behind it.
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=local_handle
+            )
+            raise
         return local_handle
 
     def stop_recording(
@@ -321,8 +330,9 @@ class Robot:
             recording_id: Unused — the daemon stops the active recording for
                 this source. Retained for call-site compatibility.
             timestamp: Optional capture time (Unix seconds) for the recording's
-                stop, matching the ``log_*`` methods. It pins the window's upper
-                bound; the producer stamps wall-clock now when omitted.
+                stop, matching the ``log_*`` methods. It is the reported stop
+                time, not the window's upper bound, which the daemon takes from
+                the publish stamp at the send.
 
         Raises:
             RobotError: If the robot is not initialized.
@@ -330,12 +340,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        active_handle = get_recording_state_manager().get_current_recording_id(
-            self.id, self.instance
-        )
-        get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=active_handle
-        )
+        # The gate closes inside the drain, not here.
         self._drain_streams_and_notify_daemon(recording_id, timestamp=timestamp)
 
     def _drain_streams_and_notify_daemon(
@@ -343,15 +348,41 @@ class Robot:
         recording_id: str | None,
         timestamp: float | None = None,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon."""
+        """Stop all streams and send the recording-stopped IPC message to the daemon.
+
+        The local ``log_*`` gate closes in the instant between the window
+        closing and the writer's tail-chunk barrier. Closing
+        it before the notify would silently discard data the daemon would still
+        have accepted — the window is open until it receives the stop. Closing it
+        after the barrier instead leaves it open for as long as the writer's
+        backlog takes to drain (over a second under burst logging), publishing
+        data the daemon has already stopped accepting and simply throws away.
+        """
         try:
             self._stop_all_streams()
-            self._get_daemon_recording_context().stop_recording(timestamp=timestamp)
+            context = self._get_daemon_recording_context()
+            try:
+                context.stop_recording(timestamp=timestamp)
+            finally:
+                # Both run even if the notify failed.
+                self._close_local_recording_gate()
+                context.flush_source()
         except Exception:
             logger.exception(
                 "Failed to stop streams and notify daemon for recording_id=%s",
                 recording_id,
             )
+
+    def _close_local_recording_gate(self) -> None:
+        """Clear the local recording handle that gates ``log_*`` forwarding."""
+        if not self.id:
+            return
+        state = get_recording_state_manager()
+        state.recording_stopped(
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=state.get_current_recording_id(self.id, self.instance),
+        )
 
     def _register_remote_stop_handler(self) -> None:
         """Register a callback to drain streams when a remote stop arrives."""
