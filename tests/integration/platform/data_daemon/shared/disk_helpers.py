@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     )
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
+        ObservedFrameCodes,
     )
 
 
@@ -752,6 +753,54 @@ def _frame_code_failure(
     )
 
 
+def _assert_observed_frame_codes(
+    *,
+    video_path: Path,
+    camera_name: str,
+    codes: list[int],
+    observed: ObservedFrameCodes,
+) -> None:
+    """Assert the archive holds the codes this recording's producer reported.
+
+    A producer that outlives the recording numbers its frames session-wide, so
+    the archive's codes start wherever that producer had got to rather than at
+    ``frame_code_base(...)``, and the contiguous range a producer scoped to one
+    recording guarantees says nothing here. What the producer *did* report is
+    exactly which codes this recording owns, so they are compared instead —
+    still strictly, because the archive is the captured sequence itself:
+
+    - every code the recording provably owns is present;
+    - nothing else is, beyond the codes logged while a boundary was passing,
+      which the daemon may keep or drop (the rule ``_assert_timestamps_match``
+      applies to their timestamps);
+    - and they appear in ascending order, so a duplicated or reordered frame
+      still has nowhere to hide.
+    """
+    owed = observed.inside.get(camera_name, [])
+    tolerated = set(owed) | observed.unknowable.get(camera_name, set())
+    prefix = f"{video_path} (camera {camera_name!r}):"
+
+    unexpected = [code for code in codes if code not in tolerated]
+    assert not unexpected, (
+        f"{prefix} {len(unexpected)} frame(s) the producer never logged into"
+        f" this recording — first few: {unexpected[:3]}"
+    )
+    missing = [code for code in owed if code not in set(codes)]
+    assert not missing, (
+        f"{prefix} {len(missing)} of the {len(owed)} frame(s) this recording"
+        f" provably owns are absent — first few: {missing[:3]}"
+    )
+    out_of_order = [
+        (index, code)
+        for index, code in enumerate(codes)
+        if index and code <= codes[index - 1]
+    ]
+    assert not out_of_order, (
+        f"{prefix} {len(out_of_order)} frame(s) repeat or run backwards —"
+        f" first few: {out_of_order[:3]}"
+    )
+
+
 def assert_disk_frame_codes(
     results: list[ContextResult], case: DataDaemonTestCase
 ) -> None:
@@ -818,6 +867,16 @@ def assert_disk_frame_codes(
                 codes = _decode_frame_codes(video_path)
                 if codes is None:
                     return
+
+                observed = result.observed_frame_codes.get(str(recording_index))
+                if observed is not None:
+                    _assert_observed_frame_codes(
+                        video_path=video_path,
+                        camera_name=camera_name,
+                        codes=codes,
+                        observed=observed,
+                    )
+                    continue
 
                 base_code = frame_code_base(
                     context_index=result.context_index,

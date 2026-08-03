@@ -386,6 +386,9 @@ class DataDaemonTestBatch:
             each case's own value alone.  A case whose shape cannot honour the
             batch's pacing raises ``ValueError`` at construction, so a
             batch-wide pacing must suit every case in the matrix.
+        video_detail: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.video_detail``.  ``None`` (default) leaves each
+            case's own value alone.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -397,6 +400,7 @@ class DataDaemonTestBatch:
     skip: bool = False
     producer_channels: str | None = None
     producer_pacing: ProducerPacing | None = None
+    video_detail: VideoDetail | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -415,6 +419,8 @@ class DataDaemonTestBatch:
             batch_overrides["producer_channels"] = self.producer_channels
         if self.producer_pacing is not None:
             batch_overrides["producer_pacing"] = self.producer_pacing
+        if self.video_detail is not None:
+            batch_overrides["video_detail"] = self.video_detail
         return [
             DataDaemonTestCase(**{
                 **{

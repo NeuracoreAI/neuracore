@@ -47,6 +47,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_REALISTIC,
     MAX_TIME_TO_START_S,
+    PRODUCER_PER_THREAD,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -61,6 +62,7 @@ _CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    producer_channels=PRODUCER_PER_THREAD,
 ).as_cases()
 
 
