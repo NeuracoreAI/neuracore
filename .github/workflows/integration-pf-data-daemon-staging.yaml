@@ -38,12 +38,12 @@ jobs:
         python-version: '3.11'
     - uses: pre-commit/action@v3.0.1
 
-  test:
+  functional:
     needs: pre-commit
     env:
-      NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging
-      NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
-      NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/daemon-phase-events.jsonl
+      NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging/functional
+      NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-functional-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
+      NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/functional/daemon-phase-events.jsonl
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
       NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
@@ -88,7 +88,7 @@ jobs:
     - name: Prepare performance report directories
       run: mkdir -p "$NCD_PERF_REPORT_DIR/allure-results" "$NCD_PERF_REPORT_DIR/metrics"
 
-    - name: Run Data Daemon Integration Tests
+    - name: Run Data Daemon Functional Tests
       env:
         NEURACORE_API_URL: https://staging.api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
@@ -106,7 +106,8 @@ jobs:
         --clean-alluredir
         --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
         --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
-        tests/integration/platform/data_daemon/
+        tests/integration/platform/data_daemon/behavioural_correctness/
+        tests/integration/platform/data_daemon/data_integrity/
 
     - name: Generate Allure performance report
       if: always()
@@ -140,7 +141,121 @@ jobs:
         REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
       run: |
         {
-          echo "### Data-daemon performance report"
+          echo "### Data-daemon performance report (functional)"
+          echo
+          echo "[Download the self-contained HTML report]($REPORT_URL)"
+          echo
+          echo "Download the HTML file and open it directly in a browser."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Show disk space after tests
+      if: always()
+      run: df -h /
+
+  performance:
+    # Runs after `functional` has drained, one matrix row at a time. The performance
+    # suite asserts wall-clock deadlines, and overlapping rows contend for both
+    # the runner pool and the shared staging backend, which makes those
+    # deadlines flaky.
+    needs: [pre-commit, functional]
+    if: ${{ !cancelled() }}
+    env:
+      NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging/performance
+      NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-performance-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
+      NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/performance/daemon-phase-events.jsonl
+      # Scheduled runs always capture metrics. A manual dispatch can disable
+      # them without changing the workflow.
+      NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      # Dispatch inputs narrow the axes; the literals are the fallback for
+      # scheduled runs, where the `inputs` context is empty and dispatch input
+      # defaults do not apply.
+      matrix:
+        python-version: ${{ fromJSON(inputs.python-version || '["3.10", "3.14"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
+
+    steps:
+    - name: Show disk space
+      run: df -h /
+
+    - name: Checkout test harness
+      uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
+      with:
+        environment: staging
+        ref: ${{ inputs.ref }}
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+
+    - name: Set up neuracore with Rust data daemon
+      uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
+      with:
+        checkout: "false"
+        path: "."
+        extras: dev
+
+    - name: Prepare performance report directories
+      run: mkdir -p "$NCD_PERF_REPORT_DIR/allure-results" "$NCD_PERF_REPORT_DIR/metrics"
+
+    - name: Run Data Daemon Performance Tests
+      env:
+        NEURACORE_API_URL: https://staging.api.neuracore.com/api
+        NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
+        NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
+        NEURACORE_PROVIDE_LIVE_DATA: false
+
+      # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
+      # namespaces live log lines by worker process so interleaved context output
+      # stays attributable.
+      run: >-
+        pytest -o log_cli=true --log-cli-level=INFO
+        -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
+        --import-mode=importlib
+        --alluredir="$NCD_PERF_REPORT_DIR/allure-results"
+        --clean-alluredir
+        --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
+        --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
+        tests/integration/platform/data_daemon/performance/
+
+    - name: Generate Allure performance report
+      if: always()
+      run: |
+        if find "$NCD_PERF_REPORT_DIR/allure-results" -type f -print -quit | grep -q .; then
+          npx --yes allure@3.14.3 awesome \
+            --single-file \
+            --output "$NCD_PERF_REPORT_DIR/allure-report" \
+            "$NCD_PERF_REPORT_DIR/allure-results"
+          cp "$NCD_PERF_REPORT_DIR/allure-report/index.html" \
+            "$NCD_PERF_REPORT_HTML"
+        else
+          echo "No Allure results were produced"
+        fi
+
+    # Upload Allure's self-contained page directly, without archiving the raw
+    # results, generated assets, metrics, or logs alongside it.
+    - name: Upload HTML performance report
+      id: upload-performance-report
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        path: ${{ env.NCD_PERF_REPORT_HTML }}
+        archive: false
+        if-no-files-found: warn
+        retention-days: 14
+
+    - name: Add performance report to job summary
+      if: always() && steps.upload-performance-report.outputs.artifact-url != ''
+      env:
+        REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
+      run: |
+        {
+          echo "### Data-daemon performance report (performance)"
           echo
           echo "[Download the self-contained HTML report]($REPORT_URL)"
           echo
