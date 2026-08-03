@@ -89,6 +89,24 @@ LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
 _JOINT_DATA_TYPES = {kind: kind.upper() for kind in JOINT_KINDS}
 
 
+def rgb_frame_code(
+    *,
+    context_index: int,
+    recording_index: int,
+    camera_index: int,
+    frame_index: int,
+) -> int:
+    """Return the integer painted into a camera frame's pixels."""
+    return (
+        frame_code_base(
+            context_index=context_index,
+            recording_ordinal=recording_index,
+            camera_index=camera_index,
+        )
+        + frame_index
+    )
+
+
 class EmittedFrame(NamedTuple):
     """One frame a producer logged, bracketed on the wall clock.
 
@@ -104,7 +122,11 @@ class EmittedFrame(NamedTuple):
 
     Attributes:
         timestamp: The frame's own capture timestamp — the value that reaches
-            disk, and the only field the assertion compares.
+            disk, and the only field the on-disk assertion compares.
+        frame_index: The producer's session-wide frame index, which never resets
+            across recordings. Recovers the painted frame code (see
+            :func:`rgb_frame_code`) for the cloud assertion, which cannot derive
+            it from the recording ordinal the way bounded producers allow.
         emitted_at: Wall clock immediately before the ``log_*`` call.
         completed_at: Wall clock immediately after it returned.
         handle: The SDK recording handle latched immediately before the call,
@@ -113,9 +135,32 @@ class EmittedFrame(NamedTuple):
     """
 
     timestamp: float
+    frame_index: int
     emitted_at: float
     completed_at: float
     handle: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservedFrameCodes:
+    """Camera frame codes one recording claimed, per camera name.
+
+    A continuous producer's frame index is session-wide, so the codes it painted
+    into a given recording's frames cannot be reconstructed from the recording
+    ordinal the way a bounded producer's can. The classification that decides
+    which frames the recording owns (:func:`_classify_boundary_frames`) already
+    knows them, so it reports them here instead.
+
+    Attributes:
+        inside: Codes of frames the recording provably owns, in emission order.
+            The cloud assertion requires every one of them to be present.
+        unknowable: Codes of frames logged while a boundary was passing. Allowed
+            to be present or absent — the same rule the on-disk assertion
+            applies to their timestamps.
+    """
+
+    inside: dict[str, list[int]]
+    unknowable: dict[str, set[int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,6 +343,7 @@ class ContextResult:
     depth_frame_count: int = 0
     depth_mode: DepthMode = "float32"
     has_depth: bool = False
+    observed_frame_codes: dict[str, ObservedFrameCodes] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -569,6 +615,55 @@ class StreamPlan:
         return keys
 
 
+def _per_camera_plans(
+    kind: str,
+    camera_name_list: list[str],
+    video_fps: int,
+    *,
+    depth_mode: DepthMode = "float32",
+) -> list[StreamPlan]:
+    """One stream per camera of *kind*, each carrying its own marker.
+
+    The threaded and continuous producers give every camera its own thread, so
+    every camera also gets its own marker series.
+    """
+    return [
+        StreamPlan(
+            name=kind,
+            marker_name=f"marker_{camera_name}",
+            fps=video_fps,
+            channel_names=(camera_name,),
+            camera_indexes=(camera_index,),
+            depth_mode=depth_mode,
+        )
+        for camera_index, camera_name in enumerate(camera_name_list)
+    ]
+
+
+def _bundled_camera_plan(
+    kind: str,
+    camera_name_list: list[str],
+    video_fps: int,
+    *,
+    depth_mode: DepthMode = "float32",
+) -> StreamPlan | None:
+    """One stream covering every camera of *kind*, or ``None`` if there are none.
+
+    The synchronous producer logs all of a kind's cameras at each video
+    timestamp from one thread, and emits a single marker series of its own, so
+    these plans carry no marker.
+    """
+    if not camera_name_list:
+        return None
+    return StreamPlan(
+        name=kind,
+        fps=video_fps,
+        channel_names=tuple(camera_name_list),
+        camera_indexes=tuple(range(len(camera_name_list))),
+        depth_mode=depth_mode,
+    )
+
+
 def build_stream_plans(
     *,
     joint_names: list[str],
@@ -580,28 +675,9 @@ def build_stream_plans(
 ) -> list[StreamPlan]:
     """Decompose a workload into one stream per camera and per joint data type."""
     return [
-        *(
-            StreamPlan(
-                name="rgb",
-                marker_name=f"marker_{camera_name}",
-                fps=video_fps,
-                channel_names=(camera_name,),
-                camera_indexes=(camera_index,),
-            )
-            for camera_index, camera_name in enumerate(camera_name_list)
-        ),
-        *(
-            StreamPlan(
-                name="depth",
-                marker_name=f"marker_{depth_camera_name}",
-                fps=video_fps,
-                channel_names=(depth_camera_name,),
-                camera_indexes=(depth_camera_index,),
-                depth_mode=depth_mode,
-            )
-            for depth_camera_index, depth_camera_name in enumerate(
-                depth_camera_name_list
-            )
+        *_per_camera_plans("rgb", camera_name_list, video_fps),
+        *_per_camera_plans(
+            "depth", depth_camera_name_list, video_fps, depth_mode=depth_mode
         ),
         *(
             StreamPlan(
@@ -640,26 +716,9 @@ def build_synchronous_stream_plans(
         channel_names=tuple(joint_names),
         joint_kinds=JOINT_KINDS,
     )
-    video_plan = (
-        StreamPlan(
-            name="rgb",
-            fps=video_fps,
-            channel_names=tuple(camera_name_list),
-            camera_indexes=tuple(range(len(camera_name_list))),
-        )
-        if camera_name_list
-        else None
-    )
-    depth_plan = (
-        StreamPlan(
-            name="depth",
-            fps=video_fps,
-            channel_names=tuple(depth_camera_name_list),
-            camera_indexes=tuple(range(len(depth_camera_name_list))),
-            depth_mode=depth_mode,
-        )
-        if depth_camera_name_list
-        else None
+    video_plan = _bundled_camera_plan("rgb", camera_name_list, video_fps)
+    depth_plan = _bundled_camera_plan(
+        "depth", depth_camera_name_list, video_fps, depth_mode=depth_mode
     )
     return joint_plan, video_plan, depth_plan
 
@@ -748,15 +807,11 @@ class StreamEmitter:
         for camera_name, camera_index in zip(
             self.plan.channel_names, self.plan.camera_indexes
         ):
-            # Frame codes must stay unique across contexts, recordings and
-            # cameras: they are read back to identify frames.
-            frame_code = (
-                frame_code_base(
-                    context_index=self.context_index,
-                    recording_ordinal=self.recording_index,
-                    camera_index=camera_index,
-                )
-                + frame_index
+            frame_code = rgb_frame_code(
+                context_index=self.context_index,
+                recording_index=self.recording_index,
+                camera_index=camera_index,
+                frame_index=frame_index,
             )
             rgb_image = self.feed.render(frame_index, frame_code)
             with Timer(
@@ -1026,6 +1081,7 @@ def _emit_and_record(
         emitter,
         EmittedFrame(
             timestamp=timestamp,
+            frame_index=frame_index,
             emitted_at=emitted_at,
             completed_at=time.time(),
             handle=handle,
@@ -1218,6 +1274,15 @@ class ProducerSession(ABC):
         )
 
     @abstractmethod
+    def frame_code_recording_index(self, recording_ordinal: int) -> int:
+        """Recording ordinal this producer painted *recording_ordinal*'s frames under.
+
+        Frame codes are namespaced by the recording they belong to (see
+        :func:`rgb_frame_code`), which only a producer that restarts with each
+        recording can name.
+        """
+
+    @abstractmethod
     def start(self) -> None:
         """Begin producing, if this producer starts before any recording."""
 
@@ -1254,6 +1319,10 @@ class BoundedProducerSession(ProducerSession):
         self._engine = engine
         self._report = FrameReport()
         self._runs: list[tuple[int, dict[str, list[EmittedFrame]]]] = []
+
+    def frame_code_recording_index(self, recording_ordinal: int) -> int:
+        """Its own ordinal: this producer's frame index restarts every recording."""
+        return recording_ordinal
 
     def start(self) -> None:
         """Nothing to start: this producer only runs inside a recording."""
@@ -1313,6 +1382,14 @@ class LifetimeProducerSession(ProducerSession):
         self._thread: threading.Thread | None = None
         self._frames: dict[str, list[EmittedFrame]] = {}
         self._error: BaseException | None = None
+
+    def frame_code_recording_index(self, recording_ordinal: int) -> int:
+        """Always ``0``: no recording was current when these frames were numbered.
+
+        The frame index is session-wide and never resets, so it keeps the codes
+        unique on its own — see :func:`run_per_thread_logging`.
+        """
+        return 0
 
     def start(self) -> None:
         """Start logging now, before any recording exists."""
@@ -1393,7 +1470,7 @@ def make_producer_session(
 def _classify_boundary_frames(
     frames: list[EmittedFrame],
     bounds: RecordingControlBounds,
-) -> tuple[list[float], set[float]]:
+) -> tuple[list[EmittedFrame], list[EmittedFrame]]:
     """Split one trace's frames into those inside a recording and those unknowable.
 
     A producer that logs across the recording lifecycle is mid-loop when each
@@ -1428,12 +1505,13 @@ def _classify_boundary_frames(
     more than a frame or two inside it.
 
     Returns:
-        ``(inside timestamps in order, unknowable timestamps)``. Frames that are
-        outside appear in neither, so the assertion requires them to be absent
-        from disk.
+        ``(inside frames in order, unknowable frames)``. Frames that are outside
+        appear in neither, so the assertions require them to be absent. Whole
+        frames rather than bare timestamps because the cloud assertion needs
+        their frame indexes too (see :func:`rgb_frame_code`).
     """
-    inside: list[float] = []
-    unknowable: set[float] = set()
+    inside: list[EmittedFrame] = []
+    unknowable: list[EmittedFrame] = []
     for frame in frames:
         is_inside = (
             frame.emitted_at >= bounds.start_returned_at
@@ -1443,9 +1521,9 @@ def _classify_boundary_frames(
             frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
         )
         if is_inside:
-            inside.append(frame.timestamp)
+            inside.append(frame)
         elif not is_outside:
-            unknowable.add(frame.timestamp)
+            unknowable.append(frame)
     return inside, unknowable
 
 
@@ -1590,6 +1668,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
+        observed_frame_codes: dict[str, ObservedFrameCodes] = {}
+        ordinal_by_disk_key: dict[str, int] = {}
 
         # One protocol for every producer: which engine runs, how many threads
         # it uses and whether it outlives these recordings are all the
@@ -1659,27 +1739,71 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     stop_called_at=stop_called_at,
                     stop_returned_at=wall_stopped_at,
                 )
+                ordinal_by_disk_key[disk_recording_key] = recording_ordinal
         finally:
             # Always stop the producer — even when the loop above raised — so
             # no producer thread outlives this worker and confuses the
             # daemon-cleanup assertions that run next.
             session.finish()
 
+        from neuracore_types.utils import validate_safe_name
+
+        # Camera trace key -> (camera name, camera index), so the classified
+        # frames of an RGB trace can be turned back into painted frame codes.
+        rgb_trace_cameras = {
+            f"RGB_IMAGES/{validate_safe_name(camera)}": (camera, camera_index)
+            for camera_index, camera in enumerate(camera_name_list)
+        }
         # The producer reported every frame it logged; each recording claims
         # its own from the wall-clock brackets around its control calls. A
         # producer scoped to one recording logged all of its frames well inside
         # those brackets, so the same rule simply finds them all.
         report = session.report()
         for disk_key, bounds in bounds_by_disk_key.items():
+            # Which recording the frames of this one were painted under: its
+            # own ordinal for a producer scoped to it, and none at all for one
+            # numbering frames session-wide.
+            code_recording_index = session.frame_code_recording_index(
+                ordinal_by_disk_key[disk_key]
+            )
             inside_by_trace: dict[str, list[float]] = {}
             unknowable_by_trace: dict[str, set[float]] = {}
+            codes_inside: dict[str, list[int]] = {}
+            codes_unknowable: dict[str, set[int]] = {}
             for trace_key, frames in report.items():
                 inside, unknowable = _classify_boundary_frames(frames, bounds)
-                inside_by_trace[trace_key] = inside
-                unknowable_by_trace[trace_key] = unknowable
+                inside_by_trace[trace_key] = [f.timestamp for f in inside]
+                unknowable_by_trace[trace_key] = {f.timestamp for f in unknowable}
+
+                camera = rgb_trace_cameras.get(trace_key)
+                if camera is None:
+                    continue
+                camera_name, camera_index = camera
+
+                def _codes(
+                    frames: list[EmittedFrame],
+                    index: int = camera_index,
+                    recording_index: int = code_recording_index,
+                ):
+                    return [
+                        rgb_frame_code(
+                            context_index=spec.context_index,
+                            recording_index=recording_index,
+                            camera_index=index,
+                            frame_index=frame.frame_index,
+                        )
+                        for frame in frames
+                    ]
+
+                codes_inside[camera_name] = _codes(inside)
+                codes_unknowable[camera_name] = set(_codes(unknowable))
+
             expected_by_recording[disk_key] = RecordingExpectedTimestamps(
                 by_trace=inside_by_trace,
                 by_trace_unknowable=unknowable_by_trace,
+            )
+            observed_frame_codes[disk_key] = ObservedFrameCodes(
+                inside=codes_inside, unknowable=codes_unknowable
             )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
@@ -1714,6 +1838,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             ),
             depth_mode=case.depth_mode,
             has_depth=bool(depth_camera_name_list),
+            observed_frame_codes=observed_frame_codes,
         )
     except Exception:
         if robot is not None:
