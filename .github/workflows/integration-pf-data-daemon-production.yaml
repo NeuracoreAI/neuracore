@@ -103,10 +103,11 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1
-      # Run the performance suite on a single matrix row to limit wasted actions runner time.
+      # Pinned rather than driven by the workflow inputs: the performance suite is
+      # the expensive half of this workflow, so it runs one Python on each OS.
       matrix:
-        python-version: ${{ fromJSON(inputs.python-version || '["3.14"]') }}
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04"]') }}
+        python-version: ["3.14"]
+        os: ["ubuntu-24.04", "macos-26"]
 
     steps:
     - name: Show disk space
