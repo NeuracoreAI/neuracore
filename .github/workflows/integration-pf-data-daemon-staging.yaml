@@ -170,12 +170,10 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 1
-      # Dispatch inputs narrow the axes; the literals are the fallback for
-      # scheduled runs, where the `inputs` context is empty and dispatch input
-      # defaults do not apply.
+      # Run the performance suite on a single matrix row to limit wasted actions runner time.
       matrix:
-        python-version: ${{ fromJSON(inputs.python-version || '["3.10", "3.14"]') }}
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
+        python-version: ${{ fromJSON(inputs.python-version || '["3.14"]') }}
+        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04"]') }}
 
     steps:
     - name: Show disk space
