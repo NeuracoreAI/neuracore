@@ -11,6 +11,9 @@ from neuracore.core import robot as core_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError
+from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
+    StreamManagerOrchestrator,
+)
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -60,6 +63,46 @@ def test_logout(temp_config_dir, monkeypatch):
         config = json.load(f)
         assert config["api_key"] is None
         assert config["current_org_id"] is None
+
+
+def test_logout_shuts_down_streaming_before_clearing_auth(monkeypatch):
+    """Auth must remain valid until every streaming task has been stopped."""
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        StreamManagerOrchestrator,
+        "shutdown_global",
+        lambda: calls.append("streaming_shutdown"),
+    )
+    monkeypatch.setattr(
+        api_core.get_auth(),
+        "logout",
+        lambda: calls.append("auth_logout"),
+    )
+
+    nc.logout()
+
+    assert calls == ["streaming_shutdown", "auth_logout"]
+
+
+def test_logout_still_clears_auth_when_streaming_shutdown_fails(monkeypatch):
+    """A cleanup failure must not leave credentials active."""
+    auth_logout = Mock()
+
+    def fail_shutdown() -> None:
+        raise RuntimeError("streaming cleanup failed")
+
+    monkeypatch.setattr(
+        StreamManagerOrchestrator,
+        "shutdown_global",
+        fail_shutdown,
+    )
+    monkeypatch.setattr(api_core.get_auth(), "logout", auth_logout)
+
+    with pytest.raises(RuntimeError, match="streaming cleanup failed"):
+        nc.logout()
+
+    auth_logout.assert_called_once_with()
 
 
 def test_auth_instance_singleton():

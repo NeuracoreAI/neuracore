@@ -103,7 +103,15 @@ def logout() -> None:
     Logs out from the Neuracore server and resets all global state including
     active robots, recording IDs, dataset IDs, and version validation status.
     """
-    get_auth().logout()
+    # Streaming tasks use the shared Auth instance at execution time. Stop and
+    # drain them before clearing its token so an in-flight heartbeat or track
+    # submission cannot become an unauthenticated background exception.
+    try:
+        StreamManagerOrchestrator.shutdown_global()
+    finally:
+        # Clearing local credentials must not be skipped if resource cleanup
+        # itself encounters an unexpected failure.
+        get_auth().logout()
     GlobalSingleton()._active_robot = None
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._active_dataset = None
