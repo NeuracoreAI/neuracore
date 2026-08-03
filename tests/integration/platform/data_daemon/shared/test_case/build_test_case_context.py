@@ -65,6 +65,10 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 JOINT_STREAM = 0
 VIDEO_STREAM = 1
 
+# Producer pacing for the performance suites
+LOG_LOOP_FREQUENCY_HZ = 60
+LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
+
 
 def encode_frame_number(
     frame_num: int, width: int, height: int, out: np.ndarray | None = None
@@ -288,6 +292,7 @@ class ContextSpec:
     timestamp_start_s: float
     timestamp_end_s: float
     assert_deadline: bool = False
+    log_interval_s: float = 0.0
 
 
 def build_context_specs(
@@ -295,7 +300,13 @@ def build_context_specs(
     dataset_name: str | None = None,
     assert_deadline: bool = False,
 ) -> list[ContextSpec]:
-    """Build per-context worker specs for a matrix case."""
+    """Build per-context worker specs for a matrix case.
+
+    ``assert_deadline`` is the performance suites' marker: besides arming the
+    ``Timer`` deadline assertions it switches on producer pacing, so those suites
+    emit at :data:`LOG_LOOP_FREQUENCY_HZ` instead of saturating the daemon's RGB
+    spool.
+    """
     specs: list[ContextSpec] = []
     timestamp_stagger_s = case.duration_sec / 2.0
     base_recordings_per_context = case.recording_count // case.parallel_contexts
@@ -354,6 +365,7 @@ def build_context_specs(
                     timestamp_start_s + context_duration_sec * recordings_for_context
                 ),
                 assert_deadline=assert_deadline,
+                log_interval_s=LOG_LOOP_INTERVAL_S if assert_deadline else 0.0,
             )
         )
     return specs
@@ -435,13 +447,15 @@ def log_synchronous_frames(
     marker_name: str,
     context_index: int,
     assert_deadline: bool = False,  # only set by performance tests
+    log_interval_s: float = 0.0,  # only set by performance tests
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
     Both timestamp sequences are precomputed by the caller and emitted as fast
-    as the transport allows — there is no wall-clock pacing.  Frames are
-    interleaved in timestamp order so the daemon receives them the way a
-    real producer would order them.
+    as the transport allows, save for the fixed *log_interval_s* sleep after
+    each iteration — the timestamps themselves are never paced to wall clock.
+    Frames are interleaved in timestamp order so the daemon receives them the
+    way a real producer would order them.
     """
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
@@ -528,6 +542,9 @@ def log_synchronous_frames(
                     )
             video_index += 1
 
+        if log_interval_s:
+            time.sleep(log_interval_s)
+
 
 def build_thread_roles(
     *,
@@ -564,13 +581,17 @@ def run_threaded_logging(
     image_width: int | None,
     image_height: int | None,
     assert_deadline: bool = False,  # only set by performance tests
+    log_interval_s: float = 0.0,  # only set by performance tests
 ) -> list[str]:
     """Run logging across multiple threads, one per data role.
 
     Every role emits the timestamp sequence its stream was given, as fast as the
-    transport allows — there is no wall-clock pacing.  All joint roles share the
-    joint sequence, so the three joint data types stay aligned exactly as they
-    do in the synchronous producer.
+    transport allows, save for the fixed *log_interval_s* sleep after each
+    iteration — the timestamps themselves are never paced to wall clock.  Each
+    role paces its own stream, so the rgb roles that feed the daemon's spool are
+    capped independently of the joint roles.  All joint roles share the joint
+    sequence, so the three joint data types stay aligned exactly as they do in
+    the synchronous producer.
     """
     roles = build_thread_roles(
         joint_names=joint_names, camera_name_list=camera_name_list
@@ -663,6 +684,8 @@ def run_threaded_logging(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+                if log_interval_s:
+                    time.sleep(log_interval_s)
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 
@@ -739,6 +762,7 @@ def log_frames(
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
             assert_deadline=spec.assert_deadline,
+            log_interval_s=spec.log_interval_s,
         )
 
     log_synchronous_frames(
@@ -754,6 +778,7 @@ def log_frames(
         marker_name=marker_name,
         context_index=spec.context_index,
         assert_deadline=spec.assert_deadline,
+        log_interval_s=spec.log_interval_s,
     )
     return [marker_name]
 
