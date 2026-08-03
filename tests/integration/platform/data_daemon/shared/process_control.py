@@ -22,6 +22,8 @@ import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
 
+import requests
+
 from neuracore.data_daemon.daemon_control import (
     ensure_daemon_running,
     pid_is_running,
@@ -113,6 +115,10 @@ def _dump_hang_diagnostics(label: str | None, waited_s: float) -> None:
         for line in sockets.splitlines()
         if ":443" in line or "retrans" in line or "rto:" in line
     ]
+    # Never come back empty: a capture that filtered everything out is worth
+    # less than raw output, and there is no second chance at a rare stall.
+    if not keep:
+        keep = sockets.splitlines()[:60]
     tcp_counters = [
         line
         for line in counters.splitlines()
@@ -156,6 +162,40 @@ def arm_hang_watchdogs(
         watchdog.start()
         watchdogs.append(watchdog)
     return tuple(watchdogs)
+
+
+def _install_http_hang_watchdog() -> None:
+    """Watch every outbound HTTP request, not just the timed ones.
+
+    Hooking :class:`Timer` alone would miss any call nobody wrapped — the
+    dataset synchronisation path, for one — so the wrapper goes on the session
+    itself. Applied at import so the pool's spawned workers, which import this
+    module too, are covered as well as the main process.
+    """
+    if os.environ.get(HANG_DIAGNOSTICS_ENV, "1") != "1":
+        return
+    if getattr(requests.Session, "_ncd_hang_wrapped", False):
+        return
+    original_request = requests.Session.request
+
+    @functools.wraps(original_request)
+    def request_with_watchdog(
+        self: requests.Session, method: str, url: str, *args: object, **kwargs: object
+    ) -> requests.Response:
+        watchdogs = arm_hang_watchdogs(
+            f"HTTP {method} {str(url)[:90]}", HANG_DIAGNOSTIC_MIN_BUDGET_S
+        )
+        try:
+            return original_request(self, method, url, *args, **kwargs)
+        finally:
+            for watchdog in watchdogs:
+                watchdog.cancel()
+
+    requests.Session.request = request_with_watchdog  # type: ignore[method-assign]
+    requests.Session._ncd_hang_wrapped = True  # type: ignore[attr-defined]
+
+
+_install_http_hang_watchdog()
 
 
 MAX_TIME_TO_START_S = 20
