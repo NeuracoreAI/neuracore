@@ -42,9 +42,10 @@ STORAGE_STATE_DELETE = "delete"
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
 
-# producer_channels
-PRODUCER_SYNCHRONOUS = "synchronous"
-PRODUCER_PER_THREAD = "per_thread"
+# producer_channels — thread allocation and producer lifetime
+PRODUCER_SYNCHRONOUS = "synchronous"  # one thread, scoped to one recording
+PRODUCER_PER_THREAD = "per_thread"  # thread per stream, scoped to one recording
+PRODUCER_CONTINUOUS = "continuous"  # thread per stream, whole context lifetime
 
 # context_duration_mode
 DURATION_MODE_FIXED = "fixed"
@@ -89,7 +90,7 @@ STORAGE_STATE_ACTIONS = (
     STORAGE_STATE_EMPTY,
 )
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
+PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD, PRODUCER_CONTINUOUS)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_BURST_ALL)
@@ -108,6 +109,20 @@ STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
 STOP_RECORDING_NO_WAIT_SLA_S = 1.0
 STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
 STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
+
+# PRODUCER_CONTINUOUS: wall-clock pause after the last stop_recording so
+# post-stop frames are logged before producer threads stop, mirroring a real
+# camera that keeps running after the recording ends.
+CONTINUOUS_LOGGING_TAIL_S = 2.0
+
+# PRODUCER_CONTINUOUS un-paced streams (PACING_BURST_VIDEO/PACING_BURST_ALL):
+# how far ahead of its nominal per-frame schedule the producer may race before
+# it must wait for real time to catch up. Bounds the backlog it can push to a
+# plausible size instead of an unbounded firehose for the whole context
+# lifetime — run_threaded_logging doesn't need this, its un-paced streams are
+# already bounded by a fixed per-recording frame count. Kept comfortably under
+# the daemon's 1s spool-stall window (see data_daemon_bridge/src/lib.rs).
+CONTINUOUS_BURST_LOOKAHEAD_S = 0.5
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0

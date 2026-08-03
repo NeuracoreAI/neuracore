@@ -39,6 +39,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_SEQUENTIAL,
     PACING_BURST_ALL,
     PACING_BURST_VIDEO,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -115,10 +116,19 @@ class DataDaemonTestCase:
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
-        producer_channels: Thread-allocation strategy for data producers.
-            ``"synchronous"`` logs all data types from a single thread in
-            sequence; ``"per_thread"`` spawns one dedicated thread per data
-            type so streams are written concurrently.
+        producer_channels: How producer threads are allocated, and how long
+            they live.  ``"synchronous"`` logs all data types from a single
+            thread in sequence; ``"per_thread"`` spawns one dedicated thread
+            per stream so streams are written concurrently.  Both scope their
+            threads to a single recording, joining them before
+            ``stop_recording``, so no frame is ever in flight when a window
+            boundary passes.  ``"continuous"`` also runs a thread per stream
+            but for the whole context lifetime — started before the first
+            ``start_recording`` and stopped after the last ``stop_recording``,
+            mid-loop at every boundary — mirroring a real camera that does not
+            stop between recordings.  Producer lifetime belongs on this axis
+            rather than a separate flag because continuous logging *requires* a
+            thread per stream, so it is not independent of the allocation.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -293,6 +303,16 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
+        producer_channels: Workload override applied to every case when set;
+            see ``DataDaemonTestCase.producer_channels``.  ``None`` (default)
+            leaves each case's own value alone.  Lets a suite declare one
+            producer model — e.g. ``"continuous"`` — across its whole matrix
+            instead of restating it on every case.
+        producer_pacing: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
+            each case's own value alone.  A case whose shape cannot honour the
+            batch's pacing degrades rather than failing; see
+            :func:`resolve_producer_pacing`.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -301,6 +321,8 @@ class DataDaemonTestBatch:
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
+    producer_channels: str | None = None
+    producer_pacing: ProducerPacing | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -312,6 +334,12 @@ class DataDaemonTestBatch:
         }
         if self.skip:
             batch_overrides["skip"] = True
+        # Workload overrides, unlike the infrastructure params above, are opt-in:
+        # unset means "keep what each case asked for".
+        if self.producer_channels is not None:
+            batch_overrides["producer_channels"] = self.producer_channels
+        if self.producer_pacing is not None:
+            batch_overrides["producer_pacing"] = self.producer_pacing
         return [
             DataDaemonTestCase(**{
                 **{
@@ -383,6 +411,8 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_detail}frames")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
+    elif case.producer_channels == PRODUCER_CONTINUOUS:
+        parts.append("continuous")
     # The resolved value, not the requested one: a batch-wide pacing that this
     # case degrades out of must not show up in its ID.
     resolved_pacing = resolve_producer_pacing(case)
