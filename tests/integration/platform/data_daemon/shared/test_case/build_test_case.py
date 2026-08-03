@@ -37,10 +37,13 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_ALL,
+    PACING_BURST_VIDEO,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -181,6 +184,22 @@ class DataDaemonTestCase:
             solid-fill frames for cases that only care about frame counts.
             Frame identity is embedded either way, so the disk timestamp and
             frame-code assertions are unaffected by this choice.
+        producer_pacing: Which producer streams skip their wall-clock deadline,
+            i.e. how fast frames are handed to the SDK.  This is fully
+            independent of ``random_phase``, which controls what timestamp a
+            frame *carries*, never when it is delivered.
+            ``"deadline"`` paces every stream, so delivery tracks wall-clock
+            time.  ``"burst-video"`` un-paces the video streams only, so frames
+            are pushed as fast as the camera thread can render and log them
+            while joints stay paced — backlogging the writer queue the way a
+            real camera does when the encoder can't keep up.  ``"burst-all"``
+            (default) un-paces everything, which is the fastest way to emit a
+            fixed frame count.  A ``"burst-video"`` request a case's shape
+            cannot honour — no cameras, or a single synchronous thread with
+            nothing for video to race ahead of — falls back to ``"burst-all"``
+            instead of failing, so a batch can set one pacing across a matrix
+            whose cases are not all shaped to take it; see
+            :func:`resolve_producer_pacing`.
         cpu_load: When ``True``, all but one CPU core is saturated (see
             ``cpu_load()`` in ``shared/process_control.py``) for the duration
             of the recording contexts. Approximates the core contention a real
@@ -218,6 +237,7 @@ class DataDaemonTestCase:
     skip: bool = False
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_BURST_ALL
     cpu_load: bool = False
 
     @property
@@ -310,6 +330,34 @@ class DataDaemonTestBatch:
 # ---------------------------------------------------------------------------
 
 
+def resolve_producer_pacing(case: DataDaemonTestCase) -> str:
+    """Delivery pacing *case* actually runs under.
+
+    ``producer_pacing`` is a request, not a guarantee, because a batch applies
+    one value across a matrix of differently-shaped cases. A ``"burst-video"``
+    request the case cannot honour degrades to ``"burst-all"`` — quietly, since
+    there is nothing wrong with a joint-only case in a batch that un-paces
+    video. ``case_id`` reports the resolved value, so a degraded case is never
+    labelled with a pacing it did not run. ``"deadline"`` and ``"burst-all"``
+    have no shape requirements, so they are always honoured as requested.
+
+    A ``"burst-video"`` request is not honoured when:
+
+    * it un-paces video on a case with no cameras, leaving nothing to un-pace;
+    * it un-paces video on a case that logs every stream from one thread
+      (``producer_channels=PRODUCER_SYNCHRONOUS``), where video has nothing to
+      race ahead of.
+    """
+    requested = case.producer_pacing
+    if requested != PACING_BURST_VIDEO:
+        return requested
+    if not case.video_count:
+        return PACING_BURST_ALL
+    if case.producer_channels == PRODUCER_SYNCHRONOUS:
+        return PACING_BURST_ALL
+    return requested
+
+
 def case_id(case: DataDaemonTestCase) -> str:
     """Generate a short human-readable ID for a test case."""
     mode_short = "seq" if case.mode == MODE_SEQUENTIAL else "stag"
@@ -331,8 +379,15 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+        if case.video_detail != DataDaemonTestCase.video_detail:
+            parts.append(f"{case.video_detail}frames")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
+    # The resolved value, not the requested one: a batch-wide pacing that this
+    # case degrades out of must not show up in its ID.
+    resolved_pacing = resolve_producer_pacing(case)
+    if resolved_pacing != DataDaemonTestCase.producer_pacing:
+        parts.append(resolved_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:

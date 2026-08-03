@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+# cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -55,6 +56,13 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
+# producer_pacing — which streams skip their wall-clock deadline
+PACING_DEADLINE = "deadline"  # none; every stream paces
+PACING_BURST_VIDEO = "burst-video"  # video only; joints stay paced
+PACING_BURST_ALL = "burst-all"  # every stream
+
+# random_phase — per-frame timestamp offset; independent of producer_pacing,
+# which controls delivery timing rather than the timestamp value.
 # Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 RANDOM_PHASE_JITTER_FACTOR = 0.5
@@ -84,6 +92,7 @@ MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
+PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_BURST_ALL)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -92,6 +101,7 @@ VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 VideoDetail = Literal["realistic", "flat"]
+ProducerPacing = Literal["deadline", "burst-video", "burst-all"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
