@@ -46,6 +46,96 @@ logger = logging.getLogger(__name__)
 # Timing constants
 # ---------------------------------------------------------------------------
 
+# cspell:ignore nstat retrans unacked
+
+HANG_DIAGNOSTICS_ENV = "NCD_HANG_DIAGNOSTICS"
+"""Set to ``1`` to dump socket and stack state while a call is still blocked."""
+
+HANG_DIAGNOSTIC_DELAYS_S = (15.0, 60.0, 240.0)
+"""Seconds after a timed call starts at which to capture state, if still running.
+
+A stalled HTTP call leaves no trace in any server log — the request never
+arrives — so the only place the cause is visible is the client's own socket
+while it is still stuck. Several samples show whether the kernel is
+retransmitting and how the retry counters evolve.
+"""
+
+
+def _run_diagnostic(command: list[str]) -> str:
+    """Return a diagnostic command's output, or a short note on why it failed."""
+    try:
+        completed = subprocess.run(
+            command, capture_output=True, text=True, timeout=5, check=False
+        )
+    except FileNotFoundError:
+        return f"({command[0]} not available)"
+    except subprocess.SubprocessError as error:
+        return f"({command[0]} failed: {error})"
+    return (completed.stdout or completed.stderr or "").strip() or "(no output)"
+
+
+def _blocked_thread_stacks() -> str:
+    """Return a compact stack for every live thread."""
+    names = {thread.ident: thread.name for thread in threading.enumerate()}
+    chunks = []
+    for thread_id, frame in sys._current_frames().items():
+        stack = traceback.format_stack(frame)[-6:]
+        chunks.append(
+            f"  thread {names.get(thread_id, thread_id)}:\n" + "".join(stack).rstrip()
+        )
+    return "\n".join(chunks)
+
+
+def _dump_hang_diagnostics(label: str | None, waited_s: float) -> None:
+    """Log socket state, TCP counters and stacks for a call still in flight."""
+    if sys.platform == "darwin":
+        sockets = _run_diagnostic(["netstat", "-an", "-p", "tcp"])
+        counters = _run_diagnostic(["netstat", "-s", "-p", "tcp"])
+    else:
+        # -t TCP, -i internal info (rto, retransmits, unacked), -n numeric.
+        sockets = _run_diagnostic(["ss", "-tin"])
+        counters = _run_diagnostic(["nstat", "-az"])
+    keep = [
+        line
+        for line in sockets.splitlines()
+        if ":443" in line or "retrans" in line or "rto:" in line
+    ]
+    tcp_counters = [
+        line
+        for line in counters.splitlines()
+        if any(k in line for k in ("Retrans", "Timeout", "retransmit", "timeout"))
+    ]
+    logger.warning(
+        "HANG DIAGNOSTICS %s still running after %.0fs\n"
+        "-- sockets to :443 --\n%s\n"
+        "-- tcp counters --\n%s\n"
+        "-- stacks --\n%s",
+        label or "call",
+        waited_s,
+        "\n".join(keep[:40]) or "(none)",
+        "\n".join(tcp_counters[:20]) or "(none)",
+        _blocked_thread_stacks(),
+    )
+
+
+def arm_hang_watchdogs(label: str | None) -> tuple[threading.Timer, ...]:
+    """Schedule state captures for a call that has not returned yet.
+
+    Returns:
+        The scheduled timers, so the caller cancels them once the call
+        completes. Empty when diagnostics are disabled.
+    """
+    if os.environ.get(HANG_DIAGNOSTICS_ENV) != "1":
+        return ()
+    watchdogs = []
+    for delay_s in HANG_DIAGNOSTIC_DELAYS_S:
+        watchdog = threading.Timer(delay_s, _dump_hang_diagnostics, (label, delay_s))
+        watchdog.daemon = True
+        watchdog.start()
+        watchdogs.append(watchdog)
+    return tuple(watchdogs)
+
+
 MAX_TIME_TO_START_S = 20
 """Maximum seconds allowed for a daemon-startup or API-handshake operation."""
 
@@ -105,9 +195,12 @@ class Timer:
     def __enter__(self) -> Timer:
         self.wall_start = time.time()
         self.start = time.perf_counter()
+        self._hang_watchdogs = arm_hang_watchdogs(self.label)
         return self
 
     def __exit__(self, *args: object) -> bool | None:
+        for watchdog in getattr(self, "_hang_watchdogs", ()):
+            watchdog.cancel()
         self.end = time.perf_counter()
         self.interval = self.end - self.start
         had_exception = len(args) > 0 and args[0] is not None
