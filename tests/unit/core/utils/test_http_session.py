@@ -19,7 +19,7 @@ from neuracore.core.utils.http_session import (
     thread_local_session,
 )
 
-# cspell:ignore poolmanager
+# cspell:ignore IPPROTO NODELAY poolmanager
 
 _URL = "https://api.neuracore.com"
 
@@ -481,3 +481,85 @@ class TestReadTimeoutRetrySession:
                 url="/resource",
                 error=error,
             )
+
+
+class TestDefaultTimeout:
+    """A session bounds requests that would otherwise block forever."""
+
+    def test_default_timeout_applied_when_caller_omits_one(self):
+        _reset_thread_local()
+        session = thread_local_session()
+        captured: dict = {}
+
+        with patch.object(
+            requests.Session, "request", return_value=MagicMock()
+        ) as parent:
+            session.get(_URL)
+            captured["timeout"] = parent.call_args.kwargs.get("timeout")
+
+        assert captured["timeout"] == http_session.DEFAULT_TIMEOUT
+
+    def test_explicit_timeout_takes_precedence(self):
+        _reset_thread_local()
+        session = thread_local_session()
+
+        with patch.object(
+            requests.Session, "request", return_value=MagicMock()
+        ) as parent:
+            session.get(_URL, timeout=(1, 2))
+            assert parent.call_args.kwargs.get("timeout") == (1, 2)
+
+    def test_unresponsive_peer_fails_instead_of_hanging(self):
+        """A peer that never answers must not block the caller indefinitely.
+
+        The pooled connection is alive at the TCP level, so urllib3's dropped
+        connection check cannot see anything wrong; only the timeout ends it.
+        """
+        _reset_thread_local()
+        session = thread_local_session()
+
+        with _StalledServer() as server:
+            with pytest.raises(requests.exceptions.RequestException):
+                session.get(server.url, timeout=(5, 0.5))
+
+
+class _StalledServer:
+    """Local server that accepts a request and never responds or closes."""
+
+    def __init__(self) -> None:
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                threading.Event().wait(30)
+
+            def log_message(self, *args: object) -> None:
+                pass
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_port}/resource"
+
+    def __enter__(self) -> "_StalledServer":
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+
+class TestKeepAlive:
+    """Pooled sockets are probed so a vanished peer becomes detectable."""
+
+    def test_adapter_configures_pools_with_keepalive(self):
+        _reset_thread_local()
+        session = thread_local_session()
+
+        for scheme in ("https://", "http://"):
+            adapter = session.get_adapter(scheme)
+            options = adapter.poolmanager.connection_pool_kw["socket_options"]
+            assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
+
+    def test_socket_options_preserve_tcp_nodelay(self):
+        options = http_session._keepalive_socket_options()
+        assert (socket.IPPROTO_TCP, socket.TCP_NODELAY, 1) in options
+        assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in options
