@@ -32,6 +32,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_FLAT,
+    PRODUCER_CONTINUOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -45,6 +46,10 @@ CASES = DataDaemonTestBatch(
     cases=NETWORK_PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    # Flat frames: these cases measure throughput, and the realistic frame
+    # bank's build cost and compression load would move the numbers.
+    video_detail=DETAIL_FLAT,
+    producer_channels=PRODUCER_CONTINUOUS,
 ).as_cases()
 
 
