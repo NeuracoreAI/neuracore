@@ -1168,6 +1168,59 @@ def _classify_boundary_frames(
     return inside, unknowable
 
 
+def classify_split_producer_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> tuple[list[EmittedFrame], list[EmittedFrame]]:
+    """Split a *cross-process* video producer's frames into the ones the
+    recording must have and the ones it must not.
+
+    Both ends are decided by the wall-clock brackets around the control calls
+    that carry the window's bounds, as in :func:`_classify_boundary_frames`, but
+    neither of that function's rules transfers unchanged to a producer in
+    another process:
+
+    - **Owed** (must be on disk) additionally requires the producer's own
+      logging gate to have been open. A producer that does not call
+      ``start_recording`` itself only learns a recording is active from the
+      recording-state manager's SSE notification, and ``log_rgb`` forwards
+      nothing until it arrives. Those first frames are genuinely inside the
+      daemon's window and were still never published, so demanding them would
+      fail on the SSE round trip rather than on any daemon behaviour. The gate
+      reading is latched immediately before the ``log_*`` call
+      (:attr:`EmittedFrame.handle`) and can only go stale in the direction that
+      does not matter: the gate closes on the *stop* notification, which cannot
+      land before ``stop_recording`` was called, and every owed frame completed
+      before that.
+
+    - **Forbidden** (must not be on disk) is decided by the clock alone, not by
+      the handle: the in-process rule reads ``frame.handle != bounds.handle``,
+      but a non-owning process holds its own handle value for the same
+      recording, which would condemn every frame logged after the stop call —
+      including ones the window legitimately still accepted. A frame whose
+      ``log_*`` call *began* at or after ``bounds.stop_returned_at`` is outside
+      on timing alone: that field is the caller's upper bracket on the window's
+      bound, so the frame's publish stamp cannot precede the bound. How much
+      this catches is exactly how tight that bracket is — the frames at issue
+      are the ones the producer logged in the few hundred milliseconds between
+      the stop and its own gate closing, so a bracket as loose as "when
+      ``stop_recording`` returned" (a flush barrier later) calls all of them
+      unknowable and proves nothing.
+
+    Everything between the two is unknowable — the call straddled a bound — and
+    belongs to neither list, so the caller requires nothing of it either way.
+
+    Returns:
+        ``(owed frames, forbidden frames)``, each in emission order.
+    """
+    inside, _ = _classify_boundary_frames(frames, bounds)
+    owed = [frame for frame in inside if frame.handle is not None]
+    forbidden = [
+        frame for frame in frames if frame.emitted_at >= bounds.stop_returned_at
+    ]
+    return owed, forbidden
+
+
 def recording_timestamps(
     spec: ContextSpec, recording_index: int
 ) -> tuple[list[float], list[float]]:

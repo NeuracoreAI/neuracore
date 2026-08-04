@@ -18,9 +18,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 
 if TYPE_CHECKING:
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (  # noqa: E501
-        DataDaemonTestCase,
-    )
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
     )
@@ -617,19 +614,40 @@ def assert_lossy_only_video_artifacts(
                 )
 
 
-def assert_rgb_trace_survived_boundary(
-    recording_index: int, case: DataDaemonTestCase
+def assert_rgb_trace_respects_the_recording_boundary(
+    recording_index: int,
+    *,
+    owed_timestamps: list[float],
+    forbidden_timestamps: list[float],
 ) -> None:
-    """Assert the recording's RGB trace has every frame, ending near the stop.
+    """Assert the recording's RGB trace holds every frame it provably owns and
+    nothing published after it closed.
+
+    Both lists are capture stamps of frames the producer *reported* logging, as
+    classified by
+    ``build_test_case_context.classify_split_producer_frames``. Neither end can
+    be checked against a nominal ``fps * duration`` count, which measures the
+    producer's throughput rather than the daemon's integrity: a cross-process
+    producer's frame rate and the lag before its logging gate opens both move
+    that number around by tens of frames.
 
     Called once the tail chunk should already have landed — see
     :func:`~runners.split_video_process_running`, which only returns once the
     producer's own writer flush barrier has completed and been acknowledged.
+
+    A missing owed frame is one the daemon accepted the window for and then
+    dropped, which at this boundary means an orphaned chunk. A present forbidden
+    frame is video published after the window closed, which means a chunk
+    straddling the boundary was taken whole instead of being cut at it.
     """
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         wait_for_written_rgb_trace,
     )
 
+    assert owed_timestamps, (
+        "the producer logged no frame provably inside the recording, so this "
+        "run proves nothing about the boundary"
+    )
     rgb_trace = wait_for_written_rgb_trace(recording_index)
     trace_json = (
         get_daemon_recordings_root_path()
@@ -639,18 +657,24 @@ def assert_rgb_trace_survived_boundary(
         / "trace.json"
     )
     frames = json.loads(trace_json.read_text(encoding="utf-8"))
-    timestamps = [float(frame["timestamp"]) for frame in frames]
-
-    expected_frame_count = case.video_fps * case.duration_sec
-    assert len(timestamps) == expected_frame_count, (
-        f"RGB trace has {len(timestamps)} frames, expected "
-        f"{expected_frame_count} — a chunk may have been orphaned at the "
-        "recording boundary"
+    on_disk = {float(frame["timestamp"]) for frame in frames}
+    span = (
+        f"{len(on_disk)} frame(s) on disk spanning "
+        f"[{min(on_disk):.4f}, {max(on_disk):.4f}]"
     )
-    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / case.video_fps
-    gap_s = case.duration_sec - max(timestamps)
-    assert gap_s <= tolerance_s, (
-        f"last on-disk RGB frame trails the recording's nominal end by "
-        f"{gap_s:.3f}s, more than the {tolerance_s:.3f}s tolerance — a tail "
-        "chunk may have been orphaned at the window boundary"
+
+    missing = [stamp for stamp in owed_timestamps if stamp not in on_disk]
+    assert not missing, (
+        f"{len(missing)}/{len(owed_timestamps)} frame(s) logged inside the "
+        f"recording never reached disk — a chunk was orphaned at the recording "
+        f"boundary. First missing capture stamps: "
+        f"{[round(stamp, 4) for stamp in missing[:5]]}; {span}"
+    )
+
+    kept_late = [stamp for stamp in forbidden_timestamps if stamp in on_disk]
+    assert not kept_late, (
+        f"{len(kept_late)}/{len(forbidden_timestamps)} frame(s) logged after "
+        f"the recording stopped reached disk — a chunk straddling the boundary "
+        f"was taken whole rather than cut at it. First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_late[:5]]}; {span}"
     )
