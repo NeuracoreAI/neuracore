@@ -225,12 +225,20 @@ struct ActiveWindow {
     /// a successor's start, force-closed by the idle reaper — get no marker and
     /// evict on the retention deadline alone.
     awaiting_flush: bool,
-    /// OS process ids ([`Envelope::VideoChunkReady`]'s `producer_pid`) that have
-    /// announced at least one video chunk into this window. A source's
+    /// OS process ids that have video in this window. A source's
     /// `(robot_id, robot_instance)` can be logged from more than one process at
     /// once, and each process's own [`Envelope::SourceFlushed`] marker only
     /// vouches for chunks *it* announced — so the window is not fully flushed
     /// until every pid here also appears in `flushed_producers`.
+    ///
+    /// Populated from two envelopes, and it needs both: an
+    /// [`Envelope::VideoChunkReady`] proves the pid has video here but arrives
+    /// only once a chunk has sealed (as late as the producer's writer backlog
+    /// is deep), while an [`Envelope::VideoProducerActive`] claim is published
+    /// from the producer's logging thread and so lands inside the window even
+    /// when its first chunk will not. The claim is what makes the marker
+    /// matching below sound; the chunk is the backstop for a producer too old
+    /// to send claims.
     video_producers: HashSet<u32>,
     /// OS process ids whose `SourceFlushed` marker has been released from the
     /// holdback queue, i.e. every tail chunk that process ordered behind it has
@@ -251,6 +259,27 @@ impl ActiveWindow {
     /// to have arrived at all, so a source with no video (`video_producers`
     /// empty) still needs the single marker the old boolean scheme did — only a
     /// source logged from more than one process additionally needs the rest.
+    ///
+    /// Sound only because `video_producers` is populated *predictively*, by
+    /// the producer's [`Envelope::VideoProducerActive`] claim, rather than
+    /// reactively by its first sealed chunk. Were it chunk-driven alone, a
+    /// video-owning producer whose chunk is still queued behind its writer
+    /// backlog would not be in the set when a *different*, video-less
+    /// producer's marker for the same source arrived — this would return
+    /// `true` vacuously and the window would evict before that chunk landed,
+    /// which is the very loss the marker mechanism exists to prevent. (That
+    /// was the live failure of
+    /// `data_integrity/test_network.py::test_split_process_video_survives_recording_boundary`:
+    /// chunk 0 sealed at the byte threshold on frame 292/300 but was announced
+    /// after the lifecycle-owning process's marker had already retired the
+    /// window.) The claim is published from the logging thread, so it lands
+    /// inside the window whatever the writer is doing.
+    ///
+    /// Residual, deliberately accepted: a claim is rate-limited to one per
+    /// source per claim interval (100 ms), so a *cross-process* producer that
+    /// logs video for less than one interval inside a window, and whose chunk
+    /// nonetheless opens inside it, can still be missed. A producer running an
+    /// SDK too old to send claims keeps the old chunk-driven behaviour.
     fn flush_markers_settled(&self) -> bool {
         !self.flushed_producers.is_empty()
             && self.video_producers.is_subset(&self.flushed_producers)
@@ -311,6 +340,12 @@ enum HeldPayload {
     SourceFlushed {
         /// OS process id of the producer this marker vouches for — see
         /// [`ActiveWindow::flushed_producers`].
+        producer_pid: u32,
+    },
+    /// A producer's claim that it is logging video for this source — see
+    /// [`ActiveWindow::video_producers`].
+    VideoProducerActive {
+        /// OS process id of the claiming producer.
         producer_pid: u32,
     },
 }
@@ -548,6 +583,27 @@ impl Dispatcher {
                     release_at: recv_at + self.holdback,
                     publish_timestamp_ns,
                     payload: HeldPayload::SourceFlushed { producer_pid },
+                });
+            }
+            Envelope::VideoProducerActive {
+                robot_id,
+                robot_instance,
+                publish_timestamp_ns,
+                producer_pid,
+            } => {
+                let source = (robot_id, robot_instance);
+                self.touch_source(&source, recv_at);
+                // Held for the same reason data is: the claim rides the
+                // producer's data port while `StartRecording` rides the
+                // calling thread's, so a claim for the recording's first
+                // frames can reach the daemon before the start that opens
+                // their window. Routed on arrival it would find no window and
+                // the source's video would go unclaimed.
+                self.held.push_back(Held {
+                    source,
+                    release_at: recv_at + self.holdback,
+                    publish_timestamp_ns,
+                    payload: HeldPayload::VideoProducerActive { producer_pid },
                 });
             }
             Envelope::RefreshConfig {} => self.handle_refresh_config().await,
@@ -1092,6 +1148,35 @@ impl Dispatcher {
             HeldPayload::SourceFlushed { producer_pid } => {
                 self.mark_source_flushed(&held.source, producer_pid)
             }
+            HeldPayload::VideoProducerActive { producer_pid } => {
+                self.note_video_producer(&held.source, publish_ts, producer_pid)
+            }
+        }
+    }
+
+    /// Attribute video for the window containing `publish_ts` to
+    /// `producer_pid`, before any of that video has been sealed into a chunk.
+    ///
+    /// Routed by publish time exactly like the chunk the claim anticipates —
+    /// the claim is stamped on the producer's logging thread, so it lands in
+    /// the same window a chunk opened at that instant would. A claim outside
+    /// every retained window (video logged between recordings) is dropped, and
+    /// is *not* an orphan: no data was lost, there was simply no recording to
+    /// attribute it to.
+    fn note_video_producer(&mut self, source: &Source, publish_ts: i64, producer_pid: u32) {
+        let Some(entry) = self.windows.get_mut(source) else {
+            return;
+        };
+        let Some(window) = Self::window_for_mut(entry, publish_ts) else {
+            return;
+        };
+        if window.video_producers.insert(producer_pid) {
+            tracing::debug!(
+                recording_index = window.recording_index,
+                producer_pid,
+                "producer claimed video for window; its own flush marker is now \
+                 required before the window can retire"
+            );
         }
     }
 
@@ -2188,6 +2273,139 @@ mod tests {
         assert_eq!(
             closing, 0,
             "a marker that never arrives is capped, not waited on forever"
+        );
+    }
+
+    /// A producer's claim that it is logging video for a source, published from
+    /// its logging thread before any chunk has sealed.
+    fn video_producer_active(robot: &str, publish_ts: i64, producer_pid: u32) -> Envelope {
+        Envelope::VideoProducerActive {
+            robot_id: robot.into(),
+            robot_instance: 0,
+            publish_timestamp_ns: publish_ts,
+            producer_pid,
+        }
+    }
+
+    #[tokio::test]
+    async fn video_claim_holds_the_window_for_a_producer_whose_chunk_has_not_sealed() {
+        // The cross-process regression, in its real arrival order: the camera
+        // process's writer is deep in its backlog, so at the moment the
+        // lifecycle process's (video-less, therefore instant) marker is
+        // processed, NO chunk from the camera process has been announced yet.
+        // Chunk-driven attribution alone is empty at that instant and the
+        // window retires on a marker that vouches for nothing — orphaning the
+        // whole recording's video when it finally seals. The claim, published
+        // from the camera process's logging thread while the recording was
+        // open, is what the window has to hold on.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone(), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+
+        // The camera process (pid 1) claims the source as it logs. Nothing has
+        // reached disk yet, let alone been announced.
+        dispatcher
+            .handle_inbound(video_producer_active("robot-1", 150, 1), opened_at)
+            .await;
+        dispatcher
+            .release_due_holdback(opened_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let stopped_at = opened_at + Duration::from_millis(2);
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .await;
+
+        // The lifecycle process (pid 2) owns no video, so its barrier is
+        // trivial and its marker lands at once.
+        dispatcher
+            .handle_inbound(source_flushed("robot-1", 300, 2), stopped_at)
+            .await;
+        let retention = dispatcher.holdback * 2;
+        let past_retention = stopped_at + retention + Duration::from_millis(1);
+        dispatcher.release_due_holdback(past_retention).await;
+        dispatcher.housekeep(past_retention).await;
+        assert_eq!(
+            dispatcher.windows.get(&source).unwrap().closing.len(),
+            1,
+            "a claim from a producer that has not announced a chunk yet must \
+             still hold the window against another producer's marker"
+        );
+
+        // The camera process's writer finally drains: its chunk — opened inside
+        // the window — is announced long past the retention deadline and must
+        // still find its window.
+        let (publish_ts, thread_id) = (150, 7); // inside [100, 200)
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+        let drained_at = past_retention + Duration::from_millis(1);
+        dispatcher
+            .handle_inbound(video_chunk("robot-1", publish_ts, thread_id, 1), drained_at)
+            .await;
+        dispatcher
+            .handle_inbound(source_flushed("robot-1", 400, 1), drained_at)
+            .await;
+        let released_at = drained_at + dispatcher.holdback + Duration::from_millis(1);
+        dispatcher.release_due_holdback(released_at).await;
+        assert_eq!(
+            dispatcher.orphan_drops, 0,
+            "the tail chunk must route into the window the claim held open"
+        );
+
+        // With every claiming producer's marker in, the window retires — the
+        // claim delays eviction, it does not deadlock it.
+        dispatcher.housekeep(released_at).await;
+        let closing = dispatcher
+            .windows
+            .get(&source)
+            .map_or(0, |entry| entry.closing.len());
+        assert_eq!(
+            closing, 0,
+            "the window retires once the claiming producer's own marker arrives"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_claim_outside_every_window_is_dropped_without_counting_an_orphan() {
+        // A producer logging video between recordings claims the source just
+        // the same — there is simply no window to attribute it to. That is
+        // routine, not data loss, so it must not inflate the orphan counter
+        // that exists to surface genuinely dropped data.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, opened_at)
+            .await;
+
+        // Published after the stop: past every window's upper bound.
+        dispatcher
+            .handle_inbound(video_producer_active("robot-1", 250, 1), opened_at)
+            .await;
+        dispatcher
+            .release_due_holdback(opened_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        assert_eq!(dispatcher.orphan_drops, 0);
+        let window = &dispatcher.windows.get(&source).unwrap().closing[0];
+        assert!(
+            window.video_producers.is_empty(),
+            "a claim outside the window must not make the window wait on that \
+             producer's marker"
         );
     }
 

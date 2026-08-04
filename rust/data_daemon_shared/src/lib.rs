@@ -456,6 +456,45 @@ pub enum Envelope {
         /// `producer_pid`, never another process's still-pending video.
         producer_pid: u32,
     },
+    /// Producer asserts that it is currently logging video for a source —
+    /// published *before* any of that video has been sealed into a chunk.
+    ///
+    /// [`Envelope::SourceFlushed`]'s per-producer matching only works if the
+    /// daemon knows which processes owe it a marker, and a chunk announcement
+    /// is too late to learn that from: the writer seals and announces a chunk
+    /// as far behind the capture as its backlog is deep, so a video-owning
+    /// process's *first* announcement can arrive after a video-less process's
+    /// marker for the same source has already retired the window — orphaning
+    /// the video the marker mechanism exists to save.
+    ///
+    /// So the claim is stamped and published on the **logging** thread (see
+    /// the producer's `log_frame`), which is by definition inside the
+    /// recording and cannot be delayed by the writer's disk backlog, and is
+    /// rate-limited to one per source per claim interval rather than one per
+    /// frame. The daemon routes it by `publish_timestamp_ns` exactly like
+    /// data, and the window it lands in then waits for this `producer_pid`'s
+    /// own marker.
+    ///
+    /// Purely a routing hint: it carries no data, and a claim that finds no
+    /// window (video logged outside any recording) is dropped without being
+    /// counted as an orphan.
+    ///
+    /// Declared last on purpose — postcard tags variants by declaration order,
+    /// so appending keeps every existing tag stable. A daemon predating this
+    /// variant fails to decode it and drops the sample, degrading to the
+    /// chunk-driven attribution it already had.
+    VideoProducerActive {
+        robot_id: String,
+        robot_instance: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) of the frame
+        /// that triggered the claim, stamped on the logging thread — the same
+        /// clock and the same call position as [`Envelope::Data`]'s, so it is
+        /// the window-membership key here too.
+        publish_timestamp_ns: i64,
+        /// OS process id (`std::process::id()`) of the claiming producer, the
+        /// same identity [`Envelope::SourceFlushed`] reports under.
+        producer_pid: u32,
+    },
 }
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
@@ -486,6 +525,7 @@ impl Envelope {
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
             Envelope::RefreshConfig {} => "refresh_config",
             Envelope::SourceFlushed { .. } => "source_flushed",
+            Envelope::VideoProducerActive { .. } => "video_producer_active",
         }
     }
 
@@ -814,6 +854,19 @@ mod tests {
         let bytes = refresh.encode().expect("encode");
         assert_eq!(refresh, Envelope::decode(&bytes).expect("decode"));
         assert_eq!(refresh.kind(), "refresh_config");
+    }
+
+    #[test]
+    fn video_producer_active_round_trips() {
+        let claim = Envelope::VideoProducerActive {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            producer_pid: 4242,
+        };
+        let bytes = claim.encode().expect("encode");
+        assert_eq!(claim, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(claim.kind(), "video_producer_active");
     }
 
     #[test]
