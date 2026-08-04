@@ -107,7 +107,8 @@ jobs:
       # the expensive half of this workflow, so it runs one Python on each OS.
       matrix:
         python-version: ["3.14"]
-        os: ["ubuntu-24.04", "macos-26"]
+        # Need large mac for more RAM to run the performance suite.
+        os: ["ubuntu-24.04", "macos-26-large"]
 
     steps:
     - name: Show disk space
