@@ -137,6 +137,23 @@ python example_retrieve_dataset.py
 If you want to just view your data, then the best way is via the [web interface](https://www.neuracore.com/dashboard/datasets).
 
 
+### Print Dataset statistics
+
+This example shows you how to:
+- Describe which data items a policy reads and which it predicts, by index
+- Ask Neuracore for a synchronized dataset's **statistics** (count, mean, std, min, max, q01, q99)
+- Print them per data type and item, without plotting anything
+
+These are the same statistics training uses to normalize your data. They are
+calculated on the platform, so the call reports progress while it waits, and
+asking again for the same recordings reuses the result instead of recalculating
+it.
+
+```bash
+python example_dataset_statistics.py
+```
+
+
 ### Edit Dataset metadata
 
 This example shows you how to:
