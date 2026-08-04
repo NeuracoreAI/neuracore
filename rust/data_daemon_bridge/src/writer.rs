@@ -235,6 +235,12 @@ struct VideoChunkState {
     frame_timestamps_ns: Vec<i64>,
     /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
     frame_timestamps_s: Vec<f64>,
+    /// Per-frame **publish** time as ms after `chunk_publish_ns`, drained into
+    /// the announcement's `frame_publish_offsets_ms` so the daemon can cut this
+    /// chunk at a recording boundary that falls inside it. Taken from the
+    /// frame's own caller-thread stamp ([`FrameJob::publish_ns`]), never this
+    /// thread's clock — the writer runs as far behind as its backlog is deep.
+    frame_publish_offsets_ms: Vec<u32>,
 }
 
 /// Process-wide registry of in-progress per-`(source, sensor)` video chunk
@@ -1102,6 +1108,7 @@ fn record_video_frame(
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_publish_offsets_ms: Vec::new(),
         }));
         registry.streams.insert(key.clone(), slot.clone());
         Some(slot)
@@ -1330,6 +1337,9 @@ fn append_frame_locked(
     state.frame_count = state.frame_count.saturating_add(1);
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
+    state
+        .frame_publish_offsets_ms
+        .push(publish_offset_ms(state.chunk_publish_ns, publish_ns));
 
     if should_flush_chunk(logical_bytes_after_write, state.frame_count) {
         if let Some(envelope) =
@@ -1339,6 +1349,19 @@ fn append_frame_locked(
         }
     }
     announcements
+}
+
+/// One frame's publish time as milliseconds after its chunk's open stamp — the
+/// wire form of [`Envelope::VideoChunkReady`]'s `frame_publish_offsets_ms`.
+///
+/// Saturates at both ends. A frame stamped at or before the chunk's open reads
+/// as 0 (only reachable if a caller's clock stepped backwards mid-chunk, and 0
+/// keeps it attributed to the chunk's own window rather than a later one), and
+/// an offset beyond `u32::MAX` ms — 49 days into one chunk, which no real
+/// capture reaches — pins to the maximum rather than wrapping.
+fn publish_offset_ms(chunk_publish_ns: i64, frame_publish_ns: i64) -> u32 {
+    let offset_ns = frame_publish_ns.saturating_sub(chunk_publish_ns).max(0);
+    (offset_ns / 1_000_000).try_into().unwrap_or(u32::MAX)
 }
 
 /// Seal the in-progress chunk and return the announcement envelope. The caller
@@ -1363,6 +1386,7 @@ fn flush_chunk_locked(
             state.frame_count = 0;
             state.frame_timestamps_ns.clear();
             state.frame_timestamps_s.clear();
+            state.frame_publish_offsets_ms.clear();
             return None;
         }
     };
@@ -1372,6 +1396,7 @@ fn flush_chunk_locked(
     let frame_count = state.frame_count;
     let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
     let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
+    let frame_publish_offsets_ms = std::mem::take(&mut state.frame_publish_offsets_ms);
 
     state.frame_count = 0;
 
@@ -1389,6 +1414,7 @@ fn flush_chunk_locked(
         frame_count,
         frame_timestamps_ns,
         frame_timestamps_s,
+        frame_publish_offsets_ms,
     })
 }
 
@@ -1643,6 +1669,7 @@ mod tests {
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_publish_offsets_ms: Vec::new(),
         }
     }
 
@@ -1907,6 +1934,64 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         assert!(state.frame_timestamps_ns.is_empty());
         assert!(state.frame_timestamps_s.is_empty());
+        assert!(state.frame_publish_offsets_ms.is_empty());
+    }
+
+    #[test]
+    fn announcement_carries_each_frame_publish_offset_from_the_chunk_open() {
+        // The offsets are what let the daemon cut this chunk at a recording
+        // boundary inside it, so they must track each frame's own caller-thread
+        // publish stamp — measured from the chunk's open, which is the first
+        // frame's stamp — and not the capture clock beside them.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        // 30 fps of publish stamps, with capture stamps on a deliberately
+        // unrelated clock.
+        for (index, capture_ns) in [10_000, 20_000, 30_000].into_iter().enumerate() {
+            append_frame_locked(
+                &mut state,
+                "r",
+                0,
+                "RGB",
+                "cam",
+                2,
+                2,
+                &frame,
+                TEST_PUBLISH_NS + index as i64 * 33_333_333,
+                capture_ns,
+                capture_ns as f64 / 1e9,
+            );
+        }
+
+        let envelope = flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
+        match envelope {
+            Envelope::VideoChunkReady {
+                publish_timestamp_ns,
+                frame_publish_offsets_ms,
+                ..
+            } => {
+                assert_eq!(
+                    publish_timestamp_ns, TEST_PUBLISH_NS,
+                    "the chunk's open stamp is its first frame's publish stamp"
+                );
+                assert_eq!(frame_publish_offsets_ms, vec![0, 33, 66]);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_offset_saturates_at_the_chunk_open() {
+        // A caller clock that steps backwards mid-chunk reads as 0 rather than
+        // wrapping, keeping the frame attributed to the chunk's own window.
+        assert_eq!(publish_offset_ms(TEST_PUBLISH_NS, TEST_PUBLISH_NS - 5), 0);
+        assert_eq!(publish_offset_ms(TEST_PUBLISH_NS, TEST_PUBLISH_NS), 0);
+        assert_eq!(
+            publish_offset_ms(TEST_PUBLISH_NS, TEST_PUBLISH_NS + 1_500_000),
+            1
+        );
     }
 
     #[test]

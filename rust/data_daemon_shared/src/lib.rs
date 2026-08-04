@@ -73,8 +73,9 @@ pub mod service_name {
     /// Worst-case postcard size of one frame's contribution to a
     /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
     /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value) and a `frame_timestamps_s` element is a fixed 8-byte `f64`.
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8;
+    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
+    /// `frame_publish_offsets_ms` element is a `u32` varint (≤5 bytes).
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -87,7 +88,8 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` vectors are the only unbounded part
+    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_ms`
+    /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
     /// enough frames in a single chunk to overflow the slice. The announcement
@@ -407,6 +409,27 @@ pub enum Envelope {
         /// Length equals `frame_count`; values round-trip bit-exact through
         /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
+        /// Per-frame **publish** time, as milliseconds after this chunk's own
+        /// `publish_timestamp_ns`, in arrival order. Length equals
+        /// `frame_count`.
+        ///
+        /// This is what makes chunk membership per-frame rather than atomic. A
+        /// chunk routes by its open stamp, but the producer keeps appending to
+        /// it until something seals it — so the frames after a recording's stop
+        /// ride the same file as the frames before it. Without these the daemon
+        /// can only take the chunk whole, and a recording ends up holding video
+        /// published after its own window closed (a video-only process keeps
+        /// logging until its stop notification arrives, which is a whole SSE
+        /// round trip). With them the daemon cuts the chunk at the window
+        /// boundary (see the dispatcher's `route_video`).
+        ///
+        /// Milliseconds, offset from the chunk's open stamp, because a cut
+        /// point needs neither more resolution nor absolute time: the boundary
+        /// error this closes is ~300 ms, frames are ≥1 ms apart in any real
+        /// capture, and a `u32` of ms spans 49 days where a `u32` of µs would
+        /// overflow on a long low-frame-rate chunk. Saturating at the chunk's
+        /// own open stamp, so a frame stamped before it reads as 0.
+        frame_publish_offsets_ms: Vec<u32>,
     },
     /// Force the daemon to re-read its profile config immediately, rather than
     /// waiting for the config watcher's next poll. Sent by the SDK's
@@ -895,6 +918,7 @@ mod tests {
                 1_700_000_000.033_333_3,
                 7.0_f64 / 60.0_f64,
             ],
+            frame_publish_offsets_ms: vec![0, 16, 33, 50],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -904,11 +928,12 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps per
-        // frame (ns + s). Even at 10_000 frames the envelope is comfortably
-        // under COMMANDS_MAX_PAYLOAD_BYTES.
+        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps plus a
+        // publish offset per frame. Even at 10_000 frames the envelope is
+        // comfortably under COMMANDS_MAX_PAYLOAD_BYTES.
         let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
         let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
@@ -923,6 +948,7 @@ mod tests {
             frame_count: frame_timestamps_ns.len() as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -938,12 +964,14 @@ mod tests {
         // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
         // announcement always fits one commands sample. Prove the cap holds at
         // the absolute worst case: every per-frame ns timestamp a full-range
-        // i64 (10-byte postcard zigzag varint) and every fixed field maxed out.
+        // i64 (10-byte postcard zigzag varint), every publish offset a
+        // full-range u32 (5-byte varint), and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
         let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: i64::MAX,
@@ -958,6 +986,7 @@ mod tests {
             frame_count: count as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
