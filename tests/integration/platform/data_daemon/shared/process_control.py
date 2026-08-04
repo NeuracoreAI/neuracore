@@ -8,6 +8,7 @@ here without cycles.
 
 from __future__ import annotations
 
+import faulthandler
 import functools
 import logging
 import logging.handlers
@@ -22,6 +23,7 @@ import traceback
 from collections.abc import Generator
 from contextlib import contextmanager
 
+from neuracore.core.utils.http_session import http_time_snapshot
 from neuracore.data_daemon.daemon_control import (
     ensure_daemon_running,
     pid_is_running,
@@ -63,6 +65,31 @@ HIGH_TIME_TO_DATASET_READY_S = 500
 # Timer
 # ---------------------------------------------------------------------------
 
+STACK_DUMP_MIN_LIMIT_S = 5.0
+"""Smallest ``Timer.max_time`` that arms a stack dump on breach.
+
+``faulthandler.dump_traceback_later`` is a single per-process timer, so arming it
+costs a rearm on every enter and exit. Per-frame logging timers run tens of
+thousands of times per test at sub-second limits, so they stay out; the
+coarse-grained operations where a hang is worth a stack trace stay in.
+"""
+
+_dump_deadlines: list[float] = []
+"""Monotonic breach deadlines of the currently open Timers, innermost last.
+
+Timers nest, so the single process-wide dump timer is always armed for the
+earliest deadline still outstanding.
+"""
+
+
+def _rearm_stack_dump() -> None:
+    """Point the process-wide stack-dump timer at the earliest open deadline."""
+    if not _dump_deadlines:
+        faulthandler.cancel_dump_traceback_later()
+        return
+    remaining = min(_dump_deadlines) - time.monotonic()
+    faulthandler.dump_traceback_later(max(remaining, 0.001), exit=False)
+
 
 class Timer:
     """Context manager that measures wall-clock elapsed time for a block.
@@ -71,6 +98,12 @@ class Timer:
     ``_stats`` dictionary so that test suites can report aggregate timing at
     the end of a run.  Optionally asserts that the block completed within
     ``max_time`` seconds.
+
+    Every logged line and assertion message apportions the elapsed time between
+    HTTP requests this thread made and everything else, so a breach states on its
+    face whether the backend was involved.  Blocks whose limit is at least
+    ``STACK_DUMP_MIN_LIMIT_S`` also dump every thread's stack to stderr at the
+    moment they breach, while the block is still stuck.
 
     Attributes:
         _stats: Class-level dict mapping label strings to aggregate timing
@@ -84,6 +117,9 @@ class Timer:
             this value.  ``None`` disables.
         assert_deadline: When ``True`` (default), raise ``AssertionError`` if
             the block exceeds ``max_time``.  Set to ``False`` to log only.
+        http_calls: Requests this thread issued inside the block.  Set on exit.
+        http_seconds: Seconds those requests took.  Set on exit.
+        dumps_stack: Whether this timer armed the stack dump.
     """
 
     _stats: dict[str, dict[str, float]] = {}
@@ -104,12 +140,27 @@ class Timer:
 
     def __enter__(self) -> Timer:
         self.wall_start = time.time()
+        self.http_calls_start, self.http_seconds_start = http_time_snapshot()
+        self.dumps_stack = self.max_time >= STACK_DUMP_MIN_LIMIT_S
+        if self.dumps_stack:
+            self.dump_deadline = time.monotonic() + self.max_time
+            _dump_deadlines.append(self.dump_deadline)
+            _rearm_stack_dump()
         self.start = time.perf_counter()
         return self
 
     def __exit__(self, *args: object) -> bool | None:
         self.end = time.perf_counter()
         self.interval = self.end - self.start
+        if self.dumps_stack:
+            try:
+                _dump_deadlines.remove(self.dump_deadline)
+            except ValueError:
+                pass
+            _rearm_stack_dump()
+        http_calls, http_seconds = http_time_snapshot()
+        self.http_calls = http_calls - self.http_calls_start
+        self.http_seconds = http_seconds - self.http_seconds_start
         had_exception = len(args) > 0 and args[0] is not None
         if self.label:
             stats = self._stats.setdefault(
@@ -131,10 +182,11 @@ class Timer:
                 )
                 logger.log(
                     level,
-                    "Timer %-32s %.3fs (limit=%.3fs)",
+                    "Timer %-32s %.3fs (limit=%.3fs) %s",
                     self.label,
                     self.interval,
                     self.max_time,
+                    self._attribution(),
                 )
 
         if had_exception:
@@ -143,9 +195,28 @@ class Timer:
         if self.assert_deadline:
             assert self.interval < self.max_time, (
                 f"{self.label or 'Function'} took too long: "
-                f"{self.interval:.3f}s >= {self.max_time:.3f}s"
+                f"{self.interval:.3f}s >= {self.max_time:.3f}s "
+                f"{self._attribution()}"
             )
         return None
+
+    def _attribution(self) -> str:
+        """Split the measured time between waiting on the API and local work.
+
+        Names whichever side dominates so a breach does not need cross-referencing
+        against backend request logs to apportion. HTTP time covers only requests
+        this thread issued, so a block whose work happens in worker processes or
+        threads reports its own HTTP time as near zero.
+
+        Returns:
+            A bracketed summary of HTTP time, local time and the dominant side.
+        """
+        local = max(self.interval - self.http_seconds, 0.0)
+        dominant = "http" if self.http_seconds > local else "local"
+        return (
+            f"[http {self.http_seconds:.3f}s over {self.http_calls} calls, "
+            f"local {local:.3f}s -> {dominant}-bound]"
+        )
 
     @classmethod
     def merge_stats(cls, stats: dict[str, dict[str, float]]) -> None:
