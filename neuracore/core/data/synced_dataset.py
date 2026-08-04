@@ -1,12 +1,17 @@
 """SynchronizedDataset class for managing synchronized datasets."""
 
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
 
+import requests
 from neuracore_types import (
+    CalculateDatasetStatisticsRequest,
     CrossEmbodimentDescription,
     CrossEmbodimentUnion,
+    DatasetStatisticsJob,
+    DatasetStatisticsJobStatus,
     SynchronizedDatasetStatistics,
 )
 from tqdm import tqdm
@@ -15,6 +20,8 @@ from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.exceptions import DatasetError
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 
 if TYPE_CHECKING:
@@ -22,6 +29,11 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+DATASET_STATISTICS_POLL_INTERVAL_S = 5.0
+DATASET_STATISTICS_TIMEOUT_S = 1800.0
+DATASET_STATISTICS_RESULT_TIMEOUT_S = (5.0, 120.0)
+_FATAL_PROGRESS_STATUS_CODES = frozenset({400, 401, 403, 404, 409, 422})
 
 
 class SynchronizedDataset:
@@ -231,6 +243,11 @@ class SynchronizedDataset:
     ) -> SynchronizedDatasetStatistics:
         """Calculate statistics for each data type in the synchronized dataset.
 
+        The calculation runs server-side, so this starts it and then blocks,
+        reporting progress, until it finishes. Repeat calls for the same
+        recordings and cross-embodiment descriptions join the running calculation
+        or reuse its result, so an interrupted call resumes rather than restarts.
+
         Args:
             input_cross_embodiment_description: Cross-embodiment
             description for input data types.
@@ -240,15 +257,171 @@ class SynchronizedDataset:
         Returns:
             SynchronizedDatasetStatistics containing the calculated statistics.
         """
-        session = thread_local_session()
+        job = self._start_statistics_job(
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+        )
+        job = self._await_statistics_job(job)
+        return self._fetch_statistics_result(job.job_id)
+
+    def _start_statistics_job(
+        self,
+        input_cross_embodiment_description: CrossEmbodimentDescription,
+        output_cross_embodiment_description: CrossEmbodimentDescription,
+    ) -> DatasetStatisticsJob:
+        """Start or join the statistics calculation for this dataset and spec.
+
+        Args:
+            input_cross_embodiment_description: Cross-embodiment
+            description for input data types.
+            output_cross_embodiment_description: Cross-embodiment
+            description for output data types.
+
+        Returns:
+            The calculation's initial state.
+
+        Raises:
+            DatasetError: If the calculation could not be started.
+        """
+        # The server derives the job from the request, so retrying is safe.
+        session = thread_local_session(retry_transient=True)
         response = session.post(
             f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset/calculate-dataset-statistics",
-            json=SynchronizedDatasetStatistics(
+            json=CalculateDatasetStatisticsRequest(
                 synchronized_dataset_id=self.id,
                 input_cross_embodiment_description=input_cross_embodiment_description,
                 output_cross_embodiment_description=output_cross_embodiment_description,
             ).model_dump(mode="json"),
             headers=get_auth().get_headers(),
         )
-        response.raise_for_status()
+        if not response.ok:
+            raise DatasetError(
+                extract_error_detail(response)
+                or "Failed to start calculating dataset statistics."
+            )
+        return DatasetStatisticsJob.model_validate(response.json())
+
+    def _poll_statistics_job(self, job_id: str) -> DatasetStatisticsJob | None:
+        """Read a statistics calculation's state, tolerating transient failures.
+
+        Args:
+            job_id: The statistics job to poll.
+
+        Returns:
+            The calculation's state, or None when this read should simply be
+            retried on the next poll.
+
+        Raises:
+            DatasetError: If the calculation failed, or the read failed in a way
+                that further polling cannot resolve.
+        """
+        session = thread_local_session(retry_transient=True, retry_read_timeout=True)
+        try:
+            response = session.get(
+                f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset"
+                f"/dataset-statistics-progress/{job_id}",
+                headers=get_auth().get_headers(),
+            )
+        except requests.RequestException as exc:
+            logger.debug(f"Dataset statistics progress poll failed: {exc}")
+            return None
+
+        if not response.ok:
+            if response.status_code in _FATAL_PROGRESS_STATUS_CODES:
+                raise DatasetError(
+                    extract_error_detail(response)
+                    or "Calculating dataset statistics failed."
+                )
+            logger.debug(
+                "Dataset statistics progress returned "
+                f"{response.status_code}; retrying."
+            )
+            return None
+
+        job = DatasetStatisticsJob.model_validate(response.json())
+        if job.status is DatasetStatisticsJobStatus.FAILED:
+            raise DatasetError(job.error or "Calculating dataset statistics failed.")
+        return job
+
+    def _await_statistics_job(self, job: DatasetStatisticsJob) -> DatasetStatisticsJob:
+        """Block until a statistics calculation completes, reporting progress.
+
+        Args:
+            job: The calculation's current state.
+
+        Returns:
+            The calculation's completed state.
+
+        Raises:
+            DatasetError: If the calculation fails or exceeds the deadline.
+        """
+        if job.status is DatasetStatisticsJobStatus.COMPLETE:
+            logger.debug(f"Dataset statistics already calculated (job {job.job_id}).")
+            return job
+
+        deadline = time.monotonic() + DATASET_STATISTICS_TIMEOUT_S
+        pbar = tqdm(
+            total=job.num_recordings,
+            desc="Calculating dataset statistics",
+            unit="recording",
+        )
+        try:
+            pbar.n = min(job.num_completed_recordings, job.num_recordings)
+            pbar.refresh()
+            aggregating = False
+            while job.status is not DatasetStatisticsJobStatus.COMPLETE:
+                if time.monotonic() >= deadline:
+                    raise DatasetError(
+                        f"Timed out after {DATASET_STATISTICS_TIMEOUT_S:.0f}s "
+                        f"waiting for dataset statistics (job {job.job_id}, "
+                        f"status {job.status.value}, "
+                        f"{job.num_completed_recordings}/{job.num_recordings} "
+                        "recordings). The calculation is still running; "
+                        "calculating again resumes it rather than starting over."
+                    )
+                time.sleep(DATASET_STATISTICS_POLL_INTERVAL_S)
+                polled = self._poll_statistics_job(job.job_id)
+                if polled is None:
+                    continue
+
+                job = polled
+                completed = min(job.num_completed_recordings, job.num_recordings)
+                if completed > pbar.n:
+                    pbar.update(completed - pbar.n)
+                if (
+                    job.status is DatasetStatisticsJobStatus.AGGREGATING
+                    and not aggregating
+                ):
+                    aggregating = True
+                    pbar.set_description("Aggregating dataset statistics")
+                # Keep the elapsed clock moving so aggregating does not look
+                # like a hang once the recording count stops changing.
+                pbar.refresh()
+        finally:
+            pbar.close()
+        return job
+
+    def _fetch_statistics_result(self, job_id: str) -> SynchronizedDatasetStatistics:
+        """Fetch a completed statistics calculation's result.
+
+        Args:
+            job_id: The completed statistics job.
+
+        Returns:
+            SynchronizedDatasetStatistics containing the calculated statistics.
+
+        Raises:
+            DatasetError: If the result could not be fetched.
+        """
+        session = thread_local_session(retry_transient=True, retry_read_timeout=True)
+        response = session.get(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronized-dataset"
+            f"/dataset-statistics/{job_id}",
+            headers=get_auth().get_headers(),
+            timeout=DATASET_STATISTICS_RESULT_TIMEOUT_S,
+        )
+        if not response.ok:
+            raise DatasetError(
+                extract_error_detail(response) or "Failed to fetch dataset statistics."
+            )
         return SynchronizedDatasetStatistics.model_validate(response.json())

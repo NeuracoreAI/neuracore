@@ -125,6 +125,7 @@ doctests
 DONTNEED
 dtype
 EADDRINUSE
+edgeitems
 eigenpy
 einops
 elementwise
