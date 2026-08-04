@@ -14,9 +14,13 @@ from typing import TYPE_CHECKING
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MIN_ENCODED_BYTES_PER_PIXEL,
+    TRAILING_RGB_GAP_FRAME_TOLERANCE,
 )
 
 if TYPE_CHECKING:
+    from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (  # noqa: E501
+        DataDaemonTestCase,
+    )
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
     )
@@ -207,6 +211,55 @@ def _assert_timestamps_match(
         durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
 
 
+def _assert_no_trailing_rgb_gap(
+    *,
+    trace_key: str,
+    timestamps: list[float],
+    expected_stop_timestamp: float | None,
+    video_fps: int,
+    failures: list[TraceFailure],
+) -> None:
+    """Assert an RGB trace's last on-disk frame isn't stranded before the stop.
+
+    A tail video chunk silently orphaned at the recording-window boundary (see
+    the dispatcher's per-producer flush-marker gating) truncates the trace
+    without ever tripping :func:`_assert_timestamps_match` — that check only
+    ever sees what actually reached disk, so a shortened sequence still
+    compares equal to itself. This is deliberately immune to producer
+    *under*-delivery (a slow or throttled camera legitimately logging fewer
+    frames), which is why it compares the last on-disk timestamp against the
+    recording's nominal capture-clock end rather than the expected frame
+    count: only a chunk orphaned at the boundary strands frames an unbounded
+    distance before a stop that has already happened.
+
+    *expected_stop_timestamp* must be on the same capture clock as
+    *timestamps* — see ``ContextResult.expected_video_stop_timestamp_by_recording``.
+    It is deliberately not the wall-clock instant ``nc.stop_recording`` was
+    called: that call's own ``timestamp`` argument, and therefore every
+    per-frame capture timestamp compared here, is caller-supplied content on
+    a clock the daemon and this harness never assume is wall-clock at all.
+    """
+    if expected_stop_timestamp is None or not timestamps:
+        return
+    if not trace_key.startswith("RGB_IMAGES/"):
+        return
+    gap_s = expected_stop_timestamp - max(timestamps)
+    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / video_fps
+    if gap_s > tolerance_s:
+        failures.append(
+            TraceFailure(
+                trace_key=trace_key,
+                body=(
+                    f"last on-disk frame trails the recording's nominal end "
+                    f"by {gap_s:.3f}s, more than the {tolerance_s:.3f}s "
+                    f"tolerance ({TRAILING_RGB_GAP_FRAME_TOLERANCE} video "
+                    f"frame interval(s) at {video_fps}fps) — a tail chunk "
+                    f"may have been orphaned at the window boundary"
+                ),
+            )
+        )
+
+
 def _collapse_trace_failures(failures: list[TraceFailure]) -> list[str]:
     """Collapse failures that share the same body across multiple traces.
 
@@ -361,6 +414,17 @@ def assert_disk_recording_properties(
                     unknowable_timestamps=frozenset(
                         per_recording.by_trace_unknowable.get(trace_key, ())
                     ),
+                )
+                _assert_no_trailing_rgb_gap(
+                    trace_key=trace_key,
+                    timestamps=timestamps,
+                    expected_stop_timestamp=(
+                        result.expected_video_stop_timestamp_by_recording.get(
+                            recording_key
+                        )
+                    ),
+                    video_fps=result.video_fps,
+                    failures=trace_failures,
                 )
 
             if trace_failures:
@@ -551,3 +615,42 @@ def assert_lossy_only_video_artifacts(
                     f"{lossy_path} has {nb_read_frames} frames, "
                     f"trace.json expects {expected_frames}"
                 )
+
+
+def assert_rgb_trace_survived_boundary(
+    recording_index: int, case: DataDaemonTestCase
+) -> None:
+    """Assert the recording's RGB trace has every frame, ending near the stop.
+
+    Called once the tail chunk should already have landed — see
+    :func:`~runners.split_video_process_running`, which only returns once the
+    producer's own writer flush barrier has completed and been acknowledged.
+    """
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        wait_for_written_rgb_trace,
+    )
+
+    rgb_trace = wait_for_written_rgb_trace(recording_index)
+    trace_json = (
+        get_daemon_recordings_root_path()
+        / str(recording_index)
+        / "RGB_IMAGES"
+        / rgb_trace["trace_id"]
+        / "trace.json"
+    )
+    frames = json.loads(trace_json.read_text(encoding="utf-8"))
+    timestamps = [float(frame["timestamp"]) for frame in frames]
+
+    expected_frame_count = case.video_fps * case.duration_sec
+    assert len(timestamps) == expected_frame_count, (
+        f"RGB trace has {len(timestamps)} frames, expected "
+        f"{expected_frame_count} — a chunk may have been orphaned at the "
+        "recording boundary"
+    )
+    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / case.video_fps
+    gap_s = case.duration_sec - max(timestamps)
+    assert gap_s <= tolerance_s, (
+        f"last on-disk RGB frame trails the recording's nominal end by "
+        f"{gap_s:.3f}s, more than the {tolerance_s:.3f}s tolerance — a tail "
+        "chunk may have been orphaned at the window boundary"
+    )

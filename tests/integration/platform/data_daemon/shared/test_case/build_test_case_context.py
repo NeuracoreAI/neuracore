@@ -13,10 +13,11 @@ import multiprocessing
 import random
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -71,6 +72,12 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 # video streams draw independent phase offsets.
 JOINT_STREAM = 0
 VIDEO_STREAM = 1
+
+# _split_video_producer: how long to wait for the video-owning subprocess to
+# report its frame log after it has already been joined. Purely a safety net
+# against a `Queue.put` not yet flushed through the feeder pipe by the time
+# `join()` returns — the process itself is already dead.
+SPLIT_VIDEO_REPORT_TIMEOUT_S = 30.0
 
 # Producer pacing for the performance suites
 LOG_LOOP_FREQUENCY_HZ = 60
@@ -324,6 +331,26 @@ class ContextResult:
     frame index makes the codes unpredictable from the recording ordinal.
     Empty for bounded producers, where ``assertions`` derives the expected codes
     from the ordinal as before.
+    """
+    expected_video_stop_timestamp_by_recording: dict[str, float] = field(
+        default_factory=dict
+    )
+    """Nominal capture-clock upper bound of each recording's video, keyed by
+    the on-disk recording directory name: ``timestamp_start_s +
+    (recording_ordinal + 1) * duration_sec``, on the same
+    ``spec.timestamp_start_s``-based clock RGB frame timestamps are written
+    on. Deliberately not a wall-clock value — ``nc.start_recording`` /
+    ``nc.stop_recording``'s own ``timestamp`` argument (stored as
+    ``start_timestamp_ns`` / ``stop_timestamp_ns``) is real wall-clock
+    (``time.time()``), an entirely different, unrelated clock from the
+    per-frame capture timestamps this compares against.
+
+    Lets :func:`~disk_helpers.assert_disk_recording_properties` bound how far an
+    RGB trace's last on-disk timestamp may trail the recording's nominal end,
+    independent of whether this context ran ``inline`` or ``split_process`` —
+    a tail chunk silently orphaned at the window boundary truncates the trace
+    without tripping the exact-equality timestamp check, since that check
+    only ever sees what actually made it to disk.
     """
 
 
@@ -657,7 +684,12 @@ def build_stream_plans(
     joint_fps: int,
     video_fps: int,
 ) -> list[StreamPlan]:
-    """Decompose a workload into one stream per camera and per joint data type."""
+    """Decompose a workload into one stream per camera and per joint data type.
+
+    An empty ``joint_names`` produces no joint-kind streams at all, rather than
+    three streams with no channels to log — a split-process camera-only worker
+    passes ``joint_names=[]`` for exactly that reason.
+    """
     return [
         *(
             StreamPlan(
@@ -678,6 +710,7 @@ def build_stream_plans(
                 joint_kinds=(kind,),
             )
             for kind in JOINT_KINDS
+            if joint_names
         ),
     ]
 
@@ -1003,6 +1036,78 @@ def run_continuous_logging(
     return report
 
 
+def _split_video_producer(
+    robot_name: str,
+    dataset_name: str,
+    camera_name_list: list[str],
+    image_width: int | None,
+    image_height: int | None,
+    video_fps: int,
+    video_detail: str,
+    timestamp_start_s: float,
+    random_phase: bool,
+    pacing: str,
+    context_index: int,
+    ready_event: Any,
+    stop_event: Any,
+    result_queue: Any,
+) -> None:
+    """Own RGB video for a producer running in its own OS process.
+
+    Runs in a separate OS process from the one that owns
+    ``start_recording``/``stop_recording`` for the same robot — the topology
+    the daemon's per-producer flush-marker tracking exists for (a source
+    logged from more than one process, each with its own OS pid). Connects
+    its own robot handle, logs continuously exactly like the in-process camera
+    thread does (:func:`run_continuous_logging`, with no joint streams), and
+    reports every frame back through *result_queue* for the caller to
+    classify against the recording it controlled.
+
+    *ready_event*, *stop_event* and *result_queue* are ``multiprocessing``
+    primitives from a ``"spawn"`` context; ``stop_event`` duck-types the
+    ``threading.Event`` interface :func:`run_continuous_logging` expects.
+    """
+    multiprocessing.current_process().name = f"split-video-{context_index}"
+    robot = None
+    try:
+        ensure_login()
+        nc.get_dataset(dataset_name)
+        robot = nc.connect_robot(robot_name, overwrite=False)
+        if camera_name_list and video_detail == DETAIL_REALISTIC:
+            # Mirrors context_worker's own prewarm — see its call site for why
+            # a lazy build inside the camera thread costs seconds this
+            # producer does not have.
+            prewarm_frame_bank(image_width, image_height)
+        ready_event.set()
+        report = run_continuous_logging(
+            robot=robot,
+            robot_name=robot_name,
+            joint_names=[],
+            camera_name_list=camera_name_list,
+            image_width=image_width,
+            image_height=image_height,
+            joint_fps=0,
+            video_fps=video_fps,
+            video_detail=video_detail,
+            timestamp_start_s=timestamp_start_s,
+            random_phase=random_phase,
+            pacing=pacing,
+            context_index=context_index,
+            stop_event=stop_event,
+        )
+        # Call the same private hook directly so this producer's tail chunk
+        # and its own SourceFlushed marker are sealed and announced under
+        # this process's own pid deterministically, without depending on the
+        # SSE round trip's timing.
+        robot._get_daemon_recording_context().flush_source()  # noqa: SLF001
+        result_queue.put({"ok": True, "report": report})
+    except BaseException:  # noqa: BLE001 - propagate full child traceback
+        result_queue.put({"ok": False, "traceback": traceback.format_exc()})
+    finally:
+        if robot is not None:
+            robot.close()
+
+
 def _classify_boundary_frames(
     frames: list[EmittedFrame],
     bounds: RecordingControlBounds,
@@ -1231,6 +1336,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
         observed_frame_codes: dict[str, ObservedFrameCodes] = {}
+        expected_video_stop_timestamp_by_recording: dict[str, float] = {}
 
         continuous = case.producer_channels == PRODUCER_CONTINUOUS
         continuous_stop_event: threading.Event | None = None
@@ -1373,6 +1479,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                         timestamp=recording_capture_stop_s,
                     )
                 wall_stopped_at = time.time()
+                expected_video_stop_timestamp_by_recording[disk_recording_key] = (
+                    spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
+                )
 
                 if continuous:
                     bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
@@ -1481,6 +1590,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             ),
             timer_stats=captured_timer_stats,
             observed_frame_codes=observed_frame_codes,
+            expected_video_stop_timestamp_by_recording=(
+                expected_video_stop_timestamp_by_recording
+            ),
         )
     except Exception:
         if robot is not None:
