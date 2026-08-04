@@ -1354,6 +1354,7 @@ fn flush_chunk_locked(
         sensor_name: Some(sensor_name.to_string()),
         publish_timestamp_ns,
         thread_id,
+        producer_pid: std::process::id(),
         width: state.width,
         height: state.height,
         byte_count,
@@ -1435,6 +1436,7 @@ fn announce_source_flushed(robot_id: &str, robot_instance: i64) {
         robot_id: robot_id.to_string(),
         robot_instance,
         publish_timestamp_ns: now_ns(),
+        producer_pid: std::process::id(),
     }));
 }
 

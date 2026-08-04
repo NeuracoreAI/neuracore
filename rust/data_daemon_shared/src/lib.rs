@@ -384,6 +384,13 @@ pub enum Envelope {
         /// chunk. Disambiguates the spool filename across threads and is a
         /// useful breadcrumb when inspecting the spool directory.
         thread_id: i64,
+        /// OS process id (`std::process::id()`) of the producer that sealed
+        /// this chunk. A source's `(robot_id, robot_instance)` can be logged
+        /// from more than one process at once — see
+        /// [`Envelope::SourceFlushed`]'s `producer_pid`, which this is matched
+        /// against so a marker from one process never vouches for another
+        /// process's still-pending video.
+        producer_pid: u32,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels (constant across a trace).
@@ -441,6 +448,13 @@ pub enum Envelope {
         /// is stamped once the barrier is done), so it is deliberately not used
         /// for window membership.
         publish_timestamp_ns: i64,
+        /// OS process id (`std::process::id()`) of the producer whose writer
+        /// flush barrier this marker reports on. A source's
+        /// `(robot_id, robot_instance)` can be logged from more than one
+        /// process sharing that identity — this marker only vouches for the
+        /// [`Envelope::VideoChunkReady`] chunks that carried the same
+        /// `producer_pid`, never another process's still-pending video.
+        producer_pid: u32,
     },
 }
 
@@ -811,6 +825,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 4242,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -848,6 +863,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 42,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -882,6 +898,7 @@ mod tests {
             sensor_name: Some("camera_with_a_deliberately_long_sensor_label".into()),
             publish_timestamp_ns: i64::MAX,
             thread_id: i64::MAX,
+            producer_pid: u32::MAX,
             width: u32::MAX,
             height: u32::MAX,
             byte_count: u64::MAX,

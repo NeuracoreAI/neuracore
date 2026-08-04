@@ -44,7 +44,7 @@
 //! queue need no locks — total ordering through the `select!` loop is what
 //! makes the routing decisions provable.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -225,9 +225,17 @@ struct ActiveWindow {
     /// a successor's start, force-closed by the idle reaper — get no marker and
     /// evict on the retention deadline alone.
     awaiting_flush: bool,
-    /// Set when that marker has been released from the holdback queue, i.e.
-    /// every tail chunk it was ordered behind has already routed.
-    flushed: bool,
+    /// OS process ids ([`Envelope::VideoChunkReady`]'s `producer_pid`) that have
+    /// announced at least one video chunk into this window. A source's
+    /// `(robot_id, robot_instance)` can be logged from more than one process at
+    /// once, and each process's own [`Envelope::SourceFlushed`] marker only
+    /// vouches for chunks *it* announced — so the window is not fully flushed
+    /// until every pid here also appears in `flushed_producers`.
+    video_producers: HashSet<u32>,
+    /// OS process ids whose `SourceFlushed` marker has been released from the
+    /// holdback queue, i.e. every tail chunk that process ordered behind it has
+    /// already routed.
+    flushed_producers: HashSet<u32>,
     /// Per-trace actors spawned within this window.
     traces: HashMap<TraceKey, TraceHandle>,
 }
@@ -236,6 +244,16 @@ impl ActiveWindow {
     /// Does this window's `[started_at_ns, stopped_at_ns)` contain `ts`?
     fn contains(&self, ts: i64) -> bool {
         ts >= self.started_at_ns && self.stopped_at_ns.is_none_or(|stop| ts < stop)
+    }
+
+    /// True once every producer known to have contributed video into this
+    /// window has also sent its own flush marker. Requires at least one marker
+    /// to have arrived at all, so a source with no video (`video_producers`
+    /// empty) still needs the single marker the old boolean scheme did — only a
+    /// source logged from more than one process additionally needs the rest.
+    fn flush_markers_settled(&self) -> bool {
+        !self.flushed_producers.is_empty()
+            && self.video_producers.is_subset(&self.flushed_producers)
     }
 }
 
@@ -279,17 +297,22 @@ enum HeldPayload {
         data_type: String,
         sensor_name: Option<String>,
         thread_id: i64,
+        producer_pid: u32,
         width: u32,
         height: u32,
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
     },
-    /// End-of-tail marker for a source's stopped window. Carries no data — it
-    /// rides the holdback queue purely for its *position*: the producer sent it
-    /// behind the barrier's tail chunks on one port, so releasing it means
-    /// those chunks have already been routed.
-    SourceFlushed,
+    /// End-of-tail marker for a source's stopped window. Rides the holdback
+    /// queue purely for its *position*: the producer sent it behind the
+    /// barrier's tail chunks on one port, so releasing it means those chunks
+    /// have already been routed.
+    SourceFlushed {
+        /// OS process id of the producer this marker vouches for — see
+        /// [`ActiveWindow::flushed_producers`].
+        producer_pid: u32,
+    },
 }
 
 /// The dispatcher's task-local state.
@@ -479,6 +502,7 @@ impl Dispatcher {
                 sensor_name,
                 publish_timestamp_ns,
                 thread_id,
+                producer_pid,
                 width,
                 height,
                 byte_count,
@@ -497,6 +521,7 @@ impl Dispatcher {
                         data_type,
                         sensor_name,
                         thread_id,
+                        producer_pid,
                         width,
                         height,
                         byte_count,
@@ -509,6 +534,7 @@ impl Dispatcher {
                 robot_id,
                 robot_instance,
                 publish_timestamp_ns,
+                producer_pid,
             } => {
                 let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
@@ -521,7 +547,7 @@ impl Dispatcher {
                     source,
                     release_at: recv_at + self.holdback,
                     publish_timestamp_ns,
-                    payload: HeldPayload::SourceFlushed,
+                    payload: HeldPayload::SourceFlushed { producer_pid },
                 });
             }
             Envelope::RefreshConfig {} => self.handle_refresh_config().await,
@@ -636,7 +662,8 @@ impl Dispatcher {
             stopped_at_ns: None,
             stop_recv_at: None,
             awaiting_flush: false,
-            flushed: false,
+            video_producers: HashSet::new(),
+            flushed_producers: HashSet::new(),
             traces: HashMap::new(),
         });
 
@@ -736,7 +763,7 @@ impl Dispatcher {
             // on this stop's flush marker for the same reason.
             window.stop_recv_at = Some(recv_at);
             window.awaiting_flush = true;
-            window.flushed = false;
+            window.flushed_producers.clear();
             tracing::warn!(
                 robot_id = source.0,
                 recording_index,
@@ -880,16 +907,20 @@ impl Dispatcher {
                 let since_stop = window.stop_recv_at.map(|at| now.duration_since(at));
                 let retained = since_stop.is_some_and(|elapsed| elapsed >= retention);
                 let flush_settled = !window.awaiting_flush
-                    || window.flushed
+                    || window.flush_markers_settled()
                     || since_stop.is_some_and(|elapsed| elapsed >= FLUSH_MARKER_WAIT_CAP);
                 let evict = retained && flush_settled;
                 if evict {
                     let elapsed = since_stop.unwrap_or_default();
-                    if window.awaiting_flush && !window.flushed {
+                    if window.awaiting_flush && !window.flush_markers_settled() {
                         tracing::warn!(
                             recording_index = window.recording_index,
                             robot_id = source.0,
                             elapsed_s = elapsed.as_secs_f64(),
+                            outstanding_producers = window
+                                .video_producers
+                                .difference(&window.flushed_producers)
+                                .count(),
                             "no producer flush marker before the cap; retiring the \
                              window anyway — any tail video chunk still in flight \
                              will be dropped as an orphan"
@@ -905,7 +936,7 @@ impl Dispatcher {
                             "trace_actor_count": window.traces.len(),
                             "configured_retention_ms": retention.as_secs_f64() * 1_000.0,
                             "awaited_flush_marker": window.awaiting_flush,
-                            "flush_marker_seen": window.flushed,
+                            "flush_marker_seen": window.flush_markers_settled(),
                         }),
                     );
                     for (_, handle) in window.traces.drain() {
@@ -1036,6 +1067,7 @@ impl Dispatcher {
                 data_type,
                 sensor_name,
                 thread_id,
+                producer_pid,
                 width,
                 height,
                 byte_count,
@@ -1048,6 +1080,7 @@ impl Dispatcher {
                     data_type,
                     sensor_name,
                     thread_id,
+                    producer_pid,
                     width,
                     height,
                     byte_count,
@@ -1056,34 +1089,39 @@ impl Dispatcher {
                 )
                 .await;
             }
-            HeldPayload::SourceFlushed => self.mark_source_flushed(&held.source),
+            HeldPayload::SourceFlushed { producer_pid } => {
+                self.mark_source_flushed(&held.source, producer_pid)
+            }
         }
     }
 
-    /// Record that a source's flush barrier has drained, releasing the oldest
-    /// closing window still waiting on one for eviction.
+    /// Record that one producer's flush barrier has drained for a source,
+    /// crediting the oldest closing window that still needs a marker from this
+    /// `producer_pid` for eviction.
     ///
     /// Matched oldest-first rather than by timestamp: the marker is stamped
     /// *after* the window it closes out, so it has no in-window key to match
-    /// on. A source's stops are strictly ordered on one publisher port, and
-    /// each stop produces exactly one marker, so the Nth marker belongs to the
-    /// Nth stopped window. An unmatched marker (its window already evicted at
+    /// on. One producer's own markers are strictly ordered on its own
+    /// publisher port, and each of its stops produces exactly one marker, so
+    /// its Nth marker belongs to its Nth stopped window — found here as the
+    /// oldest closing window that does not already have this `producer_pid` in
+    /// `flushed_producers`. An unmatched marker (its window already evicted at
     /// the cap, or a cancel that published none) is simply dropped.
-    fn mark_source_flushed(&mut self, source: &Source) {
+    fn mark_source_flushed(&mut self, source: &Source, producer_pid: u32) {
         let Some(entry) = self.windows.get_mut(source) else {
             return;
         };
-        let Some(window) = entry
-            .closing
-            .iter_mut()
-            .find(|window| window.awaiting_flush && !window.flushed)
-        else {
+        let Some(window) = entry.closing.iter_mut().find(|window| {
+            window.awaiting_flush && !window.flushed_producers.contains(&producer_pid)
+        }) else {
             return;
         };
-        window.flushed = true;
+        window.flushed_producers.insert(producer_pid);
         tracing::debug!(
             recording_index = window.recording_index,
-            "producer flush barrier drained; window may retire"
+            producer_pid,
+            "producer flush barrier drained; window may retire once every \
+             video-contributing producer has reported"
         );
     }
 
@@ -1154,6 +1192,7 @@ impl Dispatcher {
         data_type: String,
         sensor_name: Option<String>,
         thread_id: i64,
+        producer_pid: u32,
         width: u32,
         height: u32,
         byte_count: u64,
@@ -1187,6 +1226,9 @@ impl Dispatcher {
             self.note_orphan();
             return;
         };
+        // Recorded before the actor send below so a window that only ever
+        // sees this one chunk still knows to wait on this producer's marker.
+        window.video_producers.insert(producer_pid);
 
         let recording_index = window.recording_index;
         let handle = Self::ensure_actor(
@@ -1378,11 +1420,12 @@ mod tests {
 
     /// The producer's end-of-barrier marker: no more tail chunks are coming for
     /// this source's just-stopped window.
-    fn source_flushed(robot: &str, publish_timestamp_ns: i64) -> Envelope {
+    fn source_flushed(robot: &str, publish_timestamp_ns: i64, producer_pid: u32) -> Envelope {
         Envelope::SourceFlushed {
             robot_id: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns,
+            producer_pid,
         }
     }
 
@@ -1697,7 +1740,7 @@ mod tests {
 
     /// Announce a finished video chunk whose open time is `publish_ts`. The
     /// caller must have spooled the matching NUT under the spool dir first.
-    fn video_chunk(robot: &str, publish_ts: i64, thread_id: i64) -> Envelope {
+    fn video_chunk(robot: &str, publish_ts: i64, thread_id: i64, producer_pid: u32) -> Envelope {
         Envelope::VideoChunkReady {
             robot_id: robot.into(),
             robot_instance: 0,
@@ -1705,6 +1748,7 @@ mod tests {
             sensor_name: Some("camera_0".into()),
             publish_timestamp_ns: publish_ts,
             thread_id,
+            producer_pid,
             width: 64,
             height: 64,
             byte_count: 9,
@@ -1748,7 +1792,7 @@ mod tests {
 
         // Window [100, 200); the chunk (open ts 150) is announced before stop.
         tx.send(start("robot-1", 100)).await.unwrap();
-        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+        tx.send(video_chunk("robot-1", publish_ts, thread_id, 1))
             .await
             .unwrap();
         tx.send(stop("robot-1", 200)).await.unwrap();
@@ -1802,7 +1846,7 @@ mod tests {
 
         tx.send(start("robot-1", 100)).await.unwrap();
         tx.send(stop("robot-1", 200)).await.unwrap();
-        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+        tx.send(video_chunk("robot-1", publish_ts, thread_id, 1))
             .await
             .unwrap();
 
@@ -2047,7 +2091,7 @@ mod tests {
             "the stopped window is retained as closing"
         );
         dispatcher
-            .handle_inbound(source_flushed("robot-1", 900), stopped_at)
+            .handle_inbound(source_flushed("robot-1", 900, 1), stopped_at)
             .await;
         dispatcher
             .release_due_holdback(stopped_at + dispatcher.holdback + Duration::from_millis(1))
@@ -2098,7 +2142,7 @@ mod tests {
 
         // The barrier drains and announces its marker.
         dispatcher
-            .handle_inbound(source_flushed("robot-1", 900), past_retention)
+            .handle_inbound(source_flushed("robot-1", 900, 1), past_retention)
             .await;
         let released_at = past_retention + dispatcher.holdback + Duration::from_millis(1);
         dispatcher.release_due_holdback(released_at).await;
@@ -2148,6 +2192,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_flushed_from_one_producer_must_not_vouch_for_another_producers_chunk() {
+        // A source's `(robot_id, robot_instance)` can be logged from more than
+        // one OS process at once — e.g. a control process that owns the
+        // recording lifecycle and a separate camera process that owns the
+        // video. `SourceFlushed` is announced per-process, once that
+        // process's own writer flush barrier drains, so a video-less
+        // process's marker says nothing about a video-owning process's
+        // still-open barrier. `mark_source_flushed` currently retires the
+        // oldest awaiting-flush window on the first marker from *any*
+        // producer bound to the source — exactly the bug that orphans a
+        // camera process's tail chunk when the control process's marker (it
+        // has no video to flush) lands first.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone(), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+
+        // Producer A (the camera process, pid 1) seals a chunk mid-recording —
+        // exactly like the byte-threshold chunk that always survives — so this
+        // window already has video attributed to producer A before it closes.
+        let (publish_ts, thread_id) = (150, 7); // inside [100, 200)
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+        dispatcher
+            .handle_inbound(video_chunk("robot-1", publish_ts, thread_id, 1), opened_at)
+            .await;
+        dispatcher
+            .release_due_holdback(opened_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let stopped_at = opened_at + Duration::from_millis(2);
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .await;
+
+        // Producer B (the lifecycle-owning process, pid 2) has no video streams
+        // of its own, so its flush sweep is trivial and its marker lands
+        // immediately.
+        dispatcher
+            .handle_inbound(source_flushed("robot-1", 300, 2), stopped_at)
+            .await;
+        dispatcher
+            .release_due_holdback(stopped_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        // Well past retention — but producer A, who owns the chunk already
+        // routed into this window, has not sent its own marker yet.
+        let retention = dispatcher.holdback * 2;
+        let past_retention = stopped_at + retention + Duration::from_millis(1);
+        dispatcher.housekeep(past_retention).await;
+        assert_eq!(
+            dispatcher.windows.get(&source).unwrap().closing.len(),
+            1,
+            "producer B's marker must not vouch for producer A's still-open \
+             flush barrier"
+        );
+
+        // Producer A's own barrier never drains (e.g. it crashed mid-flush), so
+        // the window still must not wait past the cap.
+        let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
+        dispatcher.housekeep(at_cap).await;
+        let closing = dispatcher
+            .windows
+            .get(&source)
+            .map_or(0, |entry| entry.closing.len());
+        assert_eq!(
+            closing, 0,
+            "an unmatched producer still gives way to the cap"
+        );
+    }
+
+    #[tokio::test]
     async fn tail_video_chunk_announced_past_the_retention_deadline_still_routes() {
         // The regression this whole marker exists for. A burst-logging producer
         // is still draining its writer queue when `stop_recording` returns, so
@@ -2172,10 +2294,10 @@ mod tests {
         // Stand in for a slow flush barrier: several times the 2·holdback
         // retention passes before the tail chunk is sealed and announced.
         tokio::time::sleep(Duration::from_millis(400)).await;
-        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+        tx.send(video_chunk("robot-1", publish_ts, thread_id, 1))
             .await
             .unwrap();
-        tx.send(source_flushed("robot-1", 500)).await.unwrap();
+        tx.send(source_flushed("robot-1", 500, 1)).await.unwrap();
 
         drop(tx);
         timeout(Duration::from_secs(10), handle.shutdown())
