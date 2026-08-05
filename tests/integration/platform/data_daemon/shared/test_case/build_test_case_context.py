@@ -1249,29 +1249,41 @@ def run_case_contexts(
         with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
             nc.create_dataset(specs[0].dataset_name)
 
+    if not wait_for_traces:
+        return _run_context_specs(case, specs)
+
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        latching_trace_write_observer,
+        wait_for_all_traces_written,
+    )
+
+    # A late writer is reaped during the wait below, so observe across it.
+    with latching_trace_write_observer() as observed:
+        results = _run_context_specs(case, specs)
+        wait_for_all_traces_written(results=results, observed=observed)
+    return results
+
+
+def _run_context_specs(
+    case: DataDaemonTestCase,
+    specs: list[ContextSpec],
+) -> list[ContextResult]:
+    """Run *specs* in-process or across a pool, per the case's parallelism."""
     if case.parallel_contexts == 1:
-        results = [context_worker(specs[0])]
-    else:
-        process_context = multiprocessing.get_context("spawn")
-        with relayed_worker_logs(process_context) as log_queue:
-            with process_context.Pool(
-                case.parallel_contexts,
-                initializer=init_worker_logging,
-                initargs=(log_queue, logging.getLogger().getEffectiveLevel()),
-            ) as pool:
-                results = list(  # type: ignore[return-value]
-                    pool.map(_subprocess_context_worker, specs)
-                )
-        for result in results:
-            Timer.merge_stats(result.timer_stats)
+        return [context_worker(specs[0])]
 
-    if wait_for_traces:
-        from tests.integration.platform.data_daemon.shared.db_helpers import (
-            wait_for_all_traces_written,
-        )
-
-        wait_for_all_traces_written(results=results)
-
+    process_context = multiprocessing.get_context("spawn")
+    with relayed_worker_logs(process_context) as log_queue:
+        with process_context.Pool(
+            case.parallel_contexts,
+            initializer=init_worker_logging,
+            initargs=(log_queue, logging.getLogger().getEffectiveLevel()),
+        ) as pool:
+            results: list[ContextResult] = list(  # type: ignore[return-value]
+                pool.map(_subprocess_context_worker, specs)
+            )
+    for result in results:
+        Timer.merge_stats(result.timer_stats)
     return results
 
 
