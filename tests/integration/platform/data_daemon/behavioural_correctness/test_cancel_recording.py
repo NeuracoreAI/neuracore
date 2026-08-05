@@ -39,7 +39,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_RECORDING_OVERHEAD_PER_SEC,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    scoped_storage_state,
+    scoped_test_dir_state,
     set_case_analysis_report,
 )
 
@@ -85,7 +85,7 @@ def test_cancel_recording_produces_no_data(
     robot_name = spec.robot_name
 
     try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_test_dir_state(case, dataset_name=dataset_name):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 
@@ -165,7 +165,7 @@ def test_cancel_then_start_new_recording(
     results: list[ContextResult] = []
 
     try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_test_dir_state(case, dataset_name=dataset_name):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
 

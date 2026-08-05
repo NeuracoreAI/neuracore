@@ -39,7 +39,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     _format_timer_stats_line,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    DATA_DAEMON_TEST_STATE_ROOT,
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
@@ -48,8 +47,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 # cspell:ignore terminalreporter exitstatus finalizer NODEIDS exitfirst unparameterized
-# cspell:ignore sessionfinish nodeid getfixturevalue modifyitems callspec addoption
-# cspell:ignore getgroup
+# cspell:ignore nodeid getfixturevalue modifyitems callspec
 
 # Add the repo root to the path so sub workers on macos can unpickle pool tasks
 # correctly. pytest --import-mode=importlib imports tests files without touching the
@@ -364,17 +362,3 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
     lines.append(separator)
     terminalreporter.write_line("\n".join(lines))
-
-
-def pytest_sessionfinish(session, exitstatus):
-    """Remove the shared ``daemon.log`` after an all-green run.
-
-    It is the one artefact under ``.data_daemon_test_state`` that no
-    per-test cleanup owns (the DB and recordings folder are handled by
-    ``apply_storage_state_action``), and each background launch truncates it
-    anyway, so a passing run has nothing left in it worth keeping. Leave it
-    on a failure, since it may hold the daemon's own stderr/tracing for the
-    post-mortem.
-    """
-    del session
-    (DATA_DAEMON_TEST_STATE_ROOT / "daemon.log").unlink(missing_ok=True)

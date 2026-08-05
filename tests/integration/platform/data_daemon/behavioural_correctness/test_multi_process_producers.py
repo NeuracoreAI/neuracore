@@ -35,7 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 _PRODUCER_COUNT = 3
@@ -227,7 +227,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     result_queue = process_context.Queue()
     processes: list[multiprocessing.Process] = []
 
-    with scoped_storage_state(case, dataset_name=dataset_name):
+    with scoped_test_dir_state(case, dataset_name=dataset_name):
         with online_daemon_running():
             assert_exactly_one_daemon_pid()
             nc.create_dataset(
