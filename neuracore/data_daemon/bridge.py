@@ -154,6 +154,7 @@ class RecordingContext:
         name: str,
         width: int,
         height: int,
+        dtype: str,
         payload: bytes | memoryview,
         timestamp: float,
     ) -> None:
@@ -164,6 +165,10 @@ class RecordingContext:
             name: the camera/sensor name e.g. left_wrist_camera.
             width: Video frame width.
             height: Video frame height.
+            dtype: The frame's original numpy dtype name (``image.dtype.name``),
+                e.g. ``"uint8"`` for RGB or ``"float16"`` / ``"float32"`` for
+                depth. Parsed once at the native boundary so every internal
+                Rust component works with a strongly typed representation.
             payload: Raw video frame bytes.
             timestamp: the Unix timestamp of the sample.
         """
@@ -176,6 +181,7 @@ class RecordingContext:
             name,
             int(width),
             int(height),
+            dtype,
             payload,
             timestamp_ns,
             timestamp,

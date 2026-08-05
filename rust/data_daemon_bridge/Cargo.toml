@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 data_daemon_shared = { path = "../data_daemon_shared" }
+half.workspace = true
 iceoryx2.workspace = true
 libc.workspace = true
 miniz_oxide = "0.8"

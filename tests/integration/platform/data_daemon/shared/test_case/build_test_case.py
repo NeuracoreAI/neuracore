@@ -35,6 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
+    DepthMode,
     StopMethod,
     StorageStateAction,
 )
@@ -167,6 +168,15 @@ class DataDaemonTestCase:
             recording, so RGB cameras upload a single lossy CRF-23 video and the
             lossless archive is dropped.  ``None`` keeps the default
             lossless+lossy behaviour.
+        depth_count: Number of depth camera streams to log per recording. A
+            value of ``0`` disables depth entirely. Depth cameras are
+            independent streams from RGB cameras (distinct trace identities,
+            see :func:`depth_camera_names`) but reuse ``image_width``,
+            ``image_height``, ``video_fps``, and the RGB video timestamp
+            schedule — depth intentionally adds no separate resolution or
+            frame-rate knobs.
+        depth_mode: The NumPy dtype depth frames are logged as — ``"float16"``
+            or ``"float32"``. Ignored when ``depth_count`` is ``0``.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -196,11 +206,18 @@ class DataDaemonTestCase:
     random_phase: bool = False
     skip: bool = False
     video_codec: str | None = None
+    depth_count: int = 0
+    depth_mode: DepthMode = "float32"
 
     @property
     def has_video(self) -> bool:
         """Return True when this case logs at least one camera stream."""
         return self.video_count > 0
+
+    @property
+    def has_depth(self) -> bool:
+        """Return True when this case logs at least one depth camera stream."""
+        return self.depth_count > 0
 
     @property
     def lossy_only(self) -> bool:
@@ -216,6 +233,15 @@ class DataDaemonTestCase:
     def expected_video_frames(self) -> int:
         """Return expected video frames: ``video_fps * duration_sec``."""
         return self.video_fps * self.duration_sec
+
+    @property
+    def expected_depth_frames(self) -> int:
+        """Return expected depth frames per camera.
+
+        Depth cameras reuse the RGB video timestamp schedule (see
+        :attr:`depth_count`), so this equals :attr:`expected_video_frames`.
+        """
+        return self.expected_video_frames
 
     @property
     def recordings_per_context(self) -> int:
@@ -308,6 +334,9 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+    if case.has_depth:
+        parts.append(f"{case.depth_count}depth")
+        parts.append(case.depth_mode)
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
     if case.random_phase:
@@ -364,8 +393,18 @@ def joint_names_for_count(joint_count: int) -> list[str]:
 
 
 def camera_names(video_count: int) -> list[str]:
-    """Return a list of camera names for the given count."""
+    """Return a list of RGB camera names for the given count."""
     return [f"camera_{index}" for index in range(video_count)]
+
+
+def depth_camera_names(depth_count: int) -> list[str]:
+    """Return a list of depth camera names for the given count.
+
+    Distinct from :func:`camera_names` — depth cameras are independent
+    stream identities (``DEPTH_IMAGES/depth_camera_N`` traces) even though a
+    depth-enabled case reuses the RGB spec's resolution and frame rate.
+    """
+    return [f"depth_camera_{index}" for index in range(depth_count)]
 
 
 def generate_joint_values(
@@ -385,11 +424,12 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
     """Compute a reasonable timeout for waiting on a case to complete."""
     image_pixels = 0
     if (
-        case.has_video
+        (case.has_video or case.has_depth)
         and case.image_width is not None
         and case.image_height is not None
     ):
-        image_pixels = case.video_count * case.image_width * case.image_height
+        camera_count = case.video_count + case.depth_count
+        image_pixels = camera_count * case.image_width * case.image_height
     workload_units = (
         case.recording_count
         * case.duration_sec
@@ -451,12 +491,20 @@ def log_run_analysis(
             f"                 {case.video_count} camera(s)"
             f" @ {case.image_width}x{case.image_height}  video@{case.video_fps}Hz"
         )
+    if case.has_depth:
+        lines.append(
+            f"                 {case.depth_count} depth camera(s)"
+            f" @ {case.image_width}x{case.image_height} ({case.depth_mode})"
+        )
     lines.append(
         f"  Total joint frames:  {case.recording_count * case.expected_joint_frames}"
     )
     if case.has_video:
         total_video_frames = case.recording_count * case.expected_video_frames
         lines.append(f"  Total video frames:  {total_video_frames}")
+    if case.has_depth:
+        total_depth_frames = case.recording_count * case.expected_depth_frames
+        lines.append(f"  Total depth frames:  {total_depth_frames}")
 
     if test_wall_s is not None:
         lines.append(f"\n  Test wall time:  {test_wall_s:.1f}s")

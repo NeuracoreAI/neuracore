@@ -36,6 +36,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+use data_daemon_shared::FrameDtype;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch, Semaphore};
 use tokio::task::{self, JoinSet};
@@ -279,6 +280,10 @@ pub enum TraceActorMessage {
         frame_count: u32,
         /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
         frame_timestamps_s: Vec<f64>,
+        /// Original dtype of every frame in this chunk. The daemon never
+        /// decodes pixels — this is threaded straight into the completed
+        /// chunk and, for depth, the trace's `trace.json` sidecar.
+        dtype: FrameDtype,
     },
     /// The recording window has closed and its holdback has drained: finalise
     /// the trace. Every routed datum has already been delivered ahead of this
@@ -333,6 +338,10 @@ struct CompletedChunk {
     frame_timestamps_s: Vec<f64>,
     /// Frame count carried by the chunk message.
     frame_count: u32,
+    /// This chunk's original frame dtype — stored per chunk (not once for the
+    /// whole trace) so each chunk's metadata entries get their own dtype even
+    /// if it somehow differs between chunks of one trace.
+    dtype: FrameDtype,
 }
 
 /// Outcome of one background chunk-encode task.
@@ -376,6 +385,7 @@ pub async fn run(
                 byte_count,
                 frame_count,
                 frame_timestamps_s,
+                dtype,
             } => {
                 state
                     .handle_video(
@@ -387,6 +397,7 @@ pub async fn run(
                         byte_count,
                         frame_count,
                         frame_timestamps_s,
+                        dtype,
                     )
                     .await;
             }
@@ -600,6 +611,7 @@ impl ActorState {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        dtype: FrameDtype,
     ) {
         let trace_dir = self.trace_directory(context);
         let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
@@ -783,6 +795,7 @@ impl ActorState {
                             bytes: segment_bytes,
                             frame_timestamps_s,
                             frame_count,
+                            dtype,
                         }),
                     }
                 }
@@ -1039,7 +1052,12 @@ impl ActorState {
                 };
 
                 // Build the metadata accumulator in the same chunk-index
-                // order so per-frame entries appear in capture order.
+                // order so per-frame entries appear in capture order. Each
+                // chunk applies its own stored dtype (not just the first
+                // chunk's) to its frame entries — a depth chunk's entries gain
+                // a `"dtype"` field carrying the canonical `trace.json` string
+                // ("float16" / "float32"); RGB chunks add nothing, keeping the
+                // existing RGB `trace.json` schema byte-for-byte unchanged.
                 let mut metadata = VideoMetadataAccumulator::new();
                 for chunk in completed_chunks.values() {
                     for timestamp_s in &chunk.frame_timestamps_s {
@@ -1047,6 +1065,9 @@ impl ActorState {
                         entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
                         entry.insert("width".to_string(), Value::from(width as u64));
                         entry.insert("height".to_string(), Value::from(height as u64));
+                        if let Some(dtype_label) = chunk.dtype.depth_label() {
+                            entry.insert("dtype".to_string(), Value::from(dtype_label));
+                        }
                         metadata.record_frame(entry);
                     }
                 }
@@ -1456,6 +1477,7 @@ mod tests {
                     byte_count,
                     4,
                     frame_timestamps_s,
+                    FrameDtype::Rgb8,
                 )
                 .await;
         }
@@ -1477,6 +1499,102 @@ mod tests {
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert!(trace.total_bytes > 0);
+
+        // RGB metadata entries must stay exactly as before: no `dtype` field.
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(trace_dir.join(paths::TRACE_JSON_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        for entry in sidecar.as_array().unwrap() {
+            assert!(
+                entry.as_object().unwrap().get("dtype").is_none(),
+                "RGB trace.json entries must not gain a dtype field: {entry}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn depth_chunks_record_their_own_dtype_in_metadata_sidecar() {
+        // Depth frame entries must carry "dtype": "float16" / "float32" per
+        // chunk — and a later chunk with a different depth dtype must apply
+        // its *own* dtype to its own entries, not the first chunk's.
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping depth metadata sidecar test.");
+            return;
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
+
+        let mut state = ActorState::new(identity(1, "trace-depth", "DEPTH_IMAGES"));
+        state.send_create(&context);
+
+        let trace_dir = TracePath::new("1", "DEPTH_IMAGES", "trace-depth")
+            .directory(context.recordings_root.as_path());
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+
+        let dtypes = [FrameDtype::DepthF16, FrameDtype::DepthF32];
+        for (chunk_index, dtype) in dtypes.into_iter().enumerate() {
+            let chunk_index = chunk_index as u32;
+            let spool_nut = spool_dir.join(format!("chunk_{chunk_index}.nut"));
+            let status = std::process::Command::new("ffmpeg")
+                .args([
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg("testsrc=duration=2:size=16x16:rate=1")
+                .args(["-c:v", "rawvideo", "-pix_fmt", "rgb24", "-f", "nut"])
+                .arg(&spool_nut)
+                .status()
+                .expect("synth status");
+            assert!(status.success(), "synth NUT failed");
+
+            let byte_count = spool_nut.metadata().unwrap().len();
+            let frame_timestamps_s: Vec<f64> =
+                (0..2u32).map(|i| (chunk_index * 2 + i) as f64).collect();
+            state
+                .handle_video(
+                    &context,
+                    chunk_index,
+                    spool_nut,
+                    16,
+                    16,
+                    byte_count,
+                    2,
+                    frame_timestamps_s,
+                    dtype,
+                )
+                .await;
+        }
+
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
+
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(trace_dir.join(paths::TRACE_JSON_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        let entries = sidecar.as_array().unwrap();
+        assert_eq!(entries.len(), 4, "two chunks of two frames each");
+        // First chunk's two entries carry float16; second chunk's carry float32.
+        for entry in &entries[0..2] {
+            assert_eq!(entry["dtype"], json!("float16"));
+        }
+        for entry in &entries[2..4] {
+            assert_eq!(entry["dtype"], json!("float32"));
+        }
+        assert_eq!(entries[0]["width"], json!(16));
+        assert_eq!(entries[0]["height"], json!(16));
     }
 
     #[tokio::test]
