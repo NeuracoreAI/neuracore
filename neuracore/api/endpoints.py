@@ -361,9 +361,13 @@ def delete_endpoint(endpoint_id: str) -> None:
     org_id = get_current_org()
     try:
         session = thread_local_session()
+        # Ideally the backend would queue the teardown and return immediately
+        # instead of blocking on VM deletion. Until it does, allow a longer
+        # read timeout.
         response = session.delete(
             f"{API_URL}/org/{org_id}/models/endpoints/{endpoint_id}",
             headers=auth.get_headers(),
+            timeout=(5.0, 60.0),
         )
         response.raise_for_status()
     except Exception as e:

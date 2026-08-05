@@ -376,9 +376,11 @@ def cancel_training_job(job_id: str) -> None:
     org_id = get_current_org()
     try:
         session = thread_local_session()
+        # Blocks on VM teardown, so allow a longer read timeout.
         response = session.post(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
+            timeout=(5.0, 60.0),
         )
         response.raise_for_status()
     except Exception as e:
@@ -402,9 +404,11 @@ def delete_training_job(job_id: str, org_id: str | None = None) -> None:
     resolved_org_id = org_id or get_current_org()
     try:
         session = thread_local_session()
+        # Blocks on VM teardown, so allow a longer read timeout.
         response = session.delete(
             f"{API_URL}/org/{resolved_org_id}/training/jobs/{job_id}",
             headers=auth.get_headers(),
+            timeout=(5.0, 60.0),
         )
         response.raise_for_status()
     except Exception as e:
