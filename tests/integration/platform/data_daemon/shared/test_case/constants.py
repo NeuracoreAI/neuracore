@@ -37,6 +37,11 @@ STORAGE_STATE_PRESERVE = "preserve"
 STORAGE_STATE_EMPTY = "empty"
 STORAGE_STATE_DELETE = "delete"
 
+# daemon_log_action (governs the shared daemon.log artefact, independently of
+# storage_state_action)
+LOG_PRESERVE = "preserve"
+LOG_DELETE = "delete"
+
 # mode
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
@@ -76,6 +81,7 @@ STORAGE_STATE_ACTIONS = (
     STORAGE_STATE_PRESERVE,
     STORAGE_STATE_EMPTY,
 )
+LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
@@ -89,6 +95,7 @@ StorageStateAction = Literal["delete", "preserve", "empty"]
 DepthMode = Literal["float16", "float32"]
 """Depth camera sample dtype, matching the wire labels `nc.log_depth()`
 derives from the array's own dtype (`image.dtype.name`)."""
+LogAction = Literal["preserve", "delete"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5

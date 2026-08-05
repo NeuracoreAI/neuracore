@@ -31,7 +31,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
     cloud_resource_names,
-    scoped_storage_state,
+    scoped_test_dir_state,
     set_case_analysis_report,
 )
 
@@ -82,7 +82,7 @@ def test_offline_pending_data_recovers_when_online(
     try:
         with (
             cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
+            scoped_test_dir_state(case),
         ):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()

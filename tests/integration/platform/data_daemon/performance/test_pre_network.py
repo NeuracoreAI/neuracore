@@ -26,7 +26,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
     cloud_resource_names,
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 # Performance workloads target the daemon's throughput ceiling.
@@ -58,7 +58,7 @@ def test_disk_db_write_performance(
     with performance_report(case, dataset_name=dataset_name) as report:
         with (
             cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
+            scoped_test_dir_state(case),
         ):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()

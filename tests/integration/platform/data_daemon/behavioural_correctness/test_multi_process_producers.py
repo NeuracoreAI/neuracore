@@ -36,7 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 _PRODUCER_COUNT = 3
@@ -229,7 +229,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     processes: list[multiprocessing.Process] = []
 
     with cloud_resource_deleter(dataset_name, [robot_name]):
-        with scoped_storage_state(case):
+        with scoped_test_dir_state(case):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
                 nc.create_dataset(

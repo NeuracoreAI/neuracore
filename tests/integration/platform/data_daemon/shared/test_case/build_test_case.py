@@ -34,6 +34,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
+    LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
     PRODUCER_PER_THREAD,
@@ -41,6 +42,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
     DepthMode,
+    LogAction,
     StopMethod,
     StorageStateAction,
 )
@@ -72,6 +74,7 @@ BASE_JOINT_NAMES = [
 _BATCH_PARAMS = frozenset({
     "kill_daemon_between_tests",
     "storage_state_action",
+    "daemon_log_action",
     "preserve_artifacts_per_test",
     "stop_method",
 })
@@ -130,6 +133,11 @@ class DataDaemonTestCase:
             leaves both untouched for post-mortem inspection; ``"empty"``
             truncates DB tables and clears recordings folder contents but keeps
             them on disk; ``"delete"`` removes both entirely.
+        daemon_log_action: Controls whether the shared ``daemon.log`` is
+            removed after each test, applied by ``scoped_daemon_log_action``.
+            ``"preserve"`` (default) leaves it for post-mortem inspection.
+            ``"delete"`` removes it once the test's block exits.  Independent
+            of ``storage_state_action``.
         stop_method: Method used to stop the daemon process.  ``"cli"``
             (default) invokes the CLI stop command; ``"sigterm"`` sends SIGTERM
             directly; ``"sigkill"`` terminates immediately without giving the
@@ -202,6 +210,7 @@ class DataDaemonTestCase:
     image_height: int | None = None
     kill_daemon_between_tests: bool = True
     storage_state_action: StorageStateAction = STORAGE_STATE_EMPTY
+    daemon_log_action: LogAction = LOG_PRESERVE
     stop_method: StopMethod = STOP_METHOD_CLI
     preserve_artifacts_per_test: bool = False
     context_duration_mode: str = DURATION_MODE_FIXED
@@ -265,8 +274,9 @@ class DataDaemonTestBatch:
     Groups ``DataDaemonTestCase`` instances that should run under the same
     daemon lifecycle, storage, and artifact settings.  The batch-level params
     (``kill_daemon_between_tests``, ``storage_state_action``,
-    ``preserve_artifacts_per_test``, ``stop_method``) are propagated to every
-    case when :meth:`as_cases` is called, overriding any per-case values.
+    ``daemon_log_action``, ``preserve_artifacts_per_test``, ``stop_method``)
+    are propagated to every case when :meth:`as_cases` is called, overriding
+    any per-case values.
 
     Attributes:
         cases: The individual test case workload definitions.
@@ -274,6 +284,8 @@ class DataDaemonTestBatch:
             ``DataDaemonTestCase.kill_daemon_between_tests``.
         storage_state_action: Propagated to every case; see
             ``DataDaemonTestCase.storage_state_action``.
+        daemon_log_action: Propagated to every case; see
+            ``DataDaemonTestCase.daemon_log_action``.
         preserve_artifacts_per_test: Propagated to every case; see
             ``DataDaemonTestCase.preserve_artifacts_per_test``.
         stop_method: Propagated to every case; see
@@ -286,6 +298,7 @@ class DataDaemonTestBatch:
     cases: tuple[DataDaemonTestCase, ...]
     kill_daemon_between_tests: bool = True
     storage_state_action: StorageStateAction = STORAGE_STATE_EMPTY
+    daemon_log_action: LogAction = LOG_PRESERVE
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
@@ -295,6 +308,7 @@ class DataDaemonTestBatch:
         batch_overrides = {
             "kill_daemon_between_tests": self.kill_daemon_between_tests,
             "storage_state_action": self.storage_state_action,
+            "daemon_log_action": self.daemon_log_action,
             "preserve_artifacts_per_test": self.preserve_artifacts_per_test,
             "stop_method": self.stop_method,
         }

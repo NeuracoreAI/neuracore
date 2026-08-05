@@ -1,7 +1,7 @@
 """Test infrastructure: Timer, path constants, and storage lifecycle helpers.
 
 Provides :class:`Timer` for timing assertions, test-local path constants,
-per-test artifact directory setup, and the :func:`scoped_storage_state` /
+per-test artifact directory setup, and the :func:`scoped_test_dir_state` /
 :func:`apply_storage_state_action` helpers used by all test suites.
 """
 
@@ -37,6 +37,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_DAEMON_TEST_ARTIFACTS_DIR,
+    DATA_DAEMON_TEST_STATE_ROOT,
+    LOG_DELETE,
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
 )
@@ -106,19 +108,23 @@ def setup_per_test_artifact_dirs(
 
 
 @contextmanager
-def scoped_storage_state(case: DataDaemonTestCase) -> Generator[None]:
-    """Apply local storage cleanup before and after the block.
+def scoped_test_dir_state(case: DataDaemonTestCase) -> Generator[None]:
+    """Apply local storage and daemon-log cleanup before and after the block.
 
     ``"delete"`` removes the DB file and recordings folder.  ``"empty"`` clears
     DB tables and deletes recordings folder contents.  ``"preserve"`` leaves all
     local storage untouched.
+
+    Wraps the block in :func:`scoped_daemon_log_action` so the shared
+    ``daemon.log`` is cleaned up on the same schedule.
 
     Does **not** start, stop, or signal any daemon process, and does not touch
     cloud resources. Wrap it in cloud_resource_deleter to delete the cloud
     dataset and robots.
 
     Args:
-        case: Test case whose ``storage_state_action`` controls local cleanup.
+        case: Test case whose ``storage_state_action`` controls local cleanup
+            and whose ``daemon_log_action`` controls the daemon log.
 
     Yields:
         ``None``.
@@ -132,7 +138,8 @@ def scoped_storage_state(case: DataDaemonTestCase) -> Generator[None]:
         ):
             apply_storage_state_action(case.storage_state_action)
     try:
-        yield
+        with scoped_daemon_log_action(case):
+            yield
     finally:
         with report_step("Clean local daemon storage"):
             with Timer(
@@ -145,6 +152,23 @@ def scoped_storage_state(case: DataDaemonTestCase) -> Generator[None]:
         assert_post_test_storage_state(
             storage_state_action=case.storage_state_action,
         )
+
+
+@contextmanager
+def scoped_daemon_log_action(case: DataDaemonTestCase) -> Generator[None]:
+    """Delete the shared ``daemon.log`` after the block, when the case asks.
+
+    Args:
+        case: Test case whose ``daemon_log_action`` controls cleanup.
+
+    Yields:
+        ``None``.
+    """
+    try:
+        yield
+    finally:
+        if case.daemon_log_action == LOG_DELETE:
+            (DATA_DAEMON_TEST_STATE_ROOT / "daemon.log").unlink(missing_ok=True)
 
 
 def apply_storage_state_action(storage_state_action: str) -> None:
