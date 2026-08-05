@@ -135,7 +135,7 @@ def _same_source_producer(
         # Keep every producer and its SSE consumer alive while the parent
         # verifies that the daemon finalized all three traces.
         verification_complete.wait(timeout=_PROCESS_TIMEOUT_S)
-    except BaseException:  # noqa: BLE001 - propagate full child traceback
+    except BaseException:  # noqa: BLE001
         result_queue.put({
             "ok": False,
             "producer_index": producer_index,
