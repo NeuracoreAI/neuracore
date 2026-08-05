@@ -1171,9 +1171,9 @@ def _classify_boundary_frames(
 def classify_split_producer_frames(
     frames: list[EmittedFrame],
     bounds: RecordingControlBounds,
-) -> tuple[list[EmittedFrame], list[EmittedFrame]]:
+) -> tuple[list[EmittedFrame], list[EmittedFrame], list[EmittedFrame]]:
     """Split a *cross-process* video producer's frames into the ones the
-    recording must have and the ones it must not.
+    recording must have and the ones it must not, at both boundaries.
 
     Both ends are decided by the wall-clock brackets around the control calls
     that carry the window's bounds, as in :func:`_classify_boundary_frames`, but
@@ -1193,32 +1193,50 @@ def classify_split_producer_frames(
       land before ``stop_recording`` was called, and every owed frame completed
       before that.
 
-    - **Forbidden** (must not be on disk) is decided by the clock alone, not by
-      the handle: the in-process rule reads ``frame.handle != bounds.handle``,
-      but a non-owning process holds its own handle value for the same
-      recording, which would condemn every frame logged after the stop call —
-      including ones the window legitimately still accepted. A frame whose
-      ``log_*`` call *began* at or after ``bounds.stop_returned_at`` is outside
-      on timing alone: that field is the caller's upper bracket on the window's
-      bound, so the frame's publish stamp cannot precede the bound. How much
-      this catches is exactly how tight that bracket is — the frames at issue
-      are the ones the producer logged in the few hundred milliseconds between
-      the stop and its own gate closing, so a bracket as loose as "when
-      ``stop_recording`` returned" (a flush barrier later) calls all of them
-      unknowable and proves nothing.
+    - **Forbidden** (must not be on disk), at *either* end, is decided by the
+      clock alone, not by the handle: the in-process rule reads
+      ``frame.handle != bounds.handle``, but a non-owning process holds its own
+      handle value for the same recording, which would condemn every frame
+      logged outside its own gate's view — including ones the window
+      legitimately accepted.
+
+      - A frame whose ``log_*`` call *finished* at or before
+        ``bounds.start_called_at`` is outside on timing alone: that field is
+        the caller's lower bracket on the window's bound, so the frame's
+        publish stamp cannot follow the bound. This is the mirror of
+        :func:`_classify_boundary_frames`'s own start-side ``is_outside`` rule,
+        surfaced here because a chunk opened before a recording's start is
+        exactly what a producer's boundary-split (armed only in the process
+        that owns ``start_recording``) exists to cut off — and a producer that
+        never arms it can hand a still-open chunk straight across the
+        boundary.
+      - A frame whose ``log_*`` call *began* at or after
+        ``bounds.stop_returned_at`` is outside on timing alone: that field is
+        the caller's upper bracket on the window's bound, so the frame's
+        publish stamp cannot precede the bound.
+
+      How much either catches is exactly how tight its bracket is — the stop
+      side's frames of interest are the ones the producer logged in the few
+      hundred milliseconds between the stop and its own gate closing, so a
+      bracket as loose as "when ``stop_recording`` returned" (a flush barrier
+      later) calls all of them unknowable and proves nothing.
 
     Everything between the two is unknowable — the call straddled a bound — and
     belongs to neither list, so the caller requires nothing of it either way.
 
     Returns:
-        ``(owed frames, forbidden frames)``, each in emission order.
+        ``(owed frames, forbidden-before-start frames, forbidden-after-stop
+        frames)``, each in emission order.
     """
     inside, _ = _classify_boundary_frames(frames, bounds)
     owed = [frame for frame in inside if frame.handle is not None]
-    forbidden = [
+    forbidden_before_start = [
+        frame for frame in frames if frame.completed_at <= bounds.start_called_at
+    ]
+    forbidden_after_stop = [
         frame for frame in frames if frame.emitted_at >= bounds.stop_returned_at
     ]
-    return owed, forbidden
+    return owed, forbidden_before_start, forbidden_after_stop
 
 
 def recording_timestamps(
