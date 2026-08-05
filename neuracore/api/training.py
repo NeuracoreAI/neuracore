@@ -198,10 +198,13 @@ def start_training_run(
     auth = get_auth()
     org_id = get_current_org()
     session = thread_local_session()
+    # Ideally the backend would queue the job and return immediately instead of
+    # blocking on VM provisioning. Until it does, allow a longer read timeout.
     response = session.post(
         f"{API_URL}/org/{org_id}/training/jobs",
         headers=auth.get_headers(),
         json=data.model_dump(mode="json"),
+        timeout=(5.0, 60.0),
     )
 
     response.raise_for_status()
@@ -229,9 +232,11 @@ def resume_training_run(job_id: str, additional_epochs: int) -> dict:
     org_id = get_current_org()
     try:
         session = thread_local_session()
+        # Blocks on VM provisioning, as start_training_run does.
         response = session.post(
             f"{API_URL}/org/{org_id}/training/jobs/{job_id}/resume/{additional_epochs}",
             headers=auth.get_headers(),
+            timeout=(5.0, 60.0),
         )
     except Exception as e:
         raise ValueError(f"Error resuming job {job_id}: {e}") from e

@@ -49,8 +49,19 @@ from urllib3.exceptions import ProtocolError
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT: tuple[float, float] = (5.0, 30.0)
-"""``(connect, read)`` seconds applied to requests that set no timeout."""
+DEFAULT_TIMEOUT: tuple[float, float] = (15.0, 30.0)
+"""``(connect, read)`` seconds applied to requests that set no timeout.
+
+The connect budget also bounds the request body write, not just connection
+setup: urllib3 leaves the connect timeout on the socket for the whole of
+``conn.request()`` and only swaps in the read timeout at ``getresponse()``. It
+therefore has to cover each ``send()`` of a streamed upload once the kernel
+send buffer fills and every send waits on the drain rate — five seconds was
+enough for connecting but not for that.
+
+Callers whose response is genuinely slow should pass their own timeout rather
+than widening this one.
+"""
 
 _KEEPALIVE_IDLE_S = 60
 """Seconds of idleness before the first keep-alive probe.
