@@ -842,15 +842,16 @@ def assert_rgb_trace_respects_the_recording_boundary(
     recording_index: int,
     *,
     owed_timestamps: list[float],
-    forbidden_timestamps: list[float],
+    forbidden_before_start_timestamps: list[float],
+    forbidden_after_stop_timestamps: list[float],
 ) -> None:
     """Assert the recording's RGB trace holds every frame it provably owns and
-    nothing published after it closed.
+    nothing published outside its window, at either boundary.
 
-    Both lists are capture stamps of frames the producer *reported* logging, as
-    classified by
-    ``build_test_case_context.classify_split_producer_frames``. Neither end can
-    be checked against a nominal ``fps * duration`` count, which measures the
+    All three lists are capture stamps of frames the producer *reported*
+    logging, as classified by
+    ``build_test_case_context.classify_split_producer_frames``. None can be
+    checked against a nominal ``fps * duration`` count, which measures the
     producer's throughput rather than the daemon's integrity: a cross-process
     producer's frame rate and the lag before its logging gate opens both move
     that number around by tens of frames.
@@ -860,9 +861,12 @@ def assert_rgb_trace_respects_the_recording_boundary(
     producer's own writer flush barrier has completed and been acknowledged.
 
     A missing owed frame is one the daemon accepted the window for and then
-    dropped, which at this boundary means an orphaned chunk. A present forbidden
-    frame is video published after the window closed, which means a chunk
-    straddling the boundary was taken whole instead of being cut at it.
+    dropped, which at this boundary means an orphaned chunk. A present
+    forbidden-before-start frame means a chunk that opened before this
+    window's start was taken whole instead of being cut at it — the mirror,
+    at the start boundary, of a present forbidden-after-stop frame, which
+    means a chunk straddling the stop was taken whole instead of being cut
+    there.
     """
     from tests.integration.platform.data_daemon.shared.db_helpers import (
         wait_for_written_rgb_trace,
@@ -895,10 +899,22 @@ def assert_rgb_trace_respects_the_recording_boundary(
         f"{[round(stamp, 4) for stamp in missing[:5]]}; {span}"
     )
 
-    kept_late = [stamp for stamp in forbidden_timestamps if stamp in on_disk]
+    kept_early = [
+        stamp for stamp in forbidden_before_start_timestamps if stamp in on_disk
+    ]
+    assert not kept_early, (
+        f"{len(kept_early)}/{len(forbidden_before_start_timestamps)} frame(s) "
+        f"logged before the recording started reached disk — a chunk that "
+        f"opened before this window's start was taken whole instead of being "
+        f"cut at it. First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_early[:5]]}; {span}"
+    )
+
+    kept_late = [stamp for stamp in forbidden_after_stop_timestamps if stamp in on_disk]
     assert not kept_late, (
-        f"{len(kept_late)}/{len(forbidden_timestamps)} frame(s) logged after "
-        f"the recording stopped reached disk — a chunk straddling the boundary "
-        f"was taken whole rather than cut at it. First such capture stamps: "
+        f"{len(kept_late)}/{len(forbidden_after_stop_timestamps)} frame(s) "
+        f"logged after the recording stopped reached disk — a chunk "
+        f"straddling the boundary was taken whole rather than cut at it. "
+        f"First such capture stamps: "
         f"{[round(stamp, 4) for stamp in kept_late[:5]]}; {span}"
     )

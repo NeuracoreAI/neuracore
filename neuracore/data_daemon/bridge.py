@@ -256,6 +256,19 @@ class RecordingContext:
             self._robot_id, self._robot_instance, timestamp_ns
         )
 
+    def mark_recording_boundary(self) -> None:
+        """Tell the writer a recording boundary has passed for the bound source.
+
+        The counterpart to :meth:`start_recording` for a process that did not
+        publish the start: it rolls the writer's open video chunk so the new
+        recording's frames do not ride a chunk that opened in the previous one
+        (which the daemon routes whole, by its open stamp, into that previous
+        window). Publishes no lifecycle envelope. No-op before a source is bound.
+        """
+        if not self._robot_id:
+            return
+        _load_native().mark_recording_boundary(self._robot_id, self._robot_instance)
+
     def flush_source(self) -> None:
         """Run the writer's deferred tail-chunk barrier for the bound source.
 

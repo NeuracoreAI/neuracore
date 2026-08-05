@@ -349,14 +349,175 @@ def test_split_process_video_survives_recording_boundary() -> None:
                     # post-stop frames and calling them unknowable.
                     stop_returned_at=gate_closed_at.result,
                 )
-                owed, forbidden = classify_split_producer_frames(
-                    logged_frames["RGB_IMAGES/camera_0"], bounds
+                owed, forbidden_before_start, forbidden_after_stop = (
+                    classify_split_producer_frames(
+                        logged_frames["RGB_IMAGES/camera_0"], bounds
+                    )
                 )
                 assert_rgb_trace_respects_the_recording_boundary(
                     recording_index,
                     owed_timestamps=[frame.timestamp for frame in owed],
-                    forbidden_timestamps=[frame.timestamp for frame in forbidden],
+                    forbidden_before_start_timestamps=[
+                        frame.timestamp for frame in forbidden_before_start
+                    ],
+                    forbidden_after_stop_timestamps=[
+                        frame.timestamp for frame in forbidden_after_stop
+                    ],
                 )
+        finally:
+            if robot is not None:
+                robot.close()
+
+
+def test_split_process_video_survives_back_to_back_recording_boundaries() -> None:
+    """A video producer in a different OS process must not lose a recording's
+    leading frames when it starts immediately after the previous one stops.
+
+    The mirror, at the START boundary, of
+    :func:`test_split_process_video_survives_recording_boundary`. That test
+    proves a chunk straddling a recording's STOP is cut rather than taken
+    whole (``ef3cf6c7``); this one polices the START side.
+
+    A chunk routes by its *open* stamp (the ``publish_timestamp_ns`` of its
+    first frame), so a chunk opened during the first recording and still open
+    when the second starts routes whole into the *first* recording's window.
+    The dispatcher's per-frame stop cut (``frames_inside_window``, see
+    ``rust/data_daemon/src/pipeline/dispatcher.rs``) drops the frames published
+    after the first recording stopped, and nothing reroutes them — so the
+    second recording simply loses its leading video. The video-only process
+    never calls ``start_recording``, so the writer's boundary split armed
+    inside that call (``arm_boundary_split``, see
+    ``rust/data_daemon_bridge/src/lib.rs``) never fires for it; instead
+    ``Robot.arm_video_boundary_if_new_recording`` arms it from the video log
+    path the first time this process forwards a frame under a new handle.
+
+    Two defects had to be closed for this to hold, both of which this test
+    reproduces on the first run of a second recording. The other is that
+    ``StopRecording`` names a source, not a recording: the video process's
+    remote-stop drain used to publish one a whole SSE round trip late, closing
+    the *next* recording's window ~800 ms in — see
+    ``Robot._drain_streams_and_notify_daemon``.
+
+    Runs one continuous :func:`~runners.split_video_process_running` child
+    across ``case.recording_count`` recordings started back-to-back, and
+    classifies each recording's frames separately from the wall-clock
+    brackets around its own control calls — mirroring how ``context_worker``
+    builds ``bounds_by_disk_key`` per recording for a continuous producer.
+
+    Duration and resolution are pinned against the same 256 MiB writer
+    chunk-flush threshold the single-recording test pins against: at
+    640x480x3 bytes/frame the threshold trips at a cumulative 292 frames. The
+    video-only process never rolls its chunk on a lifecycle event (that split
+    is armed only in the process that owns ``start_recording``), so its chunk
+    keeps accumulating across both recordings regardless of the gap between
+    them. At 30fps, 6s (~180 frames) alone stays under the threshold, so the
+    chunk is still open when the second recording starts; the remaining
+    ~112-frame headroom is then used up partway through the second recording,
+    which is what leaves it missing a leading run of frames if the
+    start-boundary defect is present, while the frames after the natural roll
+    land in a fresh, correctly-routed chunk — a partial-loss signature rather
+    than a total one.
+
+    The start bracket (``[start_called_at, start_returned_at]``) needs no
+    ``_watch_local_gate_close``-style tightening the way the stop bracket
+    does: ``Robot.start_recording`` opens the local gate and publishes the
+    window in one call with no flush barrier (unlike ``stop_recording``,
+    which drains streams and runs a writer barrier before notifying the
+    daemon), so the two timestamps taken immediately around the call already
+    bracket the real boundary tightly.
+    """
+    if not has_configured_org():
+        pytest.skip(
+            "Recording/playback matrix tests require NEURACORE_ORG_ID"
+            " or a saved current organization."
+        )
+
+    run_id = uuid.uuid4().hex[:10]
+    dataset_name = f"split_video_dataset_{run_id}"
+    robot_name = f"split_video_robot_{run_id}"
+    case = DataDaemonTestCase(
+        duration_sec=6,
+        recording_count=2,
+        joint_count=0,
+        video_count=1,
+        image_width=640,
+        image_height=480,
+        video_fps=30,
+        video_detail=DETAIL_REALISTIC,
+        storage_state_action=STORAGE_STATE_DELETE,
+    )
+
+    robot = None
+    with scoped_test_dir_state(case, dataset_name=dataset_name):
+        try:
+            with _pinned_holdback(_BOUNDARY_RACE_HOLDBACK_MS), online_daemon_running():
+                assert_exactly_one_daemon_pid()
+                nc.create_dataset(dataset_name)
+
+                bounds_by_recording: dict[int, RecordingControlBounds] = {}
+                with split_video_process_running(
+                    robot_name=robot_name,
+                    dataset_name=dataset_name,
+                    camera_name="camera_0",
+                    case=case,
+                ) as logged_frames:
+                    robot = nc.connect_robot(robot_name, overwrite=False)
+                    previous_index = 0
+                    for _ in range(case.recording_count):
+                        # Both control calls are bracketed on the wall clock,
+                        # exactly as in the single-recording test — see
+                        # RecordingControlBounds.
+                        start_called_at = time.time()
+                        nc.start_recording(robot_name=robot_name, timestamp=0.0)
+                        start_returned_at = time.time()
+                        handle = robot.get_current_recording_id()
+                        recording_index = wait_for_recording_index_for_source(
+                            str(robot.id),
+                            int(robot.instance),
+                            after_index=previous_index,
+                            timeout_s=MAX_TIME_TO_START_S,
+                        )
+                        previous_index = recording_index
+                        time.sleep(case.duration_sec)
+                        stop_called_at = time.time()
+                        with _watch_local_gate_close(robot) as gate_closed_at:
+                            # Deliberately not `wait=True` — see the
+                            # single-recording test for why, doubly so here:
+                            # waiting on the upload pipeline would also widen
+                            # the gap before the next recording's start,
+                            # undermining "back-to-back".
+                            nc.stop_recording(
+                                robot_name=robot_name,
+                                timestamp=float(case.duration_sec),
+                            )
+                        bounds_by_recording[recording_index] = RecordingControlBounds(
+                            handle=handle,
+                            start_called_at=start_called_at,
+                            start_returned_at=start_returned_at,
+                            stop_called_at=stop_called_at,
+                            stop_returned_at=gate_closed_at.result,
+                        )
+                    # As in the single-recording test: give the still-running
+                    # video process time to seal and announce its tail chunk
+                    # on the way out, via its own flush barrier.
+                    time.sleep(2.0)
+
+                for recording_index, bounds in bounds_by_recording.items():
+                    owed, forbidden_before_start, forbidden_after_stop = (
+                        classify_split_producer_frames(
+                            logged_frames["RGB_IMAGES/camera_0"], bounds
+                        )
+                    )
+                    assert_rgb_trace_respects_the_recording_boundary(
+                        recording_index,
+                        owed_timestamps=[frame.timestamp for frame in owed],
+                        forbidden_before_start_timestamps=[
+                            frame.timestamp for frame in forbidden_before_start
+                        ],
+                        forbidden_after_stop_timestamps=[
+                            frame.timestamp for frame in forbidden_after_stop
+                        ],
+                    )
         finally:
             if robot is not None:
                 robot.close()
