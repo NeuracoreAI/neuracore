@@ -301,6 +301,167 @@ def test_stop_joins_the_inference_thread():
     )
 
 
+def test_request_stop_returns_without_joining():
+    """A control loop cannot afford to block on an in-flight inference."""
+    policy = FakePolicyInference(latency=0.5)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        started = time.monotonic()
+        chunker.request_stop()
+        elapsed = time.monotonic() - started
+        assert elapsed < 0.05, f"request_stop blocked for {elapsed * 1e3:.0f} ms"
+    finally:
+        chunker.stop(timeout=10.0)
+
+
+def test_start_reaps_a_thread_left_by_request_stop():
+    policy = FakePolicyInference(latency=TICK)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    assert chunker.wait_for_first_chunk(timeout=10.0)
+    chunker.request_stop()
+
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0), "restart after request_stop"
+        assert chunker.get_action() is not None
+    finally:
+        chunker.stop()
+
+    assert not any(
+        thread.name == "rtc-inference" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_error_property_reports_failure_and_has_no_side_effects():
+    """`.error` must let a control loop poll for failure without side effects.
+
+    A replan is only attempted once the cursor reaches the execution horizon, so
+    the failure is provoked by consuming actions first.
+    """
+    policy = FakePolicyInference(latency=TICK, fail_after=1)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        assert chunker.error is None
+
+        deadline = time.monotonic() + 10.0
+        while chunker.error is None and time.monotonic() < deadline:
+            try:
+                chunker.get_action()
+            except RTCInferenceError:
+                break
+            time.sleep(TICK)
+        assert chunker.error is not None, "failure never surfaced on .error"
+
+        # Polling repeatedly must not consume actions or move the cursor.
+        _, index_before = chunker.peek_chunk()
+        for _ in range(20):
+            assert chunker.error is not None
+        _, index_after = chunker.peek_chunk()
+        assert index_after == index_before, "polling .error advanced the cursor"
+    finally:
+        chunker.stop()
+
+
+def test_no_replan_is_attempted_while_actions_are_not_consumed():
+    """The cursor only advances on get_action, so an idle chunker must not replan.
+
+    This is what makes an idle chunker hold a chunk planned for a stale pose, and
+    why the caller should start it on demand rather than at bring-up.
+    """
+    policy = FakePolicyInference(latency=TICK)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        calls_after_first = policy.calls
+        time.sleep(TICK * 40)
+        assert policy.calls == calls_after_first, "chunker replanned while idle"
+        assert chunker.peek_chunk()[1] == 0
+    finally:
+        chunker.stop()
+
+
+def test_error_is_none_while_healthy():
+    policy = FakePolicyInference(latency=TICK)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        _drive(chunker, 30)
+        assert chunker.error is None
+    finally:
+        chunker.stop()
+
+
+def test_restart_discards_the_stale_chunk_and_replans():
+    """A restart must plan from a fresh observation, not resume the old chunk.
+
+    The cursor only advances while actions are being consumed, so a chunker left
+    running while idle sits on a chunk planned for a pose the robot may since
+    have left. Commanding that stale action is a real hazard on hardware.
+    """
+    policy = FakePolicyInference(latency=TICK)
+    observations = []
+
+    def observe():
+        observations.append(len(observations))
+        return _observation()
+
+    chunker = RealTimeChunker(
+        policy,
+        observe,
+        RTCConfig(inference_delay=2, execution_horizon=EXECUTION_HORIZON),
+        control_hz=CONTROL_HZ,
+        adapt_inference_delay=False,
+    )
+
+    chunker.start()
+    assert chunker.wait_for_first_chunk(timeout=10.0)
+    _drive(chunker, EXECUTION_HORIZON + 4)
+    first_chunk, first_index = chunker.peek_chunk()
+    chunker.stop()
+
+    observations_before = len(observations)
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0)
+        second_chunk, second_index = chunker.peek_chunk()
+        stats = chunker.stats()
+    finally:
+        chunker.stop()
+
+    assert len(observations) > observations_before, "restart did not re-observe"
+    assert second_index == 0, "restart must rewind the cursor"
+    assert not np.array_equal(second_chunk, first_chunk), "stale chunk was reused"
+    assert stats.chunks == 1, "restart must reset the chunk counter"
+    assert stats.deadline_misses == 0 and stats.stalled_ticks == 0
+
+
+def test_restart_clears_a_previous_failure():
+    """A failed run must not poison the next start."""
+    policy = FakePolicyInference(latency=TICK, fail_after=0)
+    chunker = _make_chunker(policy)
+    chunker.start()
+    with pytest.raises(RTCInferenceError):
+        chunker.wait_for_first_chunk(timeout=10.0)
+    chunker.stop()
+
+    policy.fail_after = None
+    policy.calls = 0
+    chunker.start()
+    try:
+        assert chunker.wait_for_first_chunk(timeout=10.0), "restart still errored"
+        assert chunker.get_action() is not None
+    finally:
+        chunker.stop()
+
+
 def test_stop_is_idempotent_and_start_is_not_reentrant():
     policy = FakePolicyInference(latency=TICK)
     chunker = _make_chunker(policy)

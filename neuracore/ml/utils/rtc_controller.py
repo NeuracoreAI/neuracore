@@ -163,29 +163,72 @@ class RealTimeChunker:
         """``H``, the number of actions in a chunk."""
         return self._horizon
 
+    @property
+    def error(self) -> BaseException | None:
+        """The failure that stopped the inference thread, if any.
+
+        Lets a caller poll for failure without calling :meth:`get_action`, which
+        would consume an action and advance the cursor.
+        """
+        with self._lock:
+            return self._error
+
     def start(self) -> None:
-        """Spawn the inference thread.
+        """Spawn the inference thread, discarding any state from a prior run.
+
+        Safe to call again after :meth:`stop`. The chunk held from a previous run
+        is dropped so the first chunk of the new run comes from a fresh
+        observation - a stale chunk would command the robot toward wherever it
+        was when that chunk was planned.
 
         Returns immediately; call :meth:`wait_for_first_chunk` before the first
         :meth:`get_action` if the caller needs an action straight away.
         """
         if self._thread is not None:
-            return
+            if self._running and self._thread.is_alive():
+                return
+            # Reap a thread left behind by request_stop before starting again.
+            self._thread.join(timeout=5.0)
+            self._thread = None
+        with self._cond:
+            self._chunk = None
+            self._index = 0
+            self._tick = 0
+            self._error = None
+            self._delays.clear()
+            self._latencies.clear()
+            self._chunks = 0
+            self._deadline_misses = 0
+            self._stalled_ticks = 0
+            self._inference_delay = self._config.inference_delay
         self._running = True
         self._thread = threading.Thread(
             target=self._inference_loop, name="rtc-inference", daemon=True
         )
         self._thread.start()
 
-    def stop(self, timeout: float = 5.0) -> None:
-        """Stop the inference thread and wait for it to exit.
+    def request_stop(self) -> None:
+        """Ask the inference thread to exit without waiting for it.
 
-        Args:
-            timeout: Seconds to wait for the thread to join.
+        Use this from a real-time control loop. :meth:`stop` has to wait for an
+        in-flight inference to finish, which can take long enough to starve a
+        robot watchdog; this returns immediately and the thread winds down on its
+        own. :meth:`start` reaps it, and :meth:`stop` still joins at shutdown.
         """
         with self._cond:
             self._running = False
             self._cond.notify_all()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop the inference thread and wait for it to exit.
+
+        Blocks for up to an in-flight inference. Prefer :meth:`request_stop` when
+        called from a loop that must keep commanding hardware.
+
+        Args:
+            timeout: Seconds to wait for the thread to join.
+        """
+        self.request_stop()
         if self._thread is not None:
             self._thread.join(timeout=timeout)
             self._thread = None
