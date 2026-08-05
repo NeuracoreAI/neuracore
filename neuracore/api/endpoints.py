@@ -279,10 +279,14 @@ def deploy_model(
     ).model_dump(mode="json")
     try:
         session = thread_local_session()
+        # Ideally the backend would queue the deployment and return immediately
+        # instead of blocking on VM provisioning. Until it does, allow a longer
+        # read timeout.
         response = session.post(
             f"{API_URL}/org/{org_id}/models/deploy",
             headers=auth.get_headers(),
             json=payload,
+            timeout=(5.0, 60.0),
         )
         response.raise_for_status()
         return response.json()
