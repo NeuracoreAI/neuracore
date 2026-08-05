@@ -8,6 +8,7 @@ adarms
 ADARMS
 addfinalizer
 addinivalue
+addoption
 agentview
 agilex
 aiofiles
@@ -198,6 +199,7 @@ geomadr
 geomid
 geomnum
 getbuffer
+getgroup
 getpgid
 getpid
 gettid
