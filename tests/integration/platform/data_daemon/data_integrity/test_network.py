@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import os
+import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import pytest
 
@@ -15,12 +19,14 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    ObservedRecordingUploads,
     latching_upload_observer,
     resolve_cloud_recording_ids,
     wait_for_recording_index_for_source,
+    wait_for_upload_complete_in_db,
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
-    assert_rgb_trace_survived_boundary,
+    assert_rgb_trace_respects_the_recording_boundary,
 )
 from tests.integration.platform.data_daemon.shared.runners import (
     online_daemon_running,
@@ -34,7 +40,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
     ContextResult,
+    RecordingControlBounds,
     build_context_specs,
+    classify_split_producer_frames,
     create_testing_dataset_name,
     run_case_contexts,
 )
@@ -56,9 +64,109 @@ _CASES = DataDaemonTestBatch(
 ).as_cases()
 
 
-# ---------------------------------------------------------------------------
-# Isolation and integrity parametrized test
-# ---------------------------------------------------------------------------
+# Holdback pinned for the split-process boundary test only. The dispatcher
+# retains a stopped window for 2x the holdback, and a video-only process's flush
+# barrier takes roughly a second to drain its writer backlog — the same order as
+# the 500ms default's 1s retention, which makes "does the tail chunk beat the
+# eviction" a coin flip and a passing run meaningless. At 50ms the eviction
+# deadline lands 100ms after the stop, firmly before the barrier, so the video
+# survives only if the daemon waits for that process's own flush marker.
+_BOUNDARY_RACE_HOLDBACK_MS = "50"
+
+
+@contextmanager
+def _pinned_holdback(holdback_ms: str) -> Generator[None]:
+    """Set ``NCD_HOLDBACK_MS`` for the block, restoring whatever was there.
+
+    Must wrap the daemon start: the daemon reads this once, at startup.
+
+    Yields:
+        ``None`` — the holdback override is in place while the body runs.
+    """
+    previous = os.environ.get("NCD_HOLDBACK_MS")
+    os.environ["NCD_HOLDBACK_MS"] = holdback_ms
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NCD_HOLDBACK_MS", None)
+        else:
+            os.environ["NCD_HOLDBACK_MS"] = previous
+
+
+@dataclass(slots=True)
+class _GateCloseObservation:
+    """When the recording owner's local ``log_*`` gate closed."""
+
+    result: float = 0.0
+
+
+@contextmanager
+def _watch_local_gate_close(robot: object) -> Generator[_GateCloseObservation]:
+    """Record the instant this process's local recording gate closes.
+
+    A tighter upper bracket on the window's real upper bound than "when
+    ``stop_recording`` returned". The bound is stamped inside the bridge's
+    ``stop_recording`` publish, and ``Robot._drain_streams_and_notify_daemon``
+    clears the local handle immediately afterwards — before the flush barrier,
+    which is what makes the public call take hundreds of milliseconds. So the
+    handle going ``None`` is within a poll interval of the boundary, while the
+    call returning is a barrier away from it.
+
+    Polls rather than hooks anything: the gate is the recording-state manager's
+    handle, and reading it is exactly what ``log_*`` does.
+
+    Yields:
+        An observation whose ``result`` is filled in with the gate-close wall
+        clock by the time the block exits. Falls back to the block's own exit
+        time if the gate never closed, which keeps the bracket valid (the bound
+        is still somewhere before it) rather than reporting a zero.
+    """
+    observation = _GateCloseObservation()
+    stop_polling = threading.Event()
+
+    def poll() -> None:
+        while not stop_polling.is_set():
+            if robot.get_current_recording_id() is None:  # type: ignore[attr-defined]
+                observation.result = time.time()
+                return
+            time.sleep(0.001)
+
+    watcher = threading.Thread(target=poll, name="gate-close-watch", daemon=True)
+    watcher.start()
+    try:
+        yield observation
+    finally:
+        stop_polling.set()
+        watcher.join(timeout=5.0)
+        if observation.result == 0.0:
+            observation.result = time.time()
+
+
+def _assert_online_verification_invariants(
+    results: list[ContextResult],
+    *,
+    observed: ObservedRecordingUploads,
+    timeout_seconds: float = 30.0,
+) -> None:
+    """Block until every recording in *results* has reached ``upload_complete``
+    in the platform DB.  Must be called before cloud frame verification so
+    that downloaded data reflects the fully-committed upload state.
+
+    Upload completion is tracked in the daemon DB by the local
+    ``recording_index`` correlation key.
+
+    Recordings whose completion *observed* already latched during the record
+    phase are satisfied: their rows have since been reclaimed by the recording
+    reaper, so there is nothing left here to poll. Everything else is waited on
+    exactly as before — not being complete yet is precisely what makes a
+    recording ineligible for reclamation, so its rows are still there.
+    """
+    for result in results:
+        for recording_index in result.recording_indexes:
+            if observed.is_complete(recording_index):
+                continue
+            wait_for_upload_complete_in_db(recording_index, timeout_s=timeout_seconds)
 
 
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
@@ -141,13 +249,26 @@ def test_split_process_video_survives_recording_boundary() -> None:
     640x480x3 bytes/frame crosses the writer's 256 MiB chunk-flush threshold
     at frame 292 of 300 (30fps x 10s), so a chunk seals mid-recording — the
     daemon has already attributed this window's video to the producer process
-    before its tail chunk (frames 292-300) is announced after the stop.
+    before its tail chunk (frames 292-300) is announced after the stop. The
+    window retention is pinned too, so the boundary is crossed the losing way
+    every run rather than on unlucky timing — see
+    :data:`_BOUNDARY_RACE_HOLDBACK_MS`.
 
-    Asserts the RGB trace reaches ``write_status='written'``, has the full
-    expected frame count, and that its last on-disk frame does not trail the
-    recording's nominal end by more than a couple of video frame intervals —
-    the assertion a truncated tail chunk fails and an exact-count check alone
-    could miss for a producer that just delivers slightly fewer frames.
+    Asserts the RGB trace reaches ``write_status='written'`` and then guards the
+    boundary from both sides: every frame the video process logged strictly
+    inside the recording is on disk, and no frame it logged after
+    ``stop_recording`` returned is. The second half is the same bug from the
+    other direction — the video process keeps logging until its stop
+    notification arrives a whole SSE round trip later, and those frames share a
+    chunk with the recording's own, so a daemon that takes the chunk whole ends
+    up with video published after the window closed.
+
+    Which frames those are is measured, not assumed: the wall-clock brackets
+    around this process's control calls decide it, and the video process reports
+    every frame it logged. A nominal ``fps * duration`` count could not do the
+    job — it moves by tens of frames with the child's render throughput and with
+    how long the SSE notification takes to open its logging gate, neither of
+    which says anything about whether a chunk was mishandled.
     """
     if not has_configured_org():
         pytest.skip(
@@ -172,7 +293,7 @@ def test_split_process_video_survives_recording_boundary() -> None:
     robot = None
     with scoped_test_dir_state(case, dataset_name=dataset_name):
         try:
-            with online_daemon_running():
+            with _pinned_holdback(_BOUNDARY_RACE_HOLDBACK_MS), online_daemon_running():
                 assert_exactly_one_daemon_pid()
                 nc.create_dataset(dataset_name)
 
@@ -181,23 +302,61 @@ def test_split_process_video_survives_recording_boundary() -> None:
                     dataset_name=dataset_name,
                     camera_name="camera_0",
                     case=case,
-                ):
+                ) as logged_frames:
                     robot = nc.connect_robot(robot_name, overwrite=False)
+                    # Both control calls are bracketed on the wall clock: the
+                    # window's real bounds are stamped inside them, so this is
+                    # as tightly as the video process's frames can be attributed
+                    # to the recording (see RecordingControlBounds).
+                    start_called_at = time.time()
                     nc.start_recording(robot_name=robot_name, timestamp=0.0)
+                    start_returned_at = time.time()
+                    handle = robot.get_current_recording_id()
                     recording_index = wait_for_recording_index_for_source(
                         str(robot.id),
                         int(robot.instance),
                         timeout_s=MAX_TIME_TO_START_S,
                     )
                     time.sleep(case.duration_sec)
-                    nc.stop_recording(
-                        robot_name=robot_name,
-                        wait=True,
-                        timestamp=float(case.duration_sec),
-                    )
+                    stop_called_at = time.time()
+                    with _watch_local_gate_close(robot) as gate_closed_at:
+                        # Deliberately not `wait=True`: this test asserts what
+                        # reached local disk, and the barrier it needs is the
+                        # video process's own flush (below) plus the daemon DB
+                        # poll in the assertion — not the cloud upload. Waiting
+                        # also polls `/recording/{id}/traces/complete`, which
+                        # 404s (raising, not returning False) until the daemon
+                        # has registered this recording's traces, so asking for
+                        # it here trades a real assertion for a race.
+                        nc.stop_recording(
+                            robot_name=robot_name,
+                            timestamp=float(case.duration_sec),
+                        )
+                    # Keep the video process logging past the stop, as a real
+                    # camera loop does — its tail chunk is sealed by the flush
+                    # barrier it runs on the way out.
                     time.sleep(2.0)
 
-                assert_rgb_trace_survived_boundary(recording_index, case)
+                bounds = RecordingControlBounds(
+                    handle=handle,
+                    start_called_at=start_called_at,
+                    start_returned_at=start_returned_at,
+                    stop_called_at=stop_called_at,
+                    # The gate-close instant, not the instant `stop_recording`
+                    # returned: both are valid upper brackets on the window's
+                    # bound, and this one is ~2ms wide instead of ~200ms, which
+                    # is the difference between policing the video process's
+                    # post-stop frames and calling them unknowable.
+                    stop_returned_at=gate_closed_at.result,
+                )
+                owed, forbidden = classify_split_producer_frames(
+                    logged_frames["RGB_IMAGES/camera_0"], bounds
+                )
+                assert_rgb_trace_respects_the_recording_boundary(
+                    recording_index,
+                    owed_timestamps=[frame.timestamp for frame in owed],
+                    forbidden_timestamps=[frame.timestamp for frame in forbidden],
+                )
         finally:
             if robot is not None:
                 robot.close()

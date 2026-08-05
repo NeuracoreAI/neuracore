@@ -682,6 +682,12 @@ impl ActorState {
             lossy_out: lossy_segment.clone(),
             lossless_out: lossless_segment.clone(),
             codec,
+            // `frame_count` is what this recording owns, which is the whole NUT
+            // unless the dispatcher cut the chunk at a window boundary. Passing
+            // it always keeps the encode and the `trace.json` sidecar built from
+            // the same count in lockstep by construction, rather than only when
+            // a cut happened to be flagged.
+            max_frames: (frame_count > 0).then_some(frame_count),
         };
         pending_encodes.spawn(async move {
             // Acquire a permit before relinking + encoding. Gating the relink

@@ -25,6 +25,14 @@
 //! been released; finalisation is then a single `WindowClosing` signal to each
 //! actor (no sequence counting).
 //!
+//! A video chunk is the one envelope carrying more than one datum, and the same
+//! rule decides it *per frame*: the chunk is a file the producer keeps appending
+//! to until something seals it, so a chunk routed into a recording by its open
+//! stamp can still hold frames published after that recording stopped. Its
+//! per-frame publish stamps are on the wire for exactly that reason — the window
+//! keeps the frames published before its stop and the rest are cut off (see
+//! [`frames_inside_window`]).
+//!
 //! One class of late data escapes that reasoning: a stopped window's **tail
 //! video chunks**, which the producer seals in a writer flush barrier that runs
 //! *after* it published the stop. Their lateness is a function of the
@@ -32,6 +40,16 @@
 //! bounds it. Those windows instead wait for the producer's explicit
 //! `SourceFlushed` marker (see [`ActiveWindow::awaiting_flush`]) — the retention
 //! remains the floor, and [`FLUSH_MARKER_WAIT_CAP`] the ceiling.
+//!
+//! One marker is not enough on its own, because a source can be logged from
+//! several processes at once and each marker only reports on its own process's
+//! barrier. So the daemon has to know *whose* markers a window is owed before
+//! it can act on any of them, and the producer says so directly: while it logs
+//! video it publishes [`Envelope::VideoProducerActive`] claims from its logging
+//! thread, which route into the window like data and record the pid in
+//! [`ActiveWindow::video_producers`]. Learning it from the first sealed chunk
+//! instead would be too late — that arrival is delayed by exactly the writer
+//! backlog this whole mechanism exists to tolerate.
 //!
 //! Because that marker rides the same port and the same holdback as the data
 //! envelopes, releasing it already implies every datum the source published
@@ -332,6 +350,9 @@ enum HeldPayload {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        /// Per-frame publish time as ms after the chunk's open stamp — what lets
+        /// `route_video` cut the chunk at a window boundary inside it.
+        frame_publish_offsets_ms: Vec<u32>,
     },
     /// End-of-tail marker for a source's stopped window. Rides the holdback
     /// queue purely for its *position*: the producer sent it behind the
@@ -544,6 +565,7 @@ impl Dispatcher {
                 frame_count,
                 frame_timestamps_ns,
                 frame_timestamps_s,
+                frame_publish_offsets_ms,
             } => {
                 let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
@@ -562,6 +584,7 @@ impl Dispatcher {
                         byte_count,
                         frame_count,
                         frame_timestamps_s,
+                        frame_publish_offsets_ms,
                     },
                 });
             }
@@ -1129,6 +1152,7 @@ impl Dispatcher {
                 byte_count,
                 frame_count,
                 frame_timestamps_s,
+                frame_publish_offsets_ms,
             } => {
                 self.route_video(
                     &held.source,
@@ -1142,6 +1166,7 @@ impl Dispatcher {
                     byte_count,
                     frame_count,
                     frame_timestamps_s,
+                    frame_publish_offsets_ms,
                 )
                 .await;
             }
@@ -1283,6 +1308,7 @@ impl Dispatcher {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        frame_publish_offsets_ms: Vec<u32>,
     ) {
         let recordings_root = self.actor_context.recordings_root.clone();
         // The chunk's `publish_timestamp_ns` (its open time) keys both the
@@ -1297,7 +1323,7 @@ impl Dispatcher {
             thread_id,
         );
 
-        // The whole chunk routes by its open (publish) time, which lies inside
+        // The chunk routes by its open (publish) time, which lies inside
         // exactly one recording window — so the tail chunk of a recording is
         // routed by a timestamp strictly before the window's stop boundary,
         // never on it.
@@ -1314,6 +1340,47 @@ impl Dispatcher {
         // Recorded before the actor send below so a window that only ever
         // sees this one chunk still knows to wait on this producer's marker.
         window.video_producers.insert(producer_pid);
+
+        // Where the chunk opened decides which window it belongs to; where each
+        // of its frames was published decides how much of it that window keeps.
+        // A producer keeps appending to an open chunk until something seals it,
+        // so a chunk opened inside a recording can hold frames published after
+        // that recording stopped — a video-only process logs on past the stop
+        // until its own stop notification arrives, a whole SSE round trip
+        // later. Those frames belong to no recording, so cut them off here
+        // rather than letting the window keep video published after it closed.
+        let kept_frames = window.stopped_at_ns.map_or(frame_count, |stop| {
+            frames_inside_window(&frame_publish_offsets_ms, publish_ts, stop, frame_count)
+        });
+        let dropped_frames = frame_count.saturating_sub(kept_frames);
+        if kept_frames == 0 {
+            // Nothing in this chunk belongs to the window it opened in. Not
+            // reachable from a well-behaved producer (the open stamp *is* the
+            // first frame's publish stamp, and it landed inside the window),
+            // so this is the defensive branch for a bogus offset vector — drop
+            // the chunk rather than register an empty trace.
+            tracing::warn!(
+                recording_index = window.recording_index,
+                frame_count,
+                "video chunk has no frame published inside the window it opened \
+                 in; dropping it"
+            );
+            remove_spool_nut(&spool_nut);
+            self.note_orphan();
+            return;
+        }
+        let mut frame_timestamps_s = frame_timestamps_s;
+        if dropped_frames > 0 {
+            frame_timestamps_s.truncate(kept_frames as usize);
+            tracing::debug!(
+                recording_index = window.recording_index,
+                kept_frames,
+                dropped_frames,
+                "video chunk straddles the window's stop; keeping the frames \
+                 published before it"
+            );
+        }
+        let frame_count = kept_frames;
 
         let recording_index = window.recording_index;
         let handle = Self::ensure_actor(
@@ -1427,6 +1494,42 @@ impl Dispatcher {
         self.actor_context.trace_writer.flush().await;
         tracing::info!("dispatcher stopped");
     }
+}
+
+/// How many of a chunk's leading frames were published before `stop_ns`.
+///
+/// `offsets_ms` is [`Envelope::VideoChunkReady`]'s `frame_publish_offsets_ms`:
+/// each frame's publish time as milliseconds after `chunk_open_ns`, in arrival
+/// order. The result is deliberately a *prefix* length — the position of the
+/// first frame at or after the boundary — because a chunk is one NUT file
+/// feeding one encode, so the only cut it can express is "keep the first N".
+/// A producer whose frame publish stamps are out of order therefore keeps its
+/// first out-of-order frame's successors too; that costs at most the disorder's
+/// own width, where the alternative (dropping interior frames) would put a hole
+/// in the middle of a video.
+///
+/// An empty `offsets_ms` means the producer sent no per-frame publish data, so
+/// the chunk can only be taken whole, exactly as before this cut existed.
+///
+/// The comparison is `>=`: the window's upper bound is exclusive, so a frame
+/// published exactly on it is already outside. Millisecond resolution puts the
+/// cut within one millisecond of the true boundary — four orders of magnitude
+/// finer than the ~300 ms overshoot it exists to remove, and finer than the
+/// inter-frame gap of any real capture.
+fn frames_inside_window(
+    offsets_ms: &[u32],
+    chunk_open_ns: i64,
+    stop_ns: i64,
+    frame_count: u32,
+) -> u32 {
+    if offsets_ms.is_empty() {
+        return frame_count;
+    }
+    let cut = offsets_ms
+        .iter()
+        .position(|offset| chunk_open_ns.saturating_add(i64::from(*offset) * 1_000_000) >= stop_ns)
+        .unwrap_or(offsets_ms.len());
+    u32::try_from(cut).unwrap_or(u32::MAX).min(frame_count)
 }
 
 fn remove_spool_nut(path: &std::path::Path) {
@@ -1823,9 +1926,74 @@ mod tests {
         );
     }
 
-    /// Announce a finished video chunk whose open time is `publish_ts`. The
-    /// caller must have spooled the matching NUT under the spool dir first.
+    #[test]
+    fn frames_inside_window_cuts_at_the_stop_boundary() {
+        // Chunk opened at 1_000 ms (in ns), frames every 10 ms, window closing
+        // 25 ms after the open: frames at +0 and +10 are inside, +20 is inside
+        // (20 < 25), +30 is not.
+        let open_ns = 1_000_000_000;
+        let stop_ns = open_ns + 25 * 1_000_000;
+        let offsets = [0, 10, 20, 30, 40];
+        assert_eq!(frames_inside_window(&offsets, open_ns, stop_ns, 5), 3);
+
+        // The upper bound is exclusive, so a frame published exactly on it is
+        // already outside.
+        let on_boundary = open_ns + 20 * 1_000_000;
+        assert_eq!(frames_inside_window(&offsets, open_ns, on_boundary, 5), 2);
+    }
+
+    #[test]
+    fn frames_inside_window_keeps_a_chunk_entirely_before_the_stop() {
+        let open_ns = 1_000_000_000;
+        let offsets = [0, 10, 20];
+        assert_eq!(
+            frames_inside_window(&offsets, open_ns, open_ns + 60 * 1_000_000, 3),
+            3
+        );
+    }
+
+    #[test]
+    fn frames_inside_window_without_per_frame_data_takes_the_chunk_whole() {
+        // A producer that sends no publish offsets leaves the daemon no cut to
+        // make; the chunk routes whole, exactly as before per-frame membership.
+        assert_eq!(
+            frames_inside_window(&[], 1_000_000_000, 1_000_000_000, 7),
+            7
+        );
+    }
+
+    #[test]
+    fn frames_inside_window_cut_is_a_prefix_under_disordered_stamps() {
+        // Frames arriving out of publish order can't be cut individually — the
+        // chunk is one file feeding one encode — so the cut is the first frame
+        // at or past the boundary and its successors go with it.
+        let open_ns = 1_000_000_000;
+        let stop_ns = open_ns + 25 * 1_000_000;
+        let offsets = [0, 30, 10, 20];
+        assert_eq!(frames_inside_window(&offsets, open_ns, stop_ns, 4), 1);
+    }
+
+    /// Announce a finished single-frame video chunk whose open time is
+    /// `publish_ts`. The caller must have spooled the matching NUT under the
+    /// spool dir first.
     fn video_chunk(robot: &str, publish_ts: i64, thread_id: i64, producer_pid: u32) -> Envelope {
+        video_chunk_frames(robot, publish_ts, thread_id, producer_pid, &[0])
+    }
+
+    /// As [`video_chunk`], with one frame per entry in `publish_offsets_ms` —
+    /// each frame's publish time as ms after the chunk's open stamp, exactly as
+    /// the producer reports it.
+    fn video_chunk_frames(
+        robot: &str,
+        publish_ts: i64,
+        thread_id: i64,
+        producer_pid: u32,
+        publish_offsets_ms: &[u32],
+    ) -> Envelope {
+        let capture_stamps: Vec<i64> = publish_offsets_ms
+            .iter()
+            .map(|offset| publish_ts + i64::from(*offset) * 1_000_000)
+            .collect();
         Envelope::VideoChunkReady {
             robot_id: robot.into(),
             robot_instance: 0,
@@ -1837,9 +2005,10 @@ mod tests {
             width: 64,
             height: 64,
             byte_count: 9,
-            frame_count: 1,
-            frame_timestamps_ns: vec![publish_ts],
-            frame_timestamps_s: vec![publish_ts as f64 / 1e9],
+            frame_count: publish_offsets_ms.len() as u32,
+            frame_timestamps_s: capture_stamps.iter().map(|ns| *ns as f64 / 1e9).collect(),
+            frame_timestamps_ns: capture_stamps,
+            frame_publish_offsets_ms: publish_offsets_ms.to_vec(),
         }
     }
 
@@ -1911,6 +2080,110 @@ mod tests {
         assert!(
             !spool_path.exists(),
             "the spooled NUT must be relinked out of the spool dir"
+        );
+    }
+
+    #[tokio::test]
+    async fn straddling_video_chunk_keeps_its_in_window_prefix() {
+        // The chunk opened inside the window and its first frames were published
+        // inside it, so it still belongs here — the frames published after the
+        // stop are cut off, not the chunk. Losing the whole chunk over its tail
+        // would throw away the recording's video; keeping the whole chunk would
+        // leave the recording holding video published after it closed.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone(), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        // Window [100, 100 + 25ms): the chunk opens at 150 (inside) and its
+        // frames run from the open to 40 ms past it — across the stop.
+        let stop_ns = 150 + 25 * 1_000_000;
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        dispatcher
+            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .await;
+
+        let (publish_ts, thread_id) = (150, 7);
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+        dispatcher
+            .handle_inbound(
+                video_chunk_frames("robot-1", publish_ts, thread_id, 1, &[0, 10, 20, 30, 40]),
+                opened_at,
+            )
+            .await;
+        dispatcher
+            .release_due_holdback(opened_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let entry = dispatcher.windows.get(&source).unwrap();
+        assert_eq!(
+            entry.closing[0].traces.len(),
+            1,
+            "the chunk's in-window frames must still route to a video trace"
+        );
+        assert_eq!(
+            dispatcher.orphan_drops, 0,
+            "cutting a chunk's tail is not an orphan drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn video_chunk_with_no_in_window_frame_is_dropped() {
+        // Defensive branch: the open stamp put the chunk in this window but not
+        // one of its frames was published inside it. Registering an empty video
+        // trace would leave the recording advertising a video with no frames, so
+        // the chunk goes the way of any other out-of-window data.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone(), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        let stop_ns = 150 + 25 * 1_000_000;
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        dispatcher
+            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .await;
+
+        let (publish_ts, thread_id) = (150, 7);
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+        dispatcher
+            .handle_inbound(
+                video_chunk_frames("robot-1", publish_ts, thread_id, 1, &[50, 60]),
+                opened_at,
+            )
+            .await;
+        dispatcher
+            .release_due_holdback(opened_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let entry = dispatcher.windows.get(&source).unwrap();
+        assert!(
+            entry.closing[0].traces.is_empty(),
+            "a chunk with no in-window frame must not register a video trace"
+        );
+        assert_eq!(dispatcher.orphan_drops, 1);
+        let spool_path = paths::spool_chunk_path(
+            &recordings_root,
+            "robot-1",
+            0,
+            "RGB_IMAGES",
+            Some("camera_0"),
+            publish_ts,
+            thread_id,
+        );
+        assert!(
+            !spool_path.exists(),
+            "the dropped chunk's spooled NUT must be removed"
         );
     }
 
