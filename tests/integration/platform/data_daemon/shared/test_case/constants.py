@@ -123,6 +123,13 @@ STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
 # camera that keeps running after the recording ends.
 CONTINUOUS_LOGGING_TAIL_S = 2.0
 
+# assert_disk_recording_properties: how many video frame intervals an RGB
+# trace's last on-disk timestamp may trail stop_called_at by. Zero would over-
+# fit to a producer that always logs up to the very edge of the window; this
+# bounds truncation (a whole tail chunk silently orphaned) without asserting
+# exact delivery, which the on-disk assertion deliberately does not require.
+TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
 # PRODUCER_CONTINUOUS un-paced streams (PACING_BURST_VIDEO/PACING_BURST_ALL):
 # how far ahead of its nominal per-frame schedule the producer may race before
 # it must wait for real time to catch up. Bounds the backlog it can push to a

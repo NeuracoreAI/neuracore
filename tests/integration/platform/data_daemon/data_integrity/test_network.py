@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
+import uuid
 from collections.abc import Callable
 
 import pytest
 
+import neuracore as nc
 from tests.integration.platform.data_daemon.daemon_test_cases import (
     PRE_NETWORK_INTEGRITY_CASES,
 )
@@ -14,8 +17,15 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     latching_upload_observer,
     resolve_cloud_recording_ids,
+    wait_for_recording_index_for_source,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.disk_helpers import (
+    assert_rgb_trace_survived_boundary,
+)
+from tests.integration.platform.data_daemon.shared.runners import (
+    online_daemon_running,
+    split_video_process_running,
+)
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -29,6 +39,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_REALISTIC,
+    MAX_TIME_TO_START_S,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -104,3 +116,88 @@ def test_cloud_data_integrity(
                 results=results,
                 test_wall_s=test_wall_timer(),
             )
+
+
+def test_split_process_video_survives_recording_boundary() -> None:
+    """A video producer in a different OS process than the recording owner
+    must not lose its tail chunk at the recording boundary.
+
+    Reproduces the real-world topology behind the RGB-tail-chunk-orphaned bug:
+    one process owns ``start_recording``/``stop_recording`` for a robot while
+    a separate process — sharing the same source, connected independently via
+    :func:`~runners.split_video_process_running` — owns that robot's RGB
+    video. The daemon's per-producer flush-marker tracking (see
+    ``rust/data_daemon/src/pipeline/dispatcher.rs``) exists so the
+    video-less lifecycle process's flush marker cannot vouch for the video
+    process's still-open writer barrier.
+
+    Requires ``online_daemon_running()``: the video-only process never calls
+    ``start_recording`` itself, so it only learns a recording is active via
+    the recording-state manager's SSE notification stream, which offline
+    daemons never emit — see ``behavioural_correctness/test_multi_process_producers.py``
+    for the same online-only constraint on a cross-process producer.
+
+    Duration and resolution are pinned to the original bug report's shape:
+    640x480x3 bytes/frame crosses the writer's 256 MiB chunk-flush threshold
+    at frame 292 of 300 (30fps x 10s), so a chunk seals mid-recording — the
+    daemon has already attributed this window's video to the producer process
+    before its tail chunk (frames 292-300) is announced after the stop.
+
+    Asserts the RGB trace reaches ``write_status='written'``, has the full
+    expected frame count, and that its last on-disk frame does not trail the
+    recording's nominal end by more than a couple of video frame intervals —
+    the assertion a truncated tail chunk fails and an exact-count check alone
+    could miss for a producer that just delivers slightly fewer frames.
+    """
+    if not has_configured_org():
+        pytest.skip(
+            "Recording/playback matrix tests require NEURACORE_ORG_ID"
+            " or a saved current organization."
+        )
+
+    run_id = uuid.uuid4().hex[:10]
+    dataset_name = f"split_video_dataset_{run_id}"
+    robot_name = f"split_video_robot_{run_id}"
+    case = DataDaemonTestCase(
+        duration_sec=10,
+        joint_count=0,
+        video_count=1,
+        image_width=640,
+        image_height=480,
+        video_fps=30,
+        video_detail=DETAIL_REALISTIC,
+        storage_state_action=STORAGE_STATE_DELETE,
+    )
+
+    robot = None
+    with scoped_test_dir_state(case, dataset_name=dataset_name):
+        try:
+            with online_daemon_running():
+                assert_exactly_one_daemon_pid()
+                nc.create_dataset(dataset_name)
+
+                with split_video_process_running(
+                    robot_name=robot_name,
+                    dataset_name=dataset_name,
+                    camera_name="camera_0",
+                    case=case,
+                ):
+                    robot = nc.connect_robot(robot_name, overwrite=False)
+                    nc.start_recording(robot_name=robot_name, timestamp=0.0)
+                    recording_index = wait_for_recording_index_for_source(
+                        str(robot.id),
+                        int(robot.instance),
+                        timeout_s=MAX_TIME_TO_START_S,
+                    )
+                    time.sleep(case.duration_sec)
+                    nc.stop_recording(
+                        robot_name=robot_name,
+                        wait=True,
+                        timestamp=float(case.duration_sec),
+                    )
+                    time.sleep(2.0)
+
+                assert_rgb_trace_survived_boundary(recording_index, case)
+        finally:
+            if robot is not None:
+                robot.close()

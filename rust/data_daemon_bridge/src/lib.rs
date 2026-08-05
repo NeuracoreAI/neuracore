@@ -56,7 +56,7 @@ use crate::publisher::{
     flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
 };
 use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
-use crate::writer::{writer_queue, FrameJob, WriterMsg};
+use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
 /// daemon opens a window and owns all recording identity.
@@ -247,13 +247,21 @@ fn log_frame(
     // GIL would stall every Python thread in the process. A frame that cannot be
     // admitted before the spool-stall window elapses surfaces as an error rather
     // than being silently dropped, so the caller learns the daemon has stalled.
-    py.detach(move || writer_queue().push(WriterMsg::Frame(job)))
-        .map_err(|_| {
-            PyRuntimeError::new_err(
-                "video logging stalled: the data daemon is not draining the spool \
-                 backlog (frame rejected after 1s of backpressure)",
-            )
-        })?;
+    py.detach(move || {
+        // Claim the source for this process before the frame is queued, not
+        // after: the claim's whole job is to reach the daemon ahead of anything
+        // the writer publishes, and admission can block for up to a second
+        // under backpressure. Rate-limited inside, so this is a lock + map
+        // lookup on all but the first frame of each interval.
+        note_video_activity(&job.robot_id, job.robot_instance, job.publish_ns);
+        writer_queue().push(WriterMsg::Frame(job))
+    })
+    .map_err(|_| {
+        PyRuntimeError::new_err(
+            "video logging stalled: the data daemon is not draining the spool \
+             backlog (frame rejected after 1s of backpressure)",
+        )
+    })?;
     Ok(())
 }
 
