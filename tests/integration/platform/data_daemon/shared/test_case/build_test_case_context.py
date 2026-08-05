@@ -1193,6 +1193,19 @@ def classify_split_producer_frames(
       land before ``stop_recording`` was called, and every owed frame completed
       before that.
 
+      The same reasoning excludes frames still logged under the *previous*
+      recording's handle. Back-to-back, a non-owning producer keeps logging
+      into the recording it last heard about for a whole SSE round trip after
+      that recording really stopped — so those frames' publish stamps land
+      inside this window while the producer is still filling a chunk opened in
+      the last one. The daemon cuts them off at the previous recording's stop
+      (correctly: the stop-boundary test requires exactly that) and cannot move
+      them here, because a chunk is one NUT file feeding one encode and the
+      only cut it can express is a prefix. Demanding them would demand a chunk
+      split across two traces, which is not a thing the pipeline can do, so
+      they are unknowable — required of neither recording, exactly like the
+      frames straddling a single recording's own stop.
+
     - **Forbidden** (must not be on disk), at *either* end, is decided by the
       clock alone, not by the handle: the in-process rule reads
       ``frame.handle != bounds.handle``, but a non-owning process holds its own
@@ -1229,7 +1242,18 @@ def classify_split_producer_frames(
         frames)``, each in emission order.
     """
     inside, _ = _classify_boundary_frames(frames, bounds)
-    owed = [frame for frame in inside if frame.handle is not None]
+    # Handles this producer was already logging under before the recording
+    # started — i.e. the previous recording's, as this process knows it.
+    carried_over = {
+        frame.handle
+        for frame in frames
+        if frame.handle is not None and frame.completed_at <= bounds.start_called_at
+    }
+    owed = [
+        frame
+        for frame in inside
+        if frame.handle is not None and frame.handle not in carried_over
+    ]
     forbidden_before_start = [
         frame for frame in frames if frame.completed_at <= bounds.start_called_at
     ]

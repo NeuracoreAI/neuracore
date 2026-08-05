@@ -392,6 +392,40 @@ fn stop_recording(
     })
 }
 
+/// Arm a window-boundary split for a source without publishing a recording
+/// lifecycle event.
+///
+/// The boundary arm inside [`start_recording`] only covers the process that
+/// opens the window. A process that logs video for the same source but learned
+/// about the recording from a notification never rolls its chunk, and since the
+/// daemon routes a chunk whole by its open stamp, that chunk carries the new
+/// recording's frames into the previous recording's window — where they are cut
+/// off at its stop and rerouted nowhere. This is that process's way to say
+/// "a window boundary has passed for this source, split here".
+///
+/// The stamp is wall-clock now rather than the window's real lower bound, which
+/// a non-owning caller cannot know. That is exactly right for this use: the
+/// caller arms as its own logging gate opens, so the next frame it publishes is
+/// the first of the new recording and the split lands on it. Fire-and-forget,
+/// like the arm in `start_recording` — it is applied lazily against frame
+/// publish stamps, and rides the same writer queue as the frames themselves, so
+/// a frame pushed after this call is always weighed against it.
+#[pyfunction]
+fn mark_recording_boundary(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: now_ns(),
+        });
+    });
+    Ok(())
+}
+
 /// Run the writer's stop barrier for a source: drain every frame still queued
 /// for it (FIFO), seal and announce the tail chunks, publish the
 /// `SourceFlushed` marker, and drain the data publisher's queue onto the wire.
@@ -534,6 +568,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(mark_recording_boundary, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;

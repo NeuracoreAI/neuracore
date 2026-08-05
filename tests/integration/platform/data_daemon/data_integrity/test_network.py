@@ -375,28 +375,27 @@ def test_split_process_video_survives_back_to_back_recording_boundaries() -> Non
     The mirror, at the START boundary, of
     :func:`test_split_process_video_survives_recording_boundary`. That test
     proves a chunk straddling a recording's STOP is cut rather than taken
-    whole (``ef3cf6c7``); this one proves the START side is handled too — and
-    it currently is not.
+    whole (``ef3cf6c7``); this one polices the START side.
 
-    The video-only process never calls ``start_recording`` itself, so it never
-    arms the writer's boundary split (``arm_boundary_split``, armed only
-    inside the process that owns the lifecycle call — see
-    ``rust/data_daemon_bridge/src/lib.rs``). Its NUT chunk therefore keeps
-    accumulating frames straight across a recording boundary no matter how
-    tight the gap between two recordings is: nothing in that process is ever
-    told a boundary happened.
+    A chunk routes by its *open* stamp (the ``publish_timestamp_ns`` of its
+    first frame), so a chunk opened during the first recording and still open
+    when the second starts routes whole into the *first* recording's window.
+    The dispatcher's per-frame stop cut (``frames_inside_window``, see
+    ``rust/data_daemon/src/pipeline/dispatcher.rs``) drops the frames published
+    after the first recording stopped, and nothing reroutes them — so the
+    second recording simply loses its leading video. The video-only process
+    never calls ``start_recording``, so the writer's boundary split armed
+    inside that call (``arm_boundary_split``, see
+    ``rust/data_daemon_bridge/src/lib.rs``) never fires for it; instead
+    ``Robot.arm_video_boundary_if_new_recording`` arms it from the video log
+    path the first time this process forwards a frame under a new handle.
 
-    A chunk still routes by its *open* stamp (the ``publish_timestamp_ns`` of
-    its first frame), so a chunk opened during the first recording that is
-    still open when the second one starts routes whole into the first
-    recording's window. The dispatcher's per-frame stop cut
-    (``frames_inside_window``, see
-    ``rust/data_daemon/src/pipeline/dispatcher.rs``) correctly drops the
-    frames published after the first recording's stop, so the first recording
-    does not wrongly keep them — but those dropped frames are never rerouted
-    into the second recording's window either. They belong to neither
-    recording on disk, even though the second recording's own wall-clock
-    bounds provably contain them.
+    Two defects had to be closed for this to hold, both of which this test
+    reproduces on the first run of a second recording. The other is that
+    ``StopRecording`` names a source, not a recording: the video process's
+    remote-stop drain used to publish one a whole SSE round trip late, closing
+    the *next* recording's window ~800 ms in — see
+    ``Robot._drain_streams_and_notify_daemon``.
 
     Runs one continuous :func:`~runners.split_video_process_running` child
     across ``case.recording_count`` recordings started back-to-back, and
