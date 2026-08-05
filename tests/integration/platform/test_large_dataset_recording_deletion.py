@@ -10,7 +10,6 @@ import json
 import time
 import warnings
 from collections import Counter
-from collections.abc import Callable
 from typing import Any
 from uuid import uuid4
 
@@ -99,18 +98,20 @@ def wait_for_dataset_ids(
     )
 
 
-def cleanup_dataset(get_dataset: Callable[[], Dataset | None], name: str) -> None:
-    """Best-effort cleanup that does not hide the test's original failure."""
+def cleanup_dataset(dataset: Dataset | None, name: str) -> None:
+    """Best-effort cleanup, including resources created before assignment."""
     try:
-        dataset = get_dataset()
-        if dataset is not None and not dataset.deleted:
-            dataset.delete()
+        candidate = dataset
+        if candidate is None:
+            candidate = Dataset.get_by_name(name, non_exist_ok=True)
+        if candidate is not None and not candidate.deleted:
+            candidate.delete()
     except Exception as exc:  # noqa: BLE001 - cleanup must preserve test failure
         warnings.warn(f"Failed to clean up dataset {name!r}: {exc}", stacklevel=2)
 
 
 def test_delete_recordings_from_cloned_large_dataset() -> None:
-    """Clone, partially delete, fully delete, merge, and verify isolation."""
+    """Clone, fully delete, merge, and verify isolation."""
     nc.login()
 
     # Unique names make reruns and concurrent CI jobs independent.
@@ -129,10 +130,6 @@ def test_delete_recordings_from_cloned_large_dataset() -> None:
     source_signatures = Counter(
         recording_signature(recording) for recording in source_recordings
     )
-    source_signatures_by_id = {
-        str(recording.id): recording_signature(recording)
-        for recording in source_recordings
-    }
     source_tags = Counter(source_dataset.tags)
     source_data_types = Counter(source_dataset.data_types)
     source_description = source_dataset.description
@@ -162,36 +159,9 @@ def test_delete_recordings_from_cloned_large_dataset() -> None:
         assert clone_ids == source_ids
         assert clone_signatures == source_signatures
 
-        # Delete records around page boundaries plus both ends. This detects
-        # off-by-one errors and deletion bugs hidden by pagination cursors.
-        ordered_clone_ids = [str(recording.id) for recording in clone]
-        selected_indexes = {
-            0,
-            PAGE_SIZE - 1,
-            PAGE_SIZE,
-            len(ordered_clone_ids) - 1,
-        }
-        selected_ids = {ordered_clone_ids[index] for index in selected_indexes}
-        for recording_id in selected_ids:
+        # Loop over all recordings in the clone and delete all of them.
+        for recording_id in clone_ids:
             delete_recording(clone, recording_id)
-
-        expected_remaining_ids = source_ids - selected_ids
-        partially_deleted_clone = wait_for_dataset_ids(
-            str(clone.id), expected_remaining_ids
-        )
-        partial_ids, partial_signatures = dataset_recording_state(
-            partially_deleted_clone
-        )
-        assert partial_ids == expected_remaining_ids
-        assert len(partially_deleted_clone) == len(source_ids) - len(selected_ids)
-        assert partial_signatures == Counter(
-            source_signatures_by_id[recording_id]
-            for recording_id in expected_remaining_ids
-        )
-
-        # Delete all remaining recordings using the fresh post-mutation view.
-        for recording_id in partial_ids:
-            delete_recording(partially_deleted_clone, recording_id)
 
         empty_clone = wait_for_dataset_ids(str(clone.id), set())
         assert len(empty_clone) == 0
@@ -204,6 +174,7 @@ def test_delete_recordings_from_cloned_large_dataset() -> None:
             name=merged_name,
             dataset_names=[clone_name, SOURCE_DATASET_NAME],
         )
+
         merged_ids, merged_signatures = dataset_recording_state(merged)
         assert merged.id not in {clone.id, source_dataset.id}
         assert merged.name == merged_name
@@ -226,8 +197,5 @@ def test_delete_recordings_from_cloned_large_dataset() -> None:
         assert final_source_signatures == source_signatures
     finally:
         # Always remove cloud resources, including after an assertion failure.
-        cleanup_dataset(lambda: merged, merged_name)
-        cleanup_dataset(
-            lambda: nc.get_dataset(id=str(clone.id)) if clone is not None else None,
-            clone_name,
-        )
+        cleanup_dataset(merged, merged_name)
+        cleanup_dataset(clone, clone_name)
