@@ -37,7 +37,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
     cloud_resource_names,
-    scoped_storage_state,
+    scoped_test_dir_state,
     set_case_analysis_report,
     setup_per_test_artifact_dirs,
 )
@@ -83,7 +83,7 @@ def test_disk_db_data_integrity(
     cloud_names = cloud_resource_names(specs)
     with (
         cloud_resource_deleter(*cloud_names),
-        scoped_storage_state(case),
+        scoped_test_dir_state(case),
     ):
         try:
             with offline_daemon_running():
