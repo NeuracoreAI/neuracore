@@ -30,7 +30,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
     cloud_resource_names,
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 # Cloud performance covers both nowait and wait=True because upload/registration
@@ -70,7 +70,7 @@ def test_cloud_upload_and_readiness_performance(
         results: list[ContextResult] = []
         with (
             cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
+            scoped_test_dir_state(case),
         ):
             with online_daemon_running():
                 with report.step("Record workload and stop recordings"):

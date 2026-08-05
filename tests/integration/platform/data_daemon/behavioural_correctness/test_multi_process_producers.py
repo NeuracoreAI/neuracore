@@ -36,7 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 _PRODUCER_COUNT = 3
@@ -135,7 +135,7 @@ def _same_source_producer(
         # Keep every producer and its SSE consumer alive while the parent
         # verifies that the daemon finalized all three traces.
         verification_complete.wait(timeout=_PROCESS_TIMEOUT_S)
-    except BaseException:  # noqa: BLE001 - propagate full child traceback
+    except BaseException:  # noqa: BLE001
         result_queue.put({
             "ok": False,
             "producer_index": producer_index,
@@ -229,7 +229,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     processes: list[multiprocessing.Process] = []
 
     with cloud_resource_deleter(dataset_name, [robot_name]):
-        with scoped_storage_state(case):
+        with scoped_test_dir_state(case):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
                 nc.create_dataset(

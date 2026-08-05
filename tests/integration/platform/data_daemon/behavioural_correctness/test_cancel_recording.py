@@ -41,7 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
     cloud_resource_names,
-    scoped_storage_state,
+    scoped_test_dir_state,
     set_case_analysis_report,
 )
 
@@ -90,7 +90,7 @@ def test_cancel_recording_produces_no_data(
     try:
         with (
             cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
+            scoped_test_dir_state(case),
         ):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
@@ -174,7 +174,7 @@ def test_cancel_then_start_new_recording(
     try:
         with (
             cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
+            scoped_test_dir_state(case),
         ):
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
