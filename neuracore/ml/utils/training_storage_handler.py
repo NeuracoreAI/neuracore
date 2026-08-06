@@ -1,8 +1,10 @@
 """TrainingStorageHandler for managing model training artifacts and checkpoints."""
 
 import logging
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
-from typing import IO, Any
+from typing import Any
 
 import requests
 import torch
@@ -69,6 +71,16 @@ class TrainingStorageHandler(UploadStorageMixin):
                     f"Training job {self.training_job_id} not found or access denied."
                 )
 
+        # Checkpoint/artifact uploads run on this single background worker so
+        # save_checkpoint()/save_model_artifacts() don't block the training
+        # loop for the duration of a large upload. One worker means every
+        # submitted job runs in strict submission order, which is what makes
+        # delete_checkpoint() safe to call right after a save without extra
+        # coordination. Created lazily since it's only needed when uploading.
+        self._upload_executor: ThreadPoolExecutor | None = None
+        self._pending_uploads_lock = threading.Lock()
+        self._pending_uploads: dict[Path, Future] = {}
+
     def _get_upload_url(self, filepath: str, content_type: str) -> str:
         """Get a signed upload URL for a file in cloud storage.
 
@@ -119,8 +131,97 @@ class TrainingStorageHandler(UploadStorageMixin):
             )
         return response.json()["url"]
 
+    def _get_upload_executor(self) -> ThreadPoolExecutor:
+        """Lazily create the single-worker background upload executor."""
+        if self._upload_executor is None:
+            self._upload_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="nc-checkpoint-upload"
+            )
+        return self._upload_executor
+
+    def _wait_for_pending_upload(self, local_path: Path) -> None:
+        """Block until any in-flight upload of ``local_path`` has finished.
+
+        Some destinations (e.g. a "latest" checkpoint, or model artifacts
+        that get regenerated in place) are reused across calls rather than
+        written to a fresh path each time. Waiting here before that path is
+        overwritten or deleted prevents a background upload thread from
+        reading a file out from under a newer write.
+        """
+        with self._pending_uploads_lock:
+            future = self._pending_uploads.get(local_path)
+        if future is not None and not future.done():
+            logger.debug(
+                "Waiting for pending upload of %s to finish before reusing it",
+                local_path,
+            )
+            future.result()
+
+    def _submit_upload(
+        self,
+        local_path: Path,
+        remote_filepath: str,
+        content_type: str,
+        delete_on_success: bool,
+    ) -> None:
+        """Upload ``local_path`` on the background worker.
+
+        Args:
+            local_path: Local file to upload.
+            remote_filepath: Destination path within cloud storage.
+            content_type: MIME type of the file being uploaded.
+            delete_on_success: Whether to unlink the local file once the
+                upload succeeds.
+        """
+
+        def _do_upload() -> None:
+            try:
+                uploaded = self.upload_file(local_path, remote_filepath, content_type)
+            except Exception:
+                logger.error(
+                    "Unexpected error uploading %s to cloud path %s",
+                    local_path,
+                    remote_filepath,
+                    exc_info=True,
+                )
+                return
+            if uploaded and delete_on_success:
+                try:
+                    local_path.unlink()
+                except Exception as e:
+                    logger.warning(
+                        "Could not delete local file %s after upload: %s",
+                        local_path,
+                        e,
+                    )
+
+        future = self._get_upload_executor().submit(_do_upload)
+        with self._pending_uploads_lock:
+            self._pending_uploads[local_path] = future
+
+    def wait_for_pending_uploads(self) -> None:
+        """Block until every submitted checkpoint/artifact upload has finished.
+
+        Call this before the process exits (e.g. at the end of training) —
+        checkpoint and artifact uploads run in the background, so without
+        this the container/VM can be torn down while the final checkpoint is
+        still mid-upload.
+        """
+        with self._pending_uploads_lock:
+            futures = list(self._pending_uploads.values())
+        for future in futures:
+            future.result()
+
     def save_checkpoint(self, checkpoint: dict, relative_checkpoint_path: Path) -> None:
         """Save checkpoint to storage.
+
+        Writes the checkpoint to disk synchronously, then — if cloud logging
+        is enabled — uploads it on a background thread so this call doesn't
+        block the training loop for the duration of the upload. If
+        ``relative_checkpoint_path`` names a file reused across calls (e.g. a
+        "latest" checkpoint), this first waits for any previous upload of
+        that same path to finish, so it's never overwritten while still
+        being read for upload.
 
         Args:
             checkpoint: Checkpoint dictionary to save.
@@ -129,35 +230,21 @@ class TrainingStorageHandler(UploadStorageMixin):
         save_path = self.local_dir / relative_checkpoint_path
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
+        if self.log_to_cloud:
+            self._wait_for_pending_upload(save_path)
+
         # Convert OmegaConf objects to plain Python types
         # for compatibility with weights_only=True
         checkpoint = self._convert_omegaconf_to_python(checkpoint)
         torch.save(checkpoint, save_path)
+
         if self.log_to_cloud:
-            upload_url = self._get_upload_url(
-                filepath=f"checkpoints/{relative_checkpoint_path.name}",
+            self._submit_upload(
+                save_path,
+                remote_filepath=f"checkpoints/{relative_checkpoint_path.name}",
                 content_type="application/octet-stream",
+                delete_on_success=True,
             )
-            with open(save_path, "rb") as f:
-                response = self._put_request(
-                    upload_url,
-                    data=f,
-                    headers={"Content-Type": "application/octet-stream"},
-                )
-            if response.status_code == 200:
-                try:
-                    save_path.unlink()
-                except Exception as e:
-                    logger.warning(
-                        "Could not delete local checkpoint "
-                        f"{relative_checkpoint_path}: {e}"
-                    )
-            else:
-                logger.error(
-                    f"Failed to save checkpoint {relative_checkpoint_path} "
-                    f"to cloud: {response.text}"
-                )
-                return
 
     def _convert_omegaconf_to_python(self, obj: Any) -> Any:
         """Recursively convert OmegaConf objects to plain Python types.
@@ -216,10 +303,17 @@ class TrainingStorageHandler(UploadStorageMixin):
     def delete_checkpoint(self, relative_checkpoint_path: Path) -> None:
         """Delete checkpoint from storage.
 
+        Waits for any pending upload of this same checkpoint to finish first
+        — deleting a file a background thread still has open for upload, or
+        deleting the cloud copy before the upload that creates it lands,
+        would otherwise race.
+
         Args:
             relative_checkpoint_path: Relative path of the checkpoint file to delete.
         """
         checkpoint_path = self.local_dir / relative_checkpoint_path
+        if self.log_to_cloud:
+            self._wait_for_pending_upload(checkpoint_path)
         if checkpoint_path.exists():
             checkpoint_path.unlink()
         if self.log_to_cloud:
@@ -236,12 +330,31 @@ class TrainingStorageHandler(UploadStorageMixin):
     def save_model_artifacts(self, model: nn.Module, output_dir: Path) -> None:
         """Save model artifacts to storage.
 
+        ``create_nc_archive`` regenerates fixed-name files (e.g.
+        ``model.nc.zip``) in ``artifacts_dir`` on every call, so — like
+        ``save_checkpoint`` — this waits for any artifact upload still in
+        flight from a previous call before regenerating them, then uploads
+        the new ones on the background worker without blocking the training
+        loop. Only artifact-path uploads are waited on here, not checkpoint
+        uploads, so the two don't block each other.
+
         Args:
             model: PyTorch model to save.
             output_dir: Directory to save the artifacts.
         """
         artifacts_dir = self.local_dir / output_dir / "artifacts"
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.log_to_cloud:
+            with self._pending_uploads_lock:
+                pending_paths = [
+                    path
+                    for path in self._pending_uploads
+                    if path.is_relative_to(artifacts_dir)
+                ]
+            for path in pending_paths:
+                self._wait_for_pending_upload(path)
+
         create_nc_archive(
             model=model,
             output_dir=artifacts_dir,
@@ -253,32 +366,12 @@ class TrainingStorageHandler(UploadStorageMixin):
         )
         if self.log_to_cloud:
             for file_path in artifacts_dir.glob("*"):
-                upload_url = self._get_upload_url(
-                    filepath=str(file_path.name),
+                self._submit_upload(
+                    file_path,
+                    remote_filepath=str(file_path.name),
                     content_type="application/octet-stream",
+                    delete_on_success=False,
                 )
-                with open(file_path, "rb") as f:
-                    response = self._put_request(
-                        upload_url,
-                        data=f,
-                        headers={"Content-Type": "application/octet-stream"},
-                    )
-                if response.status_code != 200:
-                    logger.error(
-                        f"Failed to save artifact {file_path} to cloud: {response.text}"
-                    )
-
-    def _execute_upload(
-        self,
-        upload_url: str,
-        data: bytes | IO[bytes],
-        content_type: str,
-    ) -> requests.Response:
-        return self._put_request(
-            upload_url,
-            data=data,
-            headers={"Content-Type": content_type},
-        )
 
     def update_training_progress(self, epoch: int, step: int) -> None:
         """Update training epoch/step progress in cloud storage.
