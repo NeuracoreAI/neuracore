@@ -231,10 +231,9 @@ artefacts script when you want a working daemon in a source checkout.
 
 The Rust daemon ships **inside the `neuracore` wheel**, built by maturin from
 the root [pyproject.toml](../pyproject.toml). Wheels are published for Linux
-x86_64 (`manylinux_2_28`) and Apple-Silicon macOS only, one per Python minor
-(cp310–cp314) — **no sdist and no pure wheel**, so `pip install neuracore` on
-Windows, Intel Macs, or other platforms resolves to the last pure-Python
-release (13.3.0).
+x86_64 (`manylinux_2_28`), Apple-Silicon macOS and Intel macOS, one per Python
+minor (cp310–cp314) — **no sdist and no pure wheel**, so `pip install neuracore`
+on Windows or other platforms resolves to the last pure-Python release (13.3.0).
 
 The two Rust artefacts and how `neuracore` finds them:
 
@@ -283,27 +282,29 @@ Wheels are platform- and Python-specific: pyo3 uses `extension-module` without
 protocol only enters the limited API at 3.11), so each wheel is one Python
 minor × one platform and `--interpreter` must be passed.
 
-> **Daemon: Linux and Apple-Silicon macOS only.** The daemon stack uses
-> `iceoryx2` shared-memory IPC; platform-specific syscalls (e.g.
-> `sync_file_range`, `gettid` on Linux) are gated behind `cfg(target_os)` so the
-> stack also builds and runs on macOS. Wheels ship for `linux-x86_64` and
-> `macosx-arm64` — **not** Intel Macs or Windows.
+> **Daemon: Linux and macOS only.** The daemon stack uses `iceoryx2`
+> shared-memory IPC; platform-specific syscalls (e.g. `sync_file_range`,
+> `gettid` on Linux) are gated behind `cfg(target_os)` so the stack also builds
+> and runs on macOS. Wheels ship for `linux-x86_64`, `macosx-arm64` and
+> `macosx-x86_64` — **not** Windows.
 
 ### CI
 
 [.github/workflows/build-wheels.yaml](../.github/workflows/build-wheels.yaml) builds
-the `neuracore` wheels — a `PyO3/maturin-action` matrix over `linux-x86_64` and
-`macosx-arm64`, each leg building all five interpreters (cp310–cp314). The Linux
-leg builds the daemon binary inside the `manylinux_2_28` container (glibc match,
-plus a `clang` install for iceoryx2's bindgen — `manylinux_2_28` is required over
-the default `manylinux2014` because iceoryx2's bindgen needs libclang >= 5.0,
-which 2014's clang 3.4 can't provide); the macOS leg builds natively on a
-`macos-15` Apple-silicon runner (libclang via `brew install llvm`, deployment
-target pinned to 11.0). A separate `smoke-test` job then installs each wheel
+the `neuracore` wheels — a `PyO3/maturin-action` matrix over `linux-x86_64`,
+`macosx-arm64` and `macosx-x86_64`, each leg building all five interpreters
+(cp310–cp314). The Linux leg builds the daemon binary inside the
+`manylinux_2_28` container (glibc match, plus a `clang` install for iceoryx2's
+bindgen — `manylinux_2_28` is required over the default `manylinux2014` because
+iceoryx2's bindgen needs libclang >= 5.0, which 2014's clang 3.4 can't provide);
+both macOS legs build natively (libclang via `brew install llvm`, deployment
+target pinned to 11.0) on `macos-26` for arm64 and `macos-26-intel` for Intel —
+the label suffix picks the architecture: bare and `-xlarge` are arm64, `-intel`
+and `-large` are x86_64. A separate `smoke-test` job then installs each wheel
 and launches the daemon binary on a *different* machine than the builder (the
-macOS leg on a different OS image, `macos-14`, with a `codesign --verify`) —
-proving the wheels, including the binary's ad-hoc signature, work outside the
-build environment.
+macOS legs on a different OS image, `macos-15`/`macos-15-intel`, with a
+`codesign --verify`) — proving the wheels, including the binary's ad-hoc
+signature, work outside the build environment.
 
 ### Release path
 
