@@ -75,7 +75,7 @@ use crate::encoding::video_encoder::{
     ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
-use crate::state::TraceWriteHandle;
+use crate::state::{TraceErrorCode, TraceWriteHandle};
 use crate::storage::budget::StorageBudget;
 use crate::storage::paths::{self, TracePath};
 
@@ -833,7 +833,7 @@ impl ActorState {
         else {
             return false;
         };
-        let mut any_failure = false;
+        let mut failure: Option<String> = None;
         let mut new_bytes: u64 = 0;
         let mut new_frames: u64 = 0;
         while let Some(joined) = pending_encodes.try_join_next() {
@@ -854,7 +854,7 @@ impl ActorState {
                         chunk_index,
                         "failed to encode video chunk batch"
                     );
-                    any_failure = true;
+                    failure.get_or_insert_with(|| error.to_string());
                 }
                 Err(join_error) => {
                     tracing::warn!(
@@ -862,7 +862,9 @@ impl ActorState {
                         trace_id = self.identity.trace_id,
                         "video encode task join failed"
                     );
-                    any_failure = true;
+                    failure.get_or_insert_with(|| {
+                        format!("video encode task join failed: {join_error}")
+                    });
                 }
             }
         }
@@ -877,8 +879,9 @@ impl ActorState {
                 self.last_db_bytes = self.bytes_on_disk as i64;
             }
         }
-        if any_failure {
-            self.mark_failed(context);
+        let any_failure = failure.is_some();
+        if let Some(message) = failure {
+            self.mark_failed_with(context, TraceErrorCode::EncodeFailed, message);
         }
         any_failure
     }
@@ -950,7 +953,7 @@ impl ActorState {
                         "error_kind": error.to_string(),
                     }),
                 );
-                self.mark_failed(context);
+                self.mark_failed_with(context, TraceErrorCode::EncodeFailed, error.to_string());
             }
         }
     }
@@ -1208,6 +1211,21 @@ impl ActorState {
         context
             .trace_writer
             .fail(&self.identity.trace_id, self.bytes_on_disk as i64);
+    }
+
+    /// Enqueue a `failed` write carrying the error that caused it.
+    fn mark_failed_with(
+        &mut self,
+        context: &Arc<TraceActorContext>,
+        error_code: TraceErrorCode,
+        error_message: impl Into<String>,
+    ) {
+        context.trace_writer.fail_with(
+            &self.identity.trace_id,
+            self.bytes_on_disk as i64,
+            error_code,
+            error_message,
+        );
     }
 
     /// Tear down the writer and release the trace's disk budget.
@@ -1497,6 +1515,7 @@ impl EncodeWorker {
                         "preset": self.codec.lossy_preset(),
                         "chunks": batch.len(),
                         "outcome": "error",
+                        "error_kind": error.to_string(),
                     }),
                 );
                 EncodeWorkerOutcome::Failed {
@@ -2695,6 +2714,10 @@ mod tests {
 
         let trace = store.get_trace("trace-bad").await.unwrap().unwrap();
         assert_eq!(trace.write_status, TraceWriteStatus::Failed);
+        assert_eq!(trace.error_code, Some(TraceErrorCode::EncodeFailed));
+        assert!(trace
+            .error_message
+            .is_some_and(|message| !message.is_empty()));
 
         // Both relinked NUTs stay on disk for the recovery sweep.
         let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-bad")
