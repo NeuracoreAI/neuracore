@@ -48,7 +48,7 @@ use crate::encoding::video_encoder::{
     ChunkEncodeRequest, LossyVideoCodec, VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
-use crate::state::TraceWriteHandle;
+use crate::state::{TraceErrorCode, TraceWriteHandle};
 use crate::storage::budget::StorageBudget;
 use crate::storage::paths::{self, TracePath};
 
@@ -928,7 +928,7 @@ impl ActorState {
                         "error_kind": error.to_string(),
                     }),
                 );
-                self.mark_failed(context);
+                self.mark_failed_with(context, TraceErrorCode::EncodeFailed, error.to_string());
             }
         }
     }
@@ -1148,6 +1148,21 @@ impl ActorState {
         context
             .trace_writer
             .fail(&self.identity.trace_id, self.bytes_on_disk as i64);
+    }
+
+    /// Enqueue a `failed` write carrying the error that caused it.
+    fn mark_failed_with(
+        &mut self,
+        context: &Arc<TraceActorContext>,
+        error_code: TraceErrorCode,
+        error_message: impl Into<String>,
+    ) {
+        context.trace_writer.fail_with(
+            &self.identity.trace_id,
+            self.bytes_on_disk as i64,
+            error_code,
+            error_message,
+        );
     }
 
     /// Tear down the writer and release the trace's disk budget.

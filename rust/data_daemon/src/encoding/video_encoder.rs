@@ -31,10 +31,34 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
 
 use tokio::process::Command;
+
+/// Floor for a single ffmpeg invocation's deadline.
+const FFMPEG_TIMEOUT_FLOOR: Duration = Duration::from_secs(120);
+
+/// Extra deadline granted per MiB of input, on top of the floor.
+const FFMPEG_TIMEOUT_PER_MIB_S: u64 = 1;
+
+/// Deadline for an ffmpeg invocation reading `input_bytes` of input.
+fn ffmpeg_timeout(input_bytes: u64) -> Duration {
+    FFMPEG_TIMEOUT_FLOOR
+        + Duration::from_secs(
+            (input_bytes / (1024 * 1024)).saturating_mul(FFMPEG_TIMEOUT_PER_MIB_S),
+        )
+}
+
+/// Total size of `paths`, skipping any that cannot be stat'd.
+fn total_input_bytes(paths: &[PathBuf]) -> u64 {
+    paths
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok())
+        .map(|metadata| metadata.len())
+        .sum()
+}
 
 /// Default ffmpeg binary name. Tests override via [`VideoEncoder::with_binary`]
 /// when they need to point at a specific build.
@@ -224,6 +248,14 @@ pub enum VideoEncodeError {
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,
+    },
+    /// `ffmpeg` outlived its deadline and was killed.
+    #[error("`ffmpeg` exceeded its {timeout_s}s deadline for {path} and was killed")]
+    Timeout {
+        /// Path being encoded or concatenated when the deadline expired.
+        path: PathBuf,
+        /// Deadline that was exceeded, in seconds.
+        timeout_s: u64,
     },
     /// `concat_segments` was called with no input segments — caller bug.
     #[error("concat_segments called with empty segment list")]
@@ -633,13 +665,21 @@ impl VideoEncoder {
             });
         }
 
-        let output = command
-            .output()
-            .await
-            .map_err(|source| VideoEncodeError::Spawn {
+        // `kill_on_drop` is set on the command, so letting the timeout drop the
+        // future is what reaps the child.
+        let deadline = ffmpeg_timeout(total_input_bytes(std::slice::from_ref(&request.raw_nut)));
+        let output = match tokio::time::timeout(deadline, command.output()).await {
+            Ok(result) => result.map_err(|source| VideoEncodeError::Spawn {
                 binary: self.binary.clone(),
                 source,
-            })?;
+            })?,
+            Err(_) => {
+                return Err(VideoEncodeError::Timeout {
+                    path: request.raw_nut.clone(),
+                    timeout_s: deadline.as_secs(),
+                })
+            }
+        };
 
         if !output.status.success() {
             let stderr_tail = tail_stderr(&output.stderr);
@@ -709,17 +749,26 @@ impl VideoEncoder {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
-            .output()
-            .await;
+            .output();
+        let deadline = ffmpeg_timeout(total_input_bytes(segments));
+        let result = tokio::time::timeout(deadline, result).await;
 
         // Always try to clean up the list file, even on failure — leaving it
         // around just clutters the trace directory.
         let _ = std::fs::remove_file(&list_path);
 
-        let output = result.map_err(|source| VideoEncodeError::Spawn {
-            binary: self.binary.clone(),
-            source,
-        })?;
+        let output = match result {
+            Ok(result) => result.map_err(|source| VideoEncodeError::Spawn {
+                binary: self.binary.clone(),
+                source,
+            })?,
+            Err(_) => {
+                return Err(VideoEncodeError::Timeout {
+                    path: out.to_path_buf(),
+                    timeout_s: deadline.as_secs(),
+                })
+            }
+        };
 
         if !output.status.success() {
             let stderr_tail = tail_stderr(&output.stderr);
@@ -868,6 +917,36 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
+
+    #[test]
+    fn ffmpeg_deadline_is_the_floor_plus_an_allowance_per_mib() {
+        // Sub-MiB inputs get the floor and nothing more.
+        assert_eq!(ffmpeg_timeout(0), FFMPEG_TIMEOUT_FLOOR);
+        assert_eq!(ffmpeg_timeout(1024), FFMPEG_TIMEOUT_FLOOR);
+
+        // A chunk sealed at the 256 MiB flush threshold — the largest input the
+        // encoder ever sees — still gets a deadline in minutes, so the bound
+        // can only ever catch a wedged child, never a slow-but-working one.
+        let biggest = ffmpeg_timeout(256 * 1024 * 1024);
+        assert_eq!(
+            biggest,
+            FFMPEG_TIMEOUT_FLOOR + Duration::from_secs(256 * FFMPEG_TIMEOUT_PER_MIB_S)
+        );
+        assert!(biggest >= Duration::from_secs(300));
+    }
+
+    #[test]
+    fn total_input_bytes_skips_paths_that_cannot_be_stated() {
+        let dir = TempDir::new().expect("tempdir");
+        let present = dir.path().join("segment.mp4");
+        std::fs::write(&present, vec![0u8; 2048]).expect("write");
+        let missing = dir.path().join("gone.mp4");
+
+        // A segment unlinked underneath us must not poison the deadline: it is
+        // skipped, leaving the floor rather than an overflowed sum.
+        assert_eq!(total_input_bytes(&[present.clone(), missing]), 2048);
+        assert_eq!(total_input_bytes(&[]), 0);
+    }
 
     /// Locate an ffmpeg-suite binary on `PATH`. Returns `None` (with a
     /// caller-side skip) so the suite stays green in sandboxes that lack
