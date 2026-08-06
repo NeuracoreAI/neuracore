@@ -139,6 +139,8 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.PROD_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        NCD_PERF_METRICS: "1"
+        NCD_PERF_EVENTS_PATH: ${{ runner.temp }}/ncd-perf-events.jsonl
 
       # --import-mode=importlib keeps the repo root off sys.path. Without it
       # pytest prepends it (tests/ is a package up to the root) and `import
