@@ -75,6 +75,7 @@ from tests.integration.platform.data_daemon.shared.db_constants import (
     TRACE_UPLOAD_STAT_UPLOAD_STATUS_COUNTS,
     TRACE_UPLOAD_STAT_WRITE_STATUS_COUNTS,
     TRACE_UPLOAD_UPLOADED,
+    TRACE_WRITE_DETAIL_COLUMNS,
     TRACE_WRITE_WRITTEN,
     TRACES_TABLE,
 )
@@ -1038,9 +1039,8 @@ def wait_for_all_traces_written(
         ) from exc
     unfinished = [
         {
-            COLUMN_TRACE_ID: t[COLUMN_TRACE_ID],
             correlation_column: t[correlation_column],
-            COLUMN_WRITE_STATUS: t[COLUMN_WRITE_STATUS],
+            **{column: t.get(column) for column in TRACE_WRITE_DETAIL_COLUMNS},
         }
         for t in traces
         if t[correlation_column] in recording_keys
