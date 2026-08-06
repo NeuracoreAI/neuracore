@@ -330,8 +330,14 @@ class DistributedTrainer:
             logger.error("Error during training.", exc_info=True)
             raise
         finally:
-            # Close the logger
             if self.rank == 0:
+                # Checkpoint/artifact uploads run in the background (see
+                # TrainingStorageHandler); block here until they've all
+                # landed so the process can't exit — and the training
+                # VM/container be torn down — while the final checkpoint is
+                # still mid-upload.
+                self.storage_handler.wait_for_pending_uploads()
+                # Close the logger
                 self.training_logger.close()
 
     def get_model_without_ddp(self) -> nn.Module:

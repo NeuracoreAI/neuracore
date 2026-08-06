@@ -3,9 +3,7 @@
 import logging
 import zipfile
 from pathlib import Path
-from typing import IO
 
-import requests
 import wget
 
 from neuracore.core.auth import get_auth
@@ -129,16 +127,3 @@ class AlgorithmStorageHandler(UploadStorageMixin):
                 f"Failed to get upload URL for {filepath}: {response.text}"
             )
         return response.json()["url"]
-
-    def _execute_upload(
-        self,
-        upload_url: str,
-        data: bytes | IO[bytes],
-        content_type: str,
-    ) -> requests.Response:
-        session = thread_local_session(retry_transient=True)
-        return session.put(
-            upload_url,
-            data=data,
-            headers={"Content-Type": content_type},
-        )
