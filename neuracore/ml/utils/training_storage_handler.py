@@ -142,11 +142,11 @@ class TrainingStorageHandler(UploadStorageMixin):
     def _wait_for_pending_upload(self, local_path: Path) -> None:
         """Block until any in-flight upload of ``local_path`` has finished.
 
-        Some destinations (e.g. a "latest" checkpoint, or model artifacts
-        that get regenerated in place) are reused across calls rather than
-        written to a fresh path each time. Waiting here before that path is
-        overwritten or deleted prevents a background upload thread from
-        reading a file out from under a newer write.
+        Some destinations (e.g. model artifacts, which get regenerated in
+        place) are reused across calls rather than written to a fresh path
+        each time. Waiting here before that path is overwritten or deleted
+        prevents a background upload thread from reading a file out from
+        under a newer write.
         """
         with self._pending_uploads_lock:
             future = self._pending_uploads.get(local_path)
@@ -217,11 +217,10 @@ class TrainingStorageHandler(UploadStorageMixin):
 
         Writes the checkpoint to disk synchronously, then — if cloud logging
         is enabled — uploads it on a background thread so this call doesn't
-        block the training loop for the duration of the upload. If
-        ``relative_checkpoint_path`` names a file reused across calls (e.g. a
-        "latest" checkpoint), this first waits for any previous upload of
-        that same path to finish, so it's never overwritten while still
-        being read for upload.
+        block the training loop for the duration of the upload. If a caller
+        reuses the same ``relative_checkpoint_path`` across calls, this first
+        waits for any previous upload of that same path to finish, so it's
+        never overwritten while still being read for upload.
 
         Args:
             checkpoint: Checkpoint dictionary to save.
