@@ -20,6 +20,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-24.04", "macos-26"]'
+      suites:
+        description: 'JSON array of suites to run. Trim entries to skip whole jobs.'
+        required: false
+        type: string
+        default: '["functional", "performance"]'
 
 jobs:
   pre-commit:
@@ -35,6 +40,7 @@ jobs:
 
   functional:
     needs: pre-commit
+    if: ${{ contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'functional') }}
     # Exercise the released wheel's bundled Rust daemon on each shipped OS
     # (Linux x86_64, macOS arm64) across the Python support range.
     runs-on: ${{ matrix.os }}
@@ -98,17 +104,18 @@ jobs:
     # suite asserts wall-clock deadlines, and overlapping rows contend for both
     # the runner pool and the shared backend, which makes those deadlines flaky.
     needs: [pre-commit, functional]
-    if: ${{ !cancelled() }}
-    runs-on: ${{ matrix.os }}
+    # `!cancelled()` keeps this running when `functional` fails or is skipped
+    if: ${{ !cancelled() && contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'performance') }}
+    # Shares the `os` input with `functional`, but upsizes the mac row
+    runs-on: >-
+      ${{ startsWith(matrix.os, 'macos') && !endsWith(matrix.os, '-large')
+      && format('{0}-large', matrix.os) || matrix.os }}
     strategy:
       fail-fast: false
       max-parallel: 1
-      # Pinned rather than driven by the workflow inputs: the performance suite is
-      # the expensive half of this workflow, so it runs one Python on each OS.
       matrix:
         python-version: ["3.14"]
-        # Need large mac for more RAM to run the performance suite.
-        os: ["ubuntu-24.04", "macos-26-large"]
+        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
 
     steps:
     - name: Show disk space
