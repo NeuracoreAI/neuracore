@@ -1,9 +1,6 @@
 """Storage handler for endpoint inference log uploads."""
 
 import logging
-from typing import IO
-
-import requests
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -50,19 +47,6 @@ class EndpointStorageHandler(UploadStorageMixin):
                 f"Failed to get upload URL for {filepath}: {response.text}"
             )
         return response.json()["url"]
-
-    def _execute_upload(
-        self,
-        upload_url: str,
-        data: bytes | IO[bytes],
-        content_type: str,
-    ) -> requests.Response:
-        session = thread_local_session(retry_transient=True)
-        return session.put(
-            upload_url,
-            data=data,
-            headers={"Content-Type": content_type},
-        )
 
     def report_endpoint_error(self, error: str) -> None:
         """Report endpoint startup/runtime failures to cloud metadata."""

@@ -1,6 +1,7 @@
 """Tests for TrainingStorageHandler."""
 
 import io
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -8,6 +9,7 @@ import pytest
 import torch
 
 from neuracore.core.const import API_URL
+from neuracore.ml.utils import upload_storage_mixin
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 ORG_ID = "test-org-id"
@@ -16,6 +18,12 @@ BASE_JOB_URL = f"{API_URL}/org/{ORG_ID}/training/jobs/{JOB_ID}"
 SIGNED_URL = "https://storage.example.com/signed-url"
 INPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"joints": {"0": {"name": "j0"}}}}
 OUTPUT_CROSS_EMBODIMENT_DESCRIPTION = {"robot": {"actions": {"0": {"name": "a0"}}}}
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sleeps(monkeypatch):
+    """Skip real backoff sleeps so retry-triggering tests run fast."""
+    monkeypatch.setattr(upload_storage_mixin.time, "sleep", lambda *_: None)
 
 
 @pytest.fixture
@@ -189,6 +197,7 @@ class TestSaveCheckpoint:
         requests_mock.put(SIGNED_URL, status_code=200)
 
         handler.save_checkpoint({"epoch": 2}, Path("checkpoint_2.pt"))
+        handler.wait_for_pending_uploads()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert len(put_requests) == 1
@@ -203,6 +212,7 @@ class TestSaveCheckpoint:
         requests_mock.put(SIGNED_URL, status_code=500, text="Server Error")
 
         handler.save_checkpoint({"epoch": 3}, Path("checkpoint_3.pt"))
+        handler.wait_for_pending_uploads()
 
         assert (tmp_path / "checkpoint_3.pt").exists()
 
@@ -225,6 +235,162 @@ class TestSaveCheckpoint:
         loaded = torch.load(tmp_path / "checkpoint_1.pt", weights_only=True)
         assert loaded["config"] == {"optimizer": {"lr": 0.001, "betas": [0.9, 0.999]}}
         assert isinstance(loaded["config"]["optimizer"], dict)
+
+
+class TestSaveCheckpointConcurrencyGuard:
+    """Covers the background-upload race guarded against in save_checkpoint.
+
+    checkpoint_latest.pt (and similar reused paths) get torch.save()'d again
+    on every call while a prior call's upload may still be reading the same
+    file; save_checkpoint must wait for that prior upload before overwriting.
+    """
+
+    def test_second_save_to_same_path_waits_for_first_upload_to_finish(
+        self, handler, requests_mock, tmp_path
+    ):
+        requests_mock.get(
+            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
+        )
+        first_upload_started = threading.Event()
+        release_first_upload = threading.Event()
+        call_count = {"n": 0}
+
+        def slow_put(request, context):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                first_upload_started.set()
+                release_first_upload.wait(timeout=5)
+            context.status_code = 200
+            return ""
+
+        requests_mock.put(SIGNED_URL, text=slow_put)
+
+        path = Path("checkpoint_latest.pt")
+        handler.save_checkpoint({"epoch": 1}, path)
+        assert first_upload_started.wait(timeout=2), "first upload should have started"
+
+        second_save_returned = threading.Event()
+
+        def do_second_save():
+            handler.save_checkpoint({"epoch": 2}, path)
+            second_save_returned.set()
+
+        second_save_thread = threading.Thread(target=do_second_save)
+        second_save_thread.start()
+
+        # The second save must not proceed (and overwrite checkpoint_latest.pt
+        # locally) while the first upload still has it open for reading.
+        assert not second_save_returned.wait(timeout=0.3)
+
+        release_first_upload.set()
+        second_save_thread.join(timeout=5)
+        assert second_save_returned.is_set()
+
+        handler.wait_for_pending_uploads()
+        assert call_count["n"] == 2
+        # Both uploads succeeded, so the local file was deleted after the
+        # second (successful) upload; confirm it was the epoch-2 checkpoint
+        # that was actually sent, not stale/corrupted bytes from the first.
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        last_uploaded = torch.load(io.BytesIO(put_requests[-1].body), weights_only=True)
+        assert last_uploaded["epoch"] == 2
+        assert not (tmp_path / "checkpoint_latest.pt").exists()
+
+    def test_saves_to_different_paths_do_not_block_each_other(
+        self, handler, requests_mock
+    ):
+        requests_mock.get(
+            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
+        )
+        release_upload = threading.Event()
+
+        def slow_put(request, context):
+            release_upload.wait(timeout=5)
+            context.status_code = 200
+            return ""
+
+        requests_mock.put(SIGNED_URL, text=slow_put)
+
+        # First save's upload blocks on the background worker until released.
+        handler.save_checkpoint({"epoch": 1}, Path("checkpoint_1.pt"))
+
+        second_returned = threading.Event()
+
+        def do_second_save():
+            handler.save_checkpoint({"epoch": 2}, Path("checkpoint_2.pt"))
+            second_returned.set()
+
+        second_save_thread = threading.Thread(target=do_second_save)
+        second_save_thread.start()
+
+        assert second_returned.wait(timeout=2), (
+            "save_checkpoint for a distinct path must not wait on an "
+            "unrelated in-flight upload"
+        )
+
+        release_upload.set()
+        second_save_thread.join(timeout=5)
+        handler.wait_for_pending_uploads()
+
+    def test_delete_waits_for_pending_upload_of_same_path_before_deleting(
+        self, handler, requests_mock, tmp_path
+    ):
+        requests_mock.get(
+            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
+        )
+        requests_mock.delete(
+            f"{BASE_JOB_URL}/checkpoints/checkpoint_1.pt", status_code=200
+        )
+        upload_started = threading.Event()
+        release_upload = threading.Event()
+
+        def slow_put(request, context):
+            upload_started.set()
+            release_upload.wait(timeout=5)
+            context.status_code = 200
+            return ""
+
+        requests_mock.put(SIGNED_URL, text=slow_put)
+
+        path = Path("checkpoint_1.pt")
+        handler.save_checkpoint({"epoch": 1}, path)
+        assert upload_started.wait(timeout=2)
+
+        delete_returned = threading.Event()
+
+        def do_delete():
+            handler.delete_checkpoint(path)
+            delete_returned.set()
+
+        delete_thread = threading.Thread(target=do_delete)
+        delete_thread.start()
+
+        assert not delete_returned.wait(timeout=0.3)
+
+        release_upload.set()
+        delete_thread.join(timeout=5)
+        assert delete_returned.is_set()
+
+    def test_wait_for_pending_uploads_drains_and_does_not_raise_on_failure(
+        self, handler, requests_mock, tmp_path
+    ):
+        requests_mock.get(
+            f"{BASE_JOB_URL}/upload-url", json={"url": SIGNED_URL}, status_code=200
+        )
+        requests_mock.put(SIGNED_URL, status_code=500, text="Server Error")
+
+        handler.save_checkpoint({"epoch": 1}, Path("checkpoint_1.pt"))
+
+        # Must not raise even though the upload ultimately fails after
+        # exhausting retries.
+        handler.wait_for_pending_uploads()
+
+        assert (tmp_path / "checkpoint_1.pt").exists()
+
+    def test_wait_for_pending_uploads_is_a_no_op_with_nothing_pending(
+        self, local_handler
+    ):
+        local_handler.wait_for_pending_uploads()
 
 
 class TestLoadCheckpoint:
@@ -372,6 +538,7 @@ class TestSaveModelArtifacts:
             side_effect=fake_archive,
         ):
             handler.save_model_artifacts(mock_model, output_dir)
+        handler.wait_for_pending_uploads()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert len(put_requests) == 2
