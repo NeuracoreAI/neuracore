@@ -124,6 +124,8 @@ docstrings
 doctests
 DONTNEED
 dtype
+dtyped
+dtypes
 EADDRINUSE
 edgeitems
 eigenpy
@@ -225,6 +227,7 @@ inertiagrouprange
 initargs
 inproc
 inspectable
+ipynb
 ipython
 iquat
 Irqfx

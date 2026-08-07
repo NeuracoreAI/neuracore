@@ -86,6 +86,9 @@ DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
+DepthMode = Literal["float16", "float32"]
+"""Depth camera sample dtype, matching the wire labels `nc.log_depth()`
+derives from the array's own dtype (`image.dtype.name`)."""
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
@@ -103,3 +106,31 @@ FRAME_DEFAULT_FILL_VALUE = 100
 FRAME_MAX_COLOR_VALUE = 255
 FRAME_HALF_DIVISOR = 2
 FRAME_COLOR_CHANNELS = 3
+
+# ---------------------------------------------------------------------------
+# Depth round-trip generation and verification
+# ---------------------------------------------------------------------------
+
+# `encode_depth_frame` builds each frame as
+# floor + per-frame-base + row-gradient + col-gradient, all expressed as
+# fractions of MAX_DEPTH (see neuracore.core.utils.depth_utils.MAX_DEPTH) so
+# the pattern automatically stays proportional if that constant ever changes.
+# The floor keeps every pixel strictly non-zero; the row/col fractions are
+# deliberately unequal so a width/height transpose bug shifts the decoded
+# pattern rather than leaving it looking correct.
+DEPTH_FRAME_FLOOR_FRACTION = 0.025
+DEPTH_FRAME_BASE_FRACTION = 0.375
+DEPTH_FRAME_ROW_FRACTION = 0.3
+DEPTH_FRAME_COL_FRACTION = 0.15
+DEPTH_FRAME_BASE_MODULUS = 997  # prime; spreads per-frame bases pseudo-randomly
+
+# Numerical tolerance for comparing a value retrieved from a synchronized
+# recording against the value that was actually passed to `nc.log_depth()`
+# (after its source-dtype cast). The only lossy step between those two points
+# is the 24-bit depth-to-RGB24 storage quantization
+# (MAX_DEPTH / (2**24 - 1) ~= 5.96e-7 m) plus ordinary float32 rounding across
+# the encode/decode arithmetic — both far smaller than this. Genuine
+# corruption (wrong channel order, wrong dtype, transposed axes) produces
+# errors many orders of magnitude larger, so this stays tight enough to catch
+# it.
+DEPTH_ROUND_TRIP_ATOL_M = 1e-4

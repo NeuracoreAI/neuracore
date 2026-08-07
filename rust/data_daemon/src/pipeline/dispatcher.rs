@@ -34,7 +34,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use data_daemon_shared::{BatchedDataItem, Envelope};
+use data_daemon_shared::{BatchedDataItem, Envelope, FrameDtype};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -236,6 +236,7 @@ enum HeldPayload {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        dtype: FrameDtype,
     },
 }
 
@@ -432,6 +433,7 @@ impl Dispatcher {
                 frame_count,
                 frame_timestamps_ns,
                 frame_timestamps_s,
+                dtype,
             } => {
                 let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
@@ -449,6 +451,7 @@ impl Dispatcher {
                         byte_count,
                         frame_count,
                         frame_timestamps_s,
+                        dtype,
                     },
                 });
             }
@@ -934,6 +937,7 @@ impl Dispatcher {
                 byte_count,
                 frame_count,
                 frame_timestamps_s,
+                dtype,
             } => {
                 self.route_video(
                     &held.source,
@@ -946,6 +950,7 @@ impl Dispatcher {
                     byte_count,
                     frame_count,
                     frame_timestamps_s,
+                    dtype,
                 )
                 .await;
             }
@@ -1024,6 +1029,7 @@ impl Dispatcher {
         byte_count: u64,
         frame_count: u32,
         frame_timestamps_s: Vec<f64>,
+        dtype: FrameDtype,
     ) {
         let recordings_root = self.actor_context.recordings_root.clone();
         // The chunk's `publish_timestamp_ns` (its open time) keys both the
@@ -1078,6 +1084,7 @@ impl Dispatcher {
                 byte_count,
                 frame_count,
                 frame_timestamps_s,
+                dtype,
             })
             .await
             .is_err()
@@ -1566,6 +1573,7 @@ mod tests {
             frame_count: 1,
             frame_timestamps_ns: vec![publish_ts],
             frame_timestamps_s: vec![publish_ts as f64 / 1e9],
+            dtype: FrameDtype::Rgb8,
         }
     }
 

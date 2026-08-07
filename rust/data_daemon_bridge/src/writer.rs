@@ -47,7 +47,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
-use data_daemon_shared::Envelope;
+use data_daemon_shared::{Envelope, FrameDtype};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
 use crate::paths::{source_prefix, split_stream_key, spool_chunk_filename, spool_dir, stream_key};
@@ -161,6 +161,11 @@ struct VideoChunkState {
     width: u32,
     /// Frame height in pixels (constant across a stream's chunks).
     height: u32,
+    /// Original frame dtype for the in-progress chunk. A [`Envelope::VideoChunkReady`]
+    /// announcement carries exactly one dtype, so — like `width`/`height` — a
+    /// dtype change mid-stream seals the open chunk and reopens at the new
+    /// dtype rather than mixing dtypes inside one chunk.
+    dtype: FrameDtype,
     /// `{recordings_root}/.rgb_spool/{robot_id}/{instance}/{data_type}/{sensor_name}/`.
     spool_dir: PathBuf,
     /// Active NUT writer for the in-progress chunk. `None` between chunks.
@@ -233,8 +238,12 @@ fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSl
     operation(&mut registry.streams)
 }
 
-/// One frame handed to the background writer. Owns its pixel bytes (copied out
-/// of the caller's buffer under the GIL) so the caller can return immediately.
+/// One frame handed to the background writer. Owns its raw sample bytes
+/// (copied out of the caller's buffer under the GIL) so the caller can return
+/// immediately. `data` is packed RGB24 for [`FrameDtype::Rgb8`] or raw
+/// little-endian depth samples for a depth `dtype` — the depth-to-RGB24
+/// conversion happens later, on a compression-pool worker (see
+/// [`compress_worker`]), never on this hot path.
 pub(crate) struct FrameJob {
     pub(crate) robot_id: String,
     pub(crate) robot_instance: i64,
@@ -242,6 +251,7 @@ pub(crate) struct FrameJob {
     pub(crate) sensor_name: String,
     pub(crate) width: u32,
     pub(crate) height: u32,
+    pub(crate) dtype: FrameDtype,
     pub(crate) timestamp_ns: i64,
     pub(crate) timestamp_s: f64,
     pub(crate) data: Vec<u8>,
@@ -651,11 +661,15 @@ impl FrameResult {
     }
 }
 
-/// One frame submitted to the compression pool.
+/// One frame submitted to the compression pool. `raw` is packed RGB24 for
+/// [`FrameDtype::Rgb8`] or raw depth samples otherwise — [`compress_worker`]
+/// converts depth to RGB24 before PNG-encoding it, so the raw bytes reach the
+/// pool unconverted (the hot `log_frame` path never does that work).
 struct CompressJob {
     width: u32,
     height: u32,
-    rgb: Vec<u8>,
+    dtype: FrameDtype,
+    raw: Vec<u8>,
     result: Arc<FrameResult>,
 }
 
@@ -693,8 +707,14 @@ impl CompressPool {
 }
 
 /// Compression worker: pull frames FIFO and compress each to PNG, publishing the
-/// result into its one-shot slot. Compression is stateless per frame, so any
-/// worker can take any frame — the writer restores per-stream order on collect.
+/// result into its one-shot slot. Compression (and, for depth, the RGB24
+/// conversion ahead of it) is stateless per frame, so any worker can take any
+/// frame — the writer restores per-stream order on collect.
+///
+/// RGB frames are already packed RGB24 and pass straight to the PNG encoder,
+/// leaving the existing RGB/NUT path unchanged. Depth frames are numerically
+/// converted to RGB24 storage bytes first (see [`crate::depth::depth_to_rgb24`])
+/// — `encode_png_frame` must never see raw depth bytes.
 fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
     let (lock, cond) = work;
     loop {
@@ -707,7 +727,13 @@ fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
                 queue = cond.wait(queue).unwrap_or_else(|p| p.into_inner());
             }
         };
-        let png = crate::nut_writer::encode_png_frame(job.width, job.height, &job.rgb);
+        let rgb = match job.dtype {
+            FrameDtype::Rgb8 => job.raw,
+            FrameDtype::DepthF16 | FrameDtype::DepthF32 => {
+                crate::depth::depth_to_rgb24(job.dtype, job.width, job.height, &job.raw)
+            }
+        };
+        let png = crate::nut_writer::encode_png_frame(job.width, job.height, &rgb);
         job.result.set(png);
     }
 }
@@ -720,31 +746,44 @@ struct PendingFrame {
     result: Arc<FrameResult>,
 }
 
+/// Bytes a well-formed frame of `dtype` must occupy at `width` x `height`, or
+/// `None` on overflow. Shared by [`submit_frame`]'s geometry check and unit
+/// tests below — the same overflow-safe calculation the native boundary
+/// already performed in `log_frame`, re-checked here since `submit_frame`
+/// runs on the writer thread with no path back to a Python exception (a
+/// mismatch is logged and the frame dropped, not propagated).
+fn expected_frame_bytes(dtype: FrameDtype, width: u32, height: u32) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(dtype.bytes_per_pixel()))
+}
+
 /// Validate one frame and submit it to the compression pool, recording it in the
 /// in-order pipeline. A frame whose byte length disagrees with its geometry is
 /// dropped here (the pre-split inline encode rejected it the same way) rather
 /// than handed to a worker.
 fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut job: FrameJob) {
-    let expected = (job.width as usize)
-        .checked_mul(job.height as usize)
-        .and_then(|pixels| pixels.checked_mul(3));
+    let expected = expected_frame_bytes(job.dtype, job.width, job.height);
     if expected != Some(job.data.len()) {
         tracing::warn!(
             sensor_name = job.sensor_name,
             ?expected,
             actual = job.data.len(),
+            dtype = ?job.dtype,
             "video frame size disagrees with geometry; dropping frame"
         );
         return;
     }
     let result = FrameResult::new();
-    // Move the raw pixels into the compression job; the pending frame keeps only
-    // the routing metadata (its `data` is now empty and never read again).
-    let rgb = std::mem::take(&mut job.data);
+    // Move the raw sample bytes into the compression job; the pending frame
+    // keeps only the routing metadata (its `data` is now empty and never read
+    // again).
+    let raw = std::mem::take(&mut job.data);
     pool.submit(CompressJob {
         width: job.width,
         height: job.height,
-        rgb,
+        dtype: job.dtype,
+        raw,
         result: result.clone(),
     });
     in_flight.push_back(PendingFrame { job, result });
@@ -759,6 +798,7 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
         &pending.job.sensor_name,
         pending.job.width,
         pending.job.height,
+        pending.job.dtype,
         &png,
         pending.job.timestamp_ns,
         pending.job.timestamp_s,
@@ -954,6 +994,7 @@ fn record_video_frame(
     sensor_name: &str,
     width: u32,
     height: u32,
+    dtype: FrameDtype,
     png_payload: &[u8],
     timestamp_ns: i64,
     timestamp_s: f64,
@@ -974,6 +1015,7 @@ fn record_video_frame(
         let slot = Arc::new(Mutex::new(VideoChunkState {
             width,
             height,
+            dtype,
             spool_dir: spool,
             nut_writer: None,
             chunk_publish_ns: 0,
@@ -1013,6 +1055,7 @@ fn record_video_frame(
             sensor_name,
             width,
             height,
+            dtype,
             png_payload,
             timestamp_ns,
             timestamp_s,
@@ -1046,26 +1089,34 @@ fn append_frame_locked(
     sensor_name: &str,
     width: u32,
     height: u32,
+    dtype: FrameDtype,
     png_payload: &[u8],
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Vec<Envelope> {
     let mut announcements: Vec<Envelope> = Vec::new();
 
-    // A mid-stream resolution change can't share a chunk with the prior
-    // geometry: the NUT header advertises the opening frame's size, so a
-    // differently-sized frame fails the writer's size check and is silently
-    // dropped (or, on a coincidental `w*h*3` match, corrupts the encode). Seal
-    // the open chunk (announced below) and reopen a fresh one with the new
-    // geometry rather than dropping every later frame.
-    if state.nut_writer.is_some() && (state.width != width || state.height != height) {
+    // A mid-stream resolution *or dtype* change can't share a chunk with the
+    // prior state: the NUT header advertises the opening frame's size, and a
+    // `VideoChunkReady` announcement carries exactly one dtype for the whole
+    // chunk. A differently-sized frame fails the writer's size check and is
+    // silently dropped (or, on a coincidental `w*h*3` match, corrupts the
+    // encode); a differently-dtyped frame would otherwise mislabel every
+    // frame in the chunk as the first frame's dtype. Seal the open chunk
+    // (announced below) and reopen a fresh one with the new geometry/dtype
+    // rather than dropping every later frame or mixing dtypes in one chunk.
+    if state.nut_writer.is_some()
+        && (state.width != width || state.height != height || state.dtype != dtype)
+    {
         tracing::warn!(
             sensor_name,
             old_width = state.width,
             old_height = state.height,
             new_width = width,
             new_height = height,
-            "video frame geometry changed mid-stream; sealing chunk and reopening"
+            old_dtype = ?state.dtype,
+            new_dtype = ?dtype,
+            "video frame geometry or dtype changed mid-stream; sealing chunk and reopening"
         );
         if let Some(envelope) =
             flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
@@ -1074,6 +1125,7 @@ fn append_frame_locked(
         }
     }
     state.width = width;
+    state.dtype = dtype;
     state.height = height;
 
     // Each fresh chunk opens with a header syncpoint at global_key_pts=0, so
@@ -1241,6 +1293,7 @@ fn flush_chunk_locked(
         frame_count,
         frame_timestamps_ns,
         frame_timestamps_s,
+        dtype: state.dtype,
     })
 }
 
@@ -1344,11 +1397,16 @@ mod tests {
         assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
     }
 
-    /// Build a fresh, empty per-stream chunk state rooted at `spool_dir`.
+    /// Build a fresh, empty per-stream chunk state rooted at `spool_dir`. The
+    /// initial `dtype` is irrelevant with no open chunk yet — the first
+    /// `append_frame_locked` call always overwrites it before the seal check
+    /// can ever compare against it — so this defaults to RGB for the many
+    /// dtype-agnostic tests below.
     fn fresh_state(spool_dir: PathBuf, width: u32, height: u32) -> VideoChunkState {
         VideoChunkState {
             width,
             height,
+            dtype: FrameDtype::Rgb8,
             spool_dir,
             nut_writer: None,
             chunk_publish_ns: 0,
@@ -1374,7 +1432,17 @@ mod tests {
         // First frame at 2x2 (rgb24 = 2*2*3 bytes) just opens a chunk.
         let frame_2x2 = vec![0u8; 2 * 2 * 3];
         let opened = append_frame_locked(
-            &mut state, "r", 0, "RGB", "cam", 2, 2, &frame_2x2, 1_000, 0.0,
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame_2x2,
+            1_000,
+            0.0,
         );
         assert!(
             opened.is_empty(),
@@ -1386,7 +1454,17 @@ mod tests {
         // Second frame at 4x4 must seal the 2x2 chunk and reopen at 4x4.
         let frame_4x4 = vec![0u8; 4 * 4 * 3];
         let sealed = append_frame_locked(
-            &mut state, "r", 0, "RGB", "cam", 4, 4, &frame_4x4, 2_000, 0.001,
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            4,
+            4,
+            FrameDtype::Rgb8,
+            &frame_4x4,
+            2_000,
+            0.001,
         );
         assert_eq!(sealed.len(), 1, "the geometry change seals the prior chunk");
         match &sealed[0] {
@@ -1418,6 +1496,120 @@ mod tests {
     }
 
     #[test]
+    fn dtype_change_seals_chunk_and_reopens_at_new_dtype() {
+        // A VideoChunkReady announcement carries exactly one dtype for the
+        // whole chunk, so a mid-stream depth dtype change must seal the open
+        // chunk rather than mixing float16 and float32 frames.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+
+        // append_frame_locked receives the already converted PNG/RGB24 payload.
+        // The dtype describes the original depth array, not this stored payload.
+        let png_payload = vec![0u8; 2 * 2 * 3];
+
+        let opened = append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "DEPTH_IMAGES",
+            "cam",
+            2,
+            2,
+            FrameDtype::DepthF16,
+            &png_payload,
+            1_000,
+            0.0,
+        );
+        assert!(opened.is_empty());
+        assert_eq!(state.dtype, FrameDtype::DepthF16);
+
+        // Same geometry, but the original depth dtype changes. The float16 chunk
+        // must be sealed before opening a new float32 chunk.
+        let sealed = append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "DEPTH_IMAGES",
+            "cam",
+            2,
+            2,
+            FrameDtype::DepthF32,
+            &png_payload,
+            2_000,
+            0.001,
+        );
+
+        assert_eq!(sealed.len(), 1, "the dtype change seals the prior chunk");
+
+        match &sealed[0] {
+            Envelope::VideoChunkReady {
+                dtype, frame_count, ..
+            } => {
+                assert_eq!(
+                    *dtype,
+                    FrameDtype::DepthF16,
+                    "the sealed chunk keeps its original dtype"
+                );
+                assert_eq!(*frame_count, 1);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+
+        assert_eq!(
+            state.dtype,
+            FrameDtype::DepthF32,
+            "state adopts the new dtype"
+        );
+        assert_eq!(
+            state.frame_count, 1,
+            "the new chunk holds the float32 frame"
+        );
+    }
+
+    #[test]
+    fn sealed_chunk_announcement_carries_its_dtype() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "DEPTH_IMAGES",
+            "cam",
+            2,
+            2,
+            FrameDtype::DepthF32,
+            &frame,
+            1_000,
+            0.0,
+        );
+        let envelope = flush_chunk_locked("r", 0, "DEPTH_IMAGES", "cam", &mut state)
+            .expect("open chunk seals");
+        match envelope {
+            Envelope::VideoChunkReady { dtype, .. } => {
+                assert_eq!(dtype, FrameDtype::DepthF32);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn expected_frame_bytes_matches_each_dtype() {
+        assert_eq!(expected_frame_bytes(FrameDtype::Rgb8, 4, 4), Some(48));
+        assert_eq!(expected_frame_bytes(FrameDtype::DepthF16, 4, 4), Some(32));
+        assert_eq!(expected_frame_bytes(FrameDtype::DepthF32, 4, 4), Some(64));
+    }
+
+    #[test]
+    fn expected_frame_bytes_overflow_is_none_not_a_panic() {
+        assert_eq!(
+            expected_frame_bytes(FrameDtype::DepthF32, u32::MAX, u32::MAX),
+            None
+        );
+    }
+
+    #[test]
     fn flush_seals_chunk_with_populated_announcement_and_resets_state() {
         // The normal seal path the daemon routes on (size/frame-cap roll or the
         // stop barrier). The announcement must carry every frame's identity in
@@ -1436,6 +1628,7 @@ mod tests {
                 "cam",
                 2,
                 2,
+                FrameDtype::Rgb8,
                 &frame,
                 timestamp_ns,
                 timestamp_s,
@@ -1508,6 +1701,7 @@ mod tests {
                 "cam",
                 2,
                 2,
+                FrameDtype::Rgb8,
                 &frame,
                 timestamp_ns,
                 0.0,
@@ -1533,6 +1727,7 @@ mod tests {
             sensor_name: "camera".to_string(),
             width: 0,
             height: 0,
+            dtype: FrameDtype::Rgb8,
             timestamp_ns: 0,
             timestamp_s: 0.0,
             data: vec![0u8; bytes],
@@ -1664,6 +1859,7 @@ mod tests {
             "cam",
             4096,
             4096,
+            FrameDtype::Rgb8,
             &[0u8; 4],
             timestamp_us * 1_000,
             timestamp_us as f64 / 1e6,
