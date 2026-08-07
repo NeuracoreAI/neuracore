@@ -32,6 +32,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     LOG_PRESERVE,
@@ -45,6 +46,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LogAction,
     StopMethod,
     StorageStateAction,
+    VideoDetail,
 )
 
 logger = logging.getLogger(__name__)
@@ -190,6 +192,13 @@ class DataDaemonTestCase:
             frame-rate knobs.
         depth_mode: The NumPy dtype depth frames are logged as — ``"float16"``
             or ``"float32"``. Ignored when ``depth_count`` is ``0``.
+        video_detail: Pixel content of the synthetic camera frames.
+            ``"realistic"`` (default) renders a textured scene with a moving
+            object and sensor noise, so PNG compression and the daemon's encode
+            cost what they cost on a real camera.  ``"flat"`` keeps the cheap
+            solid-fill frames for cases that only care about frame counts.
+            Frame identity is embedded either way, so the disk timestamp and
+            frame-code assertions are unaffected by this choice.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -222,6 +231,7 @@ class DataDaemonTestCase:
     video_codec: str | None = None
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
+    video_detail: VideoDetail = DETAIL_REALISTIC
 
     @property
     def has_video(self) -> bool:

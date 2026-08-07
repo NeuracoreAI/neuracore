@@ -14,8 +14,9 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_all_traces_written,
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
+    assert_disk_frame_codes,
     assert_disk_recording_properties,
-    assert_lossy_only_video_artifacts,
+    assert_video_artifacts,
 )
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
@@ -70,6 +71,12 @@ def test_disk_db_data_integrity(
     - waits for all traces to reach ``write_status == 'written'`` in SQLite
     - validates on-disk trace timestamps fall within the expected recording
       window for every frame of every recording
+    - validates every video trace holds the artefacts the case's codec implies,
+      each one structurally sound and carrying the frame content its
+      ``video_detail`` declares
+    - decodes the lossless archive and validates every frame carries the code the
+      producer painted into it, in order — per-frame identity without needing the
+      platform
     - asserts daemon and producer processes exit cleanly after stop
     - asserts no residual processes, files, sockets, or DB artefacts remain
       (isolation post-condition)
@@ -91,8 +98,9 @@ def test_disk_db_data_integrity(
                 results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
-                if case.lossy_only:
-                    assert_lossy_only_video_artifacts()
+                if case.has_video:
+                    assert_video_artifacts(results, case)
+                    assert_disk_frame_codes(results, case)
 
         finally:
             set_case_analysis_report(
