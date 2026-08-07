@@ -22,7 +22,6 @@ env:
   GCP_PROJECT_ID: neuracore-prod
   # Service-account key with object-admin on PUBLIC_BUCKET.
   GCP_SA_KEY_SECRET: GCP_SERVICE_ACCOUNT_DEPLOY_PROD_KEY
-  MODEL_ARTIFACT: bigym_pretrained_model.nc.zip
 
 permissions:
   contents: write
@@ -57,6 +56,7 @@ jobs:
           fi
           version="${latest_release_tag#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "model_artifact=bigym_pretrained_nc_v${version}_model.nc.zip" >> "$GITHUB_OUTPUT"
           echo "model_object=colab/bigym_pretrained_nc_v${version}_model.nc.zip" >> "$GITHUB_OUTPUT"
           echo "Latest released version: $version"
 
@@ -69,7 +69,8 @@ jobs:
           echo "Would install neuracore[ml,mjcf]==$v and bigym."
           echo "Would collect bigym ReachTarget demos and train CNNMLP on prod (GPU NVIDIA_TESLA_T4, epochs ${{ github.event.inputs.epochs }})."
           echo "Would roll the trained model out to confirm it succeeds often enough to be usable."
-          echo "Would download the model and upload to gs://${{ env.PUBLIC_BUCKET }}/${{ steps.release-tag.outputs.model_object }}."
+          echo "Would download the model as ${{ steps.release-tag.outputs.model_artifact }}."
+          echo "Would upload it to gs://${{ env.PUBLIC_BUCKET }}/${{ steps.release-tag.outputs.model_object }}."
           echo "Would bump the notebook's pinned version and model filename to $v and open a pull request."
 
       - name: Set up uv
@@ -113,7 +114,8 @@ jobs:
           python admin/update_google_colab.py \
             --skip-upload --skip-patch \
             --epochs "${{ github.event.inputs.epochs }}" \
-            --model-output "${{ env.MODEL_ARTIFACT }}"
+            --version "${{ steps.release-tag.outputs.version }}" \
+            --model-output "${{ steps.release-tag.outputs.model_artifact }}"
 
       - name: Authenticate to Google Cloud
         if: ${{ github.event.inputs.dry_run != 'true' }}
@@ -128,7 +130,8 @@ jobs:
           python admin/update_google_colab.py \
             --skip-train \
             --bucket "${{ env.PUBLIC_BUCKET }}" \
-            --model-output "${{ env.MODEL_ARTIFACT }}"
+            --version "${{ steps.release-tag.outputs.version }}" \
+            --model-output "${{ steps.release-tag.outputs.model_artifact }}"
 
       - name: Run pre-commit on the patched notebook
         if: ${{ github.event.inputs.dry_run != 'true' }}
