@@ -14,6 +14,7 @@ import random
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -40,8 +41,11 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
+    JOINT_KINDS,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
     PRODUCER_PER_THREAD,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -114,6 +118,7 @@ class ContextCaseSpec:
     wait: bool
     random_phase: bool
     video_detail: str
+    producer_pacing: str
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -274,6 +279,7 @@ def build_context_specs(
                     wait=case.wait,
                     random_phase=case.random_phase,
                     video_detail=case.video_detail,
+                    producer_pacing=case.producer_pacing,
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -354,6 +360,24 @@ def precompute_timestamps(
     ]
 
 
+def _should_pace(pacing: str, is_rgb: bool) -> bool:
+    """Whether a stream sleeps to its wall-clock deadline under *pacing*."""
+    if pacing == PACING_DEADLINE:
+        return True
+    if pacing == PACING_BURST_VIDEO:
+        return not is_rgb
+    return False  # PACING_BURST_ALL
+
+
+def _await_frame_deadline(deadline: float, *, pace: bool) -> None:
+    """Wait until *deadline* when *pace* is set, otherwise return immediately."""
+    if not pace:
+        return
+    remaining = deadline - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
 def log_synchronous_frames(
     *,
     robot_name: str,
@@ -365,131 +389,264 @@ def log_synchronous_frames(
     image_width: int | None,
     image_height: int | None,
     joint_fps: int,
+    video_fps: int,
     marker_name: str,
     context_index: int,
     video_detail: str,
+    pacing: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> None:
     """Log all joint and video frames for one recording synchronously.
 
-    Both timestamp sequences are precomputed by the caller and emitted as fast
-    as the transport allows, save for the fixed *log_interval_s* sleep after
-    each iteration — the timestamps themselves are never paced to wall clock.
-    Frames are interleaved in timestamp order so the daemon receives them the
-    way a real producer would order them.
+    Both timestamp sequences are precomputed by the caller. Joint and video
+    frames are interleaved in nominal-schedule order on a single thread, paced
+    according to *pacing*, plus the fixed *log_interval_s* sleep after each
+    iteration.
     """
-    camera_feed = make_camera_feed(
-        bool(camera_name_list), image_width, image_height, video_detail
+    joint_plan, video_plan = build_synchronous_stream_plans(
+        joint_names=joint_names,
+        camera_name_list=camera_name_list,
+        joint_fps=joint_fps,
+        video_fps=video_fps,
+        marker_name=marker_name,
     )
-
-    joint_frame_count = len(joint_timestamps)
-    video_frame_count = len(video_timestamps) if camera_name_list else 0
-    joint_index = 0
-    video_index = 0
-
-    while joint_index < joint_frame_count or video_index < video_frame_count:
-        next_joint = (
-            joint_timestamps[joint_index]
-            if joint_index < joint_frame_count
-            else float("inf")
+    emitters = {
+        plan: StreamEmitter(
+            plan=plan,
+            robot_name=robot_name,
+            context_index=context_index,
+            recording_index=recording_index,
+            assert_deadline=assert_deadline,
         )
-        next_video = (
-            video_timestamps[video_index]
-            if video_index < video_frame_count
-            else float("inf")
+        for plan in (joint_plan, video_plan)
+        if plan is not None
+    }
+    for emitter in emitters.values():
+        emitter.prepare(image_width, image_height, video_detail)
+
+    pace = _should_pace(pacing, is_rgb=False)
+    recording_wall_start = time.time() if pace else 0.0
+    timestamps = {joint_plan: joint_timestamps}
+    if video_plan is not None:
+        timestamps[video_plan] = video_timestamps
+    indexes = dict.fromkeys(timestamps, 0)
+
+    while any(indexes[plan] < len(timestamps[plan]) for plan in timestamps):
+        due = min(
+            (plan for plan in timestamps if indexes[plan] < len(timestamps[plan])),
+            key=lambda plan: indexes[plan] / plan.fps,
         )
-
-        if next_joint <= next_video:
-            timestamp = next_joint
-            joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_positions",
-                assert_deadline=assert_deadline,
-            ):
-                nc.log_joint_positions(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_velocities",
-                assert_deadline=assert_deadline,
-            ):
-                nc.log_joint_velocities(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_torques",
-                assert_deadline=assert_deadline,
-            ):
-                nc.log_joint_torques(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_custom_1d",
-                assert_deadline=assert_deadline,
-            ):
-                nc.log_custom_1d(
-                    marker_name,
-                    np.array([float(joint_index)], dtype=np.float32),
-                    robot_name=robot_name,
-                    timestamp=timestamp,
-                )
-            joint_index += 1
-        else:
-            timestamp = next_video
-            for camera_index, camera_name in enumerate(camera_name_list):
-                frame_code = (
-                    frame_code_base(
-                        context_index=context_index,
-                        recording_ordinal=recording_index,
-                        camera_index=camera_index,
-                    )
-                    + video_index
-                )
-                # video_index, not camera_index: every camera shows the same
-                # instant, distinguished only by its embedded frame code.
-                rgb_image = camera_feed.render(video_index, frame_code)
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_rgb",
-                    assert_deadline=assert_deadline,
-                ):
-                    nc.log_rgb(
-                        camera_name,
-                        rgb_image,
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
-            video_index += 1
-
+        frame_index = indexes[due]
+        _await_frame_deadline(recording_wall_start + (frame_index / due.fps), pace=pace)
+        emitters[due].emit(frame_index, timestamps[due][frame_index])
+        indexes[due] += 1
         if log_interval_s:
             time.sleep(log_interval_s)
 
 
-def build_thread_roles(
+@dataclass(frozen=True, slots=True)
+class StreamPlan:
+    """One producer stream: which channels it logs, and under which marker.
+
+    The single description of how a workload decomposes into streams. Producers
+    consume it through :class:`StreamEmitter` rather than re-deriving channel
+    names, log functions or frame codes for themselves.
+    """
+
+    name: str
+    fps: int
+    channel_names: tuple[str, ...]
+    marker_name: str | None = None
+    # Which ``nc.log_joint_*`` calls one frame makes. Empty for camera streams.
+    # Per-thread streams carry exactly one; the synchronous producer bundles
+    # all three into a single stream sharing one marker.
+    joint_kinds: tuple[str, ...] = ()
+    camera_indexes: tuple[int, ...] = ()
+
+    @property
+    def is_rgb(self) -> bool:
+        """Whether this stream logs camera frames rather than joint data."""
+        return self.name == "rgb"
+
+
+def build_stream_plans(
     *,
     joint_names: list[str],
     camera_name_list: list[str],
-) -> list[dict[str, object]]:
-    """Build role specs for per-thread logging."""
-    roles: list[dict[str, object]] = []
-    for camera_name in camera_name_list:
-        roles.append({
-            "role": "rgb",
-            "camera_names": [camera_name],
-            "marker_name": f"marker_{camera_name}",
-        })
-    for role_name in ("joint_positions", "joint_velocities", "joint_torques"):
-        roles.append({
-            "role": role_name,
-            "joint_names": list(joint_names),
-            "marker_name": f"marker_{role_name}",
-        })
-    return roles
+    joint_fps: int,
+    video_fps: int,
+) -> list[StreamPlan]:
+    """Decompose a workload into one stream per camera and per joint data type."""
+    return [
+        *(
+            StreamPlan(
+                name="rgb",
+                marker_name=f"marker_{camera_name}",
+                fps=video_fps,
+                channel_names=(camera_name,),
+                camera_indexes=(camera_index,),
+            )
+            for camera_index, camera_name in enumerate(camera_name_list)
+        ),
+        *(
+            StreamPlan(
+                name=kind,
+                marker_name=f"marker_{kind}",
+                fps=joint_fps,
+                channel_names=tuple(joint_names),
+                joint_kinds=(kind,),
+            )
+            for kind in JOINT_KINDS
+        ),
+    ]
+
+
+def build_synchronous_stream_plans(
+    *,
+    joint_names: list[str],
+    camera_name_list: list[str],
+    joint_fps: int,
+    video_fps: int,
+    marker_name: str,
+) -> tuple[StreamPlan, StreamPlan | None]:
+    """Decompose a workload for the single-threaded producer."""
+    joint_plan = StreamPlan(
+        name="joints",
+        marker_name=marker_name,
+        fps=joint_fps,
+        channel_names=tuple(joint_names),
+        joint_kinds=JOINT_KINDS,
+    )
+    video_plan = (
+        StreamPlan(
+            name="rgb",
+            fps=video_fps,
+            channel_names=tuple(camera_name_list),
+            camera_indexes=tuple(range(len(camera_name_list))),
+        )
+        if camera_name_list
+        else None
+    )
+    return joint_plan, video_plan
+
+
+@dataclass(slots=True, eq=False)  # identity-keyed: one emitter per thread
+class StreamEmitter:
+    """Binds a :class:`StreamPlan` to one recording's logging calls.
+
+    Owns every per-frame side effect a stream has, so producers cannot drift in
+    what they log, how frames are identified, or how the calls are labelled for
+    reporting.
+    """
+
+    plan: StreamPlan
+    robot_name: str
+    context_index: int
+    recording_index: int
+    assert_deadline: bool = False
+    feed: object | None = None
+
+    def prepare(self, image_width: int | None, image_height: int | None, detail: str):
+        """Build this stream's camera feed. Called on the stream's own thread."""
+        self.feed = make_camera_feed(
+            self.plan.is_rgb, image_width, image_height, detail
+        )
+
+    def emit(self, frame_index: int, timestamp: float | None) -> None:
+        """Log one frame's payload plus this stream's marker."""
+        if self.plan.is_rgb:
+            self._emit_rgb(frame_index, timestamp)
+        else:
+            self._emit_joints(frame_index, timestamp)
+        self._emit_marker(frame_index, timestamp)
+
+    def _emit_rgb(self, frame_index: int, timestamp: float | None) -> None:
+        for camera_name, camera_index in zip(
+            self.plan.channel_names, self.plan.camera_indexes
+        ):
+            # Frame codes must stay unique across contexts, recordings and
+            # cameras: they are read back to identify frames.
+            frame_code = (
+                frame_code_base(
+                    context_index=self.context_index,
+                    recording_ordinal=self.recording_index,
+                    camera_index=camera_index,
+                )
+                + frame_index
+            )
+            rgb_image = self.feed.render(frame_index, frame_code)
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_rgb",
+                assert_deadline=self.assert_deadline,
+            ):
+                nc.log_rgb(
+                    camera_name,
+                    rgb_image,
+                    robot_name=self.robot_name,
+                    timestamp=timestamp,
+                )
+
+    def _emit_joints(self, frame_index: int, timestamp: float | None) -> None:
+        joint_values = generate_joint_values(
+            frame_index, self.plan.fps, list(self.plan.channel_names)
+        )
+        for kind in self.plan.joint_kinds:
+            log_fn_name = f"log_{kind}"
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label=f"nc.{log_fn_name}",
+                assert_deadline=self.assert_deadline,
+            ):
+                getattr(nc, log_fn_name)(
+                    joint_values, robot_name=self.robot_name, timestamp=timestamp
+                )
+
+    def _emit_marker(self, frame_index: int, timestamp: float | None) -> None:
+        if self.plan.marker_name is None:
+            return
+        with Timer(
+            MAX_TIME_TO_LOG_S,
+            label="nc.log_custom_1d",
+            assert_deadline=self.assert_deadline,
+        ):
+            nc.log_custom_1d(
+                self.plan.marker_name,
+                np.array([float(frame_index)], dtype=np.float32),
+                robot_name=self.robot_name,
+                timestamp=timestamp,
+            )
+
+
+def _run_stream_threads(
+    emitters: list[StreamEmitter],
+    worker: Callable[[StreamEmitter], None],
+    *,
+    error_label: str,
+) -> None:
+    """Run *worker* on one daemon thread per stream, then join and surface errors."""
+    thread_errors: list[BaseException] = []
+
+    def guarded(emitter: StreamEmitter) -> None:
+        try:
+            worker(emitter)
+        except BaseException as exc:  # noqa: BLE001
+            thread_errors.append(exc)
+
+    threads = [
+        threading.Thread(target=guarded, args=(emitter,), daemon=True)
+        for emitter in emitters
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    if thread_errors:
+        raise RuntimeError(
+            f"{error_label} producer failed: {thread_errors[0]}"
+        ) from thread_errors[0]
 
 
 def run_threaded_logging(
@@ -499,137 +656,60 @@ def run_threaded_logging(
     video_timestamps: list[float],
     recording_index: int,
     joint_fps: int,
+    video_fps: int,
     context_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
     image_width: int | None,
     image_height: int | None,
     video_detail: str,
+    pacing: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> list[str]:
-    """Run logging across multiple threads, one per data role.
+    """Run logging across multiple threads, one per data stream.
 
-    Every role emits the timestamp sequence its stream was given, as fast as the
-    transport allows, save for the fixed *log_interval_s* sleep after each
-    iteration — the timestamps themselves are never paced to wall clock.  Each
-    role paces its own stream, so the rgb roles that feed the daemon's spool are
-    capped independently of the joint roles.  All joint roles share the joint
-    sequence, so the three joint data types stay aligned exactly as they do in
-    the synchronous producer.
+    Every joint-kind thread shares *joint_timestamps* and every camera thread
+    shares *video_timestamps*, so the joint data types (and every camera) stay
+    aligned exactly as they do in the synchronous producer. Each stream paces
+    itself according to *pacing*, so ``PACING_BURST_VIDEO`` leaves the video
+    threads free to outrun the joint threads, plus the fixed *log_interval_s*
+    sleep after each frame.
     """
-    roles = build_thread_roles(
-        joint_names=joint_names, camera_name_list=camera_name_list
+    plans = build_stream_plans(
+        joint_names=joint_names,
+        camera_name_list=camera_name_list,
+        joint_fps=joint_fps,
+        video_fps=video_fps,
     )
-    barrier = threading.Barrier(len(roles))
-    thread_errors: list[BaseException] = []
-
-    def worker(role_spec: dict[str, object]) -> None:
-        """Execute logging for a single thread role."""
-        try:
-            barrier.wait()
-            role_name = str(role_spec["role"])
-            marker_name = str(role_spec["marker_name"])
-            is_rgb = role_name == "rgb"
-            timestamps = video_timestamps if is_rgb else joint_timestamps
-            camera_feed = make_camera_feed(
-                is_rgb, image_width, image_height, video_detail
-            )
-            for frame_index, timestamp in enumerate(timestamps):
-                if is_rgb:
-                    for camera_offset, camera_name in enumerate(
-                        role_spec["camera_names"]
-                    ):
-                        camera_id = str(camera_name)
-                        camera_index = camera_name_list.index(camera_id) + camera_offset
-                        frame_code = (
-                            frame_code_base(
-                                context_index=context_index,
-                                recording_ordinal=recording_index,
-                                camera_index=camera_index,
-                            )
-                            + frame_index
-                        )
-                        rgb_image = camera_feed.render(frame_index, frame_code)
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_rgb",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_rgb(
-                                camera_id,
-                                rgb_image,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                else:
-                    thread_joint_names = list(role_spec["joint_names"])
-                    joint_values = generate_joint_values(
-                        frame_index, joint_fps, thread_joint_names
-                    )
-                    if role_name == "joint_positions":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_positions",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_positions(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    elif role_name == "joint_velocities":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_velocities",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_velocities(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    else:
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_torques",
-                            assert_deadline=assert_deadline,
-                        ):
-                            nc.log_joint_torques(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_custom_1d",
-                    assert_deadline=assert_deadline,
-                ):
-                    nc.log_custom_1d(
-                        marker_name,
-                        np.array([float(frame_index)], dtype=np.float32),
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
-                if log_interval_s:
-                    time.sleep(log_interval_s)
-        except BaseException as exc:  # noqa: BLE001
-            thread_errors.append(exc)
-
-    threads = [
-        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
+    emitters = [
+        StreamEmitter(
+            plan=plan,
+            robot_name=robot_name,
+            context_index=context_index,
+            recording_index=recording_index,
+            assert_deadline=assert_deadline,
+        )
+        for plan in plans
     ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
+    barrier = threading.Barrier(len(emitters))
 
-    if thread_errors:
-        raise RuntimeError(
-            f"Threaded producer failed: {thread_errors[0]}"
-        ) from thread_errors[0]
+    def worker(emitter: StreamEmitter) -> None:
+        barrier.wait()
+        emitter.prepare(image_width, image_height, video_detail)
+        fps = emitter.plan.fps
+        pace = _should_pace(pacing, emitter.plan.is_rgb)
+        thread_wall_start = time.time() if pace else 0.0
+        timestamps = video_timestamps if emitter.plan.is_rgb else joint_timestamps
+        for frame_index, timestamp in enumerate(timestamps):
+            _await_frame_deadline(thread_wall_start + (frame_index / fps), pace=pace)
+            emitter.emit(frame_index, timestamp)
+            if log_interval_s:
+                time.sleep(log_interval_s)
 
-    return [str(role["marker_name"]) for role in roles]
+    _run_stream_threads(emitters, worker, error_label="Threaded")
+
+    return [plan.marker_name for plan in plans]
 
 
 def recording_timestamps(
@@ -683,12 +763,14 @@ def log_frames(
             video_timestamps=video_timestamps,
             recording_index=recording_index,
             joint_fps=spec.case.joint_fps,
+            video_fps=spec.case.video_fps,
             context_index=spec.context_index,
             joint_names=joint_name_list,
             camera_name_list=camera_name_list,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
             video_detail=spec.case.video_detail,
+            pacing=spec.case.producer_pacing,
             assert_deadline=spec.assert_deadline,
             log_interval_s=spec.log_interval_s,
         )
@@ -703,9 +785,11 @@ def log_frames(
         image_width=spec.case.image_width,
         image_height=spec.case.image_height,
         joint_fps=spec.case.joint_fps,
+        video_fps=spec.case.video_fps,
         marker_name=marker_name,
         context_index=spec.context_index,
         video_detail=spec.case.video_detail,
+        pacing=spec.case.producer_pacing,
         assert_deadline=spec.assert_deadline,
         log_interval_s=spec.log_interval_s,
     )

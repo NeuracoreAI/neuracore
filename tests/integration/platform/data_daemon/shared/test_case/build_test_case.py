@@ -38,11 +38,14 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_ALL,
+    PACING_BURST_VIDEO,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
     LogAction,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -79,6 +82,23 @@ _BATCH_PARAMS = frozenset({
     "preserve_artifacts_per_test",
     "stop_method",
 })
+
+
+def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s parameters cannot run together, or None if they can."""
+    if case.producer_pacing == PACING_BURST_VIDEO:
+        if not case.has_video:
+            return (
+                f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0: "
+                "there is no video stream to un-pace"
+            )
+        if case.producer_channels == PRODUCER_SYNCHRONOUS:
+            return (
+                f"producer_pacing={PACING_BURST_VIDEO!r} needs "
+                f"producer_channels={PRODUCER_PER_THREAD!r}: one thread logs every "
+                "stream in schedule order, so video cannot race ahead of joints"
+            )
+    return None
 
 
 @dataclass(frozen=True)
@@ -189,6 +209,17 @@ class DataDaemonTestCase:
             solid-fill frames for cases that only care about frame counts.
             Frame identity is embedded either way, so the disk timestamp and
             frame-code assertions are unaffected by this choice.
+        producer_pacing: Which producer streams skip their wall-clock deadline,
+            i.e. how fast frames are handed to the SDK.  This is fully
+            independent of ``random_phase``, which controls what timestamp a
+            frame *carries*, never when it is delivered.
+            ``"deadline"`` paces every stream, so delivery tracks wall-clock
+            time.  ``"burst-video"`` un-paces the video streams only, so frames
+            are pushed as fast as the camera thread can render and log them
+            while joints stay paced — backlogging the writer queue the way a
+            real camera does when the encoder can't keep up.  ``"burst-all"``
+            (default) un-paces everything, which is the fastest way to emit a
+            fixed frame count.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -220,6 +251,13 @@ class DataDaemonTestCase:
     skip: bool = False
     video_codec: str | None = None
     video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_BURST_ALL
+
+    def __post_init__(self) -> None:
+        """Reject parameter combinations this case's shape cannot run."""
+        problem = _unsupported_combination(self)
+        if problem is not None:
+            raise ValueError(problem)
 
     @property
     def has_video(self) -> bool:
@@ -337,8 +375,12 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+        if case.video_detail != DataDaemonTestCase.video_detail:
+            parts.append(f"{case.video_detail}frames")
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
+    if case.producer_pacing != DataDaemonTestCase.producer_pacing:
+        parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:
