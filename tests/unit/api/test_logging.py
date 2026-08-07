@@ -7,6 +7,7 @@ from neuracore_types import DataType, ParallelGripperOpenAmountData
 
 import neuracore as nc
 from neuracore.api import logging as api_logging
+from neuracore.api.core import _get_robot
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
@@ -72,6 +73,60 @@ def test_log_with_extrinsics_intrinsics(
     # Log with extrinsics and intrinsics
     nc.log_rgb("front_camera", rgb_uint8, extrinsics=extrinsics, intrinsics=intrinsics)
     nc.log_depth("depth_camera", depth, extrinsics=extrinsics, intrinsics=intrinsics)
+
+
+def test_log_frame_forwards_dtype_derived_from_the_array(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """log_frame's native dtype must be derived from the array, per call.
+
+    RGB forwards "uint8"; depth forwards "float16" or "float32" depending on
+    the actual array passed to `nc.log_depth` — the public API takes no
+    dtype parameter, so this is the only place dtype can come from.
+    """
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    robot = _get_robot(None, 0)
+    monkeypatch.setattr(robot, "get_current_recording_id", lambda: "rec-1")
+
+    rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
+    nc.log_rgb("front_camera", rgb_uint8)
+    depth_f16 = np.ones((100, 100), dtype=np.float16)
+    nc.log_depth("depth_camera_16", depth_f16)
+    depth_f32 = np.ones((100, 100), dtype=np.float32)
+    nc.log_depth("depth_camera_32", depth_f32)
+
+    assert native.log_frame.call_count == 3
+    calls_by_dtype = {
+        call.args[2]: call.args[6] for call in native.log_frame.call_args_list
+    }
+    assert calls_by_dtype[DataType.RGB_IMAGES.value] == "uint8"
+    assert calls_by_dtype[DataType.DEPTH_IMAGES.value] in ("float16", "float32")
+    # Both depth calls are distinguishable by dtype even though they share a
+    # data_type label, so inspect each call directly rather than the dict
+    # above (which the second depth call would overwrite).
+    depth_calls = [
+        call
+        for call in native.log_frame.call_args_list
+        if call.args[2] == DataType.DEPTH_IMAGES.value
+    ]
+    assert {call.args[6] for call in depth_calls} == {"float16", "float32"}
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
 
 
 def test_log_gripper_data(

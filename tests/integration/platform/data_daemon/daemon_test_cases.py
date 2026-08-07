@@ -22,6 +22,13 @@ PRE_NETWORK_INTEGRITY_CASES = (
         video_count=1,
         image_height=64,
         image_width=64,
+        # Depth alongside RGB and joint data, logged via the synchronous
+        # producer (the default `producer_channels`). Covers `float32` —
+        # `float16` is covered below via the threaded-producer case, so
+        # together the two selected cases exercise both dtypes and both
+        # producer modes.
+        depth_count=1,
+        depth_mode="float32",
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -47,6 +54,13 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
+        # Depth via the threaded producer, covering `float16` under a more
+        # complex scenario (multiple recordings, staggered contexts) — a
+        # good stress case for the synchronized-frame-identity mapping used
+        # in the depth round-trip assertion (see assertions.py), since it
+        # can't rely on sync-iteration order lining up with capture order.
+        depth_count=1,
+        depth_mode="float16",
     ),
     DataDaemonTestCase(
         duration_sec=10,

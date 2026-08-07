@@ -66,6 +66,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     case_timeout_seconds,
 )
+from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    encode_depth_frame,
+)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
@@ -73,11 +76,13 @@ if TYPE_CHECKING:
     )
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DEPTH_ROUND_TRIP_ATOL_M,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
     FRAME_BYTE_LENGTH,
     FRAME_GRID_SIZE,
+    DepthMode,
 )
 
 logger = logging.getLogger(__name__)
@@ -240,6 +245,15 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
     - ``rgb_counts`` — per-camera frame counts.
         - ``frame_codes`` — per-camera list of decoded frame numbers from
             :func:`decode_frame_number`.
+    - ``depth_counts`` — per-camera frame counts.
+        - ``depth_frames`` — per-camera list of ``(frame_idx, frame)`` pairs,
+          where ``frame_idx`` is the *original capture-order* index the
+          synchronized episode reports for that frame (see
+          ``CameraData.frame_idx`` — "needed so we can index video after
+          sync"), **not** this loop's own ``frame_index``. Synchronization can
+          repeat or skip frames, so ``frame_idx`` is what lets the verifier
+          look up which value was actually logged for this exact frame,
+          regardless of where it lands in the synced iteration order.
     - ``joint_position_counts``, ``joint_velocity_counts``,
       ``joint_torque_counts`` — per-joint frame counts.
     - ``joint_position_values`` — list of ``(frame_index, joint_name, value)``
@@ -259,6 +273,8 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
         "timestamps": [],
         "rgb_counts": {},
         "frame_codes": {},
+        "depth_counts": {},
+        "depth_frames": {},
         "joint_position_counts": {},
         "joint_velocity_counts": {},
         "joint_torque_counts": {},
@@ -284,6 +300,18 @@ def _collect_episode_summary(synced_episode: object) -> dict[str, object]:
                 )
             summary["rgb_counts"] = rgb_counts
             summary["frame_codes"] = frame_codes
+
+        if DataType.DEPTH_IMAGES in sync_point.data:
+            depth_counts = dict(summary["depth_counts"])
+            depth_frames = dict(summary["depth_frames"])
+            for camera_name, camera_data in sync_point[DataType.DEPTH_IMAGES].items():
+                name = str(camera_name)
+                depth_counts[name] = depth_counts.get(name, 0) + 1
+                depth_frames.setdefault(name, []).append(
+                    (int(camera_data.frame_idx), np.array(camera_data.frame))
+                )
+            summary["depth_counts"] = depth_counts
+            summary["depth_frames"] = depth_frames
 
         if DataType.JOINT_POSITIONS in sync_point.data:
             counts = dict(summary["joint_position_counts"])
@@ -445,6 +473,68 @@ def _assert_synced_camera_codes_are_sane(
         )
 
 
+def _assert_synced_depth_values_round_trip(
+    *,
+    depth_frames: object,
+    camera_name: str,
+    context_index: int,
+    recording_index: int,
+    camera_index: int,
+    image_width: int,
+    image_height: int,
+    depth_mode: DepthMode,
+) -> None:
+    """Verify every retrieved depth frame numerically matches what was logged.
+
+    Unlike RGB's frame-code check (which only proves ordering/completeness
+    via a decoded identity tag), this compares actual depth *values*.
+
+    Each retrieved frame is mapped back to its expected value via
+    ``frame_idx`` — the *original capture-order* index the synchronized
+    episode reports for that frame (``CameraData.frame_idx``, "needed so we
+    can index video after sync") — **not** the position of this frame within
+    the synced iteration. Synchronization (``dataset.synchronize()`` defaults
+    to a resampling frequency, not aperiodic-verbatim replay) can repeat or
+    skip frames, so sync-iteration order is not assumed to equal capture
+    order anywhere in this check. The expected value is regenerated with
+    :func:`encode_depth_frame` using the exact same composite frame identity
+    (``context_index``, ``recording_index``, ``camera_index``, ``frame_idx``)
+    the producer used when it called ``nc.log_depth()`` for that frame, then
+    compared against the retrieved value within
+    :data:`~.constants.DEPTH_ROUND_TRIP_ATOL_M`.
+    """
+    assert depth_frames, f"No depth frames retrieved for camera {camera_name!r}"
+
+    mismatches: list[tuple[int, float]] = []
+    for frame_idx, actual in depth_frames:
+        frame_code = (
+            (context_index * 1_000_000_000)
+            + (recording_index * 10_000_000)
+            + (camera_index * 100_000)
+            + frame_idx
+        )
+        expected = encode_depth_frame(
+            frame_code, image_width, image_height, depth_mode
+        ).astype(np.float32)
+        actual_f32 = np.asarray(actual, dtype=np.float32)
+        if actual_f32.shape != expected.shape or not np.allclose(
+            actual_f32, expected, atol=DEPTH_ROUND_TRIP_ATOL_M
+        ):
+            max_abs_diff = (
+                float(np.max(np.abs(actual_f32 - expected)))
+                if actual_f32.shape == expected.shape
+                else float("nan")
+            )
+            mismatches.append((frame_idx, max_abs_diff))
+
+    assert not mismatches, (
+        f"Camera {camera_name!r}: {len(mismatches)}/{len(depth_frames)} depth "
+        f"frame(s) failed the round-trip value check against what was logged "
+        f"(tolerance={DEPTH_ROUND_TRIP_ATOL_M}m); "
+        f"first (frame_idx, max_abs_diff_m): {mismatches[:5]}"
+    )
+
+
 def _verify_synched_episode_summary(
     *,
     summary: dict[str, object],
@@ -522,6 +612,39 @@ def _verify_synched_episode_summary(
     assert (
         not unexpected_markers
     ), f"Unexpected custom marker(s) in episode: {unexpected_markers}"
+
+    # --- Depth cameras: presence, counts, and value round-trip ---
+    # Runs independently of the RGB-only gates below — depth is never
+    # lossy-only (it always keeps its lossless archive), so its round-trip
+    # check must not be skipped by `case.lossy_only`, and a depth-only case
+    # (no RGB) must still be checked. Gated on `has_depth` so a depth-count=0
+    # case executes no depth-specific assertion or lookup at all.
+    if result.has_depth:
+        depth_counts = dict(summary["depth_counts"])
+        for depth_camera_name in result.depth_camera_names:
+            assert depth_counts.get(depth_camera_name) == sync_points, (
+                f"Depth frames missing for camera {depth_camera_name!r}: "
+                f"got {depth_counts.get(depth_camera_name)}, expected {sync_points}"
+            )
+        unexpected_depth_cameras = set(depth_counts) - set(result.depth_camera_names)
+        assert (
+            not unexpected_depth_cameras
+        ), f"Unexpected camera(s) in depth counts: {unexpected_depth_cameras}"
+
+        depth_frames_by_camera = dict(summary["depth_frames"])
+        for depth_camera_index, depth_camera_name in enumerate(
+            result.depth_camera_names
+        ):
+            _assert_synced_depth_values_round_trip(
+                depth_frames=depth_frames_by_camera.get(depth_camera_name),
+                camera_name=depth_camera_name,
+                context_index=result.context_index,
+                recording_index=recording_index,
+                camera_index=depth_camera_index,
+                image_width=int(case.image_width),
+                image_height=int(case.image_height),
+                depth_mode=result.depth_mode,
+            )
 
     # --- Video presence gate ---
     if not result.has_video:

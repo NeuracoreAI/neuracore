@@ -400,6 +400,11 @@ pub enum Envelope {
         /// Length equals `frame_count`; values round-trip bit-exact through
         /// postcard for the metadata sidecar.
         frame_timestamps_s: Vec<f64>,
+        /// Original dtype of every frame in this chunk (never mixed — the
+        /// producer seals and reopens a chunk on a dtype change, mirroring a
+        /// geometry change). The daemon never decodes pixels; it threads this
+        /// straight into the trace's `trace.json` sidecar for depth frames.
+        dtype: FrameDtype,
     },
     /// Force the daemon to re-read its profile config immediately, rather than
     /// waiting for the config watcher's next poll. Sent by the SDK's
@@ -409,6 +414,62 @@ pub enum Envelope {
     /// recording window; the dispatcher handles it by refreshing the in-memory
     /// config (see `cloud::config_watcher`).
     RefreshConfig {},
+}
+
+/// Original pixel/sample representation of one video-family frame.
+///
+/// Carried on [`Envelope::VideoChunkReady`] so the daemon can record a depth
+/// frame's original dtype in its `trace.json` sidecar without ever seeing the
+/// pixels themselves — the daemon never decodes or converts frame data, it
+/// only threads this label through to metadata (see the crate-level docs on
+/// the thin-shipper model). The producer is the only side that interprets the
+/// raw bytes: RGB frames are already packed RGB24 for the NUT/PNG pipeline;
+/// depth frames are converted to RGB24 storage bytes by the producer before
+/// ever reaching the NUT writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameDtype {
+    /// Packed RGB24, one byte per channel — the existing RGB/NUT contract.
+    Rgb8,
+    /// 2D depth frame, IEEE-754 binary16 (metres).
+    DepthF16,
+    /// 2D depth frame, IEEE-754 binary32 (metres).
+    DepthF32,
+}
+
+impl FrameDtype {
+    /// Bytes occupied by one pixel/sample of this representation, before any
+    /// depth-to-RGB24 conversion.
+    pub fn bytes_per_pixel(self) -> usize {
+        match self {
+            FrameDtype::Rgb8 => 3,
+            FrameDtype::DepthF16 => 2,
+            FrameDtype::DepthF32 => 4,
+        }
+    }
+
+    /// Parse the Python-facing wire label — `numpy.dtype.name`, i.e.
+    /// `"uint8"` for RGB and `"float16"` / `"float32"` for depth. `None` for
+    /// anything else, so the native boundary rejects an unsupported dtype
+    /// with a clear error rather than silently misinterpreting the buffer.
+    pub fn from_wire_label(label: &str) -> Option<Self> {
+        match label {
+            "uint8" => Some(FrameDtype::Rgb8),
+            "float16" => Some(FrameDtype::DepthF16),
+            "float32" => Some(FrameDtype::DepthF32),
+            _ => None,
+        }
+    }
+
+    /// The canonical `trace.json` dtype string for a depth frame — `None` for
+    /// RGB, which keeps the existing RGB `trace.json` schema untouched (no
+    /// consumer or established schema calls for an RGB dtype field).
+    pub fn depth_label(self) -> Option<&'static str> {
+        match self {
+            FrameDtype::Rgb8 => None,
+            FrameDtype::DepthF16 => Some("float16"),
+            FrameDtype::DepthF32 => Some("float32"),
+        }
+    }
 }
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
@@ -793,11 +854,73 @@ mod tests {
                 1_700_000_000.033_333_3,
                 7.0_f64 / 60.0_f64,
             ],
+            dtype: FrameDtype::Rgb8,
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
         assert_eq!(original.kind(), "video_chunk_ready");
+    }
+
+    #[test]
+    fn video_chunk_ready_round_trips_for_every_frame_dtype() {
+        // The whole point of carrying dtype on the wire is that a depth
+        // chunk's announcement survives the daemon's postcard round trip —
+        // guard every variant, not just the RGB default above.
+        for (data_type, dtype) in [
+            ("RGB_IMAGES", FrameDtype::Rgb8),
+            ("DEPTH_IMAGES", FrameDtype::DepthF16),
+            ("DEPTH_IMAGES", FrameDtype::DepthF32),
+        ] {
+            let original = Envelope::VideoChunkReady {
+                robot_id: "robot-1".into(),
+                robot_instance: 0,
+                data_type: data_type.into(),
+                sensor_name: Some("depth_camera".into()),
+                publish_timestamp_ns: 1_700_000_000_000_000_000,
+                thread_id: 7,
+                width: 128,
+                height: 128,
+                byte_count: 4096,
+                frame_count: 1,
+                frame_timestamps_ns: vec![1_700_000_000_000_000_000],
+                frame_timestamps_s: vec![1_700_000_000.0],
+                dtype,
+            };
+            let bytes = original.encode().expect("encode");
+            let decoded = Envelope::decode(&bytes).expect("decode");
+            assert_eq!(original, decoded, "dtype {dtype:?} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn frame_dtype_wire_labels_round_trip() {
+        assert_eq!(FrameDtype::from_wire_label("uint8"), Some(FrameDtype::Rgb8));
+        assert_eq!(
+            FrameDtype::from_wire_label("float16"),
+            Some(FrameDtype::DepthF16)
+        );
+        assert_eq!(
+            FrameDtype::from_wire_label("float32"),
+            Some(FrameDtype::DepthF32)
+        );
+        assert_eq!(FrameDtype::from_wire_label("int32"), None);
+        assert_eq!(FrameDtype::from_wire_label(""), None);
+    }
+
+    #[test]
+    fn frame_dtype_depth_label_is_none_for_rgb() {
+        // RGB must not gain a `trace.json` dtype field — only depth does.
+        assert_eq!(FrameDtype::Rgb8.depth_label(), None);
+        assert_eq!(FrameDtype::DepthF16.depth_label(), Some("float16"));
+        assert_eq!(FrameDtype::DepthF32.depth_label(), Some("float32"));
+    }
+
+    #[test]
+    fn frame_dtype_bytes_per_pixel() {
+        assert_eq!(FrameDtype::Rgb8.bytes_per_pixel(), 3);
+        assert_eq!(FrameDtype::DepthF16.bytes_per_pixel(), 2);
+        assert_eq!(FrameDtype::DepthF32.bytes_per_pixel(), 4);
     }
 
     #[test]
@@ -820,6 +943,7 @@ mod tests {
             frame_count: frame_timestamps_ns.len() as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            dtype: FrameDtype::Rgb8,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -854,6 +978,7 @@ mod tests {
             frame_count: count as u32,
             frame_timestamps_ns,
             frame_timestamps_s,
+            dtype: FrameDtype::Rgb8,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(

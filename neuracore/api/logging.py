@@ -539,6 +539,7 @@ def _log_camera_data(
             storage_name,
             int(image.shape[1]),
             int(image.shape[0]),
+            image.dtype.name,
             memoryview(contiguous).cast("B"),
             camera_data_without_frame.timestamp,
         )

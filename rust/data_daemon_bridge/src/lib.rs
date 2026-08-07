@@ -42,12 +42,13 @@
 
 pub mod nut_writer;
 
+mod depth;
 mod paths;
 mod publisher;
 mod query;
 mod writer;
 
-use data_daemon_shared::{Envelope, RecordingIdQuery};
+use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -162,8 +163,14 @@ fn log_joints(
 /// `(source, sensor)` in-progress NUT chunk under the inbox; when the chunk
 /// crosses the chunk-flush threshold a [`Envelope::VideoChunkReady`] is
 /// published.
+///
+/// `dtype` is the Python-facing wire label (`image.dtype.name`): `"uint8"`
+/// for RGB24 frames, `"float16"` / `"float32"` for 2D depth frames (metres).
+/// It is parsed once, here, at the native boundary — every internal Rust
+/// component downstream (the writer, the daemon) works with the strongly
+/// typed [`FrameDtype`] rather than re-validating a string.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, payload, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
@@ -173,6 +180,7 @@ fn log_frame(
     name: &str,
     width: u32,
     height: u32,
+    dtype: &str,
     payload: PyBuffer<u8>,
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
@@ -182,18 +190,10 @@ fn log_frame(
             "robot_id, data_type and name must not be empty",
         ));
     }
-    if width == 0 || height == 0 {
-        return Err(PyValueError::new_err("width and height must be non-zero"));
-    }
-    let expected_bytes = (width as usize)
-        .saturating_mul(height as usize)
-        .saturating_mul(3);
+    let frame_dtype = parse_frame_dtype(data_type, dtype).map_err(PyValueError::new_err)?;
     let actual_bytes = payload.item_count();
-    if actual_bytes != expected_bytes {
-        return Err(PyValueError::new_err(format!(
-            "video frame buffer is {actual_bytes} bytes; expected width*height*3 = {expected_bytes}"
-        )));
-    }
+    validate_frame_payload(frame_dtype, width, height, actual_bytes)
+        .map_err(PyValueError::new_err)?;
     if !payload.is_c_contiguous() {
         return Err(PyValueError::new_err(
             "video frame buffer must be C-contiguous",
@@ -225,6 +225,7 @@ fn log_frame(
         sensor_name: name.to_string(),
         width,
         height,
+        dtype: frame_dtype,
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
         data,
@@ -431,6 +432,36 @@ fn cancel_recording(
     })
 }
 
+/// Parse a NumPy dtype label and validate it against the declared video type.
+///
+/// RGB frames must use `uint8`; depth frames must use `float16` or `float32`.
+/// Validating the pair at the native boundary prevents incorrectly typed frames
+/// from entering the writer and being stored under the wrong trace type.
+fn parse_frame_dtype(data_type: &str, dtype: &str) -> Result<FrameDtype, String> {
+    let frame_dtype = FrameDtype::from_wire_label(dtype).ok_or_else(|| {
+        format!(
+            "unsupported video frame dtype {dtype:?}; expected one of: \
+             uint8, float16, float32"
+        )
+    })?;
+
+    let valid_pair = matches!(
+        (data_type, frame_dtype),
+        ("RGB_IMAGES", FrameDtype::Rgb8)
+            | ("DEPTH_IMAGES", FrameDtype::DepthF16)
+            | ("DEPTH_IMAGES", FrameDtype::DepthF32)
+    );
+
+    if !valid_pair {
+        return Err(format!(
+            "video data type {data_type:?} is incompatible with dtype {dtype:?}; \
+             expected RGB_IMAGES + uint8 or DEPTH_IMAGES + float16/float32"
+        ));
+    }
+
+    Ok(frame_dtype)
+}
+
 /// Resolve the daemon-owned cloud `recording_id` for a recording, blocking with
 /// the GIL released until the id is available or `timeout_s` elapses.
 ///
@@ -499,4 +530,131 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
     Ok(())
+}
+
+/// Validate a `log_frame` payload against its declared dtype and geometry.
+///
+/// Pulled out of [`log_frame`] as a pure function (no `PyBuffer`/GIL
+/// involvement) so the native bridge's size-validation rules — the "Native
+/// bridge validation" contract every frame must satisfy before it is ever
+/// enqueued — are directly unit-testable without standing up a Python
+/// interpreter.
+fn validate_frame_payload(
+    dtype: FrameDtype,
+    width: u32,
+    height: u32,
+    actual_bytes: usize,
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("width and height must be non-zero".to_string());
+    }
+    let expected_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(dtype.bytes_per_pixel()))
+        .ok_or_else(|| "width * height * bytes_per_pixel overflows".to_string())?;
+    if actual_bytes != expected_bytes {
+        return Err(format!(
+            "video frame buffer is {actual_bytes} bytes; expected width*height*{} = \
+             {expected_bytes} bytes for dtype {dtype:?}",
+            dtype.bytes_per_pixel(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_rgb_uint8_frame_is_accepted() {
+        assert!(validate_frame_payload(FrameDtype::Rgb8, 4, 4, 4 * 4 * 3).is_ok());
+    }
+
+    #[test]
+    fn valid_depth_f16_frame_is_accepted() {
+        assert!(validate_frame_payload(FrameDtype::DepthF16, 4, 4, 4 * 4 * 2).is_ok());
+    }
+
+    #[test]
+    fn valid_depth_f32_frame_is_accepted() {
+        assert!(validate_frame_payload(FrameDtype::DepthF32, 4, 4, 4 * 4 * 4).is_ok());
+    }
+
+    #[test]
+    fn rgb_frame_with_depth_sized_payload_is_rejected() {
+        // Same byte count as a valid 4x4 f32 depth frame, but declared RGB —
+        // must be rejected, not silently accepted because the lengths differ
+        // from *some* valid combination.
+        let err = validate_frame_payload(FrameDtype::Rgb8, 4, 4, 4 * 4 * 4).unwrap_err();
+        assert!(err.contains("expected width*height*3"), "got: {err}");
+    }
+
+    #[test]
+    fn depth_frame_with_rgb_sized_payload_is_rejected() {
+        let err = validate_frame_payload(FrameDtype::DepthF16, 4, 4, 4 * 4 * 3).unwrap_err();
+        assert!(err.contains("expected width*height*2"), "got: {err}");
+    }
+
+    #[test]
+    fn zero_dimensions_are_rejected_for_every_dtype() {
+        for dtype in [FrameDtype::Rgb8, FrameDtype::DepthF16, FrameDtype::DepthF32] {
+            assert!(validate_frame_payload(dtype, 0, 4, 0).is_err());
+            assert!(validate_frame_payload(dtype, 4, 0, 0).is_err());
+        }
+    }
+
+    #[test]
+    fn overflowing_dimensions_reject_cleanly_instead_of_wrapping() {
+        // u32::MAX * u32::MAX * 4 overflows usize on 32-bit targets and would
+        // wrap silently under an unchecked multiply; on 64-bit it still
+        // overflows once cubed against bytes_per_pixel for a large enough
+        // combination. Either way this must error, never panic or wrap.
+        let result = validate_frame_payload(FrameDtype::DepthF32, u32::MAX, u32::MAX, 0);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("overflows"));
+    }
+
+    #[test]
+    fn wrong_byte_length_produces_a_clear_rgb_error() {
+        // Regression guard: the existing RGB error message shape (byte counts
+        // + the expected formula) must stay meaningful after adding dtype.
+        let err = validate_frame_payload(FrameDtype::Rgb8, 10, 10, 42).unwrap_err();
+        assert!(err.contains("42 bytes"), "got: {err}");
+        assert!(err.contains("300 bytes"), "got: {err}");
+    }
+
+    #[test]
+    fn unsupported_dtype_label_is_rejected() {
+        assert_eq!(FrameDtype::from_wire_label("int32"), None);
+        assert_eq!(FrameDtype::from_wire_label("float64"), None);
+    }
+
+    #[test]
+    fn valid_data_type_dtype_pairs_are_accepted() {
+        assert_eq!(
+            parse_frame_dtype("RGB_IMAGES", "uint8"),
+            Ok(FrameDtype::Rgb8)
+        );
+        assert_eq!(
+            parse_frame_dtype("DEPTH_IMAGES", "float16"),
+            Ok(FrameDtype::DepthF16)
+        );
+        assert_eq!(
+            parse_frame_dtype("DEPTH_IMAGES", "float32"),
+            Ok(FrameDtype::DepthF32)
+        );
+    }
+
+    #[test]
+    fn invalid_data_type_dtype_pairs_are_rejected() {
+        for (data_type, dtype) in [
+            ("RGB_IMAGES", "float16"),
+            ("RGB_IMAGES", "float32"),
+            ("DEPTH_IMAGES", "uint8"),
+        ] {
+            let error = parse_frame_dtype(data_type, dtype).unwrap_err();
+            assert!(error.contains("incompatible"), "unexpected error: {error}");
+        }
+    }
 }

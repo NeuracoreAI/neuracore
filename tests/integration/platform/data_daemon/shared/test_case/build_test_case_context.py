@@ -20,6 +20,7 @@ import numpy as np
 
 import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
+from neuracore.core.utils.depth_utils import MAX_DEPTH
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
@@ -32,11 +33,17 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     camera_names,
     case_id,
+    depth_camera_names,
     generate_joint_values,
     joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATASET_POLL_INTERVAL_S,
+    DEPTH_FRAME_BASE_FRACTION,
+    DEPTH_FRAME_BASE_MODULUS,
+    DEPTH_FRAME_COL_FRACTION,
+    DEPTH_FRAME_FLOOR_FRACTION,
+    DEPTH_FRAME_ROW_FRACTION,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
@@ -53,6 +60,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_RECORDING_OVERHEAD_PER_SEC,
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
+    DepthMode,
     random_phase_jitter_window,
 )
 
@@ -150,6 +158,110 @@ def preallocate_frame_buffer(
     return frame_buffer
 
 
+def encode_depth_frame(
+    frame_num: int,
+    width: int,
+    height: int,
+    mode: DepthMode,
+    out: np.ndarray | None = None,
+) -> np.ndarray:
+    """Build a deterministic, non-zero, spatially non-uniform depth frame.
+
+    The value at ``(row, col)`` is::
+
+        floor + base(frame_num) + row_gradient(row) + col_gradient(col)
+
+    where each term is a distinct fraction of ``MAX_DEPTH`` (see module
+    docs on :data:`~.constants.DEPTH_FRAME_BASE_FRACTION` and friends):
+
+    - ``floor`` — a small constant so no pixel is ever exactly zero (a
+      round-trip check against an all-zero frame would trivially pass for
+      the wrong reason).
+    - ``base(frame_num)`` — a pseudo-random-looking but deterministic
+      per-frame offset, keyed off the same composite ``frame_num`` the RGB
+      producer already derives from ``(context_index, recording_index,
+      camera_index, frame_index)`` — so distinct frames/cameras/recordings
+      never collide on the same pattern.
+    - ``row_gradient``/``col_gradient`` — linear ramps with *different*
+      amplitudes, so a width/height mix-up or an accidental transpose
+      shifts the decoded pattern into a detectably wrong shape rather than
+      leaving it looking correct.
+
+    The sum of all terms never exceeds ``0.85 * MAX_DEPTH``, so the pattern
+    never saturates at the encoding's clip boundary — saturation would flatten
+    the very differences this pattern exists to preserve.
+
+    Args:
+        frame_num: Composite per-frame identity (see above). Only
+            ``frame_num % DEPTH_FRAME_BASE_MODULUS`` affects the output.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        mode: ``"float16"`` or ``"float32"`` — the array is cast to this
+            dtype before being returned, matching what ``nc.log_depth()``
+            actually transmits (the cast is the ground truth a round-trip
+            check must compare against, not the pre-cast float pattern).
+        out: If given, write into this preallocated ``(height, width)``
+            array instead of allocating a new one. Must already have the
+            dtype matching ``mode``. Callers that pass ``out`` must never
+            retain the returned array past the point where its contents may
+            next be overwritten.
+
+    Returns:
+        A NumPy array with shape ``(height, width)`` and dtype ``float16``
+        or ``float32`` per ``mode``.
+    """
+    dtype = np.float16 if mode == "float16" else np.float32
+    base = (
+        (frame_num % DEPTH_FRAME_BASE_MODULUS)
+        / DEPTH_FRAME_BASE_MODULUS
+        * (MAX_DEPTH * DEPTH_FRAME_BASE_FRACTION)
+    )
+    row_gradient = (np.arange(height, dtype=np.float32) / max(height - 1, 1)) * (
+        MAX_DEPTH * DEPTH_FRAME_ROW_FRACTION
+    )
+    col_gradient = (np.arange(width, dtype=np.float32) / max(width - 1, 1)) * (
+        MAX_DEPTH * DEPTH_FRAME_COL_FRACTION
+    )
+    floor = MAX_DEPTH * DEPTH_FRAME_FLOOR_FRACTION
+
+    pattern = floor + base + row_gradient[:, None] + col_gradient[None, :]
+
+    if out is None:
+        return pattern.astype(dtype)
+    out[:] = pattern.astype(dtype)
+    return out
+
+
+def preallocate_depth_buffer(
+    should_allocate: bool,
+    image_width: int | None,
+    image_height: int | None,
+    mode: DepthMode,
+) -> np.ndarray | None:
+    """Preallocate a reusable depth frame buffer, or return ``None``.
+
+    Mirrors :func:`preallocate_frame_buffer` for depth cameras: callers reuse
+    a single buffer across iterations (via :func:`encode_depth_frame`'s
+    ``out`` param) instead of allocating a new array per frame.
+
+    Args:
+        should_allocate: Whether this caller needs a buffer at all (e.g. the
+            recording has depth cameras, or this thread's role is "depth").
+        image_width: Frame width in pixels, or ``None`` if not depth.
+        image_height: Frame height in pixels, or ``None`` if not depth.
+        mode: ``"float16"`` or ``"float32"`` — determines the buffer's dtype.
+
+    Returns:
+        A preallocated ``(image_height, image_width)`` array of the dtype
+        matching ``mode``, or ``None`` if ``should_allocate`` is ``False`` or
+        either dimension is ``None``.
+    """
+    if not should_allocate or image_width is None or image_height is None:
+        return None
+    dtype = np.float16 if mode == "float16" else np.float32
+    return np.empty((image_height, image_width), dtype=dtype)
+
+
 @dataclass(frozen=True, slots=True)
 class RecordingExpectedTimestamps:
     """Expected timestamps per trace for one recording, keyed by semantic trace name.
@@ -194,6 +306,8 @@ class ContextCaseSpec:
     video_fps: int
     wait: bool
     random_phase: bool
+    depth_count: int = 0
+    depth_mode: DepthMode = "float32"
 
     @property
     def stop_recording_sla_s(self) -> float:
@@ -204,10 +318,14 @@ class ContextCaseSpec:
         until every trace has uploaded, so its budget is the sum of the
         joint-data and video-data upload costs: total joint samples
         (``duration_sec * joint_count * joint_fps``) and total video pixels
-        (``duration_sec * video_fps * video_count * image_width *
-        image_height``), each times an observed per-unit upload cost. The
-        budget is floored at the duration-based overhead so short or
-        low-volume recordings keep a sane minimum.
+        across both RGB and depth cameras (``duration_sec * video_fps *
+        (video_count + depth_count) * image_width * image_height``), each
+        times an observed per-unit upload cost. Depth cameras reuse the RGB
+        per-pixel upload constant as a first approximation — both are
+        video-family traces that always keep a lossless archive, so their
+        upload cost is comparable order-of-magnitude, though not necessarily
+        identical. The budget is floored at the duration-based overhead so
+        short or low-volume recordings keep a sane minimum.
         """
         if not self.wait:
             return STOP_RECORDING_NO_WAIT_SLA_S
@@ -219,11 +337,12 @@ class ContextCaseSpec:
             * STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S
         )
         video_budget = 0.0
-        if self.video_count and self.image_width and self.image_height:
+        camera_count = self.video_count + self.depth_count
+        if camera_count and self.image_width and self.image_height:
             video_budget = (
                 self.duration_sec
                 * self.video_fps
-                * self.video_count
+                * camera_count
                 * self.image_width
                 * self.image_height
                 * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
@@ -278,6 +397,10 @@ class ContextResult:
     timer_stats: dict[str, dict[str, float]] = field(default_factory=dict)
     recording_indexes: list[int] = field(default_factory=list)
     source: tuple[str, int] = ("", 0)
+    depth_camera_names: list[str] = field(default_factory=list)
+    depth_frame_count: int = 0
+    depth_mode: DepthMode = "float32"
+    has_depth: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +476,8 @@ def build_context_specs(
                     video_fps=case.video_fps,
                     wait=case.wait,
                     random_phase=case.random_phase,
+                    depth_count=case.depth_count,
+                    depth_mode=case.depth_mode,
                 ),
                 context_index=context_index,
                 robot_name=f"matrix_robot_{uuid.uuid4().hex[:10]}",
@@ -441,6 +566,8 @@ def log_synchronous_frames(
     recording_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
+    depth_camera_name_list: list[str],
+    depth_mode: DepthMode,
     image_width: int | None,
     image_height: int | None,
     joint_fps: int,
@@ -455,14 +582,21 @@ def log_synchronous_frames(
     as the transport allows, save for the fixed *log_interval_s* sleep after
     each iteration — the timestamps themselves are never paced to wall clock.
     Frames are interleaved in timestamp order so the daemon receives them the
-    way a real producer would order them.
+    way a real producer would order them. Depth cameras (if any) share the
+    RGB video timestamp sequence and are logged alongside the RGB cameras at
+    each video timestamp.
     """
     frame_buffer = preallocate_frame_buffer(
         bool(camera_name_list), image_width, image_height
     )
+    depth_buffer = preallocate_depth_buffer(
+        bool(depth_camera_name_list), image_width, image_height, depth_mode
+    )
 
     joint_frame_count = len(joint_timestamps)
-    video_frame_count = len(video_timestamps) if camera_name_list else 0
+    video_frame_count = (
+        len(video_timestamps) if camera_name_list or depth_camera_name_list else 0
+    )
     joint_index = 0
     video_index = 0
 
@@ -540,6 +674,29 @@ def log_synchronous_frames(
                         robot_name=robot_name,
                         timestamp=timestamp,
                     )
+            for depth_camera_index, depth_camera_name in enumerate(
+                depth_camera_name_list
+            ):
+                frame_code = (
+                    (context_index * 1_000_000_000)
+                    + (recording_index * 10_000_000)
+                    + (depth_camera_index * 100_000)
+                    + video_index
+                )
+                depth_image = encode_depth_frame(
+                    frame_code, image_width, image_height, depth_mode, out=depth_buffer
+                )
+                with Timer(
+                    MAX_TIME_TO_LOG_S,
+                    label="nc.log_depth",
+                    assert_deadline=assert_deadline,
+                ):
+                    nc.log_depth(
+                        depth_camera_name,
+                        depth_image,
+                        robot_name=robot_name,
+                        timestamp=timestamp,
+                    )
             video_index += 1
 
         if log_interval_s:
@@ -550,6 +707,7 @@ def build_thread_roles(
     *,
     joint_names: list[str],
     camera_name_list: list[str],
+    depth_camera_name_list: list[str],
 ) -> list[dict[str, object]]:
     """Build role specs for per-thread logging."""
     roles: list[dict[str, object]] = []
@@ -558,6 +716,12 @@ def build_thread_roles(
             "role": "rgb",
             "camera_names": [camera_name],
             "marker_name": f"marker_{camera_name}",
+        })
+    for depth_camera_name in depth_camera_name_list:
+        roles.append({
+            "role": "depth",
+            "camera_names": [depth_camera_name],
+            "marker_name": f"marker_{depth_camera_name}",
         })
     for role_name in ("joint_positions", "joint_velocities", "joint_torques"):
         roles.append({
@@ -578,6 +742,8 @@ def run_threaded_logging(
     context_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
+    depth_camera_name_list: list[str],
+    depth_mode: DepthMode,
     image_width: int | None,
     image_height: int | None,
     assert_deadline: bool = False,  # only set by performance tests
@@ -588,13 +754,16 @@ def run_threaded_logging(
     Every role emits the timestamp sequence its stream was given, as fast as the
     transport allows, save for the fixed *log_interval_s* sleep after each
     iteration — the timestamps themselves are never paced to wall clock.  Each
-    role paces its own stream, so the rgb roles that feed the daemon's spool are
-    capped independently of the joint roles.  All joint roles share the joint
-    sequence, so the three joint data types stay aligned exactly as they do in
-    the synchronous producer.
+    role paces its own stream, so the rgb/depth roles that feed the daemon's
+    spool are capped independently of the joint roles.  All joint roles share
+    the joint sequence, so the three joint data types stay aligned exactly as
+    they do in the synchronous producer. Depth roles share the RGB video
+    timestamp sequence, exactly as in the synchronous producer.
     """
     roles = build_thread_roles(
-        joint_names=joint_names, camera_name_list=camera_name_list
+        joint_names=joint_names,
+        camera_name_list=camera_name_list,
+        depth_camera_name_list=depth_camera_name_list,
     )
     barrier = threading.Barrier(len(roles))
     thread_errors: list[BaseException] = []
@@ -606,8 +775,12 @@ def run_threaded_logging(
             role_name = str(role_spec["role"])
             marker_name = str(role_spec["marker_name"])
             is_rgb = role_name == "rgb"
-            timestamps = video_timestamps if is_rgb else joint_timestamps
+            is_depth = role_name == "depth"
+            timestamps = video_timestamps if (is_rgb or is_depth) else joint_timestamps
             frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            depth_buffer = preallocate_depth_buffer(
+                is_depth, image_width, image_height, depth_mode
+            )
             for frame_index, timestamp in enumerate(timestamps):
                 if is_rgb:
                     for camera_offset, camera_name in enumerate(
@@ -632,6 +805,39 @@ def run_threaded_logging(
                             nc.log_rgb(
                                 camera_id,
                                 rgb_image,
+                                robot_name=robot_name,
+                                timestamp=timestamp,
+                            )
+                elif is_depth:
+                    for camera_offset, camera_name in enumerate(
+                        role_spec["camera_names"]
+                    ):
+                        depth_camera_id = str(camera_name)
+                        depth_camera_index = (
+                            depth_camera_name_list.index(depth_camera_id)
+                            + camera_offset
+                        )
+                        frame_code = (
+                            (context_index * 1_000_000_000)
+                            + (recording_index * 10_000_000)
+                            + (depth_camera_index * 100_000)
+                            + frame_index
+                        )
+                        depth_image = encode_depth_frame(
+                            frame_code,
+                            image_width,
+                            image_height,
+                            depth_mode,
+                            out=depth_buffer,
+                        )
+                        with Timer(
+                            MAX_TIME_TO_LOG_S,
+                            label="nc.log_depth",
+                            assert_deadline=assert_deadline,
+                        ):
+                            nc.log_depth(
+                                depth_camera_id,
+                                depth_image,
                                 robot_name=robot_name,
                                 timestamp=timestamp,
                             )
@@ -748,6 +954,7 @@ def log_frames(
     joint_timestamps, video_timestamps = recording_timestamps(spec, recording_index)
     joint_name_list = joint_names_for_count(spec.case.joint_count)
     camera_name_list = camera_names(spec.case.video_count)
+    depth_camera_name_list = depth_camera_names(spec.case.depth_count)
 
     if spec.case.producer_channels == PRODUCER_PER_THREAD:
         return run_threaded_logging(
@@ -759,6 +966,8 @@ def log_frames(
             context_index=spec.context_index,
             joint_names=joint_name_list,
             camera_name_list=camera_name_list,
+            depth_camera_name_list=depth_camera_name_list,
+            depth_mode=spec.case.depth_mode,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
             assert_deadline=spec.assert_deadline,
@@ -772,6 +981,8 @@ def log_frames(
         recording_index=recording_index,
         joint_names=joint_name_list,
         camera_name_list=camera_name_list,
+        depth_camera_name_list=depth_camera_name_list,
+        depth_mode=spec.case.depth_mode,
         image_width=spec.case.image_width,
         image_height=spec.case.image_height,
         joint_fps=spec.case.joint_fps,
@@ -838,6 +1049,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     case = spec.case
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
+    depth_camera_name_list = depth_camera_names(case.depth_count)
     marker_names: list[str] = []
     recording_ids: list[str] = []
     recording_indexes: list[int] = []
@@ -909,6 +1121,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             for camera in camera_name_list:
                 safe_cam = validate_safe_name(camera)
                 by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
+            for depth_camera in depth_camera_name_list:
+                safe_depth_cam = validate_safe_name(depth_camera)
+                by_trace[f"DEPTH_IMAGES/{safe_depth_cam}"] = video_ts
             # CUSTOM_1D marker — name depends on producer_channels mode
             if case.producer_channels == PRODUCER_PER_THREAD:
                 # One marker per joint data type thread
@@ -921,6 +1136,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
                 for camera in camera_name_list:
                     safe_marker = validate_safe_name(f"marker_{camera}")
+                    by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
+                for depth_camera in depth_camera_name_list:
+                    safe_marker = validate_safe_name(f"marker_{depth_camera}")
                     by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
             else:
                 safe_marker = validate_safe_name("marker_synchronous")
@@ -976,6 +1194,12 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 by_recording=expected_by_recording
             ),
             timer_stats=captured_timer_stats,
+            depth_camera_names=depth_camera_name_list,
+            depth_frame_count=(
+                spec.expected_video_frames if depth_camera_name_list else 0
+            ),
+            depth_mode=case.depth_mode,
+            has_depth=bool(depth_camera_name_list),
         )
     except Exception:
         if robot is not None:
