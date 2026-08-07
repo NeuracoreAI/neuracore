@@ -12,8 +12,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_FLAT,
+    DETAIL_REALISTIC,
+    FRAME_BYTE_LENGTH,
+    FRAME_COLOR_CHANNELS,
+    FRAME_GRID_SIZE,
+    LOSSLESS_CONTENT_BYTES_PER_PIXEL,
+)
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    frame_code_base,
+)
 
 if TYPE_CHECKING:
+    from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (  # noqa: E501
+        DataDaemonTestCase,
+    )
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
         ContextResult,
     )
@@ -64,8 +78,54 @@ TRACE_JSON_NAME = "trace.json"
 VIDEO_TRACE_DATA_TYPES = {"RGB_IMAGES", "DEPTH_IMAGES"}
 """Data types whose traces produce video files in addition to trace.json."""
 
-VIDEO_TRACE_FILENAMES = {TRACE_JSON_NAME, "lossy.mp4", "lossless.mp4"}
-"""Expected on-disk file names for a video trace directory."""
+LOSSY_VIDEO_NAME = "lossy.mp4"
+"""Lossy H.264 video: a downscaled preview, or the only video in lossy-only mode."""
+
+LOSSLESS_VIDEO_NAME = "lossless.mp4"
+"""Bit-exact H.264 archive, written unless the case selects a lossy-only codec."""
+
+VIDEO_FILENAMES = frozenset({LOSSY_VIDEO_NAME, LOSSLESS_VIDEO_NAME})
+"""Every video file name a trace directory can hold."""
+
+
+@dataclass(frozen=True, slots=True)
+class VideoArtifact:
+    """One video file a case's codec makes the daemon write, and what it proves.
+
+    Attributes:
+        filename: Name of the file within the trace directory.
+        content_bytes_per_pixel: Encoded-size separator that decides whether this
+            artefact's content matches the case's ``video_detail``, or ``None``
+            when its size cannot decide that (see
+            :data:`LOSSLESS_CONTENT_BYTES_PER_PIXEL`).
+    """
+
+    filename: str
+    content_bytes_per_pixel: float | None
+
+
+def expected_video_artifacts(case: DataDaemonTestCase) -> tuple[VideoArtifact, ...]:
+    """Return the video artefacts *case*'s codec makes the daemon write.
+
+    ``nc.Codec.H264_MEDIUM`` (``case.lossy_only``) writes a single
+    full-resolution CRF-23 video and no archive.  The default codec writes the
+    bit-exact archive plus a preview downscaled to 480 lines.
+
+    Only the archive is judged on size: a lossy encode's bytes/pixel does not
+    separate realistic frames from flat fill, so both lossy artefacts carry no
+    separator and are checked structurally.  Frame content is generated upstream
+    of codec selection, so the archive-writing cases in the same suite are what
+    catch a frame source that regressed to flat fill.
+    """
+    if case.lossy_only:
+        return (VideoArtifact(filename=LOSSY_VIDEO_NAME, content_bytes_per_pixel=None),)
+    return (
+        VideoArtifact(filename=LOSSY_VIDEO_NAME, content_bytes_per_pixel=None),
+        VideoArtifact(
+            filename=LOSSLESS_VIDEO_NAME,
+            content_bytes_per_pixel=LOSSLESS_CONTENT_BYTES_PER_PIXEL,
+        ),
+    )
 
 
 def list_recording_indexes_on_disk() -> set[int]:
@@ -399,61 +459,305 @@ def _ffprobe_video_stream(video_path: Path) -> dict | None:
     return streams[0] if streams else None
 
 
-def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
-    """Assert every RGB video trace on disk is a single lossy H.264 video.
-
-    For a recording made with ``nc.Codec.H264_MEDIUM`` the daemon writes only
-    ``lossy.mp4`` (libx264) and no ``lossless.mp4``. For every ``RGB_IMAGES``
-    trace directory under the recordings root this verifies:
-
-    - ``lossy.mp4`` exists and ``lossless.mp4`` does NOT,
-    - (when ffprobe is available) the video is H.264 and its frame count matches
-      the per-frame ``trace.json`` sidecar.
-
-    Works identically for the Python and Rust daemons (both write the same
-    on-disk artefact layout).
-
-    Args:
-        min_trace_count: Minimum number of RGB trace directories expected.
-    """
-    recordings_root = get_daemon_recordings_root_path()
-    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
-
-    trace_dirs = [
+def _rgb_trace_dirs(
+    recordings_root: Path, results: Iterable[ContextResult]
+) -> list[Path]:
+    """Return the ``RGB_IMAGES`` trace directories of the recordings in *results*."""
+    recording_dirs = sorted({
+        recordings_root / recording_key
+        for result in results
+        for recording_key, _ in _result_recording_keys(result)
+    })
+    return [
         trace_dir
-        for recording_dir in sorted(recordings_root.iterdir())
-        if recording_dir.is_dir()
+        for recording_dir in recording_dirs
         for rgb_dir in [recording_dir / "RGB_IMAGES"]
         if rgb_dir.is_dir()
         for trace_dir in sorted(rgb_dir.iterdir())
         if trace_dir.is_dir()
     ]
+
+
+def _assert_encoded_size_matches_detail(
+    *, video_path: Path, stream: dict, detail: str, separator: float
+) -> None:
+    """Assert the encoded size sits where ``video_detail`` says it should."""
+    width, height = stream.get("width"), stream.get("height")
+    nb_read_frames = stream.get("nb_read_frames")
+    if not width or not height or not nb_read_frames:
+        return
+    frame_count, pixels = int(nb_read_frames), int(width) * int(height)
+    if frame_count <= 0 or pixels <= 0:
+        return
+
+    encoded_bytes = video_path.stat().st_size
+    bytes_per_pixel = encoded_bytes / frame_count / pixels
+    evidence = f"{encoded_bytes} bytes, {frame_count} frames, {width}x{height}"
+    if detail == DETAIL_REALISTIC:
+        assert bytes_per_pixel > separator, (
+            f"{video_path} encodes {bytes_per_pixel:.4f} bytes/pixel ({evidence}),"
+            f" at or below the {separator} floor — the logged frames have"
+            f" regressed to near-trivial content and the video pipeline is not"
+            f" being exercised"
+        )
+        return
+    assert bytes_per_pixel < separator, (
+        f"{video_path} encodes {bytes_per_pixel:.4f} bytes/pixel ({evidence}), at"
+        f" or above the {separator} ceiling — a {DETAIL_FLAT}-detail case is"
+        f" carrying real frame content, so it is not the cheap workload it is"
+        f" calibrated as"
+    )
+
+
+def _assert_frame_count_matches_sidecar(
+    *, video_path: Path, stream: dict, trace_dir: Path
+) -> None:
+    """Assert the video holds exactly one frame per ``trace.json`` entry."""
+    trace_json = trace_dir / TRACE_JSON_NAME
+    nb_read_frames = stream.get("nb_read_frames")
+    if nb_read_frames is None or not trace_json.is_file():
+        return
+    expected_frames = len(json.loads(trace_json.read_text(encoding="utf-8")))
+    if expected_frames == 0:
+        return
+    assert int(nb_read_frames) == expected_frames, (
+        f"{video_path} has {nb_read_frames} frames, "
+        f"trace.json expects {expected_frames}"
+    )
+
+
+def _assert_video_artifact(
+    *, trace_dir: Path, artifact: VideoArtifact, detail: str
+) -> None:
+    """Assert one artefact exists, is well-formed, and carries the right content.
+
+    Everything past existence needs ffprobe, so on a host without it this
+    degrades to the file-existence check rather than failing.
+    """
+    video_path = trace_dir / artifact.filename
+    assert video_path.is_file(), f"missing {artifact.filename} in {trace_dir}"
+
+    stream = _ffprobe_video_stream(video_path)
+    if stream is None:
+        return
+    assert (
+        stream.get("codec_name") == "h264"
+    ), f"{video_path} should be H.264, got {stream.get('codec_name')!r}"
+    _assert_frame_count_matches_sidecar(
+        video_path=video_path, stream=stream, trace_dir=trace_dir
+    )
+
+    if artifact.content_bytes_per_pixel is not None:
+        _assert_encoded_size_matches_detail(
+            video_path=video_path,
+            stream=stream,
+            detail=detail,
+            separator=artifact.content_bytes_per_pixel,
+        )
+
+
+def assert_video_artifacts(
+    results: list[ContextResult],
+    case: DataDaemonTestCase,
+    min_trace_count: int = 1,
+) -> None:
+    """Assert every RGB video trace on disk holds the artefacts *case* implies.
+
+    One pass of the same checks covers all four (codec, detail) combinations —
+    what differs between them is data, not code path:
+
+    - **artefact set** — the lossy video is always written; the lossless archive
+      only when the case keeps the default codec, and it must be *absent*
+      otherwise, since a lossy-only recording that still wrote one would leave an
+      archive on disk the daemon never registers or uploads.
+    - **structure** — every artefact is H.264 and holds exactly as many frames as
+      its per-frame ``trace.json`` sidecar.
+    - **content** — an artefact whose size can decide the question (only the
+      lossless archive; see :func:`expected_video_artifacts`) must encode on the
+      side of its separator that ``case.video_detail`` claims.  See
+      :func:`_assert_encoded_size_matches_detail` for why both directions are
+      worth failing on.
+
+    Args:
+        results: Per-context results whose recordings scope the check.
+        case: The active test case.  Its codec selects the artefact set, its
+            ``video_detail`` selects the direction of the content assertions.
+        min_trace_count: Minimum number of RGB trace directories expected.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
+
+    trace_dirs = _rgb_trace_dirs(recordings_root, results)
     assert len(trace_dirs) >= min_trace_count, (
         f"expected at least {min_trace_count} RGB trace dir(s), "
         f"found {len(trace_dirs)} under {recordings_root}"
     )
 
+    artifacts = expected_video_artifacts(case)
+    forbidden_names = VIDEO_FILENAMES - {artifact.filename for artifact in artifacts}
+
     for trace_dir in trace_dirs:
-        lossy_path = trace_dir / "lossy.mp4"
-        lossless_path = trace_dir / "lossless.mp4"
-        assert lossy_path.is_file(), f"missing lossy.mp4 in {trace_dir}"
-        assert (
-            not lossless_path.exists()
-        ), f"lossy-only recording must not write lossless.mp4: {lossless_path}"
+        for filename in sorted(forbidden_names):
+            forbidden_path = trace_dir / filename
+            assert not forbidden_path.exists(), (
+                f"a {case.video_codec} recording must not write {filename}: "
+                f"{forbidden_path}"
+            )
+        for artifact in artifacts:
+            _assert_video_artifact(
+                trace_dir=trace_dir, artifact=artifact, detail=case.video_detail
+            )
 
-        stream = _ffprobe_video_stream(lossy_path)
-        if stream is None:
-            continue
-        assert (
-            stream.get("codec_name") == "h264"
-        ), f"{lossy_path} should be H.264, got {stream.get('codec_name')!r}"
 
-        trace_json = trace_dir / TRACE_JSON_NAME
-        if trace_json.is_file():
-            expected_frames = len(json.loads(trace_json.read_text(encoding="utf-8")))
-            nb_read_frames = stream.get("nb_read_frames")
-            if nb_read_frames is not None and expected_frames > 0:
-                assert int(nb_read_frames) == expected_frames, (
-                    f"{lossy_path} has {nb_read_frames} frames, "
-                    f"trace.json expects {expected_frames}"
+def _decode_frame_codes(video_path: Path) -> list[int] | None:
+    """Return the code painted into every frame of *video_path*, in stream order.
+
+    Crops to the top-left grid before writing raw frames out, so only the bytes
+    the code lives in cross the pipe — the decode still runs in full, but a
+    1080p archive costs 48 bytes a frame to read back instead of 6 MB.
+
+    Returns:
+        One code per decoded frame, or ``None`` when ffmpeg is unavailable — the
+        same degradation :func:`_ffprobe_video_stream` applies.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        return None
+    raw = subprocess.run(
+        [
+            ffmpeg,
+            "-v",
+            "error",
+            "-nostdin",
+            "-i",
+            str(video_path),
+            "-vf",
+            f"crop={FRAME_GRID_SIZE}:{FRAME_GRID_SIZE}:0:0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    ).stdout
+    grid_bytes = FRAME_GRID_SIZE * FRAME_GRID_SIZE * FRAME_COLOR_CHANNELS
+    return [
+        # Red channel of each grid pixel, row-major — the layout
+        # ``encode_frame_number`` paints and ``decode_frame_number`` reads.
+        int.from_bytes(
+            raw[offset : offset + grid_bytes][0::FRAME_COLOR_CHANNELS][
+                :FRAME_BYTE_LENGTH
+            ],
+            byteorder="big",
+        )
+        for offset in range(0, len(raw) - grid_bytes + 1, grid_bytes)
+    ]
+
+
+def _frame_code_failure(
+    *, video_path: Path, camera_name: str, codes: list[int], expected: list[int]
+) -> str:
+    """Describe how a trace's decoded frame codes differ from what was painted."""
+    if len(codes) != len(expected):
+        return (
+            f"{video_path} (camera {camera_name!r}) holds {len(codes)} frame(s),"
+            f" trace.json expects {len(expected)}"
+        )
+    mismatches = [
+        (index, actual, want)
+        for index, (actual, want) in enumerate(zip(codes, expected))
+        if actual != want
+    ]
+    examples = "; ".join(
+        f"[{index}] actual={actual} expected={want}"
+        for index, actual, want in mismatches[:3]
+    )
+    return (
+        f"{video_path} (camera {camera_name!r}):"
+        f" {len(mismatches)}/{len(codes)} frame code(s) mismatch — {examples}"
+        + (f" (+ {len(mismatches) - 3} more)" if len(mismatches) > 3 else "")
+    )
+
+
+def assert_disk_frame_codes(
+    results: list[ContextResult], case: DataDaemonTestCase
+) -> None:
+    """Assert the archive replays exactly the frames the producer painted.
+
+    Every logged camera frame carries its own code in its top-left 4x4 pixel
+    grid, and ``lossless.mp4`` is ``libx264rgb -qp 0``, so that grid survives the
+    encode untouched.  Decoding it back turns the archive into a per-frame
+    identity check: frame ``i`` must carry ``frame_code_base(...) + i``, in that
+    order, for exactly as many frames as the trace's ``trace.json`` holds.
+
+    This is the offline counterpart to the cloud pass's
+    :func:`~assertions._assert_synced_camera_codes_are_sane`, and it is strict
+    where that one cannot be.  The cloud pass reads a *synchronised* episode,
+    where the synchroniser legitimately repeats a frame to fill a sync point, so
+    it has to allow missing codes covered by duplicates.  The archive is the
+    captured sequence itself, so a dropped, duplicated, or reordered frame has
+    nowhere to hide here.
+
+    A lossy-only case perturbs the very pixels the codes live in and writes no
+    archive to read them from, so it is skipped — the same gate the cloud pass
+    applies.
+
+    Args:
+        results: Per-context results whose recordings scope the check.
+        case: The active test case; ``lossy_only`` decides whether codes survive.
+    """
+    if case.lossy_only:
+        return
+
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        fetch_all_traces,
+    )
+
+    recordings_root = get_daemon_recordings_root_path()
+
+    for result in results:
+        for recording_ordinal, recording_index in enumerate(result.recording_indexes):
+            rgb_dir = recordings_root / str(recording_index) / "RGB_IMAGES"
+            assert rgb_dir.is_dir(), f"no RGB_IMAGES traces on disk under {rgb_dir}"
+
+            camera_by_trace = {
+                str(row["trace_id"]): str(row.get("data_type_name") or "")
+                for row in fetch_all_traces(
+                    recording_index,
+                    columns=["trace_id", "data_type", "data_type_name"],
+                )
+                if row.get("trace_id") and row.get("data_type") == "RGB_IMAGES"
+            }
+
+            for trace_dir in sorted(p for p in rgb_dir.iterdir() if p.is_dir()):
+                camera_name = camera_by_trace.get(trace_dir.name)
+                assert camera_name in result.camera_names, (
+                    f"{trace_dir} maps to camera {camera_name!r}, which is not one"
+                    f" of this context's cameras {result.camera_names}"
+                )
+                video_path = trace_dir / LOSSLESS_VIDEO_NAME
+                trace_json = trace_dir / TRACE_JSON_NAME
+                assert (
+                    video_path.is_file()
+                ), f"missing {LOSSLESS_VIDEO_NAME} in {trace_dir}"
+                assert trace_json.is_file(), f"missing {TRACE_JSON_NAME} in {trace_dir}"
+
+                codes = _decode_frame_codes(video_path)
+                if codes is None:
+                    return
+
+                base_code = frame_code_base(
+                    context_index=result.context_index,
+                    recording_ordinal=recording_ordinal,
+                    camera_index=result.camera_names.index(camera_name),
+                )
+                frame_count = len(json.loads(trace_json.read_text(encoding="utf-8")))
+                expected = [base_code + index for index in range(frame_count)]
+                assert codes == expected, _frame_code_failure(
+                    video_path=video_path,
+                    camera_name=camera_name,
+                    codes=codes,
+                    expected=expected,
                 )

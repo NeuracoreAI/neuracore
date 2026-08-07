@@ -66,6 +66,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     case_timeout_seconds,
 )
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    frame_code_base,
+)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
@@ -372,10 +375,10 @@ def _assert_synced_camera_codes_are_sane(
     expected recording/camera code namespace, remain monotonic, and that no
     expected frame codes are missing.
     """
-    base_code = (
-        (context_index * 1_000_000_000)
-        + (recording_index * 10_000_000)
-        + (camera_index * 100_000)
+    base_code = frame_code_base(
+        context_index=context_index,
+        recording_ordinal=recording_index,
+        camera_index=camera_index,
     )
     max_code = base_code + max(expected_video_frame_count - 1, 0)
 
@@ -553,7 +556,7 @@ def _verify_synched_episode_summary(
     # Frame codes are integers painted into each frame's pixels so the decoded
     # video can be checked for ordering/completeness. Lossy encoding
     # (nc.Codec.H264_MEDIUM) perturbs those pixels, so the exact codes do not
-    # survive round-trip
+    # survive round-trip. Frame *counts* are asserted above either way.
     if case.lossy_only:
         return
     for camera_index, camera_name in enumerate(result.camera_names):

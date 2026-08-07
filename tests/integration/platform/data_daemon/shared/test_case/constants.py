@@ -56,6 +56,10 @@ DURATION_MODE_VARIABLE = "variable"
 DURATION_VARIABLE_MIN_FACTOR = 0.75
 DURATION_VARIABLE_MAX_FACTOR = 1.25
 
+# video_detail
+DETAIL_REALISTIC = "realistic"
+DETAIL_FLAT = "flat"
+
 # Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 RANDOM_PHASE_JITTER_FACTOR = 0.5
@@ -85,6 +89,7 @@ LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
+VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -93,6 +98,7 @@ DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 StopMethod = Literal["cli", "sigterm", "sigkill"]
 StorageStateAction = Literal["delete", "preserve", "empty"]
 LogAction = Literal["preserve", "delete"]
+VideoDetail = Literal["realistic", "flat"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
@@ -110,3 +116,7 @@ FRAME_DEFAULT_FILL_VALUE = 100
 FRAME_MAX_COLOR_VALUE = 255
 FRAME_HALF_DIVISOR = 2
 FRAME_COLOR_CHANNELS = 3
+
+# Separates realistic frame content from flat fill by the size of the encoded
+# ``lossless.mp4`` archive, in bytes per pixel per frame
+LOSSLESS_CONTENT_BYTES_PER_PIXEL = 0.1
