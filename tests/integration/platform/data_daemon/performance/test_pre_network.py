@@ -24,7 +24,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    scoped_storage_state,
+    scoped_test_dir_state,
 )
 
 # Performance workloads target the daemon's throughput ceiling.
@@ -53,7 +53,7 @@ def test_disk_db_write_performance(
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
     with performance_report(case, dataset_name=dataset_name) as report:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_test_dir_state(case, dataset_name=dataset_name):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
                 report.capture_results(

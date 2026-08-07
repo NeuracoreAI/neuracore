@@ -29,7 +29,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    scoped_storage_state,
+    scoped_test_dir_state,
     set_case_analysis_report,
 )
 
@@ -77,7 +77,7 @@ def test_offline_pending_data_recovers_when_online(
     results: list[ContextResult] = []
 
     try:
-        with scoped_storage_state(case, dataset_name=dataset_name):
+        with scoped_test_dir_state(case, dataset_name=dataset_name):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)
