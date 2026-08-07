@@ -165,14 +165,15 @@ class Auth(metaclass=SingletonMetaclass):
         correctly and prevents issues from version mismatches.
 
         Raises:
-            AuthenticationError: If version validation fails due to
-                incompatible versions or server communication issues.
+            VersionMismatchError: If the server reports an incompatible client
+                version (HTTP 4xx).
+            AuthenticationError: If version validation fails due to server
+                communication issues (including transient HTTP 5xx after retries).
         """
-        # Placeholder for version validation logic
         from neuracore_types import __version__ as nc_types_version
 
         try:
-            session = thread_local_session()
+            session = thread_local_session(retry_transient=True)
             response = session.get(
                 f"{API_URL}/auth/verify-version",
                 params={"version": nc_types_version},
@@ -183,9 +184,15 @@ class Auth(metaclass=SingletonMetaclass):
             if response is None:
                 raise AuthenticationError(str(exc)) from exc
 
-            error_message = _format_version_validation_error(response)
-            raise VersionMismatchError(
-                error_message, response_payload=_response_json_payload(response)
+            if 400 <= response.status_code < 500:
+                error_message = _format_version_validation_error(response)
+                raise VersionMismatchError(
+                    error_message, response_payload=_response_json_payload(response)
+                ) from exc
+
+            detail = extract_error_detail(response) or str(exc)
+            raise AuthenticationError(
+                detail, response_payload=_response_json_payload(response)
             ) from exc
         except requests.exceptions.ConnectionError as exc:
             raise AuthenticationError(str(exc)) from exc
