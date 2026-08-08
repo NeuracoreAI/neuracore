@@ -36,4 +36,4 @@ Workflow files use kebab-case with environment suffix:
 integration-<category>-<test-name>-<prod|staging>.yaml
 ```
 
-Example: `integration-ml-resume-training-prod.yaml`
+Example: `integration-ml-lifecycle-prod.yaml`
