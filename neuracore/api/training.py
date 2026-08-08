@@ -14,6 +14,7 @@ from neuracore_types import (
     GPUType,
     SynchronizationDetails,
     TrainingJobRequest,
+    estimate_min_disk_size_gb,
 )
 
 from neuracore.core.config.get_current_org import get_current_org
@@ -156,13 +157,19 @@ def start_training_run(
         )
     )
 
-    # Validate that the machine size is large enough for the dataset.
-    dataset_size_gb = dataset.size_bytes / 1_000_000_000
-    if disk_size_gb <= dataset_size_gb:
+    # Validate that the machine disk is large enough for training workloads.
+    min_disk_size_gb = estimate_min_disk_size_gb(
+        size_bytes=dataset.size_bytes,
+        num_demonstrations=len(dataset),
+        hydra_arg_name=algorithm_name,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
+    )
+    if disk_size_gb < min_disk_size_gb:
         raise ValueError(
-            f"Dataset {dataset_name} is {dataset_size_gb:.2f} GB, "
-            f"but selected VM disk is {disk_size_gb} GB. "
-            "Please increase disk_size_gb."
+            f"Estimated minimum disk for this training job is "
+            f"{min_disk_size_gb} GB, but selected VM disk is "
+            f"{disk_size_gb} GB. Please increase disk_size_gb."
         )
 
     validate_training_params(
