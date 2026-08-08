@@ -19,7 +19,9 @@ Contents:
 - **Wait helpers** — :func:`wait_for_dataset_ready`,
   :func:`wait_for_recording_to_exist_in_db`,
   :func:`wait_for_offline_db_ready`, :func:`wait_for_all_traces_written`,
-    :func:`wait_for_upload_complete_in_db`.
+    :func:`wait_for_upload_complete_in_db`,
+    :func:`latching_upload_observer`,
+    :meth:`ObservedRecordingUploads.wait_for_all_complete`
 """
 
 from __future__ import annotations
@@ -27,9 +29,10 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sqlite3
+import threading
 import time
-from collections.abc import Callable, Iterable
-from contextlib import closing
+from collections.abc import Callable, Generator, Iterable
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -92,15 +95,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _recording_correlation_column() -> str:
-    """Return the recordings/traces correlation column.
-
-    Recordings are keyed by the local INTEGER ``recording_index``; the cloud
-    ``recording_id`` is a separate, nullable column.
-    """
-    return COLUMN_RECORDING_INDEX
 
 
 class DaemonDbStore:
@@ -171,7 +165,7 @@ class DaemonDbStore:
         ``recording_key`` is the daemon's correlation key: the local INTEGER
         ``recording_index``.
         """
-        correlation_column = _recording_correlation_column()
+        correlation_column = COLUMN_RECORDING_INDEX
         with closing(self.connect()) as conn:
             row = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {correlation_column} = ?",
@@ -211,7 +205,7 @@ class DaemonDbStore:
         Traces join to recordings on the correlation column, the integer
         ``recording_index``.
         """
-        correlation_column = _recording_correlation_column()
+        correlation_column = COLUMN_RECORDING_INDEX
         with closing(self.connect_read_only()) as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
@@ -384,15 +378,20 @@ def resolve_cloud_recording_ids(
     results: list[ContextResult],
     *,
     timeout_s: float = 60.0,
+    observed: ObservedRecordingUploads | None = None,
 ) -> list[ContextResult]:
     """Return copies of *results* with cloud ``recording_ids`` resolved.
 
     The cloud ``recording_id`` is populated asynchronously by the
     start-notifier once the daemon is online, so the captured ids may have been
-    NULL at record time. This reads the daemon DB directly by ``recording_index``
-    (which the recording worker already captured) and waits until each row's
-    cloud ``recording_id`` is filled in, so cloud verification (which matches the
-    dataset's ``recording.id``) has the correct ids.
+    NULL at record time. Ids latched by a :func:`latching_upload_observer` during
+    the record phase are used first; the rest are read from the daemon DB by
+    ``recording_index`` (which the recording worker already captured), waiting
+    until each row's cloud ``recording_id`` is filled in, so cloud verification
+    (which matches the dataset's ``recording.id``) has the correct ids.
+
+    Preferring the observed id is what keeps this correct once the recording
+    reaper has run. Recordings made offline have no id to observe.
 
     Resolving from the DB rather than ``nc.get_cloud_recording_id`` is required
     here: recordings are made in worker subprocesses, so the verifying process
@@ -406,9 +405,11 @@ def resolve_cloud_recording_ids(
     for result in results:
         cloud_ids: list[str] = []
         for recording_index in result.recording_indexes:
-            cloud_id = _wait_for_cloud_recording_id(
-                recording_index, timeout_s=timeout_s
-            )
+            cloud_id = observed.get_cloud_id(recording_index) if observed else None
+            if not cloud_id:
+                cloud_id = _wait_for_cloud_recording_id(
+                    recording_index, timeout_s=timeout_s
+                )
             assert cloud_id, (
                 f"Cloud recording_id never populated for recording_index "
                 f"{recording_index} (robot {result.robot_name!r}) within "
@@ -1154,6 +1155,119 @@ def assert_recording_db_statuses(
         f"({len(non_uploaded)}/{len(traces)}):\n"
         + "\n".join(f"  {t}" for t in non_uploaded)
     )
+
+
+class ObservedRecordingUploads:
+    """Terminal upload states latched while the daemon still held the rows.
+
+    Written by the :func:`latching_upload_observer` thread, read by the
+    verification helpers on the main thread — hence the lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._completed: set[int | str] = set()
+        self._cloud_ids: dict[int | str, str] = {}
+
+    def record_complete(self, recording_key: int | str) -> None:
+        """Latch ``recording_key`` as having reached upload completion."""
+        with self._lock:
+            self._completed.add(recording_key)
+
+    def record_cloud_id(self, recording_key: int | str, cloud_id: str) -> None:
+        """Latch the cloud ``recording_id`` seen for ``recording_key``."""
+        with self._lock:
+            self._cloud_ids[recording_key] = cloud_id
+
+    def is_complete(self, recording_key: int | str) -> bool:
+        """Return ``True`` when upload completion was observed for this key."""
+        with self._lock:
+            return recording_key in self._completed
+
+    def get_cloud_id(self, recording_key: int | str) -> str | None:
+        """Return the cloud ``recording_id`` observed for this key, if any."""
+        with self._lock:
+            return self._cloud_ids.get(recording_key)
+
+    def wait_for_all_complete(
+        self,
+        recording_keys: Iterable[int | str],
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.05,
+    ) -> None:
+        """Block until every key in *recording_keys* has latched as complete.
+
+        Raises:
+            AssertionError: If any key has not latched complete within
+                ``timeout_s``.
+        """
+        deadline = time.monotonic() + timeout_s
+        pending = set(recording_keys)
+        while True:
+            with self._lock:
+                pending -= self._completed
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "Upload completion not observed for recording_index(es) "
+                    f"{sorted(pending, key=str)} within {timeout_s}s"
+                )
+            time.sleep(poll_interval_s)
+
+
+@contextmanager
+def latching_upload_observer(
+    poll_interval_s: float = 0.5,
+) -> Generator[ObservedRecordingUploads]:
+    """Latch each recording's terminal upload state as it happens.
+
+    This polls for that window and remembers what it saw, so the verification helpers
+    can assert on an observation taken in time instead of on rows the daemon has
+    since reclaimed.
+
+    Args:
+        poll_interval_s: Seconds between sweeps of the recordings table. The
+            tick bounds what this can catch: a recording whose
+            uploaded-to-reaped window is shorter than one tick is missed.
+
+    Yields:
+        The :class:`ObservedRecordingUploads` being populated.
+    """
+    observed = ObservedRecordingUploads()
+    stop_observing = threading.Event()
+    correlation_column = COLUMN_RECORDING_INDEX
+
+    def _observe() -> None:
+        while not stop_observing.is_set():
+            try:
+                recording_rows = fetch_all_rows(RECORDINGS_TABLE)
+                for row in recording_rows:
+                    recording_key = row[correlation_column]
+                    cloud_id = row.get(COLUMN_RECORDING_ID)
+                    if cloud_id:
+                        observed.record_cloud_id(recording_key, str(cloud_id))
+                    if observed.is_complete(recording_key):
+                        continue
+                    if _is_online_upload_complete(
+                        fetch_recording_online_verification_stats(recording_key)
+                    ):
+                        observed.record_complete(recording_key)
+            except sqlite3.OperationalError:
+                # Daemon has not created the DB file or schema yet; retry.
+                pass
+            stop_observing.wait(poll_interval_s)
+
+    thread = threading.Thread(
+        target=_observe, name="upload-completion-observer", daemon=True
+    )
+    thread.start()
+    try:
+        yield observed
+    finally:
+        stop_observing.set()
+        thread.join(timeout=5.0)
 
 
 def wait_for_upload_complete_in_db(

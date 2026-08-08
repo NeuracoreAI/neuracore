@@ -8,9 +8,9 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     assert_offline_recordings_pending,
+    latching_upload_observer,
     resolve_cloud_recording_ids,
     wait_for_all_traces_written,
-    wait_for_upload_complete_in_db,
 )
 from tests.integration.platform.data_daemon.shared.runners import (
     offline_daemon_running,
@@ -87,11 +87,15 @@ def test_offline_pending_data_recovers_when_online(
             # offline artefacts for the online recovery phase below.
 
             with online_daemon_running():
-                for result in results:
-                    for recording_index in result.recording_indexes:
-                        wait_for_upload_complete_in_db(recording_index)
+                with latching_upload_observer() as observed:
+                    recording_indexes = [
+                        recording_index
+                        for result in results
+                        for recording_index in result.recording_indexes
+                    ]
+                    observed.wait_for_all_complete(recording_indexes, timeout_s=90.0)
 
-                results = resolve_cloud_recording_ids(results)
+                results = resolve_cloud_recording_ids(results, observed=observed)
                 verify_cloud_results(results=results, case=case)
 
     finally:
