@@ -376,11 +376,7 @@ class DistributedTrainer:
             "global_val_step": self.global_val_step,
         }
 
-        # Save regular checkpoint
-        # TODO: remove latest in future PR and just keep numbered ones
-        latest_checkpoint_path = self.checkpoint_dir / "checkpoint_latest.pt"
         checkpoint_path = self.checkpoint_dir / f"checkpoint_{epoch}.pt"
-        self.storage_handler.save_checkpoint(checkpoint, latest_checkpoint_path)
         self.storage_handler.save_checkpoint(checkpoint, checkpoint_path)
         checkpoint_epoch_to_remove = epoch - self.keep_last_n_checkpoints
         if checkpoint_epoch_to_remove > 0:

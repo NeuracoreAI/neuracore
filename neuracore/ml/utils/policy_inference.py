@@ -205,22 +205,18 @@ class PolicyInference:
                 raise ValueError(
                     "Organization ID and Job ID must be set to load checkpoints."
                 )
-            checkpoint_name = f"checkpoint_{epoch if epoch != -1 else 'latest'}.pt"
+            if epoch == -1:
+                checkpoint_url, checkpoint_name = self._get_latest_checkpoint_url()
+            else:
+                checkpoint_name = f"checkpoint_{epoch}.pt"
+                checkpoint_url = self._get_checkpoint_url(checkpoint_name)
             checkpoint_path = (
                 Path(tempfile.gettempdir()) / self.job_id / checkpoint_name
             )
             if not checkpoint_path.exists():
                 checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                session = thread_local_session()
-                response = session.get(
-                    f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}/checkpoint_url/{checkpoint_name}",
-                    headers=get_auth().get_headers(),
-                    timeout=30,
-                )
-                if response.status_code == 404:
-                    raise ValueError(f"Checkpoint {checkpoint_name} does not exist.")
                 checkpoint_path = download_with_progress(
-                    response.json()["url"],
+                    checkpoint_url,
                     f"Downloading checkpoint {checkpoint_name}",
                     destination=checkpoint_path,
                 )
@@ -233,6 +229,53 @@ class PolicyInference:
             torch.load(checkpoint_path, map_location=self.device, weights_only=True),
             strict=False,
         )
+
+    def _get_checkpoint_url(self, checkpoint_name: str) -> str:
+        """Get a signed download URL for a specific checkpoint.
+
+        Args:
+            checkpoint_name: Name of the checkpoint file, e.g. "checkpoint_5.pt".
+
+        Returns:
+            The signed download URL.
+
+        Raises:
+            ValueError: If the checkpoint does not exist.
+        """
+        session = thread_local_session()
+        response = session.get(
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}"
+            f"/checkpoint_url/{checkpoint_name}",
+            headers=get_auth().get_headers(),
+            timeout=30,
+        )
+        if response.status_code == 404:
+            raise ValueError(f"Checkpoint {checkpoint_name} does not exist.")
+        return response.json()["url"]
+
+    def _get_latest_checkpoint_url(self) -> tuple[str, str]:
+        """Get a signed download URL for the job's latest checkpoint.
+
+        "Latest" is resolved server-side by listing checkpoints in storage,
+        not by a separately-maintained pointer file.
+
+        Returns:
+            A ``(download_url, checkpoint_name)`` tuple.
+
+        Raises:
+            ValueError: If the job has no checkpoints.
+        """
+        session = thread_local_session()
+        response = session.get(
+            f"{API_URL}/org/{self.org_id}/training/jobs/{self.job_id}"
+            "/latest_checkpoint_url",
+            headers=get_auth().get_headers(),
+            timeout=30,
+        )
+        if response.status_code == 404:
+            raise ValueError(f"No checkpoints found for job {self.job_id}.")
+        body = response.json()
+        return body["url"], body["checkpoint_name"]
 
     def _assign_names_to_model_outputs(
         self,
