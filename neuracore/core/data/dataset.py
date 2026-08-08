@@ -461,6 +461,82 @@ class Dataset:
         self.__dict__.clear()
         self.__class__ = _DeletedDataset
 
+    def delete_recording(
+        self,
+        recording_name: str | None = None,
+        recording_id: str | None = None,
+    ) -> None:
+        """Delete a recording from this dataset by its name or ID.
+
+        Args:
+            recording_name: The recording's human-readable name.
+            recording_id: The recording's unique ID.
+
+        Raises:
+            ValueError: If neither or both identifiers are supplied.
+            DatasetError: If no recording has the supplied identifier, or if the name
+                matches more than one recording.
+            requests.HTTPError: If the API request fails.
+        """
+        # The user must provide either a name or an ID, but not both.
+        if (recording_name is None) == (recording_id is None):
+            raise ValueError(
+                "Exactly one of recording_name or recording_id must be provided."
+            )
+
+        if recording_id is not None:
+            # An ID can be sent to the API without loading the dataset first.
+            resolved_recording_id = recording_id
+        else:
+            # Load all recordings so we can find the right name.
+            recordings = list(self)
+            matches = [r for r in recordings if r.name == recording_name]
+            if not matches:
+                raise DatasetError(
+                    f"Recording {recording_name!r} not found in dataset {self.name!r}."
+                )
+            # Names can be the same, so use an ID when more than one name matches.
+            if len(matches) > 1:
+                raise DatasetError(
+                    f"Multiple recordings named {recording_name!r} exist in dataset "
+                    f"{self.name!r}; delete the recording by ID instead."
+                )
+            resolved_recording_id = matches[0].id
+
+        # Delete the recording from this dataset.
+        session = thread_local_session()
+        response = session.delete(
+            f"{API_URL}/org/{self.org_id}/datasets/{self.id}/recording/"
+            f"{resolved_recording_id}",
+            headers=get_auth().get_headers(),
+        )
+        if response.status_code == 404:
+            raise DatasetError(
+                f"Recording {recording_name or recording_id!r} not found in dataset "
+                f"{self.name!r}."
+            )
+        response.raise_for_status()
+
+        # Clear saved recordings so the next read gets fresh data.
+        with self._page_lock:
+            self._recordings_cache = []
+            self._start_after = None
+            self._num_recordings = None
+            self._robot_ids = None
+            self._robot_names = None
+
+        # Update fields such as size and data types after the recording is deleted.
+        try:
+            self._refresh_dataset_metadata()
+        except Exception as e:
+            # The delete worked, so do not report it as failed if this update fails.
+            logger.warning(
+                "Deleted recording %s, but failed to refresh dataset %s: %s",
+                resolved_recording_id,
+                self.id,
+                e,
+            )
+
     def _synchronize(
         self,
         frequency: int = 0,
