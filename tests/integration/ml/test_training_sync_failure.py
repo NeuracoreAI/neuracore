@@ -30,6 +30,9 @@ from tests.integration.ml.shared.training import (
     wait_for_all_training,
 )
 from tests.integration.ml.shared.utils import unique_name
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")
@@ -71,7 +74,7 @@ OUTPUT_EMBODIMENT_DESCRIPTION: EmbodimentDescription = {
 INPUT_DATA_TYPES = list(INPUT_EMBODIMENT_DESCRIPTION.keys())
 OUTPUT_DATA_TYPES = list(OUTPUT_EMBODIMENT_DESCRIPTION.keys())
 
-ROBOT_NAME = "integration_test_robot"
+ROBOT_NAME = "integration_test_robot_sync_failure"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 20
@@ -183,6 +186,7 @@ class TestTrainingSyncFailure:
                 logger.warning(
                     f"Failed to delete dataset {cls.dataset_name}", exc_info=True
                 )
+        delete_cloud_robot(ROBOT_NAME)
 
     def test_step1_collect_demo_data(self) -> None:
         self.__class__.dataset = collect_demo_data(

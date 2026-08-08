@@ -25,6 +25,9 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +189,7 @@ class TestDatasetDatatypeValidation:
                 logger.warning(
                     f"Failed to delete dataset {cls.dataset_name}", exc_info=True
                 )
+        delete_cloud_robot(ROBOT_NAME)
 
     def test_step1_collect_mixed_recordings(self) -> None:
         """Collect 8 recordings with four distinct datatype profiles."""

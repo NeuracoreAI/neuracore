@@ -17,6 +17,9 @@ from tests.integration.ml.shared.training import (
     wait_for_all_training,
 )
 from tests.integration.ml.shared.utils import unique_name
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")
@@ -39,7 +42,7 @@ GRIPPER_NAMES = ["left_gripper", "right_gripper"]
 POSE_SENSOR_NAME = "tcp"
 LANGUAGE_LABEL = "instruction"
 
-ROBOT_NAME = "integration_test_robot"
+ROBOT_NAME = "integration_test_robot_back_to_back"
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 BACK_TO_BACK_NUM_EPISODES = 25
@@ -96,6 +99,7 @@ class TestBackToBackTraining:
                 logger.warning(
                     f"Failed to delete dataset {cls.dataset_name}", exc_info=True
                 )
+        delete_cloud_robot(ROBOT_NAME)
 
     def test_step1_collect_demo_data(self) -> None:
         collect_demo_data(

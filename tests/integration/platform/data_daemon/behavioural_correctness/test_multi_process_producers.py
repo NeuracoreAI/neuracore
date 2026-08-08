@@ -35,6 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    cloud_resource_deleter,
     scoped_storage_state,
 )
 
@@ -227,100 +228,103 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     result_queue = process_context.Queue()
     processes: list[multiprocessing.Process] = []
 
-    with scoped_storage_state(case, dataset_name=dataset_name):
-        with online_daemon_running():
-            assert_exactly_one_daemon_pid()
-            nc.create_dataset(
-                dataset_name,
-                description="Three independent producers sharing one Rust recording",
-            )
-
-            for producer_index in range(_PRODUCER_COUNT):
-                process = process_context.Process(
-                    target=_same_source_producer,
-                    args=(
-                        producer_index,
-                        robot_name,
-                        dataset_name,
-                        robot_connection_lock,
-                        ready_barrier,
-                        logged_barrier,
-                        recording_started,
-                        recording_stopped,
-                        verification_complete,
-                        capture_start_s,
-                        result_queue,
+    with cloud_resource_deleter(dataset_name, [robot_name]):
+        with scoped_storage_state(case):
+            with online_daemon_running():
+                assert_exactly_one_daemon_pid()
+                nc.create_dataset(
+                    dataset_name,
+                    description=(
+                        "Three independent producers sharing one Rust recording"
                     ),
                 )
-                processes.append(process)
-                process.start()
 
-            try:
-                results = _collect_worker_results(result_queue)
-                assert len(results) == _PRODUCER_COUNT, (
-                    f"Received {len(results)} of {_PRODUCER_COUNT} producer results: "
-                    f"{results}"
-                )
-                failures = [result for result in results if not result["ok"]]
-                assert not failures, "Producer process failure(s):\n" + "\n".join(
-                    result["traceback"] for result in failures
-                )
+                for producer_index in range(_PRODUCER_COUNT):
+                    process = process_context.Process(
+                        target=_same_source_producer,
+                        args=(
+                            producer_index,
+                            robot_name,
+                            dataset_name,
+                            robot_connection_lock,
+                            ready_barrier,
+                            logged_barrier,
+                            recording_started,
+                            recording_stopped,
+                            verification_complete,
+                            capture_start_s,
+                            result_queue,
+                        ),
+                    )
+                    processes.append(process)
+                    process.start()
 
-                results.sort(key=lambda result: int(result["producer_index"]))
-                owner = results[0]
-                robot_ids = {str(result["robot_id"]) for result in results}
-                recording_ids = {str(result["recording_id"]) for result in results}
-                expected_names = {str(result["gripper_name"]) for result in results}
+                try:
+                    results = _collect_worker_results(result_queue)
+                    assert len(results) == _PRODUCER_COUNT, (
+                        f"Received {len(results)} of {_PRODUCER_COUNT} producer "
+                        f"results: {results}"
+                    )
+                    failures = [result for result in results if not result["ok"]]
+                    assert not failures, "Producer process failure(s):\n" + "\n".join(
+                        result["traceback"] for result in failures
+                    )
 
-                assert (
-                    len(robot_ids) == 1
-                ), f"Producers resolved different robots: {results}"
-                assert (
-                    len(recording_ids) == 1
-                ), f"Producers observed different recording ids: {results}"
-                assert owner["recording_index"] is not None
+                    results.sort(key=lambda result: int(result["producer_index"]))
+                    owner = results[0]
+                    robot_ids = {str(result["robot_id"]) for result in results}
+                    recording_ids = {str(result["recording_id"]) for result in results}
+                    expected_names = {str(result["gripper_name"]) for result in results}
 
-                rows = fetch_recordings_for_source(
-                    str(owner["robot_id"]), int(owner["robot_instance"])
-                )
-                assert len(rows) == 1, (
-                    "Only the lifecycle owner may create a recording; "
-                    f"daemon rows={rows}"
-                )
+                    assert (
+                        len(robot_ids) == 1
+                    ), f"Producers resolved different robots: {results}"
+                    assert (
+                        len(recording_ids) == 1
+                    ), f"Producers observed different recording ids: {results}"
+                    assert owner["recording_index"] is not None
 
-                matching_traces = _wait_for_three_written_traces(
-                    int(owner["recording_index"]), expected_names
-                )
-                assert {trace["data_type_name"] for trace in matching_traces} == (
-                    expected_names
-                )
+                    rows = fetch_recordings_for_source(
+                        str(owner["robot_id"]), int(owner["robot_instance"])
+                    )
+                    assert len(rows) == 1, (
+                        "Only the lifecycle owner may create a recording; "
+                        f"daemon rows={rows}"
+                    )
 
-                wait_for_dataset_ready(
-                    dataset_name,
-                    expected_recording_count=1,
-                    timeout_s=120.0,
-                )
-                wait_for_recordings_finalized(
-                    dataset_name,
-                    recording_ids,
-                    timeout_s=120.0,
-                )
-            finally:
-                verification_complete.set()
-                deadline = time.monotonic() + 30.0
-                for process in processes:
-                    process.join(timeout=max(0.0, deadline - time.monotonic()))
-                hung = [process for process in processes if process.is_alive()]
-                for process in hung:
-                    process.terminate()
-                    process.join(timeout=5.0)
-                assert not hung, (
-                    "Producer process(es) did not exit: "
-                    f"{[(process.name, process.pid) for process in hung]}"
-                )
-                bad_exits = [
-                    (process.name, process.exitcode)
-                    for process in processes
-                    if process.exitcode != 0
-                ]
-                assert not bad_exits, f"Producer process exit failures: {bad_exits}"
+                    matching_traces = _wait_for_three_written_traces(
+                        int(owner["recording_index"]), expected_names
+                    )
+                    assert {trace["data_type_name"] for trace in matching_traces} == (
+                        expected_names
+                    )
+
+                    wait_for_dataset_ready(
+                        dataset_name,
+                        expected_recording_count=1,
+                        timeout_s=120.0,
+                    )
+                    wait_for_recordings_finalized(
+                        dataset_name,
+                        recording_ids,
+                        timeout_s=120.0,
+                    )
+                finally:
+                    verification_complete.set()
+                    deadline = time.monotonic() + 30.0
+                    for process in processes:
+                        process.join(timeout=max(0.0, deadline - time.monotonic()))
+                    hung = [process for process in processes if process.is_alive()]
+                    for process in hung:
+                        process.terminate()
+                        process.join(timeout=5.0)
+                    assert not hung, (
+                        "Producer process(es) did not exit: "
+                        f"{[(process.name, process.pid) for process in hung]}"
+                    )
+                    bad_exits = [
+                        (process.name, process.exitcode)
+                        for process in processes
+                        if process.exitcode != 0
+                    ]
+                    assert not bad_exits, f"Producer process exit failures: {bad_exits}"
