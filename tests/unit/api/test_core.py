@@ -10,7 +10,7 @@ from neuracore.api import core as api_core
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
-from neuracore.core.exceptions import AuthenticationError
+from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -120,13 +120,32 @@ def test_login_version_mismatch_surfaces_installed_version(
             status_code=400,
         )
 
-        with pytest.raises(AuthenticationError) as exc_info:
+        with pytest.raises(VersionMismatchError) as exc_info:
             nc.login("test_api_key")
 
     message = str(exc_info.value)
     assert "Neuracore client version mismatch" in message
     assert f"Installed version: {nc.__version__}" in message
     assert "pip install --upgrade neuracore" in message
+
+
+def test_login_version_check_service_unavailable_is_not_version_mismatch(
+    temp_config_dir, reset_neuracore
+):
+    """Transient backend errors should not be reported as a client version mismatch."""
+    with requests_mock.Mocker() as m:
+        m.get(
+            f"{API_URL}/auth/verify-version",
+            text="Service Unavailable",
+            status_code=503,
+        )
+
+        with pytest.raises(AuthenticationError) as exc_info:
+            nc.login("test_api_key")
+
+    assert not isinstance(exc_info.value, VersionMismatchError)
+    assert "Service Unavailable" in str(exc_info.value)
+    assert "pip install --upgrade neuracore" not in str(exc_info.value)
 
 
 def test_login_version_check_connection_error_surfaces_cleanly(
@@ -139,7 +158,7 @@ def test_login_version_check_connection_error_surfaces_cleanly(
 
     monkeypatch.setattr(
         "neuracore.core.auth.thread_local_session",
-        lambda: type("_Session", (), {"get": raise_connection_error})(),
+        lambda **_kwargs: type("_Session", (), {"get": raise_connection_error})(),
     )
 
     with pytest.raises(AuthenticationError) as exc_info:
