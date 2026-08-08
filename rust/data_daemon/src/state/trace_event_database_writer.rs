@@ -135,7 +135,6 @@ impl TraceWriteHandle {
     }
 
     /// Mark the trace `failed` with a write-phase error code + message.
-    #[allow(dead_code)]
     pub fn fail_with(
         &self,
         trace_id: &str,
