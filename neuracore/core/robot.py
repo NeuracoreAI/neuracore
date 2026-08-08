@@ -25,6 +25,7 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon import bridge as recording_context
 
@@ -69,6 +70,8 @@ class Robot:
     upload, data stream management, and recording coordination. It supports both
     URDF and MJCF model formats and handles automatic conversion when needed.
     """
+
+    deleted = False
 
     def __init__(
         self,
@@ -709,6 +712,52 @@ class Robot:
         finally:
             self._daemon_recording_context = None
 
+    def delete(self) -> None:
+        """Delete this robot from Neuracore and invalidate this object.
+
+        After a successful delete the robot is dropped from the global registry,
+        local resources are released, and the object is turned into a tombstone,
+        so any further attribute or method access raises RobotError.
+
+        Raises:
+            RobotError: If the robot is shared, has not been initialized, or the
+                server rejects the delete.
+        """
+        if self.shared:
+            raise RobotError("Cannot delete a shared robot.")
+        robot_id = self.id
+        if robot_id is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        try:
+            session = thread_local_session()
+            response = session.delete(
+                f"{API_URL}/org/{self.org_id}/robots/{robot_id}",
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            raise RobotError(f"Failed to delete robot: {detail or str(e)}")
+
+        _robots.pop(
+            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=self.instance),
+            None,
+        )
+        for robot_name, mapped_id in list(_robot_name_id_mapping.items()):
+            if mapped_id == robot_id:
+                del _robot_name_id_mapping[robot_name]
+
+        self.close()
+        self.__dict__.clear()
+        self.__class__ = _DeletedRobot
+
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()
@@ -723,6 +772,19 @@ class Robot:
     def __del__(self) -> None:
         """Best-effort cleanup for daemon recording resources."""
         self.close()
+
+
+class _DeletedRobot(Robot):
+    """Tombstone for a deleted Robot. Any attribute access raises."""
+
+    def __getattribute__(self, name: str) -> object:
+        """Raise on every access except the deleted flag."""
+        if name == "deleted":
+            return True
+        raise RobotError("Robot has been deleted and can no longer be used.")
+
+    def __del__(self) -> None:
+        """Do nothing. Local resources were released during delete."""
 
 
 # Global robot registry
