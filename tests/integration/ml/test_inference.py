@@ -1,5 +1,8 @@
 """Inference integration tests (direct, local server, remote endpoint).
 
+Covers both explicit input/output embodiment descriptions and the robot_name
+path that resolves embodiments from the trained model archive.
+
 These tests are decoupled from the end-to-end flow test: instead of relying
 on in-memory shared state, they discover the trained model by scanning for the
 latest COMPLETED training run under ``INFERENCE_MODEL_TRAIN_RUN_PREFIX``. If no
@@ -45,6 +48,7 @@ from tests.integration.ml.test_training_flow import (
     NC_CAM_NAME,
     OUTPUT_DATA_TYPES,
     OUTPUT_EMBODIMENT_DESCRIPTION,
+    ROBOT_NAME,
 )
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -173,13 +177,13 @@ class TestInference:
     track_step_teardown = True
     all_steps_passed: bool = True
     selected_run: SelectedRun | None = None
-    endpoint_id: str | None = None
+    endpoint_ids: list[str]
 
     @classmethod
     def setup_class(cls) -> None:
         cls.all_steps_passed = True
         cls.selected_run = None
-        cls.endpoint_id = None
+        cls.endpoint_ids = []
         nc.login()
 
     @classmethod
@@ -189,12 +193,12 @@ class TestInference:
                 "Skipping TestInference teardown cleanup: one or more steps failed"
             )
             return
-        if cls.endpoint_id:
+        for endpoint_id in cls.endpoint_ids:
             try:
-                nc.delete_endpoint(cls.endpoint_id)
+                nc.delete_endpoint(endpoint_id)
             except Exception:
                 logger.warning(
-                    f"Failed to delete endpoint {cls.endpoint_id}", exc_info=True
+                    f"Failed to delete endpoint {endpoint_id}", exc_info=True
                 )
         # Keep the run we used as a known-good model for future sessions (so a
         # later run whose training fails can fall back to it), and prune the
@@ -240,7 +244,30 @@ class TestInference:
             f" (run name='{self.selected_run.name}' id={self.selected_run.id})"
         )
 
-    def test_step3_local_server_inference(self) -> None:
+    def test_step3_direct_inference_robot_name(self) -> None:
+        """Resolve embodiments from the model via robot_name (no explicit specs)."""
+        assert self.selected_run is not None, "[STEP 1] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        policy = nc.policy(
+            train_run_name=self.selected_run.name,
+            robot_name=ROBOT_NAME,
+        )
+        run_policy_inference(
+            policy=policy,
+            joint_names=JOINT_NAMES,
+            gripper_names=GRIPPER_NAMES,
+            language_label=LANGUAGE_LABEL,
+            nc_cam_name=NC_CAM_NAME,
+            mj_cam_name=MJ_CAM_NAME,
+            output_data_types=OUTPUT_DATA_TYPES,
+        )
+        logger.info(
+            f"[STEP 3] [PASSED] Direct Inference With robot_name Succeeded"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.selected_run.name}' id={self.selected_run.id})"
+        )
+
+    def test_step4_local_server_inference(self) -> None:
         assert self.selected_run is not None, "[STEP 1] Did Not Complete"
         policy = nc.policy_local_server(
             input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
@@ -258,11 +285,35 @@ class TestInference:
             output_data_types=OUTPUT_DATA_TYPES,
         )
         logger.info(
-            f"[STEP 3] [PASSED] Local Server Inference Succeeded"
+            f"[STEP 4] [PASSED] Local Server Inference Succeeded"
             f" (run name='{self.selected_run.name}' id={self.selected_run.id})"
         )
 
-    def test_step4_deploy_remote_endpoint(self) -> None:
+    def test_step5_local_server_inference_robot_name(self) -> None:
+        """Local server resolves embodiments via robot_name (no explicit specs)."""
+        assert self.selected_run is not None, "[STEP 1] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        policy = nc.policy_local_server(
+            train_run_name=self.selected_run.name,
+            robot_name=ROBOT_NAME,
+            port=LOCAL_SERVER_PORT,
+        )
+        run_policy_inference(
+            policy=policy,
+            joint_names=JOINT_NAMES,
+            gripper_names=GRIPPER_NAMES,
+            language_label=LANGUAGE_LABEL,
+            nc_cam_name=NC_CAM_NAME,
+            mj_cam_name=MJ_CAM_NAME,
+            output_data_types=OUTPUT_DATA_TYPES,
+        )
+        logger.info(
+            f"[STEP 5] [PASSED] Local Server Inference With robot_name Succeeded"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.selected_run.name}' id={self.selected_run.id})"
+        )
+
+    def test_step6_deploy_remote_endpoint(self) -> None:
         assert self.selected_run is not None, "[STEP 1] Did Not Complete"
         endpoint_name = unique_name(prefix="flow_endpoint")
         endpoint_data = nc.deploy_model(
@@ -272,13 +323,36 @@ class TestInference:
             output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
             ttl=ENDPOINT_TTL_SECONDS,
         )
-        self.__class__.endpoint_id = endpoint_data["id"]
-        assert self.endpoint_id is not None
-        final_status = wait_for_endpoint(endpoint_id=self.endpoint_id)
+        endpoint_id = endpoint_data["id"]
+        self.__class__.endpoint_ids.append(endpoint_id)
+        final_status = wait_for_endpoint(endpoint_id=endpoint_id)
         assert (
             final_status == "active"
         ), f"Endpoint did not become active, status: {final_status!r}"
         logger.info(
-            f"[STEP 4] [PASSED] Endpoint {self.endpoint_id} Is Active"
+            f"[STEP 6] [PASSED] Endpoint {endpoint_id} Is Active"
             f" (run name='{self.selected_run.name}' id={self.selected_run.id})"
+        )
+
+    def test_step7_deploy_remote_endpoint_robot_name(self) -> None:
+        """Deploy resolves embodiments via robot_name (no explicit specs)."""
+        assert self.selected_run is not None, "[STEP 1] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        endpoint_name = unique_name(prefix="flow_endpoint_robot_name")
+        endpoint_data = nc.deploy_model(
+            job_id=self.selected_run.id,
+            name=endpoint_name,
+            robot_name=ROBOT_NAME,
+            ttl=ENDPOINT_TTL_SECONDS,
+        )
+        endpoint_id = endpoint_data["id"]
+        self.__class__.endpoint_ids.append(endpoint_id)
+        final_status = wait_for_endpoint(endpoint_id=endpoint_id)
+        assert (
+            final_status == "active"
+        ), f"Endpoint did not become active, status: {final_status!r}"
+        logger.info(
+            f"[STEP 7] [PASSED] Endpoint {endpoint_id} With robot_name Is Active"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.selected_run.name}' id={self.selected_run.id})"
         )
