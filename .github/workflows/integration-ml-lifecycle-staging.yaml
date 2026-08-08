@@ -1,0 +1,14 @@
+name: Integration ML - Lifecycle (Staging)
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: NeuracoreAI/shared-workflows/.github/workflows/integration-ml-test.yaml@main
+    with:
+      environment: staging
+      test-path: tests/integration/ml/test_ml_lifecycle.py
+    secrets: inherit
