@@ -13,6 +13,9 @@ import pytest
 from neuracore_types import DataType
 
 import neuracore as nc
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -78,7 +81,7 @@ def test_get_latest_data_from_multiple_nodes(execution_number: int):
     Tests that get_latest_data correctly aggregates data logged from multiple
     processes (nodes) for the same robot instance.
     """
-    robot_name = "multinode-test-robot"
+    robot_name = f"multinode-test-robot-{execution_number}"
     instance = 0
     nc.login()
     # The main process creates/connects to the robot.
@@ -174,6 +177,7 @@ def test_get_latest_data_from_multiple_nodes(execution_number: int):
         assert sync_point[DataType.JOINT_TORQUES]["joint_from_remote"].value == 0.5
 
     finally:
-        # 6. Teardown: Clean up the remote process.
+        # 6. Teardown: Clean up the remote process and cloud robot.
         remote_process.terminate()
         remote_process.join(timeout=5)
+        delete_cloud_robot(robot_name)

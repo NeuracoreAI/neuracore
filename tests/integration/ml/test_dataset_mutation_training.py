@@ -51,6 +51,9 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_recordings_finalized,
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    delete_cloud_robot,
+)
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _EXAMPLES_DIR = os.path.join(_THIS_DIR, "..", "..", "..", "examples")
@@ -65,7 +68,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-ROBOT_NAME = "integration_test_robot"
+ROBOT_NAME = "integration_test_robot_dataset_mutation"
 ROBOT_INSTANCE = 5
 GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
@@ -354,6 +357,7 @@ class TestDatasetMutationTraining:
                 logger.warning(
                     f"Failed to delete dataset {dataset.name}", exc_info=True
                 )
+        delete_cloud_robot(ROBOT_NAME)
 
     def test_step1_create_initial_dataset(self) -> None:
         dataset, ground_truth, new_ids = _collect_recordings(
