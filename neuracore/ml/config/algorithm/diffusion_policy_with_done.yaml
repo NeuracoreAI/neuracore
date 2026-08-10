@@ -46,4 +46,4 @@ algorithm:
   freeze_backbone: false                  # Whether to freeze image encoder backbone
 
   # Done-flag classification head
-  done_loss_weight: 1.0                   # Weight for BCE done loss relative to diffusion MSE
+  done_loss_weight: 0.1                   # Weight for BCE done loss relative to diffusion MSE
