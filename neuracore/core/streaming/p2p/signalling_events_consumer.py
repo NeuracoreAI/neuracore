@@ -17,7 +17,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,
@@ -89,7 +89,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
             the configuration to be used to connect to the client
         """
         return EventSourceConfig(
-            url=f"{API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
+            url=f"{STREAM_API_URL}/org/{self.org_id}/signalling/notifications/{self.local_stream_id}",
             request_options={
                 "headers": self.auth.get_headers(),
             },
@@ -135,7 +135,7 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         # The response is read within a context manager so the underlying
         # connection is released back to the session pool.
         async with self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
+            f"{STREAM_API_URL}/org/{self.org_id}/signalling/alive/{self.local_stream_id}",
             headers=self.auth.get_headers(),
             data="pong",
         ) as raw_response:

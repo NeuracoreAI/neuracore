@@ -17,6 +17,13 @@ if API_URL not in STANDARD_API_URLS:
 
 
 API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
+
+# Long-lived connections (WebRTC signalling, recording notifications) are served
+# by a backend service of their own, selected by this path prefix. A prefix is
+# what the load balancer can route on: the organization id sits in the middle of
+# the path, which it cannot match.
+STREAM_API_URL = f"{API_URL}/stream"
+
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
 MAX_DATA_STREAMS = 1000
