@@ -23,7 +23,7 @@ from neuracore_types import HandshakeMessage, MessageType, OpenConnectionDetails
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.provider.json_source import JSONSource
@@ -225,7 +225,7 @@ class PeerToPeerProviderConnection:
         # The response body is ignored; the context manager ensures the
         # connection is released back to the session pool.
         async with self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/message/submit",
+            f"{STREAM_API_URL}/org/{self.org_id}/signalling/message/submit",
             headers=self.auth.get_headers(),
             json=HandshakeMessage(
                 connection_id=self.id,

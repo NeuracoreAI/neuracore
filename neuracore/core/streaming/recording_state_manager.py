@@ -25,7 +25,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.base_sse_consumer import (
     BaseSSEConsumer,
     EventSourceConfig,
@@ -485,7 +485,7 @@ class RecordingStateManager(BaseSSEConsumer):
             the configuration to be used to connect to the client
         """
         return EventSourceConfig(
-            url=f"{API_URL}/org/{self.org_id}/recording/notifications",
+            url=f"{STREAM_API_URL}/org/{self.org_id}/recording/notifications",
             request_options={
                 "headers": self.auth.get_headers(),
             },

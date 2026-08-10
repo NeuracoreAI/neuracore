@@ -19,7 +19,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
@@ -133,7 +133,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
         # The response is read within a context manager so the underlying
         # connection is released back to the session pool.
         async with self.client_session.get(
-            f"{API_URL}/org/{self.org_id}/signalling/turn_servers/{self.local_stream_id}",
+            f"{STREAM_API_URL}/org/{self.org_id}/signalling/turn_servers/{self.local_stream_id}",
             headers=self.auth.get_headers(),
         ) as response:
             self.ice_config = IceConfig.model_validate(await response.json())

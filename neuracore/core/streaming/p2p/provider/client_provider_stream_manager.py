@@ -21,7 +21,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
-from neuracore.core.const import API_URL
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
 )
@@ -200,7 +200,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             track: The track metadata to submit.
         """
         await self.client_session.post(
-            f"{API_URL}/org/{self.org_id}/signalling/track",
+            f"{STREAM_API_URL}/org/{self.org_id}/signalling/track",
             headers=self.auth.get_headers(),
             json=track.model_dump(mode="json"),
         )
