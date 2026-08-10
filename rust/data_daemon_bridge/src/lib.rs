@@ -95,7 +95,7 @@ fn start_recording(
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StartRecording {
-            robot_id,
+            robot_id: robot_id.clone(),
             robot_instance,
             robot_name,
             dataset_id,
@@ -103,6 +103,12 @@ fn start_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // Tell the writer where the window opened, so no chunk spans it.
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: publish_timestamp_ns,
+        });
         Ok(capture_timestamp_ns)
     })
 }
@@ -229,6 +235,9 @@ fn log_frame(
         width,
         height,
         dtype: frame_dtype,
+        // Stamped on the caller's thread while the owning recording is open,
+        // not on the writer thread, which may reach the frame after the stop.
+        publish_ns: now_ns(),
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
         data,
@@ -297,26 +306,24 @@ fn log_json(
     Ok(())
 }
 
-/// Drain the data publisher, publish one `StopRecording`, then flush any tail
-/// video chunks for the source before returning.
+/// Drain the data publisher, then publish one `StopRecording`.
 ///
-/// Three barriers, in order: the data publisher's queue is drained first (so
-/// the recording's joint/JSON tail is on the wire before the window's upper
-/// bound is stamped), then the stop is published, then the writer is flushed
-/// and its chunk announcements drained. Together these make the call's
-/// post-condition uniform across every data path — once `stop_recording`
-/// returns, nothing belonging to the recording is still sitting in an
-/// in-process queue that a subsequent process exit would discard.
+/// Two barriers, in order: the data publisher's queue is drained first, so the
+/// recording's joint/JSON tail is on the wire before the window's upper bound
+/// is stamped, and only then is the stop published. The writer's tail video
+/// chunks are *not* sealed here — [`flush_source`] does that, and every caller
+/// must invoke it straight after this call.
 ///
-/// The stop is published BEFORE the writer flush barrier:
-/// it shares the calling thread's publisher with `StartRecording`, so sending
-/// it first guarantees the daemon sees this stop ahead of the next recording's
-/// start. Stamping the boundary early but sending only after a slow flush
-/// (~19 ms observed) let the stop reach the wire after the following start —
-/// the daemon then retired the wrong window and dropped both recordings' data.
-/// Late tail chunks (announced on the writer's port after this stop) route
-/// into the just-closed window by the daemon's holdback + closing-window
-/// retention, so chunk-before-stop ordering is not required.
+/// The stop is published BEFORE the writer flush barrier because it shares the
+/// calling thread's publisher with `StartRecording`, so sending it first is
+/// what guarantees the daemon sees this stop ahead of the next recording's
+/// start. Stamping the boundary early but sending after the flush let the stop
+/// reach the wire behind the following start, and the daemon then retired the
+/// wrong window and dropped both recordings' data.
+/// Late tail chunks (announced on the writer's port after this stop, by the
+/// flush barrier below) route into the just-closed window by the daemon's
+/// holdback + the `SourceFlushed` marker, so chunk-before-stop ordering is not
+/// required.
 ///
 /// The producer stamps the window's upper bound on the publish clock here
 /// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
@@ -367,13 +374,13 @@ fn stop_recording(
             timestamp_ns: capture_timestamp_ns,
         })?;
         // Then barrier on the writer: it drains every frame still queued for
-        // this source (FIFO), seals the tail chunks and announces them, then
-        // acks. Blocking here means `stop_recording` still returns only once
-        // those chunks are durably spooled + announced, so a process exit right
-        // after the call can't lose them. The tail chunks ride the writer's
-        // port and land after this stop; the daemon's holdback + closing-window
-        // retention route them into the just-closed window by their in-window
-        // open timestamp.
+        // this source (FIFO), seals the tail chunks and announces them,
+        // publishes the `SourceFlushed` marker, then acks. Blocking here means
+        // `stop_recording` still returns only once those chunks are durably
+        // spooled + announced, so a process exit right after the call can't
+        // lose them. The tail chunks ride the writer's port and land after this
+        // stop; the daemon's holdback + that marker route them into the
+        // just-closed window by their in-window open timestamp.
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::FlushSource {

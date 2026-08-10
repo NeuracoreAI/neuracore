@@ -409,8 +409,8 @@ pub enum Envelope {
         /// Number of frames packed into this chunk.
         frame_count: u32,
         /// Per-frame capture time in nanoseconds since the Unix epoch, in
-        /// arrival order. Length equals `frame_count`. Used to bucket the
-        /// chunk's frames against the source's active-window map.
+        /// arrival order. Length equals `frame_count`. Capture-clock content for
+        /// the trace sidecar; routing uses `frame_publish_offsets_ms`.
         frame_timestamps_ns: Vec<i64>,
         /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
         /// Length equals `frame_count`; values round-trip bit-exact through
@@ -430,6 +430,18 @@ pub enum Envelope {
     /// recording window; the dispatcher handles it by refreshing the in-memory
     /// config (see `cloud::config_watcher`).
     RefreshConfig {},
+    /// End-of-stream marker for a just-stopped window's late data.
+    ///
+    /// Published on the same port as the chunk announcements, so it is ordered
+    /// strictly behind every chunk it vouches for and the dispatcher can evict
+    /// the closing window with no timing assumption.
+    SourceFlushed {
+        robot_id: String,
+        robot_instance: i64,
+        /// Publish time at the marker's send. Diagnostic only: deliberately
+        /// not used for window membership.
+        publish_timestamp_ns: i64,
+    },
 }
 
 /// Original pixel/sample representation of one video-family frame.
@@ -515,6 +527,7 @@ impl Envelope {
             Envelope::BatchedData { .. } => "batched_data",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
             Envelope::RefreshConfig {} => "refresh_config",
+            Envelope::SourceFlushed { .. } => "source_flushed",
         }
     }
 
