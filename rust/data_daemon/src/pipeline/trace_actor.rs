@@ -947,7 +947,7 @@ impl ActorState {
     }
 
     async fn finalise_writer(
-        &self,
+        &mut self,
         writer: TraceWriterKind,
         context: &Arc<TraceActorContext>,
     ) -> Result<u64, FrameAppendError> {
@@ -1003,6 +1003,13 @@ impl ActorState {
                     let completed = result.outcome?;
                     completed_chunks.insert(result.chunk_index, completed);
                 }
+                // Restate the frame count from the finished chunk set rather
+                // than trusting the running total. That total is only bumped by
+                // `drain_completed_encodes.
+                self.frame_count = completed_chunks
+                    .values()
+                    .map(|chunk| chunk.frame_count as u64)
+                    .sum();
                 crate::perf_events::emit(
                     "video_encoding",
                     "completed",
@@ -1499,6 +1506,11 @@ mod tests {
             .expect("trace exists");
         assert_eq!(trace.write_status, TraceWriteStatus::Written);
         assert!(trace.total_bytes > 0);
+        assert_eq!(
+            state.frame_count, 8,
+            "finalised frame count must cover every chunk, not just those \
+             drained before close"
+        );
 
         // RGB metadata entries must stay exactly as before: no `dtype` field.
         let sidecar: Value = serde_json::from_slice(
