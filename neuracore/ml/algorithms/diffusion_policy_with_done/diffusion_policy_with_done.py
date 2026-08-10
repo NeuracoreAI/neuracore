@@ -96,7 +96,7 @@ class DiffusionPolicyWithDone(NeuracoreModel):
         prediction_type: str = "epsilon",  # diffusion only
         lr_scheduler_type: str = "cosine",
         lr_scheduler_num_warmup_steps: int = 500,
-        done_loss_weight: float = 1.0,
+        done_loss_weight: float = 0.1,
     ):
         """Initialize the Diffusion Policy with Done model.
 

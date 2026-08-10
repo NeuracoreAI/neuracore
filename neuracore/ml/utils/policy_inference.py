@@ -145,7 +145,15 @@ class PolicyInference:
             list[tuple[DataType, str | None]]: One entry per action column.
         """
         names: list[tuple[DataType, str | None]] = []
-        for data_type in self.model.ordered_output_data_types:
+        # Prefer continuous action outputs when the model separates them from
+        # classification heads (e.g. DiffusionPolicyWithDone's CUSTOM_1D done).
+        data_types = (
+            getattr(self.model, "action_output_data_types", None)
+            or self.model.ordered_output_data_types
+        )
+        for data_type in data_types:
+            if data_type not in self.model.output_dims:
+                continue
             start_idx, end_idx = self.model.output_dims[data_type]
             indexed = self.output_embodiment_description.get(data_type, {})
             for index in range(end_idx - start_idx):
