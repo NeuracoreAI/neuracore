@@ -1,0 +1,49 @@
+# @package _global_
+algorithm:
+  _target_: neuracore.ml.algorithms.diffusion_policy_with_done.diffusion_policy_with_done.DiffusionPolicyWithDone
+
+  # UNet architecture
+  unet_down_dims: [256, 512, 1024]       # Downsampling channel dimensions for each UNet stage
+  unet_kernel_size: 5                     # Kernel size for UNet convolutions
+  unet_n_groups: 8                        # Number of groups for group normalization
+  unet_diffusion_step_embed_dim: 128      # Dimension of diffusion step embeddings
+  unet_use_film_scale_modulation: true    # Use FiLM scale modulation in UNet
+
+  # Vision encoder
+  hidden_dim: 64                          # Output dim per image encoder (spatial_softmax_num_keypoints * 2)
+  spatial_softmax_num_keypoints: 32       # Number of keypoints for spatial softmax pooling
+  use_pretrained_weights: true            # Load pretrained ResNet weights
+  use_resnet_stats: true                  # Use ResNet normalization statistics
+
+  # Generative process
+  process_type: "diffusion"               # "diffusion" or "flow_matching"
+
+  # Diffusion process (ignored when process_type == "flow_matching")
+  noise_scheduler_type: "DDPM"            # Noise scheduler type ("DDPM" or "DDIM")
+  num_train_timesteps: 100                # Number of diffusion timesteps for training
+  prediction_type: "epsilon"              # Prediction target ("epsilon" or "sample")
+  beta_start: 0.0001                      # Starting beta value for noise schedule
+  beta_end: 0.02                          # Ending beta value for noise schedule
+  beta_schedule: "squaredcos_cap_v2"      # Beta schedule type
+
+  # Sampling (both processes; flow matching integrates via forward Euler)
+  num_inference_steps: 100                # Sampling steps (use ~10 for flow_matching)
+  clip_sample: true                       # Whether to clip samples each step
+  clip_sample_range: 1.0                  # Clip range for samples
+
+  # Learning rates
+  lr: 1e-4                                # Learning rate for main parameters
+  lr_backbone: 1e-4                       # Learning rate for backbone parameters
+  weight_decay: 1e-6                      # AdamW weight decay
+  optimizer_betas: [0.9, 0.999]           # Adam beta parameters
+  optimizer_eps: 1e-8                     # Adam epsilon
+
+  # LR scheduler
+  lr_scheduler_type: "cosine"             # Learning rate scheduler type
+  lr_scheduler_num_warmup_steps: 500      # Number of warmup steps
+
+  # Backbone
+  freeze_backbone: false                  # Whether to freeze image encoder backbone
+
+  # Done-flag classification head
+  done_loss_weight: 1.0                   # Weight for BCE done loss relative to diffusion MSE

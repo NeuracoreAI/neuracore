@@ -68,10 +68,12 @@ class RTCConfig:
         inference_delay: ``d``, the inference latency measured in controller
             ticks. Actions ``[0, d)`` of a new chunk are frozen to the previous
             chunk because they will already have executed when it lands. Must
-            satisfy ``0 <= d <= H - s``.
+            satisfy the paper invariant ``0 <= d <= s <= H - d`` (equivalently
+            ``d <= s`` and ``d <= H - s``).
         execution_horizon: ``s``, the number of actions executed from each chunk
             before replanning. The final ``s`` actions of a chunk are generated
-            without any guidance.
+            without any guidance. Controllers treat this as a minimum and may
+            raise it to ``max(d, s)`` when inference delay grows.
         max_guidance_weight: ``beta``, the clip applied to the guidance weight.
             ``None`` picks the right default for the model's process type -
             :data:`DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT` for flow matching and the
@@ -118,6 +120,31 @@ class RTCConfig:
             return DEFAULT_FLOW_MAX_GUIDANCE_WEIGHT
         return DEFAULT_DIFFUSION_MAX_GUIDANCE_WEIGHT
 
+    def with_horizons(
+        self, inference_delay: int, execution_horizon: int
+    ) -> "RTCConfig":
+        """Return a copy with new ``d`` / ``s`` horizons.
+
+        Args:
+            inference_delay: The new value for ``d``, in controller ticks.
+            execution_horizon: The new value for ``s``, in controller ticks.
+                Must match the number of actions already consumed from the
+                previous chunk so the soft mask's free region lines up with
+                the zero-padded alignment tail.
+
+        Returns:
+            RTCConfig: A copy with both horizons replaced.
+        """
+        return RTCConfig(
+            inference_delay=inference_delay,
+            execution_horizon=execution_horizon,
+            max_guidance_weight=self.max_guidance_weight,
+            prefix_attention_schedule=self.prefix_attention_schedule,
+            force_ddim=self.force_ddim,
+            num_inference_steps=self.num_inference_steps,
+            guidance_start_step=self.guidance_start_step,
+        )
+
     def with_inference_delay(self, inference_delay: int) -> "RTCConfig":
         """Return a copy with a new measured inference delay.
 
@@ -127,15 +154,38 @@ class RTCConfig:
         Returns:
             RTCConfig: A copy of this config with ``inference_delay`` replaced.
         """
-        return RTCConfig(
-            inference_delay=inference_delay,
-            execution_horizon=self.execution_horizon,
-            max_guidance_weight=self.max_guidance_weight,
-            prefix_attention_schedule=self.prefix_attention_schedule,
-            force_ddim=self.force_ddim,
-            num_inference_steps=self.num_inference_steps,
-            guidance_start_step=self.guidance_start_step,
+        return self.with_horizons(inference_delay, self.execution_horizon)
+
+
+def max_feasible_inference_delay(
+    prediction_horizon: int, execution_horizon: int
+) -> int:
+    """Largest ``d`` that still satisfies ``d <= s <= H - d`` with adaptive ``s``.
+
+    Controllers may raise the live execution horizon to ``s = max(s_min, d)``.
+    Under that rule the binding constraint is:
+
+    * ``s_min <= H // 2``: ``d <= H // 2`` (then ``s`` grows with ``d``).
+    * ``s_min > H // 2``: ``d <= H - s_min`` (``s`` stays at ``s_min``).
+
+    Args:
+        prediction_horizon: ``H``, the chunk length.
+        execution_horizon: ``s_min``, the configured minimum execution horizon.
+
+    Returns:
+        int: Maximum feasible inference delay in ticks.
+    """
+    if prediction_horizon < 1:
+        raise ValueError(f"prediction_horizon must be >= 1, got {prediction_horizon}")
+    if execution_horizon < 1 or execution_horizon > prediction_horizon:
+        raise ValueError(
+            f"execution_horizon must be in [1, {prediction_horizon}], "
+            f"got {execution_horizon}"
         )
+    half = prediction_horizon // 2
+    if execution_horizon <= half:
+        return half
+    return prediction_horizon - execution_horizon
 
 
 def rtc_soft_mask(
