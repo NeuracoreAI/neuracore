@@ -45,8 +45,9 @@ LOG_DELETE = "delete"
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
 
-# producer_channels
+# Producer lifetime strategies: synchronous, old_per_thread, per_thread.
 PRODUCER_SYNCHRONOUS = "synchronous"
+PRODUCER_OLD_PER_THREAD = "old_per_thread"
 PRODUCER_PER_THREAD = "per_thread"
 
 # context_duration_mode
@@ -86,7 +87,7 @@ STORAGE_STATE_ACTIONS = (
 )
 LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
+PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_OLD_PER_THREAD, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 
@@ -102,11 +103,17 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 
+# The ``nc.log_joint_*`` calls a joint stream makes per frame.
+JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")
+
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
 STOP_RECORDING_NO_WAIT_SLA_S = 1.0
 STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
 STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
+
+# Pause after the last stop_recording, so post-stop frames are logged.
+PER_THREAD_LOGGING_TAIL_S = 2.0
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
