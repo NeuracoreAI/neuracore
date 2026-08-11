@@ -111,7 +111,9 @@ def test_cancel_recording_produces_no_data(
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
-                log_frames(spec, recording_index=0, marker_name="marker_cancel")
+                log_frames(
+                    spec, robot=robot, recording_index=0, marker_name="marker_cancel"
+                )
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -199,7 +201,9 @@ def test_cancel_then_start_new_recording(
                 cancelled_recording_id = robot.get_current_recording_id()
                 assert cancelled_recording_id is not None
 
-                log_frames(spec, recording_index=0, marker_name="marker_cancelled")
+                log_frames(
+                    spec, robot=robot, recording_index=0, marker_name="marker_cancelled"
+                )
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
@@ -222,7 +226,9 @@ def test_cancel_then_start_new_recording(
                 resumed_recording_id = robot.get_cloud_recording_id()
                 assert resumed_recording_id is not None
 
-                log_frames(spec, recording_index=0, marker_name="marker_resume")
+                log_frames(
+                    spec, robot=robot, recording_index=0, marker_name="marker_resume"
+                )
 
                 with Timer(
                     case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,

@@ -38,6 +38,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -116,10 +117,22 @@ class DataDaemonTestCase:
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
-        producer_channels: Thread-allocation strategy for data producers.
-            ``"synchronous"`` logs all data types from a single thread in
-            sequence; ``"per_thread"`` spawns one dedicated thread per data
-            type so streams are written concurrently.
+        producer_channels: How producer threads are allocated, and how long
+            they live.  ``"per_thread"`` runs one thread per stream for the
+            whole context lifetime — started before the first
+            ``start_recording`` and stopped after the last ``stop_recording``,
+            mid-loop at every boundary — mirroring a real camera that does not
+            stop between recordings, and the only mode under which the daemon
+            is shown what it does with frames logged as a window opens and
+            closes.  The other two scope their threads to a single recording
+            and join them before ``stop_recording``, so no frame is ever in
+            flight when a boundary passes: ``"synchronous"`` (default) logs
+            every data type from a single thread in sequence, and
+            ``"old_per_thread"`` gives each stream its own thread so they race
+            each other inside the recording.  Producer lifetime belongs on this
+            axis rather than a separate flag because logging across recordings
+            *requires* a thread per stream, so it is not independent of the
+            allocation.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -291,6 +304,11 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
+        producer_channels: Workload override applied to every case when set;
+            see ``DataDaemonTestCase.producer_channels``.  ``None`` (default)
+            leaves each case's own value alone.  Lets a suite declare one
+            producer model — e.g. ``"per_thread"`` — across its whole matrix
+            instead of restating it on every case.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -300,6 +318,7 @@ class DataDaemonTestBatch:
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
+    producer_channels: str | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -312,6 +331,9 @@ class DataDaemonTestBatch:
         }
         if self.skip:
             batch_overrides["skip"] = True
+        # Workload overrides are opt-in; unset = keep case default.
+        if self.producer_channels is not None:
+            batch_overrides["producer_channels"] = self.producer_channels
         return [
             DataDaemonTestCase(**{
                 **{
@@ -351,11 +373,15 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+        if case.video_detail != DataDaemonTestCase.video_detail:
+            parts.append(f"{case.video_detail}frames")
     if case.has_depth:
         parts.append(f"{case.depth_count}depth")
         parts.append(case.depth_mode)
-    if case.producer_channels == PRODUCER_PER_THREAD:
-        parts.append("threaded")
+    if case.producer_channels == PRODUCER_OLD_PER_THREAD:
+        parts.append("old-per-thread")
+    elif case.producer_channels == PRODUCER_PER_THREAD:
+        parts.append("per-thread")
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:
