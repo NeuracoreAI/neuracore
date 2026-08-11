@@ -8,6 +8,7 @@ Configuration dataclasses and the matrix builder live in
 
 from __future__ import annotations
 
+import functools
 import logging
 import multiprocessing
 import random
@@ -23,6 +24,7 @@ import numpy as np
 
 import neuracore as nc
 from neuracore.core.streaming.recording_state_manager import RecordingStateManager
+from neuracore.data_daemon.bridge import LoggingStalledError
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
@@ -40,6 +42,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    BACKLOG_BACKOFF_BASE_S,
+    BACKLOG_BACKOFF_MAX_S,
+    BACKLOG_STALL_BUDGET_S,
     DATASET_POLL_INTERVAL_S,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
@@ -47,6 +52,9 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     JOINT_KINDS,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
+    PACING_SATURATE_WITH_BACKOFF,
     PER_THREAD_LOGGING_TAIL_S,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
@@ -195,6 +203,7 @@ class ContextCaseSpec:
     wait: bool
     random_phase: bool
     video_detail: str
+    producer_pacing: str
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -315,10 +324,8 @@ def build_context_specs(
     """Build per-context worker specs for a matrix case.
 
     ``assert_deadline`` is the performance suites' marker: besides arming the
-    ``Timer`` deadline assertions it imposes the fixed
-    :data:`LOG_LOOP_FREQUENCY_HZ` inter-frame interval, so a performance case
-    measures latency at a known offered rate rather than under whatever load
-    the machine happens to sustain.
+    ``Timer`` deadline assertions it imposes the :data:`LOG_LOOP_FREQUENCY_HZ`
+    inter-frame interval, so latency is measured at a known offered rate.
     """
     specs: list[ContextSpec] = []
     timestamp_stagger_s = case.duration_sec / 2.0
@@ -367,6 +374,7 @@ def build_context_specs(
                     wait=case.wait,
                     random_phase=case.random_phase,
                     video_detail=case.video_detail,
+                    producer_pacing=case.producer_pacing,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),
@@ -449,6 +457,23 @@ def precompute_timestamps(
     ]
 
 
+def _should_pace(pacing: str, is_video: bool) -> bool:
+    """Whether a stream sleeps to its wall-clock deadline under *pacing*.
+
+    ``PACING_BURST_VIDEO`` un-paces depth cameras too, since both share a spool.
+    """
+    if pacing == PACING_DEADLINE:
+        return True
+    if pacing == PACING_BURST_VIDEO:
+        return not is_video
+    return False
+
+
+def _should_backoff(pacing: str) -> bool:
+    """Whether a rejected frame is retried rather than fatal under *pacing*."""
+    return pacing == PACING_SATURATE_WITH_BACKOFF
+
+
 def _await_frame_deadline(deadline: float, stop_event: threading.Event) -> bool:
     """Wait until *deadline*, unless *stop_event* fires first.
 
@@ -459,6 +484,32 @@ def _await_frame_deadline(deadline: float, stop_event: threading.Event) -> bool:
     if remaining <= 0:
         return False
     return stop_event.wait(remaining)
+
+
+def _log_with_backlog_backoff(
+    call: Callable[[], None], stop_event: threading.Event
+) -> None:
+    """Run one ``nc.log_*`` call, retrying while the daemon is backlogged.
+
+    Wraps the individual call so a retry can't duplicate a frame that was
+    never admitted.
+
+    Raises:
+        LoggingStalledError: The stall persisted past
+            :data:`BACKLOG_STALL_BUDGET_S` or *stop_event* fired; the frame
+            never landed, so this surfaces rather than being swallowed.
+    """
+    delay = BACKLOG_BACKOFF_BASE_S
+    stalled_for = 0.0
+    while True:
+        try:
+            call()
+            return
+        except LoggingStalledError:
+            stalled_for += delay
+            if stalled_for >= BACKLOG_STALL_BUDGET_S or stop_event.wait(delay):
+                raise
+            delay = min(delay * 2, BACKLOG_BACKOFF_MAX_S)
 
 
 @dataclass(frozen=True, slots=True)
@@ -664,7 +715,11 @@ class StreamEmitter:
     robot_name: str
     context_index: int
     recording_index: int
+    # Cuts a backlog retry short, so it is needed whether or not one can happen.
+    stop_event: threading.Event
     assert_deadline: bool = False
+    # Set only by PACING_SATURATE_WITH_BACKOFF: retry a refused frame.
+    backoff: bool = False
     feed: object | None = None
     depth_buffer: np.ndarray | None = None
     image_width: int | None = None
@@ -683,6 +738,24 @@ class StreamEmitter:
         self.depth_buffer = preallocate_depth_buffer(
             self.plan.is_depth, image_width, image_height, self.plan.depth_mode
         )
+
+    def _log_video_frame(self, label: str, call: Callable[[], None]) -> None:
+        """Log one video frame, timed, retrying it if the daemon is backlogged.
+
+        The ``Timer`` sits *inside* the retry so each attempt is measured on its
+        own; it skips its deadline assertion for a refused attempt.
+        """
+
+        def timed() -> None:
+            with Timer(
+                MAX_TIME_TO_LOG_S, label=label, assert_deadline=self.assert_deadline
+            ):
+                call()
+
+        if self.backoff:
+            _log_with_backlog_backoff(timed, self.stop_event)
+        else:
+            timed()
 
     def emit(self, frame_index: int, timestamp: float | None) -> None:
         """Log one frame's payload plus this stream's marker."""
@@ -709,17 +782,16 @@ class StreamEmitter:
                 + frame_index
             )
             rgb_image = self.feed.render(frame_index, frame_code)
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_rgb",
-                assert_deadline=self.assert_deadline,
-            ):
-                nc.log_rgb(
+            self._log_video_frame(
+                "nc.log_rgb",
+                functools.partial(
+                    nc.log_rgb,
                     camera_name,
                     rgb_image,
                     robot_name=self.robot_name,
                     timestamp=timestamp,
-                )
+                ),
+            )
 
     def _emit_depth(self, frame_index: int, timestamp: float | None) -> None:
         for camera_name, camera_index in zip(
@@ -741,17 +813,16 @@ class StreamEmitter:
                 self.plan.depth_mode,
                 out=self.depth_buffer,
             )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_depth",
-                assert_deadline=self.assert_deadline,
-            ):
-                nc.log_depth(
+            self._log_video_frame(
+                "nc.log_depth",
+                functools.partial(
+                    nc.log_depth,
                     camera_name,
                     depth_image,
                     robot_name=self.robot_name,
                     timestamp=timestamp,
-                )
+                ),
+            )
 
     def _emit_joints(self, frame_index: int, timestamp: float | None) -> None:
         joint_values = generate_joint_values(
@@ -819,39 +890,25 @@ class ProducerRequest:
     """Everything a producer needs to run, whatever that producer's lifetime.
 
     One shape for all three engines, so a case can swap producers without its
-    caller learning anything about which one it got. Two fields carry the whole
-    difference between them:
-
-    - *duration_sec* bounds every stream at ``fps * duration_sec`` frames.
-      ``None`` instead runs each stream until *stop_event* fires, which is what
-      lets a producer outlive the recordings it logs across.
-    - *recording_index* and *seed_ordinal* name the recording being logged. A
-      producer that outlives every recording has none to name and passes ``0``
-      for both: its frame index is session-wide and never resets, so frame
-      codes stay unique without one.
+    caller learning which one it got. Two fields carry the whole difference:
+    *duration_sec* bounds each stream at ``fps * duration_sec`` frames, or runs
+    it until *stop_event* fires; *recording_index* and *seed_ordinal* name the
+    recording, and are ``0`` for a producer that outlives every recording.
 
     Attributes:
-        robot: The connected robot handle, read once per frame for the SDK's
-            local logging gate (see :attr:`EmittedFrame.handle`).
-        robot_name: Name every ``nc.log_*`` call is made against.
-        context_index: Index of the parallel context this producer runs in.
+        robot: Connected robot handle, read once per frame for the SDK's local
+            logging gate (see :attr:`EmittedFrame.handle`).
         recording_index: Recording ordinal that namespaces painted frame codes.
         seed_ordinal: Recording ordinal that seeds the random-phase offsets.
-        plans: The streams to run, in the order the single-threaded producer
-            should break ties between them.
-        image_width: Camera frame width, or ``None`` when no camera streams.
-        image_height: Camera frame height, or ``None`` when no camera streams.
-        video_detail: Whether camera frames carry realistic content or flat fill.
+        plans: Streams to run, in the order the single-threaded producer breaks
+            ties between them.
         timestamp_start_s: Capture timestamp the first frame of every stream
             carries.
-        random_phase: Whether to offset each timestamp within
-            :func:`random_phase_jitter_window`.
-        duration_sec: Seconds of frames each stream emits, or ``None`` to run
-            until *stop_event*.
-        stop_event: Set to ask every stream to stop at its next frame.
-        assert_deadline: Arms the per-call ``Timer`` deadline assertions.
-        log_interval_s: Fixed sleep after each frame, imposed by the
-            performance suites so latency is measured at a known offered rate.
+        pacing: How hard the streams may drive the SDK. Only the lifetime
+            producer may carry a rate; every other producer is refused one when
+            its case is built, so the value here is always one it honours.
+        log_interval_s: Fixed sleep after each frame, imposed by the performance
+            suites so latency is measured at a known offered rate.
     """
 
     robot: object
@@ -866,6 +923,7 @@ class ProducerRequest:
     timestamp_start_s: float
     random_phase: bool
     duration_sec: int | None
+    pacing: str
     stop_event: threading.Event
     assert_deadline: bool = False
     log_interval_s: float = 0.0
@@ -934,7 +992,9 @@ def _build_emitters(request: ProducerRequest) -> list[StreamEmitter]:
             robot_name=request.robot_name,
             context_index=request.context_index,
             recording_index=request.recording_index,
+            stop_event=request.stop_event,
             assert_deadline=request.assert_deadline,
+            backoff=_should_backoff(request.pacing),
         )
         for plan in request.plans
     ]
@@ -1027,22 +1087,9 @@ def run_old_per_thread_logging(
 def run_per_thread_logging(request: ProducerRequest) -> dict[str, list[EmittedFrame]]:
     """Run one thread per stream, for as long as the caller keeps them running.
 
-    Mirrors real deployments where camera and proprioception loops run for the
-    process lifetime: the threads start before the first ``nc.start_recording``
-    and keep logging — on a session-wide, ever-increasing frame index — until
-    the request's *stop_event* is set, regardless of how many recordings start
-    and stop while they run.
-
-    Real time is this producer's schedule. With no frame count to bound it, a
-    stream that emitted as fast as it could would be an unbounded firehose for
-    the whole context lifetime, so each one waits for its next frame's
-    wall-clock deadline exactly as the camera it stands in for would.
-
-    Every frame is reported, whichever recording was current and even when none
-    was: which of them belong to a recording is decided afterwards, from the
-    wall-clock brackets around that recording's control calls (see
-    :func:`_classify_boundary_frames`). Reporting only the frames logged during
-    a recording would hide the ones the daemon must be shown to have *rejected*.
+    Every frame is reported, even those logged while no recording was current,
+    so the daemon's rejections are visible too (see
+    :func:`_classify_boundary_frames`).
 
     Returns:
         Mapping of trace key -> every frame logged for it, in order.
@@ -1054,12 +1101,13 @@ def run_per_thread_logging(request: ProducerRequest) -> dict[str, list[EmittedFr
     def worker(emitter: StreamEmitter) -> None:
         barrier.wait()
         emitter.prepare(request.image_width, request.image_height, request.video_detail)
+        pace = _should_pace(request.pacing, emitter.plan.is_video)
         thread_wall_start = time.time()
         for frame_index, timestamp in stream_frame_schedule(emitter.plan, request):
             if request.stop_event.is_set():
                 break
             frame_deadline = thread_wall_start + (frame_index / emitter.plan.fps)
-            if _await_frame_deadline(frame_deadline, request.stop_event):
+            if pace and _await_frame_deadline(frame_deadline, request.stop_event):
                 break
             _emit_and_record(emitter, frame_index, timestamp, request, report)
             if request.log_interval_s:
@@ -1129,6 +1177,7 @@ class ProducerSession(ABC):
             ),
             random_phase=case.random_phase,
             duration_sec=duration_sec,
+            pacing=case.producer_pacing,
             stop_event=self.stop_event,
             assert_deadline=self.spec.assert_deadline,
             log_interval_s=self.spec.log_interval_s,

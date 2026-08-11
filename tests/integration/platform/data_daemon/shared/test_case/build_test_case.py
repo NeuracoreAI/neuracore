@@ -38,6 +38,10 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
+    PACING_SATURATE,
+    PACING_SATURATE_WITH_BACKOFF,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -45,6 +49,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     DepthMode,
     LogAction,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -81,6 +86,30 @@ _BATCH_PARAMS = frozenset({
     "preserve_artifacts_per_test",
     "stop_method",
 })
+
+
+def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s parameters cannot run together, or None if they can.
+
+    A pacing a case cannot honour is refused rather than quietly resolved, so
+    ``producer_pacing`` always names what the producer actually ran under.
+    """
+    needs_video = (PACING_BURST_VIDEO, PACING_SATURATE_WITH_BACKOFF)
+    if case.producer_pacing in needs_video and not (case.has_video or case.has_depth):
+        return (
+            f"producer_pacing={case.producer_pacing!r} needs video_count > 0 or "
+            "depth_count > 0: only the video path is paced or backlogged"
+        )
+    needs_rate = (PACING_DEADLINE, PACING_BURST_VIDEO)
+    lifetime_producer = case.producer_channels == PRODUCER_PER_THREAD
+    if case.producer_pacing in needs_rate and not lifetime_producer:
+        return (
+            f"producer_pacing={case.producer_pacing!r} needs "
+            f"producer_channels={PRODUCER_PER_THREAD!r}: only a producer that "
+            "runs for the whole context lifetime is bounded by a rate, the "
+            "others by their frame count"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -203,6 +232,17 @@ class DataDaemonTestCase:
         video_detail: Pixel content of the synthetic camera frames — realistic
             costs full compression/encode, flat is a cheap solid fill; frame
             identity is embedded either way.
+        producer_pacing: How hard the producer may drive the SDK. Only the
+            lifetime producers are bounded by a rate rather than a frame count,
+            so pairing one with any other producer is refused at construction.
+            Independent of ``random_phase``, which decides what timestamp a
+            frame carries, never when it is delivered.
+            ``"deadline"`` paces every stream to its wall-clock deadline;
+            ``"burst-video"`` un-paces the video streams only, backlogging the
+            writer queue the way a real camera does when the encoder cannot keep
+            up; ``"saturate"`` (default) removes every throttle, leaving the
+            daemon's spool cap to block, and a wedge past that fails the run;
+            ``"saturate-with-backoff"`` retries the refused frame instead.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -236,6 +276,13 @@ class DataDaemonTestCase:
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
     video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_SATURATE
+
+    def __post_init__(self) -> None:
+        """Reject parameter combinations this case's shape cannot run."""
+        problem = _unsupported_combination(self)
+        if problem is not None:
+            raise ValueError(problem)
 
     @property
     def has_video(self) -> bool:
@@ -309,6 +356,11 @@ class DataDaemonTestBatch:
             leaves each case's own value alone.  Lets a suite declare one
             producer model — e.g. ``"per_thread"`` — across its whole matrix
             instead of restating it on every case.
+        producer_pacing: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
+            each case's own value alone.  A case whose shape cannot honour the
+            batch's pacing raises ``ValueError`` at construction, so a
+            batch-wide pacing must suit every case in the matrix.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -319,6 +371,7 @@ class DataDaemonTestBatch:
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
     producer_channels: str | None = None
+    producer_pacing: ProducerPacing | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -334,6 +387,8 @@ class DataDaemonTestBatch:
         # Workload overrides are opt-in; unset = keep case default.
         if self.producer_channels is not None:
             batch_overrides["producer_channels"] = self.producer_channels
+        if self.producer_pacing is not None:
+            batch_overrides["producer_pacing"] = self.producer_pacing
         return [
             DataDaemonTestCase(**{
                 **{
@@ -382,6 +437,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("old-per-thread")
     elif case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("per-thread")
+    if case.producer_pacing != DataDaemonTestCase.producer_pacing:
+        parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:

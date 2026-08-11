@@ -43,6 +43,10 @@ def _load_native() -> ModuleType:
     return _DATA_BRIDGE_MODULE
 
 
+class LoggingStalledError(RuntimeError):
+    """The daemon is not draining its spool backlog fast enough to admit a frame."""
+
+
 def notify_daemon_config_changed() -> None:
     """Try ask a running daemon to reload its profile immediately."""
     try:
@@ -177,18 +181,22 @@ class RecordingContext:
         """
         robot_id = self._require_source("log_frame")
         timestamp_ns = int(timestamp * 1_000_000_000)
-        _load_native().log_frame(
-            robot_id,
-            self._robot_instance,
-            data_type,
-            name,
-            int(width),
-            int(height),
-            dtype,
-            payload,
-            timestamp_ns,
-            timestamp,
-        )
+        native = _load_native()
+        try:
+            native.log_frame(
+                robot_id,
+                self._robot_instance,
+                data_type,
+                name,
+                int(width),
+                int(height),
+                dtype,
+                payload,
+                timestamp_ns,
+                timestamp,
+            )
+        except native.LoggingStalledError as error:
+            raise LoggingStalledError(str(error)) from error
 
     def log_json(
         self,
