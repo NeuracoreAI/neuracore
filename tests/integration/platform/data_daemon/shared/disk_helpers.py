@@ -198,16 +198,30 @@ def _assert_timestamps_match(
     expected_timestamps: list[float],
     failures: list[TraceFailure],
     durations: dict[str, float],
+    unknowable_timestamps: frozenset[float] = frozenset(),
 ) -> None:
     """Assert all timestamps exactly match the expected list (no tolerance).
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
 
+    *unknowable_timestamps* are frames a producer logging across the recording
+    lifecycle emitted while one of the recording's boundaries was passing, so
+    neither side can say whether the daemon took them (see
+    ``build_test_case_context._classify_boundary_frames``). They are removed
+    from **both** lists up front — never permitted on one — and what remains is
+    compared exactly, at both ends alike. Empty for every other case.
+
     Appends :class:`TraceFailure` instances to *failures* so the caller can
     aggregate traces that share the same failure body (e.g. all joints failing
     with the same mismatch pattern).
     """
+    if unknowable_timestamps:
+        timestamps = [ts for ts in timestamps if ts not in unknowable_timestamps]
+        expected_timestamps = [
+            ts for ts in expected_timestamps if ts not in unknowable_timestamps
+        ]
+
     if len(timestamps) != len(expected_timestamps):
         failures.append(
             TraceFailure(
@@ -392,6 +406,9 @@ def assert_disk_recording_properties(
                     expected_timestamps=expected[trace_key],
                     failures=trace_failures,
                     durations=durations,
+                    unknowable_timestamps=frozenset(
+                        per_recording.by_trace_unknowable.get(trace_key, ())
+                    ),
                 )
 
             if trace_failures:
