@@ -55,7 +55,7 @@ class DiffusionPolicyWithDone(NeuracoreModel):
 
     Continuous joint/gripper actions are predicted via diffusion or flow
     matching. Binary done signals are predicted as ``DataType.CUSTOM_1D`` from
-    a lightweight MLP on the shared vision-proprio conditioning features.
+    a lightweight MLP on vision features only (proprioception is not used).
     """
 
     CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (
@@ -199,6 +199,7 @@ class DiffusionPolicyWithDone(NeuracoreModel):
                 self.proprio_dims[data_type] = (current_dim, current_dim + dim)
                 current_dim += dim
 
+        self.proprio_dim = current_dim
         global_cond_dim = current_dim
 
         # Continuous action outputs only (CUSTOM_1D is handled by the done head).
@@ -280,6 +281,7 @@ class DiffusionPolicyWithDone(NeuracoreModel):
         )
 
         # Vision components
+        self.vision_cond_dim = 0
         if DataType.RGB_IMAGES in self.input_data_types:
             stats = cast(
                 list[CameraDataStats],
@@ -304,7 +306,8 @@ class DiffusionPolicyWithDone(NeuracoreModel):
                     )
                 )
 
-            global_cond_dim += self.image_encoders[0].feature_dim * max_cameras
+            self.vision_cond_dim = self.image_encoders[0].feature_dim * max_cameras
+            global_cond_dim += self.vision_cond_dim
 
         self.global_cond_dim = global_cond_dim
         self.unet = DiffusionConditionalUnet1d(
@@ -318,8 +321,13 @@ class DiffusionPolicyWithDone(NeuracoreModel):
         )
 
         if self.custom_1d_dim > 0:
+            if self.vision_cond_dim == 0:
+                raise ValueError(
+                    "DiffusionPolicyWithDone requires RGB_IMAGES input to predict "
+                    "CUSTOM_1D done flags; the done head does not use proprioception."
+                )
             self.done_head = nn.Sequential(
-                nn.Linear(global_cond_dim, hidden_dim),
+                nn.Linear(self.vision_cond_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(
                     hidden_dim, self.output_prediction_horizon * self.custom_1d_dim
@@ -621,18 +629,33 @@ class DiffusionPolicyWithDone(NeuracoreModel):
 
         return global_cond
 
-    def _predict_done_logits(self, global_cond: torch.Tensor) -> torch.Tensor:
-        """Predict done-flag logits from global conditioning.
+    def _vision_cond(self, global_cond: torch.Tensor) -> torch.Tensor:
+        """Slice image features out of the shared global conditioning vector.
+
+        Proprioception occupies the leading ``proprio_dim`` columns; the remainder
+        is vision-only and is what the done head consumes.
 
         Args:
             global_cond: Global conditioning with shape (B, global_cond_dim).
+
+        Returns:
+            torch.Tensor: Vision features with shape (B, vision_cond_dim).
+        """
+        return global_cond[:, self.proprio_dim :]
+
+    def _predict_done_logits(self, global_cond: torch.Tensor) -> torch.Tensor:
+        """Predict done-flag logits from vision features in global conditioning.
+
+        Args:
+            global_cond: Global conditioning with shape (B, global_cond_dim).
+                Only the image-feature suffix is passed to the done head.
 
         Returns:
             torch.Tensor: Done logits with shape (B, T, custom_1d_dim).
         """
         assert self.done_head is not None
         batch_size = global_cond.shape[0]
-        logits = self.done_head(global_cond)
+        logits = self.done_head(self._vision_cond(global_cond))
         return logits.view(
             batch_size, self.output_prediction_horizon, self.custom_1d_dim
         )
