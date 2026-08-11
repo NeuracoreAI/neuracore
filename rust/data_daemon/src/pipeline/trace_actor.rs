@@ -1003,9 +1003,8 @@ impl ActorState {
                     let completed = result.outcome?;
                     completed_chunks.insert(result.chunk_index, completed);
                 }
-                // Restate the frame count from the finished chunk set rather
-                // than trusting the running total. That total is only bumped by
-                // `drain_completed_encodes.
+                // The running total is only bumped by `drain_completed_encodes`,
+                // which misses encodes that finish here, at window close.
                 self.frame_count = completed_chunks
                     .values()
                     .map(|chunk| chunk.frame_count as u64)
