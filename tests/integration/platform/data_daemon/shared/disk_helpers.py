@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_COLOR_CHANNELS,
     FRAME_GRID_SIZE,
     LOSSLESS_CONTENT_BYTES_PER_PIXEL,
+    TRAILING_RGB_GAP_FRAME_TOLERANCE,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
     frame_code_base,
@@ -264,6 +265,48 @@ def _assert_timestamps_match(
         durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
 
 
+def _assert_no_trailing_rgb_gap(
+    *,
+    trace_key: str,
+    timestamps: list[float],
+    expected_stop_timestamp: float | None,
+    video_fps: int,
+    failures: list[TraceFailure],
+) -> None:
+    """Assert an RGB trace's last on-disk frame isn't stranded before the stop.
+
+    A tail video chunk silently orphaned at the recording-window boundary (see
+    the dispatcher's per-producer flush-marker gating) truncates the trace
+    without ever tripping :func:`_assert_timestamps_match` — that check only
+    ever sees what actually reached disk, so a shortened sequence still
+    compares equal to itself. This is deliberately immune to producer
+    *under*-delivery (a slow or throttled camera legitimately logging fewer
+    frames), which is why it compares the last on-disk timestamp against the
+    recording's nominal capture-clock end rather than the expected frame
+    count: only a chunk orphaned at the boundary strands frames an unbounded
+    distance before a stop that has already happened.
+    """
+    if expected_stop_timestamp is None or not timestamps:
+        return
+    if not trace_key.startswith("RGB_IMAGES/"):
+        return
+    gap_s = expected_stop_timestamp - max(timestamps)
+    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / video_fps
+    if gap_s > tolerance_s:
+        failures.append(
+            TraceFailure(
+                trace_key=trace_key,
+                body=(
+                    f"last on-disk frame trails the recording's nominal end "
+                    f"by {gap_s:.3f}s, more than the {tolerance_s:.3f}s "
+                    f"tolerance ({TRAILING_RGB_GAP_FRAME_TOLERANCE} video "
+                    f"frame interval(s) at {video_fps}fps) — a tail chunk "
+                    f"may have been orphaned at the window boundary"
+                ),
+            )
+        )
+
+
 def _collapse_trace_failures(failures: list[TraceFailure]) -> list[str]:
     """Collapse failures that share the same body across multiple traces.
 
@@ -418,6 +461,17 @@ def assert_disk_recording_properties(
                     unknowable_timestamps=frozenset(
                         per_recording.by_trace_unknowable.get(trace_key, ())
                     ),
+                )
+                _assert_no_trailing_rgb_gap(
+                    trace_key=trace_key,
+                    timestamps=timestamps,
+                    expected_stop_timestamp=(
+                        result.expected_video_stop_timestamp_by_recording.get(
+                            recording_key
+                        )
+                    ),
+                    video_fps=result.video_fps,
+                    failures=trace_failures,
                 )
 
             if trace_failures:
@@ -778,3 +832,73 @@ def assert_disk_frame_codes(
                     codes=codes,
                     expected=expected,
                 )
+
+
+def assert_rgb_trace_respects_the_recording_boundary(
+    recording_index: int,
+    *,
+    owed_timestamps: list[float],
+    forbidden_before_start_timestamps: list[float],
+    forbidden_after_stop_timestamps: list[float],
+) -> None:
+    """Assert the recording's RGB trace holds every frame it provably owns and
+    nothing published outside its window, at either boundary.
+
+    A missing owed frame is one the daemon accepted the window for and then
+    dropped, which at this boundary means an orphaned chunk. A present
+    forbidden-before-start frame means a chunk that opened before this
+    window's start was taken whole instead of being cut at it — the mirror,
+    at the start boundary, of a present forbidden-after-stop frame, which
+    means a chunk straddling the stop was taken whole instead of being cut
+    there.
+    """
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        wait_for_written_rgb_trace,
+    )
+
+    assert owed_timestamps, (
+        "the producer logged no frame provably inside the recording, so this "
+        "run proves nothing about the boundary"
+    )
+    rgb_trace = wait_for_written_rgb_trace(recording_index)
+    trace_json = (
+        get_daemon_recordings_root_path()
+        / str(recording_index)
+        / "RGB_IMAGES"
+        / rgb_trace["trace_id"]
+        / "trace.json"
+    )
+    frames = json.loads(trace_json.read_text(encoding="utf-8"))
+    on_disk = {float(frame["timestamp"]) for frame in frames}
+    span = (
+        f"{len(on_disk)} frame(s) on disk spanning "
+        f"[{min(on_disk):.4f}, {max(on_disk):.4f}]"
+    )
+
+    missing = [stamp for stamp in owed_timestamps if stamp not in on_disk]
+    assert not missing, (
+        f"{len(missing)}/{len(owed_timestamps)} frame(s) logged inside the "
+        f"recording never reached disk — a chunk was orphaned at the recording "
+        f"boundary. First missing capture stamps: "
+        f"{[round(stamp, 4) for stamp in missing[:5]]}; {span}"
+    )
+
+    kept_early = [
+        stamp for stamp in forbidden_before_start_timestamps if stamp in on_disk
+    ]
+    assert not kept_early, (
+        f"{len(kept_early)}/{len(forbidden_before_start_timestamps)} frame(s) "
+        f"logged before the recording started reached disk — a chunk that "
+        f"opened before this window's start was taken whole instead of being "
+        f"cut at it. First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_early[:5]]}; {span}"
+    )
+
+    kept_late = [stamp for stamp in forbidden_after_stop_timestamps if stamp in on_disk]
+    assert not kept_late, (
+        f"{len(kept_late)}/{len(forbidden_after_stop_timestamps)} frame(s) "
+        f"logged after the recording stopped reached disk — a chunk "
+        f"straddling the boundary was taken whole rather than cut at it. "
+        f"First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_late[:5]]}; {span}"
+    )

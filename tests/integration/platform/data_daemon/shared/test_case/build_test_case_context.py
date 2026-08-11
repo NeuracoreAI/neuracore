@@ -13,11 +13,12 @@ import multiprocessing
 import random
 import threading
 import time
+import traceback
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import numpy as np
 
@@ -42,6 +43,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATASET_POLL_INTERVAL_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
@@ -79,6 +81,12 @@ CONTEXT_DURATION_RANDOM = random.Random(0)
 # video streams draw independent phase offsets.
 JOINT_STREAM = 0
 VIDEO_STREAM = 1
+
+# _split_video_producer: how long to wait for the video-owning subprocess to
+# report its frame log after it has already been joined. Purely a safety net
+# against a `Queue.put` not yet flushed through the feeder pipe by the time
+# `join()` returns — the process itself is already dead.
+SPLIT_VIDEO_REPORT_TIMEOUT_S = 30.0
 
 # Producer pacing for the performance suites
 LOG_LOOP_FREQUENCY_HZ = 120
@@ -344,6 +352,33 @@ class ContextResult:
     depth_mode: DepthMode = "float32"
     has_depth: bool = False
     observed_frame_codes: dict[str, ObservedFrameCodes] = field(default_factory=dict)
+    """Painted camera frame codes per recording, keyed by ``recording_index``.
+
+    Only populated for ``producer_channels="continuous"``, whose session-wide
+    frame index makes the codes unpredictable from the recording ordinal.
+    Empty for bounded producers, where ``assertions`` derives the expected codes
+    from the ordinal as before.
+    """
+    expected_video_stop_timestamp_by_recording: dict[str, float] = field(
+        default_factory=dict
+    )
+    """Nominal capture-clock upper bound of each recording's video, keyed by
+    the on-disk recording directory name: ``timestamp_start_s +
+    (recording_ordinal + 1) * duration_sec``, on the same
+    ``spec.timestamp_start_s``-based clock RGB frame timestamps are written
+    on. Deliberately not a wall-clock value — ``nc.start_recording`` /
+    ``nc.stop_recording``'s own ``timestamp`` argument (stored as
+    ``start_timestamp_ns`` / ``stop_timestamp_ns``) is real wall-clock
+    (``time.time()``), an entirely different, unrelated clock from the
+    per-frame capture timestamps this compares against.
+
+    Lets :func:`~disk_helpers.assert_disk_recording_properties` bound how far an
+    RGB trace's last on-disk timestamp may trail the recording's nominal end,
+    independent of whether this context ran ``inline`` or ``split_process`` —
+    a tail chunk silently orphaned at the window boundary truncates the trace
+    without tripping the exact-equality timestamp check, since that check
+    only ever sees what actually made it to disk.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -673,7 +708,12 @@ def build_stream_plans(
     joint_fps: int,
     video_fps: int,
 ) -> list[StreamPlan]:
-    """Decompose a workload into one stream per camera and per joint data type."""
+    """Decompose a workload into one stream per camera and per joint data type.
+
+    An empty ``joint_names`` produces no joint-kind streams at all, rather than
+    three streams with no channels to log — a split-process camera-only worker
+    passes ``joint_names=[]`` for exactly that reason.
+    """
     return [
         *_per_camera_plans("rgb", camera_name_list, video_fps),
         *_per_camera_plans(
@@ -688,6 +728,7 @@ def build_stream_plans(
                 joint_kinds=(kind,),
             )
             for kind in JOINT_KINDS
+            if joint_names
         ),
     ]
 
@@ -1467,6 +1508,91 @@ def make_producer_session(
     return BoundedProducerSession(spec, robot, plans, engine)
 
 
+def _split_video_producer(
+    robot_name: str,
+    dataset_name: str,
+    camera_name_list: list[str],
+    image_width: int | None,
+    image_height: int | None,
+    video_fps: int,
+    video_detail: str,
+    timestamp_start_s: float,
+    random_phase: bool,
+    pacing: str,
+    context_index: int,
+    ready_event: Any,
+    stop_event: Any,
+    result_queue: Any,
+) -> None:
+    """Own RGB video for a producer running in its own OS process.
+
+    Runs in a separate OS process from the one that owns
+    ``start_recording``/``stop_recording`` for the same robot — the topology
+    the daemon's per-producer flush-marker tracking exists for (a source
+    logged from more than one process, each with its own OS pid). Connects
+    its own robot handle, runs the lifetime producer exactly as the in-process
+    one does (:func:`run_per_thread_logging`, with no joint or depth streams),
+    and reports every frame back through *result_queue* for the caller to
+    classify against the recording it controlled.
+
+    *ready_event*, *stop_event* and *result_queue* are ``multiprocessing``
+    primitives from a ``"spawn"`` context; ``stop_event`` duck-types the
+    ``threading.Event`` interface a :class:`ProducerRequest` expects.
+    """
+    multiprocessing.current_process().name = f"split-video-{context_index}"
+    robot = None
+    try:
+        ensure_login()
+        nc.get_dataset(dataset_name)
+        robot = nc.connect_robot(robot_name, overwrite=False)
+        if camera_name_list and video_detail == DETAIL_REALISTIC:
+            # Mirrors context_worker's own prewarm — see its call site for why
+            # a lazy build inside the camera thread costs seconds this
+            # producer does not have.
+            prewarm_frame_bank(image_width, image_height)
+        ready_event.set()
+        report = run_per_thread_logging(
+            ProducerRequest(
+                robot=robot,
+                robot_name=robot_name,
+                context_index=context_index,
+                # No recording of its own to name: this producer never calls
+                # start_recording, and its frame index is session-wide.
+                recording_index=0,
+                seed_ordinal=0,
+                plans=tuple(
+                    build_stream_plans(
+                        joint_names=[],
+                        camera_name_list=camera_name_list,
+                        depth_camera_name_list=[],
+                        depth_mode="float32",
+                        joint_fps=0,
+                        video_fps=video_fps,
+                    )
+                ),
+                image_width=image_width,
+                image_height=image_height,
+                video_detail=video_detail,
+                timestamp_start_s=timestamp_start_s,
+                random_phase=random_phase,
+                duration_sec=None,
+                pacing=pacing,
+                stop_event=stop_event,
+            )
+        )
+        # Call the same private hook directly so this producer's tail chunk
+        # and its own SourceFlushed marker are sealed and announced under
+        # this process's own pid deterministically, without depending on the
+        # SSE round trip's timing.
+        robot._get_daemon_recording_context().flush_source()  # noqa: SLF001
+        result_queue.put({"ok": True, "report": report})
+    except BaseException:  # noqa: BLE001 - propagate full child traceback
+        result_queue.put({"ok": False, "traceback": traceback.format_exc()})
+    finally:
+        if robot is not None:
+            robot.close()
+
+
 def _classify_boundary_frames(
     frames: list[EmittedFrame],
     bounds: RecordingControlBounds,
@@ -1525,6 +1651,101 @@ def _classify_boundary_frames(
         elif not is_outside:
             unknowable.append(frame)
     return inside, unknowable
+
+
+def classify_split_producer_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> tuple[list[EmittedFrame], list[EmittedFrame], list[EmittedFrame]]:
+    """Split a *cross-process* video producer's frames into the ones the
+    recording must have and the ones it must not, at both boundaries.
+
+    Both ends are decided by the wall-clock brackets around the control calls
+    that carry the window's bounds, as in :func:`_classify_boundary_frames`, but
+    neither of that function's rules transfers unchanged to a producer in
+    another process:
+
+    - **Owed** (must be on disk) additionally requires the producer's own
+      logging gate to have been open. A producer that does not call
+      ``start_recording`` itself only learns a recording is active from the
+      recording-state manager's SSE notification, and ``log_rgb`` forwards
+      nothing until it arrives. Those first frames are genuinely inside the
+      daemon's window and were still never published, so demanding them would
+      fail on the SSE round trip rather than on any daemon behaviour. The gate
+      reading is latched immediately before the ``log_*`` call
+      (:attr:`EmittedFrame.handle`) and can only go stale in the direction that
+      does not matter: the gate closes on the *stop* notification, which cannot
+      land before ``stop_recording`` was called, and every owed frame completed
+      before that.
+
+      The same reasoning excludes frames still logged under the *previous*
+      recording's handle. Back-to-back, a non-owning producer keeps logging
+      into the recording it last heard about for a whole SSE round trip after
+      that recording really stopped — so those frames' publish stamps land
+      inside this window while the producer is still filling a chunk opened in
+      the last one. The daemon cuts them off at the previous recording's stop
+      (correctly: the stop-boundary test requires exactly that) and cannot move
+      them here, because a chunk is one NUT file feeding one encode and the
+      only cut it can express is a prefix. Demanding them would demand a chunk
+      split across two traces, which is not a thing the pipeline can do, so
+      they are unknowable — required of neither recording, exactly like the
+      frames straddling a single recording's own stop.
+
+    - **Forbidden** (must not be on disk), at *either* end, is decided by the
+      clock alone, not by the handle: the in-process rule reads
+      ``frame.handle != bounds.handle``, but a non-owning process holds its own
+      handle value for the same recording, which would condemn every frame
+      logged outside its own gate's view — including ones the window
+      legitimately accepted.
+
+      - A frame whose ``log_*`` call *finished* at or before
+        ``bounds.start_called_at`` is outside on timing alone: that field is
+        the caller's lower bracket on the window's bound, so the frame's
+        publish stamp cannot follow the bound. This is the mirror of
+        :func:`_classify_boundary_frames`'s own start-side ``is_outside`` rule,
+        surfaced here because a chunk opened before a recording's start is
+        exactly what a producer's boundary-split (armed only in the process
+        that owns ``start_recording``) exists to cut off — and a producer that
+        never arms it can hand a still-open chunk straight across the
+        boundary.
+      - A frame whose ``log_*`` call *began* at or after
+        ``bounds.stop_returned_at`` is outside on timing alone: that field is
+        the caller's upper bracket on the window's bound, so the frame's
+        publish stamp cannot precede the bound.
+
+      How much either catches is exactly how tight its bracket is — the stop
+      side's frames of interest are the ones the producer logged in the few
+      hundred milliseconds between the stop and its own gate closing, so a
+      bracket as loose as "when ``stop_recording`` returned" (a flush barrier
+      later) calls all of them unknowable and proves nothing.
+
+    Everything between the two is unknowable — the call straddled a bound — and
+    belongs to neither list, so the caller requires nothing of it either way.
+
+    Returns:
+        ``(owed frames, forbidden-before-start frames, forbidden-after-stop
+        frames)``, each in emission order.
+    """
+    inside, _ = _classify_boundary_frames(frames, bounds)
+    # Handles this producer was already logging under before the recording
+    # started — i.e. the previous recording's, as this process knows it.
+    carried_over = {
+        frame.handle
+        for frame in frames
+        if frame.handle is not None and frame.completed_at <= bounds.start_called_at
+    }
+    owed = [
+        frame
+        for frame in inside
+        if frame.handle is not None and frame.handle not in carried_over
+    ]
+    forbidden_before_start = [
+        frame for frame in frames if frame.completed_at <= bounds.start_called_at
+    ]
+    forbidden_after_stop = [
+        frame for frame in frames if frame.emitted_at >= bounds.stop_returned_at
+    ]
+    return owed, forbidden_before_start, forbidden_after_stop
 
 
 def recording_timestamps(
@@ -1667,6 +1888,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
+        expected_video_stop_timestamp_by_recording: dict[str, float] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         observed_frame_codes: dict[str, ObservedFrameCodes] = {}
         ordinal_by_disk_key: dict[str, int] = {}
@@ -1731,6 +1953,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                         timestamp=recording_capture_stop_s,
                     )
                 wall_stopped_at = time.time()
+                expected_video_stop_timestamp_by_recording[disk_recording_key] = (
+                    spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
+                )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
                     handle=recording_handle,
@@ -1839,6 +2064,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             depth_mode=case.depth_mode,
             has_depth=bool(depth_camera_name_list),
             observed_frame_codes=observed_frame_codes,
+            expected_video_stop_timestamp_by_recording=(
+                expected_video_stop_timestamp_by_recording
+            ),
         )
     except Exception:
         if robot is not None:

@@ -72,6 +72,34 @@ def scoped_offline_profile() -> Generator[None]:
 
 
 @contextmanager
+def scoped_holdback_ms(millis: int) -> Generator[None]:
+    """Pin the dispatcher's routing holdback for the block.
+
+    The daemon reads ``NCD_HOLDBACK_MS`` once, at startup (see
+    ``rust/data_daemon/src/pipeline/dispatcher.rs``), so this must wrap the
+    daemon start rather than the workload. It is an internal override with no
+    profile-config representation — a test pins it to make a timing-dependent
+    reproduction deterministic, not to cover a configuration users deploy.
+
+    Args:
+        millis: Holdback in milliseconds. The daemon's own default is 500, and
+            it retains a stopped recording window for twice this value.
+
+    Yields:
+        ``None`` — the holdback override is in place while the body runs.
+    """
+    previous = os.environ.get("NCD_HOLDBACK_MS")
+    os.environ["NCD_HOLDBACK_MS"] = str(millis)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NCD_HOLDBACK_MS", None)
+        else:
+            os.environ["NCD_HOLDBACK_MS"] = previous
+
+
+@contextmanager
 def scoped_online_mode() -> Generator[None]:
     """Force online daemon config for the block.
 

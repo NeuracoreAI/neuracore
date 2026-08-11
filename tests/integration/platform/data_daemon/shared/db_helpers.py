@@ -1072,6 +1072,40 @@ def wait_for_all_traces_written(
     )
 
 
+def wait_for_written_rgb_trace(
+    recording_index: int,
+    *,
+    timeout_s: float = 30.0,
+    poll_interval_s: float = 0.1,
+) -> dict[str, Any]:
+    """Poll until the recording's RGB_IMAGES trace reaches ``write_status='written'``.
+
+    Returns:
+        The RGB_IMAGES trace row once it has finalized.
+
+    Raises:
+        AssertionError: If the trace does not finalize within ``timeout_s``.
+    """
+    deadline = time.monotonic() + timeout_s
+    last_traces: list[dict[str, Any]] = []
+    while time.monotonic() < deadline:
+        last_traces = fetch_all_traces(
+            recording_index, columns=["trace_id", "data_type", "write_status"]
+        )
+        rgb_trace = next(
+            (row for row in last_traces if row.get("data_type") == "RGB_IMAGES"), None
+        )
+        if (
+            rgb_trace is not None
+            and rgb_trace.get("write_status") == TRACE_WRITE_WRITTEN
+        ):
+            return rgb_trace
+        time.sleep(poll_interval_s)
+    raise AssertionError(
+        f"Daemon did not finalize the RGB_IMAGES trace; traces={last_traces}"
+    )
+
+
 def assert_recording_db_statuses(
     recording_index: int,
     *,

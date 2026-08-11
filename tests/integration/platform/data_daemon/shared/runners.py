@@ -8,9 +8,11 @@ used by every test suite.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
 from collections.abc import Generator
 from contextlib import contextmanager
+from typing import Any
 
 from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
@@ -26,9 +28,18 @@ from tests.integration.platform.data_daemon.shared.profiles import (
     scoped_online_mode,
 )
 from tests.integration.platform.data_daemon.shared.reporting import report_step
+from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    DataDaemonTestCase,
+)
+from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    EmittedFrame,
+    _split_video_producer,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MAX_TIME_TO_START_S,
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
+    PACING_BURST_ALL,
 )
 
 
@@ -122,3 +133,71 @@ def online_daemon_running() -> Generator[None]:
                 ):
                     stop_daemon()
                     assert_daemon_cleanup()
+
+
+@contextmanager
+def split_video_process_running(
+    *,
+    robot_name: str,
+    dataset_name: str,
+    camera_name: str,
+    case: DataDaemonTestCase,
+) -> Generator[dict[str, list[EmittedFrame]]]:
+    """Run a video-only producer for *robot_name* in a separate OS process.
+
+    Reproduces a real deployment where the recording owner and the camera are
+    different processes sharing one source: starts :func:`_split_video_producer`
+    in a ``"spawn"`` child and blocks until it signals ready (its own
+    ``connect_robot`` plus frame-bank prewarm complete).
+
+    Yields:
+        An initially-empty mapping of trace key -> every frame the child logged,
+        filled in from the child's report once it has exited. Only readable
+        *after* the block: what the producer logged is not known until it stops.
+    """
+    spawn_ctx = multiprocessing.get_context("spawn")
+    ready_event = spawn_ctx.Event()
+    stop_event = spawn_ctx.Event()
+    result_queue = spawn_ctx.Queue()
+    process = spawn_ctx.Process(
+        target=_split_video_producer,
+        args=(
+            robot_name,
+            dataset_name,
+            [camera_name],
+            case.image_width,
+            case.image_height,
+            case.video_fps,
+            case.video_detail,
+            0.0,  # timestamp_start_s: capture clock, decoupled from wall clock
+            False,  # random_phase
+            PACING_BURST_ALL,
+            0,  # context_index
+            ready_event,
+            stop_event,
+            result_queue,
+        ),
+    )
+    process.start()
+    logged_frames: dict[str, list[EmittedFrame]] = {}
+    try:
+        assert ready_event.wait(timeout=MAX_TIME_TO_START_S), (
+            "split-process video producer did not become ready within "
+            f"{MAX_TIME_TO_START_S}s"
+        )
+        yield logged_frames
+    finally:
+        stop_event.set()
+        process.join(timeout=30.0)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5.0)
+
+    outcome: dict[str, Any] = result_queue.get(timeout=5.0)
+    assert outcome[
+        "ok"
+    ], f"split-process video producer failed:\n{outcome.get('traceback')}"
+    assert (
+        process.exitcode == 0
+    ), f"split-process video producer exited with code {process.exitcode}"
+    logged_frames.update(outcome["report"])
