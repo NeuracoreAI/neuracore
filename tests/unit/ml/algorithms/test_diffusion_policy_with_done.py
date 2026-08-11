@@ -134,6 +134,23 @@ def test_custom_1d_only_raises(
         DiffusionPolicyWithDone(model_init_description=description, **model_config)
 
 
+def test_custom_1d_requires_rgb(
+    pytorch_dummy_dataset: PytorchDummyDataset,
+    model_config: dict,
+):
+    description = ModelInitDescription(
+        input_data_types=OrderedSet([DataType.JOINT_POSITIONS]),
+        output_data_types=OrderedSet(
+            [DataType.JOINT_TARGET_POSITIONS, DataType.CUSTOM_1D]
+        ),
+        input_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["input"],
+        output_dataset_statistics=pytorch_dummy_dataset.dataset_statistics["output"],
+        output_prediction_horizon=pytorch_dummy_dataset.output_prediction_horizon,
+    )
+    with pytest.raises(ValueError, match="RGB_IMAGES"):
+        DiffusionPolicyWithDone(model_init_description=description, **model_config)
+
+
 @pytest.mark.parametrize("output_data_types", OUTPUT_PARAMS)
 @pytest.mark.parametrize("input_data_types", INPUT_PARAMS)
 def test_model_construction_forward_backward(
@@ -144,6 +161,12 @@ def test_model_construction_forward_backward(
     sample_inference_batch: BatchedInferenceInputs,
     sample_training_batch: BatchedTrainingSamples,
 ):
+    if (
+        DataType.CUSTOM_1D in output_data_types
+        and DataType.RGB_IMAGES not in input_data_types
+    ):
+        pytest.skip("Done-flag head requires RGB images")
+
     description = ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
@@ -154,6 +177,10 @@ def test_model_construction_forward_backward(
     model = DiffusionPolicyWithDone(model_init_description=description, **model_config)
     model = model.to(DEVICE)
     assert isinstance(model, nn.Module)
+    if DataType.CUSTOM_1D in output_data_types:
+        assert model.done_head is not None
+        assert model.done_head[0].in_features == model.vision_cond_dim
+        assert model.vision_cond_dim == model.global_cond_dim - model.proprio_dim
 
     sample_inference_batch = sample_inference_batch.to(DEVICE)
     output: dict[DataType, list[BatchedNCData]] = model(sample_inference_batch)
@@ -205,6 +232,12 @@ def test_flow_matching_forward_backward(
     The diffusion process is already covered by
     test_model_construction_forward_backward (the default process_type).
     """
+    if (
+        DataType.CUSTOM_1D in output_data_types
+        and DataType.RGB_IMAGES not in input_data_types
+    ):
+        pytest.skip("Done-flag head requires RGB images")
+
     description = ModelInitDescription(
         input_data_types=input_data_types,
         output_data_types=output_data_types,
