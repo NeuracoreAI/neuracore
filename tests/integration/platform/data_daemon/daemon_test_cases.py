@@ -6,7 +6,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
-    PRODUCER_PER_THREAD,
+    PRODUCER_OLD_PER_THREAD,
 )
 
 PRE_NETWORK_INTEGRITY_CASES = (
@@ -54,7 +54,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
         # Depth via the threaded producer, covering `float16` under a more
@@ -74,7 +74,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         wait=False,
         video_detail=DETAIL_FLAT,
     ),
@@ -86,7 +86,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 500 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         random_phase=True,
         wait=False,
         video_detail=DETAIL_FLAT,
@@ -128,7 +128,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         video_detail=DETAIL_FLAT,
@@ -185,7 +185,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         wait=False,
         video_detail=DETAIL_FLAT,
     ),
@@ -226,7 +226,7 @@ NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         video_detail=DETAIL_FLAT,
@@ -240,7 +240,7 @@ NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         wait=True,
@@ -335,7 +335,7 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -346,7 +346,7 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         wait=True,
         video_detail=DETAIL_FLAT,
     ),
@@ -358,7 +358,7 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
+        producer_channels=PRODUCER_OLD_PER_THREAD,
         random_phase=True,
         wait=False,
         video_detail=DETAIL_FLAT,
