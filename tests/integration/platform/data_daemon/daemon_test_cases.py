@@ -2,9 +2,11 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
+    PACING_BURST_ALL,
     PRODUCER_PER_THREAD,
 )
 
@@ -87,12 +89,14 @@ PRE_NETWORK_INTEGRITY_CASES = (
     ),
     DataDaemonTestCase(
         duration_sec=10,
-        joint_count=7,
-        recording_count=1,
-        video_count=1,
-        image_height=64,
-        image_width=64,
+        joint_count=15,
+        recording_count=30,
+        video_count=2,
+        image_height=480,
+        image_width=640,
         video_codec="h264_medium",
+        video_detail=DETAIL_REALISTIC,
+        producer_pacing=PACING_BURST_ALL,
     ),
 )
 

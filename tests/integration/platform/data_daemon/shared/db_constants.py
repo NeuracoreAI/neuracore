@@ -10,6 +10,11 @@ COLUMN_RECORDING_ID = "recording_id"
 COLUMN_TRACE_ID = "trace_id"
 COLUMN_ROBOT_ID = "robot_id"
 COLUMN_ROBOT_INSTANCE = "robot_instance"
+# Caller capture timestamps, not the routed window bounds — those are stamped on
+# the publish clock inside the producer's start/stop calls and live in daemon
+# memory, never in a column.
+COLUMN_START_TIMESTAMP_NS = "start_timestamp_ns"
+COLUMN_STOP_TIMESTAMP_NS = "stop_timestamp_ns"
 COLUMN_STARTED_AT = "started_at"
 COLUMN_EXPECTED_TRACE_COUNT = "expected_trace_count"
 COLUMN_EXPECTED_TRACE_COUNT_REPORTED = "expected_trace_count_reported"

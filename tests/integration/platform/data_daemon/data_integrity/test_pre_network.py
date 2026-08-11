@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import pytest
 
@@ -15,8 +16,10 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_disk_recording_properties,
+    assert_encoded_video_not_trivial,
     assert_lossy_only_video_artifacts,
 )
+from tests.integration.platform.data_daemon.shared.process_control import cpu_load
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -31,6 +34,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case_con
     run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_REALISTIC,
+    PACING_BURST_VIDEO,
+    PRODUCER_CONTINUOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
 )
@@ -46,6 +52,8 @@ CASES = DataDaemonTestBatch(
     cases=PRE_NETWORK_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
+    producer_pacing=PACING_BURST_VIDEO,
+    producer_channels=PRODUCER_CONTINUOUS,
 ).as_cases()
 
 # ---------------------------------------------------------------------------
@@ -88,11 +96,14 @@ def test_disk_db_data_integrity(
         try:
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs)
+                with cpu_load() if case.cpu_load else nullcontext():
+                    results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
                 if case.lossy_only:
-                    assert_lossy_only_video_artifacts()
+                    assert_lossy_only_video_artifacts(results)
+                elif case.has_video and case.video_detail == DETAIL_REALISTIC:
+                    assert_encoded_video_not_trivial(results)
 
         finally:
             set_case_analysis_report(

@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MIN_ENCODED_BYTES_PER_PIXEL,
+    TRAILING_RGB_GAP_FRAME_TOLERANCE,
+)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
@@ -116,7 +120,7 @@ def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]
     ]
 
 
-def _collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
+def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
     """Return mapping of trace file key (joint/camera name) to timestamps
     from every trace.json under a recording dir."""
     trace_timestamps: dict[str, list[float]] = {}
@@ -147,16 +151,30 @@ def _assert_timestamps_match(
     expected_timestamps: list[float],
     failures: list[TraceFailure],
     durations: dict[str, float],
+    unknowable_timestamps: frozenset[float] = frozenset(),
 ) -> None:
     """Assert all timestamps exactly match the expected list (no tolerance).
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
 
+    *unknowable_timestamps* are frames a producer logging across the recording
+    lifecycle emitted while one of the recording's boundaries was passing, so
+    neither side can say whether the daemon took them (see
+    ``build_test_case_context._classify_boundary_frames``). They are removed
+    from **both** lists up front — never permitted on one — and what remains is
+    compared exactly, at both ends alike. Empty for every other case.
+
     Appends :class:`TraceFailure` instances to *failures* so the caller can
     aggregate traces that share the same failure body (e.g. all joints failing
     with the same mismatch pattern).
     """
+    if unknowable_timestamps:
+        timestamps = [ts for ts in timestamps if ts not in unknowable_timestamps]
+        expected_timestamps = [
+            ts for ts in expected_timestamps if ts not in unknowable_timestamps
+        ]
+
     if len(timestamps) != len(expected_timestamps):
         failures.append(
             TraceFailure(
@@ -188,6 +206,55 @@ def _assert_timestamps_match(
 
     if timestamps:
         durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
+
+
+def _assert_no_trailing_rgb_gap(
+    *,
+    trace_key: str,
+    timestamps: list[float],
+    expected_stop_timestamp: float | None,
+    video_fps: int,
+    failures: list[TraceFailure],
+) -> None:
+    """Assert an RGB trace's last on-disk frame isn't stranded before the stop.
+
+    A tail video chunk silently orphaned at the recording-window boundary (see
+    the dispatcher's per-producer flush-marker gating) truncates the trace
+    without ever tripping :func:`_assert_timestamps_match` — that check only
+    ever sees what actually reached disk, so a shortened sequence still
+    compares equal to itself. This is deliberately immune to producer
+    *under*-delivery (a slow or throttled camera legitimately logging fewer
+    frames), which is why it compares the last on-disk timestamp against the
+    recording's nominal capture-clock end rather than the expected frame
+    count: only a chunk orphaned at the boundary strands frames an unbounded
+    distance before a stop that has already happened.
+
+    *expected_stop_timestamp* must be on the same capture clock as
+    *timestamps* — see ``ContextResult.expected_video_stop_timestamp_by_recording``.
+    It is deliberately not the wall-clock instant ``nc.stop_recording`` was
+    called: that call's own ``timestamp`` argument, and therefore every
+    per-frame capture timestamp compared here, is caller-supplied content on
+    a clock the daemon and this harness never assume is wall-clock at all.
+    """
+    if expected_stop_timestamp is None or not timestamps:
+        return
+    if not trace_key.startswith("RGB_IMAGES/"):
+        return
+    gap_s = expected_stop_timestamp - max(timestamps)
+    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / video_fps
+    if gap_s > tolerance_s:
+        failures.append(
+            TraceFailure(
+                trace_key=trace_key,
+                body=(
+                    f"last on-disk frame trails the recording's nominal end "
+                    f"by {gap_s:.3f}s, more than the {tolerance_s:.3f}s "
+                    f"tolerance ({TRAILING_RGB_GAP_FRAME_TOLERANCE} video "
+                    f"frame interval(s) at {video_fps}fps) — a tail chunk "
+                    f"may have been orphaned at the window boundary"
+                ),
+            )
+        )
 
 
 def _collapse_trace_failures(failures: list[TraceFailure]) -> list[str]:
@@ -266,7 +333,7 @@ def assert_disk_recording_properties(
                 )
                 continue
 
-            trace_timestamps = _collect_trace_timestamps_per_file(recording_dir)
+            trace_timestamps = collect_trace_timestamps_per_file(recording_dir)
             if not trace_timestamps:
                 all_failures.append(
                     RecordingFailures(
@@ -341,6 +408,20 @@ def assert_disk_recording_properties(
                     expected_timestamps=expected[trace_key],
                     failures=trace_failures,
                     durations=durations,
+                    unknowable_timestamps=frozenset(
+                        per_recording.by_trace_unknowable.get(trace_key, ())
+                    ),
+                )
+                _assert_no_trailing_rgb_gap(
+                    trace_key=trace_key,
+                    timestamps=timestamps,
+                    expected_stop_timestamp=(
+                        result.expected_video_stop_timestamp_by_recording.get(
+                            recording_key
+                        )
+                    ),
+                    video_fps=result.video_fps,
+                    failures=trace_failures,
                 )
 
             if trace_failures:
@@ -399,7 +480,91 @@ def _ffprobe_video_stream(video_path: Path) -> dict | None:
     return streams[0] if streams else None
 
 
-def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
+def _rgb_trace_dirs(
+    recordings_root: Path, results: Iterable[ContextResult]
+) -> list[Path]:
+    """Return the ``RGB_IMAGES`` trace directories of the recordings in *results*.
+
+    Scoped to *results* rather than walking the whole recordings root: under
+    ``storage_state_action="preserve"`` the root still holds every earlier
+    case's recordings, and those were made with a different codec and frame
+    content, so judging this case against them is meaningless.
+    """
+    recording_dirs = sorted({
+        recordings_root / recording_key
+        for result in results
+        for recording_key, _ in _result_recording_keys(result)
+    })
+    return [
+        trace_dir
+        for recording_dir in recording_dirs
+        for rgb_dir in [recording_dir / "RGB_IMAGES"]
+        if rgb_dir.is_dir()
+        for trace_dir in sorted(rgb_dir.iterdir())
+        if trace_dir.is_dir()
+    ]
+
+
+def assert_encoded_video_not_trivial(
+    results: list[ContextResult], min_trace_count: int = 1
+) -> None:
+    """Assert the encoded lossless video carries a realistic amount of data.
+
+    Guards the *frame content*, not the pipeline: solid-colour frames compress
+    ~620:1 losslessly, so a regression that quietly reverted the synthetic camera
+    frames to a flat fill would leave every other assertion in this suite passing
+    while the video pipeline did almost no work.
+
+    For every ``RGB_IMAGES`` trace, divides ``lossless.mp4``'s size by its frame
+    count and pixel count and requires the result to exceed
+    :data:`MIN_ENCODED_BYTES_PER_PIXEL`, which every resolution in this suite
+    clears by at least 11x while flat frames fall at least 3x below it.
+
+    Only meaningful for cases whose ``video_detail`` is ``DETAIL_REALISTIC`` and
+    which write a lossless archive, so callers must gate on both.
+
+    Args:
+        results: Per-context results whose recordings scope the check.
+        min_trace_count: Minimum number of RGB trace directories expected.
+    """
+    recordings_root = get_daemon_recordings_root_path()
+    assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
+
+    trace_dirs = _rgb_trace_dirs(recordings_root, results)
+    assert len(trace_dirs) >= min_trace_count, (
+        f"expected at least {min_trace_count} RGB trace dir(s), "
+        f"found {len(trace_dirs)} under {recordings_root}"
+    )
+
+    for trace_dir in trace_dirs:
+        lossless_path = trace_dir / "lossless.mp4"
+        assert lossless_path.is_file(), f"missing lossless.mp4 in {trace_dir}"
+
+        stream = _ffprobe_video_stream(lossless_path)
+        if stream is None:
+            continue
+        width, height = stream.get("width"), stream.get("height")
+        nb_read_frames = stream.get("nb_read_frames")
+        if not width or not height or not nb_read_frames:
+            continue
+        frame_count, pixels = int(nb_read_frames), int(width) * int(height)
+        if frame_count <= 0 or pixels <= 0:
+            continue
+
+        encoded_bytes = lossless_path.stat().st_size
+        bytes_per_pixel = encoded_bytes / frame_count / pixels
+        assert bytes_per_pixel > MIN_ENCODED_BYTES_PER_PIXEL, (
+            f"{lossless_path} encodes {bytes_per_pixel:.4f} bytes/pixel "
+            f"({encoded_bytes} bytes, {frame_count} frames, {width}x{height}), "
+            f"at or below the {MIN_ENCODED_BYTES_PER_PIXEL} floor — the logged "
+            f"frames have regressed to near-trivial content and the video "
+            f"pipeline is not being exercised"
+        )
+
+
+def assert_lossy_only_video_artifacts(
+    results: list[ContextResult], min_trace_count: int = 1
+) -> None:
     """Assert every RGB video trace on disk is a single lossy H.264 video.
 
     For a recording made with ``nc.Codec.H264_MEDIUM`` the daemon writes only
@@ -410,24 +575,14 @@ def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
     - (when ffprobe is available) the video is H.264 and its frame count matches
       the per-frame ``trace.json`` sidecar.
 
-    Works identically for the Python and Rust daemons (both write the same
-    on-disk artefact layout).
-
     Args:
+        results: Per-context results whose recordings scope the check.
         min_trace_count: Minimum number of RGB trace directories expected.
     """
     recordings_root = get_daemon_recordings_root_path()
     assert recordings_root.exists(), f"recordings root missing: {recordings_root}"
 
-    trace_dirs = [
-        trace_dir
-        for recording_dir in sorted(recordings_root.iterdir())
-        if recording_dir.is_dir()
-        for rgb_dir in [recording_dir / "RGB_IMAGES"]
-        if rgb_dir.is_dir()
-        for trace_dir in sorted(rgb_dir.iterdir())
-        if trace_dir.is_dir()
-    ]
+    trace_dirs = _rgb_trace_dirs(recordings_root, results)
     assert len(trace_dirs) >= min_trace_count, (
         f"expected at least {min_trace_count} RGB trace dir(s), "
         f"found {len(trace_dirs)} under {recordings_root}"
@@ -457,3 +612,85 @@ def assert_lossy_only_video_artifacts(min_trace_count: int = 1) -> None:
                     f"{lossy_path} has {nb_read_frames} frames, "
                     f"trace.json expects {expected_frames}"
                 )
+
+
+def assert_rgb_trace_respects_the_recording_boundary(
+    recording_index: int,
+    *,
+    owed_timestamps: list[float],
+    forbidden_before_start_timestamps: list[float],
+    forbidden_after_stop_timestamps: list[float],
+) -> None:
+    """Assert the recording's RGB trace holds every frame it provably owns and
+    nothing published outside its window, at either boundary.
+
+    All three lists are capture stamps of frames the producer *reported*
+    logging, as classified by
+    ``build_test_case_context.classify_split_producer_frames``. None can be
+    checked against a nominal ``fps * duration`` count, which measures the
+    producer's throughput rather than the daemon's integrity: a cross-process
+    producer's frame rate and the lag before its logging gate opens both move
+    that number around by tens of frames.
+
+    Called once the tail chunk should already have landed — see
+    :func:`~runners.split_video_process_running`, which only returns once the
+    producer's own writer flush barrier has completed and been acknowledged.
+
+    A missing owed frame is one the daemon accepted the window for and then
+    dropped, which at this boundary means an orphaned chunk. A present
+    forbidden-before-start frame means a chunk that opened before this
+    window's start was taken whole instead of being cut at it — the mirror,
+    at the start boundary, of a present forbidden-after-stop frame, which
+    means a chunk straddling the stop was taken whole instead of being cut
+    there.
+    """
+    from tests.integration.platform.data_daemon.shared.db_helpers import (
+        wait_for_written_rgb_trace,
+    )
+
+    assert owed_timestamps, (
+        "the producer logged no frame provably inside the recording, so this "
+        "run proves nothing about the boundary"
+    )
+    rgb_trace = wait_for_written_rgb_trace(recording_index)
+    trace_json = (
+        get_daemon_recordings_root_path()
+        / str(recording_index)
+        / "RGB_IMAGES"
+        / rgb_trace["trace_id"]
+        / "trace.json"
+    )
+    frames = json.loads(trace_json.read_text(encoding="utf-8"))
+    on_disk = {float(frame["timestamp"]) for frame in frames}
+    span = (
+        f"{len(on_disk)} frame(s) on disk spanning "
+        f"[{min(on_disk):.4f}, {max(on_disk):.4f}]"
+    )
+
+    missing = [stamp for stamp in owed_timestamps if stamp not in on_disk]
+    assert not missing, (
+        f"{len(missing)}/{len(owed_timestamps)} frame(s) logged inside the "
+        f"recording never reached disk — a chunk was orphaned at the recording "
+        f"boundary. First missing capture stamps: "
+        f"{[round(stamp, 4) for stamp in missing[:5]]}; {span}"
+    )
+
+    kept_early = [
+        stamp for stamp in forbidden_before_start_timestamps if stamp in on_disk
+    ]
+    assert not kept_early, (
+        f"{len(kept_early)}/{len(forbidden_before_start_timestamps)} frame(s) "
+        f"logged before the recording started reached disk — a chunk that "
+        f"opened before this window's start was taken whole instead of being "
+        f"cut at it. First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_early[:5]]}; {span}"
+    )
+
+    kept_late = [stamp for stamp in forbidden_after_stop_timestamps if stamp in on_disk]
+    assert not kept_late, (
+        f"{len(kept_late)}/{len(forbidden_after_stop_timestamps)} frame(s) "
+        f"logged after the recording stopped reached disk — a chunk "
+        f"straddling the boundary was taken whole rather than cut at it. "
+        f"First such capture stamps: "
+        f"{[round(stamp, 4) for stamp in kept_late[:5]]}; {span}"
+    )

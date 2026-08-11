@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+# cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -41,9 +42,10 @@ STORAGE_STATE_DELETE = "delete"
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
 
-# producer_channels
-PRODUCER_SYNCHRONOUS = "synchronous"
-PRODUCER_PER_THREAD = "per_thread"
+# producer_channels — thread allocation and producer lifetime
+PRODUCER_SYNCHRONOUS = "synchronous"  # one thread, scoped to one recording
+PRODUCER_PER_THREAD = "per_thread"  # thread per stream, scoped to one recording
+PRODUCER_CONTINUOUS = "continuous"  # thread per stream, whole context lifetime
 
 # context_duration_mode
 DURATION_MODE_FIXED = "fixed"
@@ -51,6 +53,17 @@ DURATION_MODE_VARIABLE = "variable"
 DURATION_VARIABLE_MIN_FACTOR = 0.75
 DURATION_VARIABLE_MAX_FACTOR = 1.25
 
+# video_detail
+DETAIL_REALISTIC = "realistic"
+DETAIL_FLAT = "flat"
+
+# producer_pacing — which streams skip their wall-clock deadline
+PACING_DEADLINE = "deadline"  # none; every stream paces
+PACING_BURST_VIDEO = "burst-video"  # video only; joints stay paced
+PACING_BURST_ALL = "burst-all"  # every stream
+
+# random_phase — per-frame timestamp offset; independent of producer_pacing,
+# which controls delivery timing rather than the timestamp value.
 # Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 RANDOM_PHASE_JITTER_FACTOR = 0.5
@@ -77,8 +90,10 @@ STORAGE_STATE_ACTIONS = (
     STORAGE_STATE_EMPTY,
 )
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD)
+PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD, PRODUCER_CONTINUOUS)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
+VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
+PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_BURST_ALL)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -89,12 +104,35 @@ StorageStateAction = Literal["delete", "preserve", "empty"]
 DepthMode = Literal["float16", "float32"]
 """Depth camera sample dtype, matching the wire labels `nc.log_depth()`
 derives from the array's own dtype (`image.dtype.name`)."""
+VideoDetail = Literal["realistic", "flat"]
+ProducerPacing = Literal["deadline", "burst-video", "burst-all"]
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
 STOP_RECORDING_NO_WAIT_SLA_S = 1.0
 STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
 STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
+
+# PRODUCER_CONTINUOUS: wall-clock pause after the last stop_recording so
+# post-stop frames are logged before producer threads stop, mirroring a real
+# camera that keeps running after the recording ends.
+CONTINUOUS_LOGGING_TAIL_S = 2.0
+
+# assert_disk_recording_properties: how many video frame intervals an RGB
+# trace's last on-disk timestamp may trail stop_called_at by. Zero would over-
+# fit to a producer that always logs up to the very edge of the window; this
+# bounds truncation (a whole tail chunk silently orphaned) without asserting
+# exact delivery, which the on-disk assertion deliberately does not require.
+TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
+# PRODUCER_CONTINUOUS un-paced streams (PACING_BURST_VIDEO/PACING_BURST_ALL):
+# how far ahead of its nominal per-frame schedule the producer may race before
+# it must wait for real time to catch up. Bounds the backlog it can push to a
+# plausible size instead of an unbounded firehose for the whole context
+# lifetime — run_threaded_logging doesn't need this, its un-paced streams are
+# already bounded by a fixed per-recording frame count. Kept comfortably under
+# the daemon's 1s spool-stall window (see data_daemon_bridge/src/lib.rs).
+CONTINUOUS_BURST_LOOKAHEAD_S = 0.5
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
@@ -134,3 +172,12 @@ DEPTH_FRAME_BASE_MODULUS = 997  # prime; spreads per-frame bases pseudo-randomly
 # errors many orders of magnitude larger, so this stays tight enough to catch
 # it.
 DEPTH_ROUND_TRIP_ATOL_M = 1e-4
+
+# Floor for encoded ``lossless.mp4`` bytes per pixel, asserted on realistic-detail
+# video cases. Measured across this matrix through the daemon's own ffmpeg
+# arguments: flat frames yield 0.005 (1920x1080) to 0.032 (64x64) bytes/pixel,
+# realistic frames 1.18 (1920x1080) to 2.07 (64x64). Small frames sit nearer the
+# floor from both directions because a keyframe amortises over fewer pixels, so
+# they set the margin: at least 3x above the flat ceiling and 11x below the
+# realistic floor.
+MIN_ENCODED_BYTES_PER_PIXEL = 0.1

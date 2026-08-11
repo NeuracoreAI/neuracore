@@ -24,20 +24,31 @@ if TYPE_CHECKING:
     )
 
 from neuracore.core.config.config_manager import get_config_manager
-from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.process_control import (
+    BUCKET_KEYS,
+    LATENCY_BUCKETS_S,
+    Timer,
+    percentile_upper_bound,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
+    DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_ALL,
+    PACING_BURST_VIDEO,
+    PRODUCER_CONTINUOUS,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
     STORAGE_STATE_EMPTY,
     DepthMode,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
+    VideoDetail,
 )
 
 logger = logging.getLogger(__name__)
@@ -106,10 +117,19 @@ class DataDaemonTestCase:
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
-        producer_channels: Thread-allocation strategy for data producers.
-            ``"synchronous"`` logs all data types from a single thread in
-            sequence; ``"per_thread"`` spawns one dedicated thread per data
-            type so streams are written concurrently.
+        producer_channels: How producer threads are allocated, and how long
+            they live.  ``"synchronous"`` logs all data types from a single
+            thread in sequence; ``"per_thread"`` spawns one dedicated thread
+            per stream so streams are written concurrently.  Both scope their
+            threads to a single recording, joining them before
+            ``stop_recording``, so no frame is ever in flight when a window
+            boundary passes.  ``"continuous"`` also runs a thread per stream
+            but for the whole context lifetime — started before the first
+            ``start_recording`` and stopped after the last ``stop_recording``,
+            mid-loop at every boundary — mirroring a real camera that does not
+            stop between recordings.  Producer lifetime belongs on this axis
+            rather than a separate flag because continuous logging *requires* a
+            thread per stream, so it is not independent of the allocation.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -177,6 +197,36 @@ class DataDaemonTestCase:
             frame-rate knobs.
         depth_mode: The NumPy dtype depth frames are logged as — ``"float16"``
             or ``"float32"``. Ignored when ``depth_count`` is ``0``.
+        video_detail: Pixel content of the synthetic camera frames.
+            ``"realistic"`` (default) renders a textured scene with a moving
+            object and sensor noise, so PNG compression and the daemon's encode
+            cost what they cost on a real camera.  ``"flat"`` keeps the cheap
+            solid-fill frames for cases that only care about frame counts.
+            Frame identity is embedded either way, so the disk timestamp and
+            frame-code assertions are unaffected by this choice.
+        producer_pacing: Which producer streams skip their wall-clock deadline,
+            i.e. how fast frames are handed to the SDK.  This is fully
+            independent of ``random_phase``, which controls what timestamp a
+            frame *carries*, never when it is delivered.
+            ``"deadline"`` paces every stream, so delivery tracks wall-clock
+            time.  ``"burst-video"`` un-paces the video streams only, so frames
+            are pushed as fast as the camera thread can render and log them
+            while joints stay paced — backlogging the writer queue the way a
+            real camera does when the encoder can't keep up.  ``"burst-all"``
+            (default) un-paces everything, which is the fastest way to emit a
+            fixed frame count.  A ``"burst-video"`` request a case's shape
+            cannot honour — no cameras, or a single synchronous thread with
+            nothing for video to race ahead of — falls back to ``"burst-all"``
+            instead of failing, so a batch can set one pacing across a matrix
+            whose cases are not all shaped to take it; see
+            :func:`resolve_producer_pacing`.
+        cpu_load: When ``True``, all but one CPU core is saturated (see
+            ``cpu_load()`` in ``shared/process_control.py``) for the duration
+            of the recording contexts. Approximates the core contention a real
+            rig puts on the daemon, so a case relying on the writer's compress
+            pool backlogging under load doesn't depend on how many idle cores
+            the host happens to have. ``False`` (default) runs with no
+            injected contention.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -208,6 +258,9 @@ class DataDaemonTestCase:
     video_codec: str | None = None
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
+    video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_BURST_ALL
+    cpu_load: bool = False
 
     @property
     def has_video(self) -> bool:
@@ -276,6 +329,19 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
+        producer_channels: Workload override applied to every case when set;
+            see ``DataDaemonTestCase.producer_channels``.  ``None`` (default)
+            leaves each case's own value alone.  Lets a suite declare one
+            producer model — e.g. ``"continuous"`` — across its whole matrix
+            instead of restating it on every case.
+        producer_pacing: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
+            each case's own value alone.  A case whose shape cannot honour the
+            batch's pacing degrades rather than failing; see
+            :func:`resolve_producer_pacing`.
+        video_detail: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.video_detail``.  ``None`` (default) leaves each
+            case's own value alone.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -284,6 +350,9 @@ class DataDaemonTestBatch:
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
+    producer_channels: str | None = None
+    producer_pacing: ProducerPacing | None = None
+    video_detail: VideoDetail | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -295,6 +364,14 @@ class DataDaemonTestBatch:
         }
         if self.skip:
             batch_overrides["skip"] = True
+        # Workload overrides, unlike the infrastructure params above, are opt-in:
+        # unset means "keep what each case asked for".
+        if self.producer_channels is not None:
+            batch_overrides["producer_channels"] = self.producer_channels
+        if self.producer_pacing is not None:
+            batch_overrides["producer_pacing"] = self.producer_pacing
+        if self.video_detail is not None:
+            batch_overrides["video_detail"] = self.video_detail
         return [
             DataDaemonTestCase(**{
                 **{
@@ -311,6 +388,34 @@ class DataDaemonTestBatch:
 # ---------------------------------------------------------------------------
 # Utility functions
 # ---------------------------------------------------------------------------
+
+
+def resolve_producer_pacing(case: DataDaemonTestCase) -> str:
+    """Delivery pacing *case* actually runs under.
+
+    ``producer_pacing`` is a request, not a guarantee, because a batch applies
+    one value across a matrix of differently-shaped cases. A ``"burst-video"``
+    request the case cannot honour degrades to ``"burst-all"`` — quietly, since
+    there is nothing wrong with a joint-only case in a batch that un-paces
+    video. ``case_id`` reports the resolved value, so a degraded case is never
+    labelled with a pacing it did not run. ``"deadline"`` and ``"burst-all"``
+    have no shape requirements, so they are always honoured as requested.
+
+    A ``"burst-video"`` request is not honoured when:
+
+    * it un-paces video on a case with no cameras, leaving nothing to un-pace;
+    * it un-paces video on a case that logs every stream from one thread
+      (``producer_channels=PRODUCER_SYNCHRONOUS``), where video has nothing to
+      race ahead of.
+    """
+    requested = case.producer_pacing
+    if requested != PACING_BURST_VIDEO:
+        return requested
+    if not case.video_count:
+        return PACING_BURST_ALL
+    if case.producer_channels == PRODUCER_SYNCHRONOUS:
+        return PACING_BURST_ALL
+    return requested
 
 
 def case_id(case: DataDaemonTestCase) -> str:
@@ -334,15 +439,26 @@ def case_id(case: DataDaemonTestCase) -> str:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
+        if case.video_detail != DataDaemonTestCase.video_detail:
+            parts.append(f"{case.video_detail}frames")
     if case.has_depth:
         parts.append(f"{case.depth_count}depth")
         parts.append(case.depth_mode)
     if case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("threaded")
+    elif case.producer_channels == PRODUCER_CONTINUOUS:
+        parts.append("continuous")
+    # The resolved value, not the requested one: a batch-wide pacing that this
+    # case degrades out of must not show up in its ID.
+    resolved_pacing = resolve_producer_pacing(case)
+    if resolved_pacing != DataDaemonTestCase.producer_pacing:
+        parts.append(resolved_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:
         parts.append("wait")
+    if case.cpu_load:
+        parts.append("cpuload")
     return "-".join(parts)
 
 
@@ -446,11 +562,59 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
 # ---------------------------------------------------------------------------
 
 
+MIN_SAMPLES_FOR_PERCENTILE = 100
+"""Below this sample count a percentile is not reported — it would just be the max."""
+
+
+def _percentile_text(stats: dict[str, float], quantile: float) -> str:
+    """Render one percentile column, or empty when it would say nothing.
+
+    Args:
+        stats: One label's accumulated timer stats.
+        quantile: The quantile to render, e.g. ``0.99``.
+    """
+    count = int(stats["count"])
+    label = f"p{int(quantile * 100)}"
+    if count < MIN_SAMPLES_FOR_PERCENTILE:
+        # One-shot lifecycle timers (connect, start, stop): a percentile over a
+        # handful of samples says nothing avg and max don't already, so leave
+        # the column empty rather than print a bucket edge that looks like data.
+        return ""
+    if not any(stats.get(key, 0.0) for key in BUCKET_KEYS):
+        # Stats merged from a run before the histogram existed.
+        return f"{label}=n/a"
+    bound = percentile_upper_bound(stats, quantile)
+    if bound is None:
+        return f"{label}>{LATENCY_BUCKETS_S[-1]:.3f}s"
+    # A bucket edge, not an interpolated value — "<=" keeps that honest.
+    # Clamped to max: the true percentile cannot exceed the largest sample, so
+    # the bound is tighter that way and never reads as larger than max.
+    return f"{label}<={min(bound, stats['max']):.3f}s"
+
+
 def _format_timer_stats_line(label: str, stats: dict[str, float]) -> str:
-    """Format a timer stats line for analysis output."""
+    """Format a timer stats line for analysis output.
+
+    Carries percentiles alongside ``avg``/``max`` because the two extremes
+    answer different questions and neither answers this one: ``avg`` is
+    insensitive to a tail (one slow call in 30k moves it by nothing) while
+    ``max`` is a single draw dominated by scheduler noise, so it swings 2x
+    between identical runs.
+
+    Both ``p95`` and ``p99``, because the buckets are log-spaced and the two
+    usually land in different ones — which separates a distribution that slid
+    as a whole from one call in a hundred stalling. A regression that slows
+    every call moves ``p95`` first.
+    """
     count = int(stats["count"])
     avg = stats["total"] / count if count > 0 else 0.0
-    return f"    {label:<42}  {count:3}x" f"  avg={avg:.3f}s  max={stats['max']:.3f}s"
+    p95_text = _percentile_text(stats, 0.95)
+    p99_text = _percentile_text(stats, 0.99)
+    return (
+        f"    {label:<42}  {count:3}x"
+        f"  avg={avg:.3f}s  {p95_text:<12}  {p99_text:<12}"
+        f"  max={stats['max']:.3f}s"
+    )
 
 
 def log_run_analysis(

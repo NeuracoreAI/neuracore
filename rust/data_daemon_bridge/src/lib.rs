@@ -57,7 +57,7 @@ use crate::publisher::{
     flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
 };
 use crate::query::{resolve_recording_id, wait_until_ready as wait_until_ready_impl};
-use crate::writer::{writer_queue, FrameJob, WriterMsg};
+use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
 /// daemon opens a window and owns all recording identity.
@@ -92,7 +92,7 @@ fn start_recording(
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StartRecording {
-            robot_id,
+            robot_id: robot_id.clone(),
             robot_instance,
             robot_name,
             dataset_id,
@@ -100,6 +100,14 @@ fn start_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // Tell the writer where the window opened so no video chunk spans the
+        // boundary. Fire-and-forget: it is applied lazily against frame publish
+        // stamps, so it costs the caller nothing and needs no barrier here.
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: publish_timestamp_ns,
+        });
         Ok(capture_timestamp_ns)
     })
 }
@@ -226,6 +234,10 @@ fn log_frame(
         width,
         height,
         dtype: frame_dtype,
+        // Stamped here, on the caller's thread, while the recording that owns
+        // this frame is still open — not on the writer thread, which may not
+        // reach the frame until well after the stop.
+        publish_ns: now_ns(),
         timestamp_ns,
         timestamp_s: resolved_timestamp_s,
         data,
@@ -236,13 +248,21 @@ fn log_frame(
     // GIL would stall every Python thread in the process. A frame that cannot be
     // admitted before the spool-stall window elapses surfaces as an error rather
     // than being silently dropped, so the caller learns the daemon has stalled.
-    py.detach(move || writer_queue().push(WriterMsg::Frame(job)))
-        .map_err(|_| {
-            PyRuntimeError::new_err(
-                "video logging stalled: the data daemon is not draining the spool \
-                 backlog (frame rejected after 1s of backpressure)",
-            )
-        })?;
+    py.detach(move || {
+        // Claim the source for this process before the frame is queued, not
+        // after: the claim's whole job is to reach the daemon ahead of anything
+        // the writer publishes, and admission can block for up to a second
+        // under backpressure. Rate-limited inside, so this is a lock + map
+        // lookup on all but the first frame of each interval.
+        note_video_activity(&job.robot_id, job.robot_instance, job.publish_ns);
+        writer_queue().push(WriterMsg::Frame(job))
+    })
+    .map_err(|_| {
+        PyRuntimeError::new_err(
+            "video logging stalled: the data daemon is not draining the spool \
+             backlog (frame rejected after 1s of backpressure)",
+        )
+    })?;
     Ok(())
 }
 
@@ -311,9 +331,9 @@ fn log_json(
 /// start. Stamping the boundary early but sending only after a slow flush
 /// (~19 ms observed) let the stop reach the wire after the following start —
 /// the daemon then retired the wrong window and dropped both recordings' data.
-/// Late tail chunks (announced on the writer's port after this stop) route
-/// into the just-closed window by the daemon's holdback + closing-window
-/// retention, so chunk-before-stop ordering is not required.
+/// Late tail chunks (announced on the writer's port after this stop, by
+/// [`flush_source`]) route into the just-closed window by the daemon's holdback
+/// + the `SourceFlushed` marker, so chunk-before-stop ordering is not required.
 ///
 /// The producer stamps the window's upper bound on the publish clock here
 /// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
@@ -363,14 +383,68 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
-        // Then barrier on the writer: it drains every frame still queued for
-        // this source (FIFO), seals the tail chunks and announces them, then
-        // acks. Blocking here means `stop_recording` still returns only once
-        // those chunks are durably spooled + announced, so a process exit right
-        // after the call can't lose them. The tail chunks ride the writer's
-        // port and land after this stop; the daemon's holdback + closing-window
-        // retention route them into the just-closed window by their in-window
-        // open timestamp.
+        // The writer's tail chunks are NOT sealed here — [`flush_source`] does
+        // that, and every caller must invoke it straight after this. The two are
+        // split so the caller can close its own logging gate in between, at the
+        // window boundary, rather than after a barrier that lasts as long as the
+        // writer's backlog; leaving a gate open that long publishes a second or
+        // more of data the daemon has already stopped accepting.
+        Ok(())
+    })
+}
+
+/// Arm a window-boundary split for a source without publishing a recording
+/// lifecycle event.
+///
+/// The boundary arm inside [`start_recording`] only covers the process that
+/// opens the window. A process that logs video for the same source but learned
+/// about the recording from a notification never rolls its chunk, and since the
+/// daemon routes a chunk whole by its open stamp, that chunk carries the new
+/// recording's frames into the previous recording's window — where they are cut
+/// off at its stop and rerouted nowhere. This is that process's way to say
+/// "a window boundary has passed for this source, split here".
+///
+/// The stamp is wall-clock now rather than the window's real lower bound, which
+/// a non-owning caller cannot know. That is exactly right for this use: the
+/// caller arms as its own logging gate opens, so the next frame it publishes is
+/// the first of the new recording and the split lands on it. Fire-and-forget,
+/// like the arm in `start_recording` — it is applied lazily against frame
+/// publish stamps, and rides the same writer queue as the frames themselves, so
+/// a frame pushed after this call is always weighed against it.
+#[pyfunction]
+fn mark_recording_boundary(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: now_ns(),
+        });
+    });
+    Ok(())
+}
+
+/// Run the writer's stop barrier for a source: drain every frame still queued
+/// for it (FIFO), seal and announce the tail chunks, publish the
+/// `SourceFlushed` marker, and drain the data publisher's queue onto the wire.
+///
+/// The second half of [`stop_recording`], and mandatory after it — the tail
+/// chunks are sealed nowhere else. Blocking, so once it returns those chunks are
+/// durably spooled and announced and a process exit cannot lose them. The chunks
+/// ride the writer's port and land after the stop; the daemon's holdback plus
+/// the `SourceFlushed` marker route them into the just-closed window by their
+/// in-window open timestamp. Idempotent — a source with nothing open seals
+/// nothing.
+#[pyfunction]
+fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
         let (ack_tx, ack_rx) = std::sync::mpsc::channel();
         // Control messages bypass the frame caps, so this never blocks or stalls.
         let _ = writer_queue().push(WriterMsg::FlushSource {
@@ -383,8 +457,8 @@ fn stop_recording(
         // onto the data publisher's queue, so the ack above means spooled and
         // queued, not published. Drain once more to put them on the wire.
         flush_published_data();
-        Ok(())
-    })
+    });
+    Ok(())
 }
 
 /// Cancel a recording — drop the source's in-progress chunk state without
@@ -525,6 +599,8 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(mark_recording_boundary, module)?)?;
+    module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;

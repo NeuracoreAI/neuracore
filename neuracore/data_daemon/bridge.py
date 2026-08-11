@@ -102,9 +102,13 @@ class RecordingContext:
         source ``(robot_id, robot_instance)``. No recording id is on the wire —
         the daemon allocates and owns recording identity.
 
-        ``timestamp`` optionally pins the recording window's lower bound (Unix
-        seconds), matching the ``log_*`` methods; when ``None`` the producer
-        stamps the publish clock now.
+        ``timestamp`` is the recording's *capture* start time (Unix seconds):
+        stored as ``start_timestamp_ns``, POSTed as the backend ``start_time``,
+        and returned as the marker that resolves this recording's cloud id
+        (:meth:`get_recording_id`). It does **not** bound the recording window —
+        the daemon routes on a publish stamp taken inside this call, so a
+        synthetic capture clock cannot shift the window or clip data. When
+        ``None`` the publish time is used as the capture time too.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
@@ -240,9 +244,16 @@ class RecordingContext:
         """Publish one ``StopRecording`` tagged with the source.
 
         The daemon uses the publish-clock stop boundary to close the recording
-        window. ``timestamp`` optionally pins that boundary (Unix seconds),
-        matching the ``log_*`` methods; when ``None`` the producer stamps
-        wall-clock now.
+        window. ``timestamp`` is the recording's *capture* stop time (Unix
+        seconds) and is separate from that boundary: it is stored as
+        ``stop_timestamp_ns`` and POSTed as the backend ``end_time``, never used
+        for window membership. When ``None`` the producer stamps wall-clock now
+        and uses it as the capture time too.
+
+        This publishes the stop only; :meth:`flush_source` seals the writer's
+        tail chunks and must be called straight after. The two are split so the
+        caller can close its own logging gate in between, at the window boundary
+        rather than after a backlog-length barrier.
         """
         if not self._robot_id:
             return
@@ -250,6 +261,29 @@ class RecordingContext:
         _load_native().stop_recording(
             self._robot_id, self._robot_instance, timestamp_ns
         )
+
+    def mark_recording_boundary(self) -> None:
+        """Tell the writer a recording boundary has passed for the bound source.
+
+        The counterpart to :meth:`start_recording` for a process that did not
+        publish the start: it rolls the writer's open video chunk so the new
+        recording's frames do not ride a chunk that opened in the previous one
+        (which the daemon routes whole, by its open stamp, into that previous
+        window). Publishes no lifecycle envelope. No-op before a source is bound.
+        """
+        if not self._robot_id:
+            return
+        _load_native().mark_recording_boundary(self._robot_id, self._robot_instance)
+
+    def flush_source(self) -> None:
+        """Run the writer's deferred tail-chunk barrier for the bound source.
+
+        The second half of :meth:`stop_recording`, and mandatory after it — the
+        tail chunks are sealed nowhere else. No-op before a source is bound.
+        """
+        if not self._robot_id:
+            return
+        _load_native().flush_source(self._robot_id, self._robot_instance)
 
     def get_recording_id(
         self,

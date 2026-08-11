@@ -532,7 +532,12 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
 
-    if robot.get_current_recording_id() is not None:
+    current_recording_id = robot.get_current_recording_id()
+    if current_recording_id is not None:
+        # Before the frame, not after: the boundary and the frame ride the same
+        # writer queue in that order, so the split lands on this frame and the
+        # chunk it opens is stamped inside the new recording.
+        robot.arm_video_boundary_if_new_recording(current_recording_id)
         contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
         robot._get_daemon_recording_context().log_frame(
             camera_type.value,

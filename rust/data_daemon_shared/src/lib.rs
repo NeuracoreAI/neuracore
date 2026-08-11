@@ -73,8 +73,9 @@ pub mod service_name {
     /// Worst-case postcard size of one frame's contribution to a
     /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
     /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value) and a `frame_timestamps_s` element is a fixed 8-byte `f64`.
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8;
+    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
+    /// `frame_publish_offsets_ms` element is a `u32` varint (≤5 bytes).
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -87,7 +88,8 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` vectors are the only unbounded part
+    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_ms`
+    /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
     /// enough frames in a single chunk to overflow the slice. The announcement
@@ -384,6 +386,13 @@ pub enum Envelope {
         /// chunk. Disambiguates the spool filename across threads and is a
         /// useful breadcrumb when inspecting the spool directory.
         thread_id: i64,
+        /// OS process id (`std::process::id()`) of the producer that sealed
+        /// this chunk. A source's `(robot_id, robot_instance)` can be logged
+        /// from more than one process at once — see
+        /// [`Envelope::SourceFlushed`]'s `producer_pid`, which this is matched
+        /// against so a marker from one process never vouches for another
+        /// process's still-pending video.
+        producer_pid: u32,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels (constant across a trace).
@@ -405,6 +414,27 @@ pub enum Envelope {
         /// geometry change). The daemon never decodes pixels; it threads this
         /// straight into the trace's `trace.json` sidecar for depth frames.
         dtype: FrameDtype,
+        /// Per-frame **publish** time, as milliseconds after this chunk's own
+        /// `publish_timestamp_ns`, in arrival order. Length equals
+        /// `frame_count`.
+        ///
+        /// This is what makes chunk membership per-frame rather than atomic. A
+        /// chunk routes by its open stamp, but the producer keeps appending to
+        /// it until something seals it — so the frames after a recording's stop
+        /// ride the same file as the frames before it. Without these the daemon
+        /// can only take the chunk whole, and a recording ends up holding video
+        /// published after its own window closed (a video-only process keeps
+        /// logging until its stop notification arrives, which is a whole SSE
+        /// round trip). With them the daemon cuts the chunk at the window
+        /// boundary (see the dispatcher's `route_video`).
+        ///
+        /// Milliseconds, offset from the chunk's open stamp, because a cut
+        /// point needs neither more resolution nor absolute time: the boundary
+        /// error this closes is ~300 ms, frames are ≥1 ms apart in any real
+        /// capture, and a `u32` of ms spans 49 days where a `u32` of µs would
+        /// overflow on a long low-frame-rate chunk. Saturating at the chunk's
+        /// own open stamp, so a frame stamped before it reads as 0.
+        frame_publish_offsets_ms: Vec<u32>,
     },
     /// Force the daemon to re-read its profile config immediately, rather than
     /// waiting for the config watcher's next poll. Sent by the SDK's
@@ -414,6 +444,85 @@ pub enum Envelope {
     /// recording window; the dispatcher handles it by refreshing the in-memory
     /// config (see `cloud::config_watcher`).
     RefreshConfig {},
+    /// Producer announces that it has finished announcing tail video chunks for
+    /// a source's just-stopped recording — the "end of stream" marker for that
+    /// window's late data.
+    ///
+    /// A [`Envelope::StopRecording`] is published *before* the producer's writer
+    /// flush barrier runs, so the tail chunks it seals are announced after their
+    /// own stop. The daemon therefore has to keep the closed window resolvable
+    /// for some time — but "how long" is a property of the producer's writer
+    /// backlog (queue depth, disk speed), which the daemon cannot observe. A
+    /// fixed retention is a guess, and a wrong guess silently orphans the tail
+    /// chunk and loses its frames.
+    ///
+    /// So the producer states it instead: the writer publishes this marker
+    /// immediately after the last tail chunk of the barrier, **on the same port
+    /// as the chunk announcements**, so it is ordered strictly behind every
+    /// chunk it vouches for. It is held for the same holdback as those chunks,
+    /// so by the time the daemon releases it, they have already routed. The
+    /// dispatcher then evicts the closing window with no timing assumption at
+    /// all.
+    ///
+    /// Best-effort by construction: a producer that dies mid-barrier never
+    /// sends it, so the daemon still bounds the wait (see the dispatcher's
+    /// flush-wait cap). Carries no window key — a source's stops are strictly
+    /// ordered, so markers match its closed windows oldest-first.
+    SourceFlushed {
+        robot_id: String,
+        robot_instance: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) at the marker's
+        /// send. Diagnostic only — it lies *after* the window it closes out (it
+        /// is stamped once the barrier is done), so it is deliberately not used
+        /// for window membership.
+        publish_timestamp_ns: i64,
+        /// OS process id (`std::process::id()`) of the producer whose writer
+        /// flush barrier this marker reports on. A source's
+        /// `(robot_id, robot_instance)` can be logged from more than one
+        /// process sharing that identity — this marker only vouches for the
+        /// [`Envelope::VideoChunkReady`] chunks that carried the same
+        /// `producer_pid`, never another process's still-pending video.
+        producer_pid: u32,
+    },
+    /// Producer asserts that it is currently logging video for a source —
+    /// published *before* any of that video has been sealed into a chunk.
+    ///
+    /// [`Envelope::SourceFlushed`]'s per-producer matching only works if the
+    /// daemon knows which processes owe it a marker, and a chunk announcement
+    /// is too late to learn that from: the writer seals and announces a chunk
+    /// as far behind the capture as its backlog is deep, so a video-owning
+    /// process's *first* announcement can arrive after a video-less process's
+    /// marker for the same source has already retired the window — orphaning
+    /// the video the marker mechanism exists to save.
+    ///
+    /// So the claim is stamped and published on the **logging** thread (see
+    /// the producer's `log_frame`), which is by definition inside the
+    /// recording and cannot be delayed by the writer's disk backlog, and is
+    /// rate-limited to one per source per claim interval rather than one per
+    /// frame. The daemon routes it by `publish_timestamp_ns` exactly like
+    /// data, and the window it lands in then waits for this `producer_pid`'s
+    /// own marker.
+    ///
+    /// Purely a routing hint: it carries no data, and a claim that finds no
+    /// window (video logged outside any recording) is dropped without being
+    /// counted as an orphan.
+    ///
+    /// Declared last on purpose — postcard tags variants by declaration order,
+    /// so appending keeps every existing tag stable. A daemon predating this
+    /// variant fails to decode it and drops the sample, degrading to the
+    /// chunk-driven attribution it already had.
+    VideoProducerActive {
+        robot_id: String,
+        robot_instance: i64,
+        /// Producer wall-clock publish time (Unix nanoseconds) of the frame
+        /// that triggered the claim, stamped on the logging thread — the same
+        /// clock and the same call position as [`Envelope::Data`]'s, so it is
+        /// the window-membership key here too.
+        publish_timestamp_ns: i64,
+        /// OS process id (`std::process::id()`) of the claiming producer, the
+        /// same identity [`Envelope::SourceFlushed`] reports under.
+        producer_pid: u32,
+    },
 }
 
 /// Original pixel/sample representation of one video-family frame.
@@ -499,6 +608,8 @@ impl Envelope {
             Envelope::BatchedData { .. } => "batched_data",
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
             Envelope::RefreshConfig {} => "refresh_config",
+            Envelope::SourceFlushed { .. } => "source_flushed",
+            Envelope::VideoProducerActive { .. } => "video_producer_active",
         }
     }
 
@@ -830,6 +941,19 @@ mod tests {
     }
 
     #[test]
+    fn video_producer_active_round_trips() {
+        let claim = Envelope::VideoProducerActive {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            producer_pid: 4242,
+        };
+        let bytes = claim.encode().expect("encode");
+        assert_eq!(claim, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(claim.kind(), "video_producer_active");
+    }
+
+    #[test]
     fn video_chunk_ready_round_trips() {
         let original = Envelope::VideoChunkReady {
             robot_id: "robot-1".into(),
@@ -838,6 +962,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 4242,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -855,6 +980,7 @@ mod tests {
                 7.0_f64 / 60.0_f64,
             ],
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms: vec![0, 16, 33, 50],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -925,11 +1051,12 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps per
-        // frame (ns + s). Even at 10_000 frames the envelope is comfortably
-        // under COMMANDS_MAX_PAYLOAD_BYTES.
+        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps plus a
+        // publish offset per frame. Even at 10_000 frames the envelope is
+        // comfortably under COMMANDS_MAX_PAYLOAD_BYTES.
         let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
         let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
@@ -937,6 +1064,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 42,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -944,6 +1072,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -959,12 +1088,14 @@ mod tests {
         // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
         // announcement always fits one commands sample. Prove the cap holds at
         // the absolute worst case: every per-frame ns timestamp a full-range
-        // i64 (10-byte postcard zigzag varint) and every fixed field maxed out.
+        // i64 (10-byte postcard zigzag varint), every publish offset a
+        // full-range u32 (5-byte varint), and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
         let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: i64::MAX,
@@ -972,6 +1103,7 @@ mod tests {
             sensor_name: Some("camera_with_a_deliberately_long_sensor_label".into()),
             publish_timestamp_ns: i64::MAX,
             thread_id: i64::MAX,
+            producer_pid: u32::MAX,
             width: u32::MAX,
             height: u32::MAX,
             byte_count: u64::MAX,
@@ -979,6 +1111,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(

@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -121,6 +122,17 @@ class Robot:
         )
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
+        # Did *this* process open the daemon's window for the current recording,
+        # i.e. did it call `start_recording` rather than learn about the
+        # recording from a notification? Decides two things a non-owning
+        # producer must not do: publish the stop (see
+        # `_drain_streams_and_notify_daemon`) and skip the writer's window
+        # boundary (see `neuracore.api.logging._log_camera_data`).
+        self._owns_daemon_recording = False
+        # The recording handle this process last armed a writer boundary for.
+        # Guarded by `_boundary_lock` so concurrent camera threads arm once.
+        self._armed_boundary_handle: str | None = None
+        self._boundary_lock = threading.Lock()
 
         self.org_id = org_id or get_current_org()
 
@@ -268,9 +280,8 @@ class Robot:
 
         Args:
             dataset_id: Unique identifier of the dataset to record into.
-            timestamp: Optional capture time (Unix seconds) for the recording's
-                start, matching the ``log_*`` methods. It pins the window's
-                lower bound; the producer stamps wall-clock now when omitted.
+
+
 
         Returns:
             A local correlation handle. The daemon owns recording identity and
@@ -291,20 +302,41 @@ class Robot:
         # wall-clock now, which is at or after this value, so notifications stay
         # orderable against it.
         start_time = timestamp if timestamp is not None else time.time()
-        self._get_daemon_recording_context().start_recording(
-            robot_id=self.id,
-            robot_instance=self.instance,
-            robot_name=self.name,
-            dataset_id=dataset_id,
-            dataset_name=None,
-            timestamp=timestamp,
-        )
+        # Open the local gate BEFORE announcing the window. Every `log_*`
+        # forwards to the daemon only while `get_current_recording_id()` is set,
+        # so if that flips after the announcement, data logged in between is
+        # discarded by the SDK even though the daemon's window is already open —
+        # and discarded silently, since nothing is published for the daemon to
+        # report as out-of-window. Opening first makes the gate a superset of the
+        # window: the daemon, which is the authority, then rejects the
+        # genuinely-early samples itself.
         get_recording_state_manager().recording_started(
             robot_id=self.id,
             instance=self.instance,
             recording_id=local_handle,
             start_time=start_time,
         )
+        try:
+            self._get_daemon_recording_context().start_recording(
+                robot_id=self.id,
+                robot_instance=self.instance,
+                robot_name=self.name,
+                dataset_id=dataset_id,
+                dataset_name=None,
+                timestamp=timestamp,
+            )
+            # This process published the window, so it is the one that may
+            # close it — and the writer already knows where the boundary is,
+            # because the native `start_recording` armed the split itself.
+            self._owns_daemon_recording = True
+            self._armed_boundary_handle = local_handle
+        except Exception:
+            # The gate is open but no window exists, so every later `log_*`
+            # would publish into nothing. Close it again before surfacing.
+            get_recording_state_manager().recording_stopped(
+                robot_id=self.id, instance=self.instance, recording_id=local_handle
+            )
+            raise
         return local_handle
 
     def stop_recording(
@@ -321,8 +353,10 @@ class Robot:
             recording_id: Unused — the daemon stops the active recording for
                 this source. Retained for call-site compatibility.
             timestamp: Optional capture time (Unix seconds) for the recording's
-                stop, matching the ``log_*`` methods. It pins the window's upper
-                bound; the producer stamps wall-clock now when omitted.
+                stop, matching the ``log_*`` methods. It is the reported stop
+                time, not the window's upper bound — the daemon closes the window
+                on the publish stamp taken at the send. The producer stamps
+                wall-clock now when omitted.
 
         Raises:
             RobotError: If the robot is not initialized.
@@ -330,12 +364,8 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        active_handle = get_recording_state_manager().get_current_recording_id(
-            self.id, self.instance
-        )
-        get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=active_handle
-        )
+        # The local `log_*` gate is closed inside the drain below, between the
+        # stop reaching the wire and the writer's tail-chunk barrier — not here.
         self._drain_streams_and_notify_daemon(recording_id, timestamp=timestamp)
 
     def _drain_streams_and_notify_daemon(
@@ -343,15 +373,57 @@ class Robot:
         recording_id: str | None,
         timestamp: float | None = None,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon."""
+        """Stop all streams and send the recording-stopped IPC message to the daemon.
+
+        The local ``log_*`` gate closes in the instant between the window
+        closing and the writer's tail-chunk barrier. Closing
+        it before the notify would silently discard data the daemon would still
+        have accepted — the window is open until it receives the stop. Closing it
+        after the barrier instead leaves it open for as long as the writer's
+        backlog takes to drain (over a second under burst logging), publishing
+        data the daemon has already stopped accepting and simply throws away.
+
+        Only the process that opened the window publishes the stop.
+        ``StopRecording`` names a source, not a recording, so the daemon applies
+        it to whatever window is open for that source — and a process that
+        learned about the recording from a notification learns about its *stop*
+        a whole SSE round trip late, by which time the next recording's window
+        can already be open. Publishing from there closed the wrong recording
+        (a back-to-back recording died ~800 ms in). A non-owner still closes its
+        local gate and runs its writer barrier: those are per-process, and its
+        tail chunks are sealed nowhere else.
+        """
         try:
             self._stop_all_streams()
-            self._get_daemon_recording_context().stop_recording(timestamp=timestamp)
+            context = self._get_daemon_recording_context()
+            try:
+                if self._owns_daemon_recording:
+                    context.stop_recording(timestamp=timestamp)
+            finally:
+                # Consumed either way: a stop this process did not publish is
+                # not one it may publish later either.
+                self._owns_daemon_recording = False
+                # Both run even if the notify failed: leaving the gate open would
+                # keep forwarding into a window that may never close, and skipping
+                # the barrier would strand the spooled tail chunks.
+                self._close_local_recording_gate()
+                context.flush_source()
         except Exception:
             logger.exception(
                 "Failed to stop streams and notify daemon for recording_id=%s",
                 recording_id,
             )
+
+    def _close_local_recording_gate(self) -> None:
+        """Clear the local recording handle that gates ``log_*`` forwarding."""
+        if not self.id:
+            return
+        state = get_recording_state_manager()
+        state.recording_stopped(
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=state.get_current_recording_id(self.id, self.instance),
+        )
 
     def _register_remote_stop_handler(self) -> None:
         """Register a callback to drain streams when a remote stop arrives."""
@@ -395,6 +467,38 @@ class Robot:
         return get_recording_state_manager().get_current_recording_id(
             robot_id=self.id, instance=self.instance
         )
+
+    def arm_video_boundary_if_new_recording(self, recording_id: str) -> None:
+        """Roll this process's video chunk when it first logs into *recording_id*.
+
+        A no-op in the process that called :meth:`start_recording`: the native
+        ``start_recording`` already armed the split, at the window's real lower
+        bound rather than at whatever instant this process noticed.
+
+        Everywhere else this is the only arm there is. The writer rolls its NUT
+        chunk on a recording boundary so no chunk spans one, but that arm rides
+        the lifecycle call — so a process that logs video for a source whose
+        recording it learned about from a notification keeps appending to a chunk
+        opened in the *previous* recording. The daemon routes a chunk whole by
+        its open stamp, so those frames land in the previous window, are cut off
+        at its stop, and are rerouted nowhere: the new recording simply loses its
+        leading video.
+
+        Armed on the handle rather than on a start event, because the handle is
+        already read on the video log path and a non-owning process can be handed
+        one recording's handle straight after another's with no gap between them.
+
+        Args:
+            recording_id: The local gate's current handle, as read by the caller
+                immediately before forwarding a frame.
+        """
+        if self._owns_daemon_recording:
+            return
+        with self._boundary_lock:
+            if self._armed_boundary_handle == recording_id:
+                return
+            self._armed_boundary_handle = recording_id
+        self._get_daemon_recording_context().mark_recording_boundary()
 
     def get_cloud_recording_id(
         self, timestamp_ns: int | None = None, timeout_s: float = 30.0
