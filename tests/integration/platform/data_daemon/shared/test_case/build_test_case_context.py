@@ -36,6 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     camera_names,
     case_id,
     depth_camera_names,
+    effective_pacing,
     generate_joint_values,
     joint_names_for_count,
 )
@@ -47,6 +48,10 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     JOINT_KINDS,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
+    PACING_SATURATE,
+    PER_THREAD_BURST_LOOKAHEAD_S,
     PER_THREAD_LOGGING_TAIL_S,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
@@ -195,6 +200,9 @@ class ContextCaseSpec:
     wait: bool
     random_phase: bool
     video_detail: str
+    # Already resolved by `effective_pacing`: the value here is what the
+    # producer will run under, not what the case declared.
+    producer_pacing: str
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -315,10 +323,11 @@ def build_context_specs(
     """Build per-context worker specs for a matrix case.
 
     ``assert_deadline`` is the performance suites' marker: besides arming the
-    ``Timer`` deadline assertions it imposes the fixed
-    :data:`LOG_LOOP_FREQUENCY_HZ` inter-frame interval, so a performance case
-    measures latency at a known offered rate rather than under whatever load
-    the machine happens to sustain.
+    ``Timer`` deadline assertions it offers the fixed
+    :data:`LOG_LOOP_FREQUENCY_HZ` inter-frame interval.  Whether that interval is
+    actually applied is the case's own pacing decision — ``PACING_SATURATE``
+    drops it, so a saturating case really does run un-throttled rather than
+    emitting at :data:`LOG_LOOP_FREQUENCY_HZ`.
     """
     specs: list[ContextSpec] = []
     timestamp_stagger_s = case.duration_sec / 2.0
@@ -367,6 +376,7 @@ def build_context_specs(
                     wait=case.wait,
                     random_phase=case.random_phase,
                     video_detail=case.video_detail,
+                    producer_pacing=effective_pacing(case),
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),
@@ -381,7 +391,13 @@ def build_context_specs(
                     timestamp_start_s + context_duration_sec * recordings_for_context
                 ),
                 assert_deadline=assert_deadline,
-                log_interval_s=LOG_LOOP_INTERVAL_S if assert_deadline else 0.0,
+                # Resolved once, here, so producers stay unaware of the axis:
+                # saturating cases carry no interval at all.
+                log_interval_s=(
+                    LOG_LOOP_INTERVAL_S
+                    if assert_deadline and effective_pacing(case) != PACING_SATURATE
+                    else 0.0
+                ),
             )
         )
     return specs
@@ -449,18 +465,38 @@ def precompute_timestamps(
     ]
 
 
-def _await_frame_deadline(deadline: float, stop_event: threading.Event) -> bool:
-    """Wait until *deadline*, unless *stop_event* fires first.
+def _should_pace(pacing: str, is_video: bool) -> bool:
+    """Whether a stream sleeps to its wall-clock deadline under *pacing*.
 
-    Only the lifetime producer waits: it has no frame count to bound it, so its
-    schedule is real time itself. The producers scoped to one recording are
-    bounded by a fixed frame count and emit as fast as the transport allows.
+    ``PACING_BURST_VIDEO`` un-paces every stream that feeds the daemon's video
+    pipeline — depth cameras as well as RGB ones, since both backlog the same
+    spool when the encoder cannot keep up.
+    """
+    if pacing == PACING_DEADLINE:
+        return True
+    if pacing == PACING_BURST_VIDEO:
+        return not is_video
+    return False  # PACING_SATURATE
+
+
+def _await_frame_deadline(
+    deadline: float, stop_event: threading.Event, *, pace: bool
+) -> bool:
+    """Wait for *deadline*, unless *stop_event* fires first.
+
+    Only the lifetime producer waits at all: it has no frame count to bound it,
+    so its rate is whatever this decides. A paced stream waits for the whole
+    deadline; an un-paced one only waits once it has raced more than
+    :data:`PER_THREAD_BURST_LOOKAHEAD_S` ahead of its nominal schedule, which
+    keeps it a burst rather than an unbounded firehose. The producers scoped to
+    one recording are already bounded by their frame count and never call this.
 
     Returns:
         ``True`` when *stop_event* fired during the wait, meaning the caller's
         loop should stop; ``False`` otherwise.
     """
-    remaining = deadline - time.time()
+    wait_until = deadline if pace else deadline - PER_THREAD_BURST_LOOKAHEAD_S
+    remaining = wait_until - time.time()
     if remaining <= 0:
         return False
     return stop_event.wait(remaining)
@@ -863,6 +899,10 @@ class ProducerRequest:
             :func:`random_phase_jitter_window`.
         duration_sec: Seconds of frames each stream emits, or ``None`` to run
             until *stop_event*.
+        pacing: How hard the streams may drive the SDK. Only the lifetime
+            producer reads it — every other producer is resolved to
+            ``PACING_SATURATE`` before it gets here (see ``effective_pacing``),
+            which is the rate it runs at anyway.
         stop_event: Set to ask every stream to stop at its next frame.
         assert_deadline: Arms the per-call ``Timer`` deadline assertions.
         log_interval_s: Fixed sleep after each frame, imposed by the
@@ -881,6 +921,7 @@ class ProducerRequest:
     timestamp_start_s: float
     random_phase: bool
     duration_sec: int | None
+    pacing: str
     stop_event: threading.Event
     assert_deadline: bool = False  # only set by performance tests
     log_interval_s: float = 0.0  # only set by performance tests
@@ -1072,10 +1113,11 @@ def run_per_thread_logging(request: ProducerRequest) -> dict[str, list[EmittedFr
     the request's *stop_event* is set, regardless of how many recordings start
     and stop while they run.
 
-    Real time is this producer's schedule. With no frame count to bound it, a
-    stream that emitted as fast as it could would be an unbounded firehose for
-    the whole context lifetime, so each one waits for its next frame's
-    wall-clock deadline exactly as the camera it stands in for would.
+    Real time is this producer's schedule: with no frame count to bound it,
+    what each stream waits for is the request's ``pacing`` decision, from
+    tracking its wall-clock deadline exactly as the camera it stands in for
+    would, to bursting ahead of it up to
+    :data:`PER_THREAD_BURST_LOOKAHEAD_S`.
 
     Every frame is reported, whichever recording was current and even when none
     was: which of them belong to a recording is decided afterwards, from the
@@ -1093,12 +1135,13 @@ def run_per_thread_logging(request: ProducerRequest) -> dict[str, list[EmittedFr
     def worker(emitter: StreamEmitter) -> None:
         barrier.wait()
         emitter.prepare(request.image_width, request.image_height, request.video_detail)
+        pace = _should_pace(request.pacing, emitter.plan.is_video)
         thread_wall_start = time.time()
         for frame_index, timestamp in stream_frame_schedule(emitter.plan, request):
             if request.stop_event.is_set():
                 break
             frame_deadline = thread_wall_start + (frame_index / emitter.plan.fps)
-            if _await_frame_deadline(frame_deadline, request.stop_event):
+            if _await_frame_deadline(frame_deadline, request.stop_event, pace=pace):
                 break
             _emit_and_record(emitter, frame_index, timestamp, request, report)
             if request.log_interval_s:
@@ -1168,6 +1211,7 @@ class ProducerSession(ABC):
             ),
             random_phase=case.random_phase,
             duration_sec=duration_sec,
+            pacing=case.producer_pacing,
             stop_event=self.stop_event,
             assert_deadline=self.spec.assert_deadline,
             log_interval_s=self.spec.log_interval_s,

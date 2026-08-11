@@ -38,6 +38,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_VIDEO,
+    PACING_SATURATE,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -45,6 +47,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     DepthMode,
     LogAction,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -81,6 +84,36 @@ _BATCH_PARAMS = frozenset({
     "preserve_artifacts_per_test",
     "stop_method",
 })
+
+
+def effective_pacing(case: DataDaemonTestCase) -> ProducerPacing:
+    """Return the pacing *case* will actually run under.
+
+    Pacing only reaches the producer that runs for the whole context lifetime:
+    it is the only one with no frame count to bound it, so it is the only one
+    whose rate is still open. The others already emit a fixed number of frames
+    as fast as the transport allows, which is what ``PACING_SATURATE`` means,
+    so that is what they are resolved to however the case was written.
+    """
+    if case.producer_channels == PRODUCER_PER_THREAD:
+        return case.producer_pacing
+    return PACING_SATURATE
+
+
+def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s parameters cannot run together, or None if they can.
+
+    Only a pacing the case will actually honour can be unsatisfiable; one that
+    is resolved away by :func:`effective_pacing` asks nothing of the workload.
+    """
+    if effective_pacing(case) == PACING_BURST_VIDEO and not (
+        case.has_video or case.has_depth
+    ):
+        return (
+            f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0 "
+            "or depth_count > 0: there is no video stream to un-pace"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -212,6 +245,26 @@ class DataDaemonTestCase:
             solid-fill frames for cases that only care about frame counts.
             Frame identity is embedded either way, so the disk timestamp and
             frame-code assertions are unaffected by this choice.
+        producer_pacing: How hard the producer is allowed to drive the SDK, i.e.
+            how fast frames are handed over.  Only
+            ``producer_channels="per_thread"`` reads it — see
+            :func:`effective_pacing` for why the others cannot — and a case
+            that pairs a pacing with any other producer runs saturated,
+            silently: it asked its engine for something that engine has no way
+            to express, which is not a mistake worth refusing to run over.
+            This is fully independent of ``random_phase``, which controls what
+            timestamp a frame *carries*, never when it is delivered.
+            ``"deadline"`` paces every stream to its wall-clock deadline, so
+            delivery tracks real time.  ``"burst-video"`` un-paces the video
+            streams only, so frames are pushed as fast as the camera thread can
+            render and log them while joints stay paced — backlogging the writer
+            queue the way a real camera does when the encoder can't keep up.
+            ``"saturate"`` (default) removes every throttle: no stream waits for
+            its deadline, and the fixed inter-frame interval the performance
+            suites otherwise impose is dropped too, so the producer offers load
+            as fast as the machine can generate it.  This axis is what decides
+            that interval — the performance suites supply its length, but a
+            ``"saturate"`` case ignores it.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -245,6 +298,13 @@ class DataDaemonTestCase:
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
     video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_SATURATE
+
+    def __post_init__(self) -> None:
+        """Reject parameter combinations this case's shape cannot run."""
+        problem = _unsupported_combination(self)
+        if problem is not None:
+            raise ValueError(problem)
 
     @property
     def has_video(self) -> bool:
@@ -321,6 +381,11 @@ class DataDaemonTestBatch:
             leaves each case's own value alone.  Lets a suite declare one
             producer model — e.g. ``"per_thread"`` — across its whole matrix
             instead of restating it on every case.
+        producer_pacing: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
+            each case's own value alone.  A case whose shape cannot honour the
+            batch's pacing raises ``ValueError`` at construction, so a
+            batch-wide pacing must suit every case in the matrix.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -331,6 +396,7 @@ class DataDaemonTestBatch:
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
     producer_channels: str | None = None
+    producer_pacing: ProducerPacing | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -347,6 +413,8 @@ class DataDaemonTestBatch:
         # unset means "keep what each case asked for".
         if self.producer_channels is not None:
             batch_overrides["producer_channels"] = self.producer_channels
+        if self.producer_pacing is not None:
+            batch_overrides["producer_pacing"] = self.producer_pacing
         return [
             DataDaemonTestCase(**{
                 **{
@@ -395,6 +463,10 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("old-per-thread")
     elif case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("per-thread")
+    # The pacing a case declares but does not honour says nothing about what
+    # ran, so the id names the one it will actually use.
+    if effective_pacing(case) != DataDaemonTestCase.producer_pacing:
+        parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:

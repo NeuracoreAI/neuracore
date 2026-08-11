@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+# cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -61,6 +62,13 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
+# producer_pacing — how hard the producer is allowed to drive the SDK. Only
+# PRODUCER_PER_THREAD reads it; every other producer runs as if PACING_SATURATE
+# (see effective_pacing in build_test_case.py).
+PACING_DEADLINE = "deadline"  # every stream paces
+PACING_BURST_VIDEO = "burst-video"  # video only; joints stay paced
+PACING_SATURATE = "saturate"  # no stream paces, and no inter-frame throttle either
+
 # Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 RANDOM_PHASE_JITTER_FACTOR = 0.5
@@ -91,6 +99,7 @@ MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_OLD_PER_THREAD, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
+PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -103,6 +112,7 @@ DepthMode = Literal["float16", "float32"]
 derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
+ProducerPacing = Literal["deadline", "burst-video", "saturate"]
 
 # The ``nc.log_joint_*`` calls a joint stream makes per frame.
 JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")
@@ -117,6 +127,15 @@ STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
 # post-stop frames are logged before producer threads stop, mirroring a real
 # camera that keeps running after the recording ends.
 PER_THREAD_LOGGING_TAIL_S = 2.0
+
+# PRODUCER_PER_THREAD un-paced streams (PACING_BURST_VIDEO/PACING_SATURATE):
+# how far ahead of its nominal per-frame schedule the producer may race before
+# it must wait for real time to catch up. Bounds the backlog it can push to a
+# plausible size instead of an unbounded firehose for the whole context
+# lifetime — the producers scoped to one recording don't need it: a fixed
+# per-recording frame count already bounds them. Kept comfortably under the
+# daemon's 1s spool-stall window (see data_daemon_bridge/src/lib.rs).
+PER_THREAD_BURST_LOOKAHEAD_S = 0.5
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
