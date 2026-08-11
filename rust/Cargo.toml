@@ -5,7 +5,10 @@ resolver = "2"
 [workspace.package]
 edition = "2021"
 license = "MIT"
-version = "0.1.0"
+# Kept equal to the neuracore version in pyproject.toml: the release bump
+# rewrites both (see .bumpversion.cfg), so the daemon can report the neuracore
+# version it was built from as CARGO_PKG_VERSION.
+version = "15.0.0"
 
 [workspace.dependencies]
 anyhow = "1"
