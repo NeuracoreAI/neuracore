@@ -10,5 +10,3 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
-
-Streaming connections (WebRTC signalling and recording notifications) now use the backend's dedicated streaming service. This version requires a backend running the matching release.
