@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_COLOR_CHANNELS,
     FRAME_GRID_SIZE,
     LOSSLESS_CONTENT_BYTES_PER_PIXEL,
+    TRAILING_RGB_GAP_FRAME_TOLERANCE,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
     frame_code_base,
@@ -256,6 +257,42 @@ def _assert_timestamps_match(
         durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
 
 
+def _assert_no_trailing_rgb_gap(
+    *,
+    trace_key: str,
+    timestamps: list[float],
+    expected_stop_timestamp: float | None,
+    video_fps: int,
+    failures: list[TraceFailure],
+) -> None:
+    """Assert an RGB trace's last on-disk frame isn't stranded before the stop.
+
+    A tail chunk orphaned at the boundary escapes
+    :func:`_assert_timestamps_match`, which only sees what reached disk, so
+    this compares the last timestamp against the nominal end rather than an
+    expected frame count — staying immune to a legitimately slow camera.
+    """
+    if expected_stop_timestamp is None or not timestamps:
+        return
+    if not trace_key.startswith("RGB_IMAGES/"):
+        return
+    gap_s = expected_stop_timestamp - max(timestamps)
+    tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / video_fps
+    if gap_s > tolerance_s:
+        failures.append(
+            TraceFailure(
+                trace_key=trace_key,
+                body=(
+                    f"last on-disk frame trails the recording's nominal end "
+                    f"by {gap_s:.3f}s, more than the {tolerance_s:.3f}s "
+                    f"tolerance ({TRAILING_RGB_GAP_FRAME_TOLERANCE} video "
+                    f"frame interval(s) at {video_fps}fps) — a tail chunk "
+                    f"may have been orphaned at the window boundary"
+                ),
+            )
+        )
+
+
 def _collapse_trace_failures(failures: list[TraceFailure]) -> list[str]:
     """Collapse failures that share the same body across multiple traces.
 
@@ -411,6 +448,17 @@ def assert_disk_recording_properties(
                     unknowable_timestamps=frozenset(
                         classification.unknowable_timestamps
                     ),
+                )
+                _assert_no_trailing_rgb_gap(
+                    trace_key=trace_key,
+                    timestamps=timestamps,
+                    expected_stop_timestamp=(
+                        result.expected_video_stop_timestamp_by_recording.get(
+                            recording_key
+                        )
+                    ),
+                    video_fps=result.video_fps,
+                    failures=trace_failures,
                 )
 
             if trace_failures:

@@ -352,6 +352,21 @@ class ContextResult:
     depth_mode: DepthMode = "float32"
     has_depth: bool = False
     observed_frame_codes: dict[str, ObservedFrameCodes] = field(default_factory=dict)
+    """Painted camera frame codes per recording, keyed by ``recording_index``.
+
+    Populated only for producers that outlive a recording, whose session-wide
+    frame index makes the codes unpredictable from the ordinal.
+    """
+    expected_video_stop_timestamp_by_recording: dict[str, float] = field(
+        default_factory=dict
+    )
+    """Nominal capture-clock upper bound of each recording's video.
+
+    On the capture clock the frame timestamps use, not the wall clock the control
+    calls carry. Bounds how far an RGB trace's last on-disk timestamp may trail
+    the recording's end, which is the only way an orphaned tail chunk shows up:
+    the exact-equality check only ever sees what reached disk.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -1684,6 +1699,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
+        expected_video_stop_timestamp_by_recording: dict[str, float] = {}
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         observed_frame_codes: dict[str, ObservedFrameCodes] = {}
         ordinal_by_disk_key: dict[str, int] = {}
@@ -1748,6 +1764,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                         timestamp=recording_capture_stop_s,
                     )
                 wall_stopped_at = time.time()
+                expected_video_stop_timestamp_by_recording[disk_recording_key] = (
+                    spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
+                )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
                     handle=recording_handle,
@@ -1849,6 +1868,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             depth_mode=case.depth_mode,
             has_depth=bool(depth_camera_name_list),
             observed_frame_codes=observed_frame_codes,
+            expected_video_stop_timestamp_by_recording=(
+                expected_video_stop_timestamp_by_recording
+            ),
         )
     except Exception:
         if robot is not None:

@@ -137,6 +137,9 @@ BACKLOG_BACKOFF_MAX_S = 1.0
 # Backoff one frame may absorb before the stall reads as a wedged daemon.
 BACKLOG_STALL_BUDGET_S = 30.0
 
+# RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
+TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
 DATASET_POLL_INTERVAL_S = 0.25
