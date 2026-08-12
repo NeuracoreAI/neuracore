@@ -10,6 +10,3 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
-
-Live robot availability now consumes incremental signalling updates, reducing
-repeated snapshot traffic while keeping peer-to-peer stream state synchronized.
