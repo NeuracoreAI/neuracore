@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 if TYPE_CHECKING:
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
     )
 
@@ -920,7 +920,7 @@ def wait_for_all_traces_written(
 
     Args:
         timeout_s: Maximum seconds to wait before raising.
-        results: List of :class:`~build_test_case_context.ContextResult` objects
+        results: List of :class:`~test_case.context_spec.ContextResult` objects
             whose recording keys scope the check.
         observed: Writes latched by :func:`latching_trace_write_observer`; a
             latched recording is dropped from the poll so this survives a reap.
