@@ -72,6 +72,46 @@ def scoped_offline_profile() -> Generator[None]:
 
 
 @contextmanager
+def scoped_holdback_ms(milliseconds: int) -> Generator[None]:
+    """Pin the dispatcher's routing holdback for the block.
+
+    The daemon reads ``NCD_HOLDBACK_MS`` once at startup, so this must wrap the
+    daemon start rather than the workload. An internal override with no
+    profile-config representation: it makes a timing-dependent reproduction
+    deterministic rather than covering a deployed configuration.
+    """
+    previous = os.environ.get("NCD_HOLDBACK_MS")
+    os.environ["NCD_HOLDBACK_MS"] = str(milliseconds)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NCD_HOLDBACK_MS", None)
+        else:
+            os.environ["NCD_HOLDBACK_MS"] = previous
+
+
+@contextmanager
+def scoped_recording_reaper_disabled() -> Generator[None]:
+    """Keep uploaded recordings' files and rows on the machine for the block.
+
+    The reaper deletes exactly what a test asserting on disk after an upload
+    needs to read. Read once at startup, so this must wrap the daemon start
+    rather than the workload; the value is ``"0"`` rather than the empty string,
+    which the daemon treats as unset.
+    """
+    previous = os.environ.get("NCD_RECORDING_REAPER")
+    os.environ["NCD_RECORDING_REAPER"] = "0"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NCD_RECORDING_REAPER", None)
+        else:
+            os.environ["NCD_RECORDING_REAPER"] = previous
+
+
+@contextmanager
 def scoped_online_mode() -> Generator[None]:
     """Force online daemon config for the block.
 

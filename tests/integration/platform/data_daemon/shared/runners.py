@@ -24,8 +24,12 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 from tests.integration.platform.data_daemon.shared.profiles import (
     scoped_offline_profile,
     scoped_online_mode,
+    scoped_recording_reaper_disabled,
 )
 from tests.integration.platform.data_daemon.shared.reporting import report_step
+from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    DataDaemonTestCase,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     OFFLINE_DB_PATH,
     OFFLINE_RECORDINGS_ROOT,
@@ -122,3 +126,20 @@ def online_daemon_running() -> Generator[None]:
                 ):
                     stop_daemon()
                     assert_daemon_cleanup()
+
+
+@contextmanager
+def daemon_running_for(case: DataDaemonTestCase) -> Generator[None]:
+    """Run the daemon *case* needs, in the mode that leaves its artefacts intact.
+
+    A case logging from a process that does not own the recording has to run
+    online: offline, that producer never hears a recording started. The online
+    branch also disables the reaper, which would delete the artefacts under a
+    disk assertion mid-run.
+    """
+    if case.records_offline:
+        with offline_daemon_running():
+            yield
+        return
+    with scoped_recording_reaper_disabled(), online_daemon_running():
+        yield

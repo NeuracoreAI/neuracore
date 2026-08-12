@@ -200,17 +200,16 @@ export RUST_BACKTRACE=1
 #   3. behavioural_correctness/test_signal_cleanup — many short signal tests
 #   4. behavioural_correctness/test_cancel_recording — short, no upload
 #   5. behavioural_correctness/test_offline_to_online — recorded -> online flip
-#   6. data_integrity/test_pre_network             — disk-only integrity
-#   7. data_integrity/test_network                 — adds upload + dataset wait
-#   8. performance/test_pre_network                — disk-only perf budgets
-#   9. performance/test_network                    — full network perf run
+#   6. data_integrity/test_disk_integrity          — local disk + DB verdicts
+#   7. data_integrity/test_cloud_integrity         — adds upload + dataset wait
+#   8. performance/test_disk_performance           — disk-only perf budgets
+#   9. performance/test_cloud_performance          — full network perf run
 #
 # The 300s (5-minute) 1920x1080 performance cases are pulled OUT of the normal
 # order and run last (see `run_tests`): they dominate wall time and their
 # upload-readiness budgets are the most fragile under host load, so every
-# cheaper test gets a chance to fail fast first. The 300s
-# pre-network (disk-only) cases run immediately before their network (upload)
-# equivalents. Both perf files keep their case-ids containing "300s", which is
+# cheaper test gets a chance to fail fast first. The 300s disk-only cases run
+# immediately before their upload equivalents. Both perf files keep their case-ids containing "300s", which is
 # the keyword the two phases select on.
 # ---------------------------------------------------------------------------
 
@@ -220,10 +219,10 @@ test_targets=(
   "tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py"
   "tests/integration/platform/data_daemon/behavioural_correctness/test_cancel_recording.py"
   "tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py"
-  "tests/integration/platform/data_daemon/data_integrity/test_pre_network.py"
-  "tests/integration/platform/data_daemon/data_integrity/test_network.py"
-  "tests/integration/platform/data_daemon/performance/test_pre_network.py"
-  "tests/integration/platform/data_daemon/performance/test_network.py"
+  "tests/integration/platform/data_daemon/data_integrity/test_disk_integrity.py"
+  "tests/integration/platform/data_daemon/data_integrity/test_cloud_integrity.py"
+  "tests/integration/platform/data_daemon/performance/test_disk_performance.py"
+  "tests/integration/platform/data_daemon/performance/test_cloud_performance.py"
 )
 
 # Substring shared by every 300s case-id; the two perf files are the last two

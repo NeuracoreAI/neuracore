@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    PRE_NETWORK_INTEGRITY_CASES,
+    DATA_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
@@ -18,7 +18,7 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_disk_recording_properties,
     assert_video_artifacts,
 )
-from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import daemon_running_for
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -46,10 +46,11 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 )
 
 CASES = DataDaemonTestBatch(
-    cases=PRE_NETWORK_INTEGRITY_CASES,
+    cases=DATA_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
+
 
 # ---------------------------------------------------------------------------
 # Isolation and integrity parametrized test
@@ -63,13 +64,13 @@ def test_disk_db_data_integrity(
     request: pytest.FixtureRequest,
     test_wall_timer: Callable[[], float],
 ) -> None:
-    """Record data in offline mode and verify local disk and DB state.
+    """Record data and verify what reached local disk and the daemon DB.
 
-    No data is uploaded to the platform.  Complements the network integrity
-    test, which additionally verifies the cloud-side upload.
+    Every case gets its on-disk verdict here, whichever daemon it takes to
+    record one. Nothing is read from the platform.
 
     - asserts no leftover daemon state before starting (isolation pre-condition)
-    - records all context specs via the offline daemon profile
+    - records all context specs
     - waits for all traces to reach ``write_status == 'written'`` in SQLite
     - validates on-disk trace timestamps fall within the expected recording
       window for every frame of every recording
@@ -80,6 +81,11 @@ def test_disk_db_data_integrity(
     - asserts daemon and producer processes exit cleanly after stop
     - asserts no residual processes, files, sockets, or DB artefacts remain
       (isolation post-condition)
+
+    For a case logging from a process that does not own the recording, this is
+    also where the recording boundary is policed. The comparison is two-sided:
+    only the frames no bracket can attribute are dropped, so both a missing owed
+    frame and a frame kept past the window fail.
     """
     if case.preserve_artifacts_per_test:
         setup_per_test_artifact_dirs(case_id(case))
@@ -93,7 +99,7 @@ def test_disk_db_data_integrity(
         scoped_test_dir_state(case),
     ):
         try:
-            with offline_daemon_running():
+            with daemon_running_for(case):
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)

@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from tests.integration.platform.data_daemon.daemon_test_cases import (
-    NETWORK_PERFORMANCE_CASES,
-)
+from tests.integration.platform.data_daemon.daemon_test_cases import PERFORMANCE_CASES
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
@@ -38,7 +36,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 # Cloud performance covers both nowait and wait=True because upload/registration
 # progress is asynchronous and both stop-recording modes must remain valid.
 CASES = DataDaemonTestBatch(
-    cases=NETWORK_PERFORMANCE_CASES,
+    cases=PERFORMANCE_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()

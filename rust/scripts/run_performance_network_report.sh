@@ -19,7 +19,7 @@ pytest_log="$run_dir/pytest.log"
 events_path="$run_dir/daemon-phase-events.jsonl"
 daemon_state_dir="$run_dir/daemon-state"
 daemon_log="$daemon_state_dir/daemon.log"
-test_target="tests/integration/platform/data_daemon/performance/test_network.py"
+test_target="tests/integration/platform/data_daemon/performance/test_cloud_performance.py"
 python_bin="${PYTHON_BIN:-python3}"
 perf_metrics="${NCD_PERF_METRICS:-1}"
 

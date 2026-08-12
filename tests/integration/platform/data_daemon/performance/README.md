@@ -1,7 +1,7 @@
 # Local network performance report
 
 This report is intentionally local. It runs only
-`performance/test_network.py`, captures correlated daemon phase events, and
+`performance/test_cloud_performance.py`, captures correlated daemon phase events, and
 renders them with Allure 3.
 
 The reporting lifecycle itself is suite-wide. Data-daemon tests that register

@@ -18,6 +18,7 @@ from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.profiles import (
     cleanup_test_profiles,
     profile_path,
+    scoped_holdback_ms,
 )
 from tests.integration.platform.data_daemon.shared.reporting import (
     PerformanceReportContext,
@@ -184,6 +185,24 @@ def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
     request.getfixturevalue("case")
     apply_storage_state_action(STORAGE_STATE_DELETE)
     _BATCH_START_CLEANED_NODEIDS.add(nodeid_without_param)
+
+
+@pytest.fixture(autouse=True)
+def apply_holdback(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Pin the daemon's holdback for a case that asked for one.
+
+    Wraps the body rather than the daemon lifecycle: the override has to be in
+    the environment before the test starts the daemon.
+    """
+    if "case" not in request.fixturenames:
+        yield
+        return
+    holdback_ms = getattr(request.getfixturevalue("case"), "holdback_ms", None)
+    if holdback_ms is None:
+        yield
+        return
+    with scoped_holdback_ms(holdback_ms):
+        yield
 
 
 @pytest.fixture(autouse=True)

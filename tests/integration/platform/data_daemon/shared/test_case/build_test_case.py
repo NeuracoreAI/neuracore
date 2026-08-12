@@ -295,13 +295,14 @@ class DataDaemonTestCase:
             up; ``"saturate"`` (default) removes every throttle, leaving the
             daemon's spool cap to block, and a wedge past that fails the run;
             ``"saturate-with-backoff"`` retries the refused frame instead.
+        holdback_ms: Overrides the daemon's ``NCD_HOLDBACK_MS`` for this case.
+            ``None`` (default) keeps the daemon default. Boundary cases pin it
+            because the tail-chunk-vs-eviction race is a coin flip otherwise.
+            Read at daemon startup via the autouse ``apply_holdback`` fixture.
 
     Note:
-        ``mode="staggered"`` and ``context_duration_mode="variable"``:
-        Both are computed from the base ``duration_sec`` separately (rather than
-        stagger being a function of the calculated duration variation).
-        With a 50 % stagger and a 75 % duration floor, context 1's timestamp
-        start is guaranteed to fall before context 0's timestamp end.
+        Combining ``mode="staggered"`` with ``context_duration_mode="variable"``
+        is safe: context 1's start always precedes context 0's end.
     """
 
     CHANNELS: ClassVar[ProducerChannels] = PRODUCER_SYNCHRONOUS
@@ -331,6 +332,7 @@ class DataDaemonTestCase:
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_SATURATE
     producer_process_streams: tuple[tuple[str, ...], ...] = ()
+    holdback_ms: int | None = None
 
     def __post_init__(self) -> None:
         """Reject parameter combinations this case's shape cannot run."""
@@ -360,6 +362,16 @@ class DataDaemonTestCase:
     def lossy_only(self) -> bool:
         """Return True when the case drops the lossless archive for RGB video."""
         return self.video_codec == "h264_medium"
+
+    @property
+    def records_offline(self) -> bool:
+        """Return True when an offline daemon can record everything it logs.
+
+        False only for the multi-process model: a non-owning producer learns of
+        a recording over the network, so offline it forwards nothing — which is
+        why the disk and cloud data-integrity tests split on this rule.
+        """
+        return self.producer_channels != PRODUCER_MULTI_PROCESS
 
     @property
     def expected_joint_frames(self) -> int:
