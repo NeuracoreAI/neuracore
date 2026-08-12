@@ -619,6 +619,7 @@ def log_synchronous_frames(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_positions",
                 assert_deadline=assert_deadline,
+                log_breaches=False,
             ):
                 nc.log_joint_positions(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -627,6 +628,7 @@ def log_synchronous_frames(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_velocities",
                 assert_deadline=assert_deadline,
+                log_breaches=False,
             ):
                 nc.log_joint_velocities(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -635,6 +637,7 @@ def log_synchronous_frames(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_joint_torques",
                 assert_deadline=assert_deadline,
+                log_breaches=False,
             ):
                 nc.log_joint_torques(
                     joint_values, robot_name=robot_name, timestamp=timestamp
@@ -643,6 +646,7 @@ def log_synchronous_frames(
                 MAX_TIME_TO_LOG_S,
                 label="nc.log_custom_1d",
                 assert_deadline=assert_deadline,
+                log_breaches=False,
             ):
                 nc.log_custom_1d(
                     marker_name,
@@ -667,6 +671,7 @@ def log_synchronous_frames(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
                     assert_deadline=assert_deadline,
+                    log_breaches=False,
                 ):
                     nc.log_rgb(
                         camera_name,
@@ -690,6 +695,7 @@ def log_synchronous_frames(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_depth",
                     assert_deadline=assert_deadline,
+                    log_breaches=False,
                 ):
                     nc.log_depth(
                         depth_camera_name,
@@ -801,6 +807,7 @@ def run_threaded_logging(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
                             assert_deadline=assert_deadline,
+                            log_breaches=False,
                         ):
                             nc.log_rgb(
                                 camera_id,
@@ -834,6 +841,7 @@ def run_threaded_logging(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_depth",
                             assert_deadline=assert_deadline,
+                            log_breaches=False,
                         ):
                             nc.log_depth(
                                 depth_camera_id,
@@ -851,6 +859,7 @@ def run_threaded_logging(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_positions",
                             assert_deadline=assert_deadline,
+                            log_breaches=False,
                         ):
                             nc.log_joint_positions(
                                 joint_values,
@@ -862,6 +871,7 @@ def run_threaded_logging(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_velocities",
                             assert_deadline=assert_deadline,
+                            log_breaches=False,
                         ):
                             nc.log_joint_velocities(
                                 joint_values,
@@ -873,6 +883,7 @@ def run_threaded_logging(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_joint_torques",
                             assert_deadline=assert_deadline,
+                            log_breaches=False,
                         ):
                             nc.log_joint_torques(
                                 joint_values,
@@ -883,6 +894,7 @@ def run_threaded_logging(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_custom_1d",
                     assert_deadline=assert_deadline,
+                    log_breaches=False,
                 ):
                     nc.log_custom_1d(
                         marker_name,
