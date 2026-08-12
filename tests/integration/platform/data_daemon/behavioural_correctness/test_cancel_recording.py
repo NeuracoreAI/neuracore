@@ -23,6 +23,7 @@ from tests.integration.platform.data_daemon.shared.runners import online_daemon_
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
+    Synchronous,
     camera_names,
     case_ids,
     has_configured_org,
@@ -51,14 +52,14 @@ logger = logging.getLogger(__name__)
 
 _CASES = DataDaemonTestBatch(
     cases=(
-        DataDaemonTestCase(
+        Synchronous(
             duration_sec=5,
             joint_count=4,
             video_count=1,
             image_width=64,
             image_height=64,
         ),
-        DataDaemonTestCase(
+        Synchronous(
             duration_sec=5,
             joint_count=4,
             video_count=1,

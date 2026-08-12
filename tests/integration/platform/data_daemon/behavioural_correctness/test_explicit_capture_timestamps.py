@@ -29,7 +29,7 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
-    DataDaemonTestCase,
+    Synchronous,
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -50,7 +50,7 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_test_dir_state,
 )
 
-_CASE = DataDaemonTestCase(
+_CASE = Synchronous(
     duration_sec=3,
     joint_count=4,
     video_count=1,

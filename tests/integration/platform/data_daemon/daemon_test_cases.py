@@ -1,21 +1,21 @@
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
-    DataDaemonTestCase,
+    PerThread,
+    Synchronous,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
-    PRODUCER_PER_THREAD,
 )
 
 PRE_NETWORK_INTEGRITY_CASES = (
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=10,
         joint_count=7,
         parallel_contexts=1,
         recording_count=1,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=10,
         joint_count=7,
         recording_count=1,
@@ -30,7 +30,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         depth_count=1,
         depth_mode="float32",
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=10,
         joint_count=7,
         recording_count=1,
@@ -41,7 +41,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         video_fps=30,
         joint_fps=15,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         joint_count=7,
         recording_count=4,
@@ -51,7 +51,6 @@ PRE_NETWORK_INTEGRITY_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
-        producer_channels=PRODUCER_PER_THREAD,
         parallel_contexts=2,
         mode=MODE_STAGGERED,
         # Depth via the threaded producer, covering `float16` under a more
@@ -62,7 +61,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         depth_count=1,
         depth_mode="float16",
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=1,
         video_count=1,
@@ -70,10 +69,9 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
         wait=False,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=4,
         video_count=1,
@@ -81,11 +79,10 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 500 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=10,
         joint_count=7,
         recording_count=1,
@@ -99,7 +96,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
 PRE_NETWORK_PERFORMANCE_CASES = (
     # High frequency robot control at 100Hz joint data
     # Tests: high-frequency sampling, temporal jitter, joint-only streaming
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=60,
         joint_count=7,
         video_count=0,
@@ -112,7 +109,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
     # recordings. Tests: multi-robot contention, mixed data types,
     # moderate-res cameras (256x256),
     # one producer thread per robot, back-to-back recordings
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=20,
         joint_count=7,
         video_count=1,
@@ -121,7 +118,6 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
     ),
@@ -132,7 +128,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
     # One trace is produced per joint per data type and each pays a fixed
     # upload cost regardless of size, so 1000 joints dominates the suite's
     # runtime and puts enough load on the backend to destabilise it.
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=30,
         joint_count=100,
         video_count=0,
@@ -142,7 +138,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
     # 3x longer duration recordings
     # Tests: long-running stability, memory leak detection, large dataset
     # accumulation
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -154,7 +150,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -167,7 +163,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         random_phase=True,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=1,
         video_count=1,
@@ -175,7 +171,6 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,  # previously 1000 but flaky due to sync
-        producer_channels=PRODUCER_PER_THREAD,
         wait=False,
     ),
 )
@@ -183,7 +178,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
 NETWORK_PERFORMANCE_CASES = (
     # High frequency robot control at 100Hz joint data
     # Tests: high-frequency sampling, temporal jitter, joint-only streaming
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=60,
         joint_count=7,
         video_count=0,
@@ -192,7 +187,7 @@ NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_FIXED,
         joint_fps=100,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=60,
         joint_count=7,
         video_count=0,
@@ -206,7 +201,7 @@ NETWORK_PERFORMANCE_CASES = (
     # recordings. Tests: multi-robot contention, mixed data types,
     # moderate-res cameras (256x256),
     # one producer thread per robot, back-to-back recordings
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=20,
         joint_count=7,
         video_count=1,
@@ -215,11 +210,10 @@ NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=20,
         joint_count=7,
         video_count=1,
@@ -228,7 +222,6 @@ NETWORK_PERFORMANCE_CASES = (
         parallel_contexts=8,
         recording_count=16,
         joint_fps=80,
-        producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         wait=True,
@@ -240,14 +233,14 @@ NETWORK_PERFORMANCE_CASES = (
     # One trace is produced per joint per data type and each pays a fixed
     # upload cost regardless of size, so 1000 joints dominates the suite's
     # runtime and puts enough load on the backend to destabilise it.
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=30,
         joint_count=100,
         video_count=0,
         parallel_contexts=1,
         recording_count=3,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=30,
         joint_count=100,
         video_count=0,
@@ -258,7 +251,7 @@ NETWORK_PERFORMANCE_CASES = (
     # 3x longer duration recordings
     # Tests: long-running stability, memory leak detection, large dataset
     # accumulation
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -270,7 +263,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -283,7 +276,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         wait=True,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -296,7 +289,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         random_phase=True,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=300,
         joint_count=10,
         video_count=1,
@@ -310,7 +303,7 @@ NETWORK_PERFORMANCE_CASES = (
         random_phase=True,
         wait=True,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=1,
         video_count=1,
@@ -318,9 +311,8 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=1,
         video_count=1,
@@ -328,10 +320,9 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
         wait=True,
     ),
-    DataDaemonTestCase(
+    PerThread(
         duration_sec=10,
         recording_count=4,
         video_count=1,
@@ -339,7 +330,6 @@ NETWORK_PERFORMANCE_CASES = (
         image_width=120,
         video_fps=120,
         joint_fps=250,
-        producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
     ),

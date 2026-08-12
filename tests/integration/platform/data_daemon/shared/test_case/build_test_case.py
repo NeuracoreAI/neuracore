@@ -16,7 +16,7 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
@@ -49,6 +49,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     DepthMode,
     LogAction,
+    ProducerChannels,
     ProducerPacing,
     StopMethod,
     StorageStateAction,
@@ -146,22 +147,13 @@ class DataDaemonTestCase:
             joint_count: Number of joint channels to log per frame.  Names are
             drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
             when the count exceeds the base list length.
-        producer_channels: How producer threads are allocated, and how long
-            they live.  ``"per_thread"`` runs one thread per stream for the
-            whole context lifetime — started before the first
-            ``start_recording`` and stopped after the last ``stop_recording``,
-            mid-loop at every boundary — mirroring a real camera that does not
-            stop between recordings, and the only mode under which the daemon
-            is shown what it does with frames logged as a window opens and
-            closes.  The other two scope their threads to a single recording
-            and join them before ``stop_recording``, so no frame is ever in
-            flight when a boundary passes: ``"synchronous"`` (default) logs
-            every data type from a single thread in sequence, and
-            ``"old_per_thread"`` gives each stream its own thread so they race
-            each other inside the recording.  Producer lifetime belongs on this
-            axis rather than a separate flag because logging across recordings
-            *requires* a thread per stream, so it is not independent of the
-            allocation.
+        CHANNELS: How producer threads are allocated, and how long they live —
+            a class attribute, not a field, so it is chosen by constructing the
+            matching subclass.  This class is :class:`Synchronous`; see
+            :class:`PerThread` and :class:`OldPerThread`.  Producer lifetime
+            belongs on this axis rather than a separate flag because logging
+            across recordings *requires* a thread per stream, so it is not
+            independent of the allocation.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -252,12 +244,13 @@ class DataDaemonTestCase:
         start is guaranteed to fall before context 0's timestamp end.
     """
 
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_SYNCHRONOUS
+
     duration_sec: int = 5
     parallel_contexts: int = 1
     recording_count: int = 1
     mode: str = MODE_SEQUENTIAL
     joint_count: int = 10
-    producer_channels: str = PRODUCER_SYNCHRONOUS
     video_count: int = 0
     image_width: int | None = None
     image_height: int | None = None
@@ -283,6 +276,14 @@ class DataDaemonTestCase:
         problem = _unsupported_combination(self)
         if problem is not None:
             raise ValueError(problem)
+
+    @property
+    def producer_channels(self) -> ProducerChannels:
+        """The producer model this case runs under, fixed by its class.
+
+        Not a field: a variant *is* its producer model, so it cannot contradict itself.
+        """
+        return type(self).CHANNELS
 
     @property
     def has_video(self) -> bool:
@@ -329,6 +330,29 @@ class DataDaemonTestCase:
 
 
 @dataclass(frozen=True)
+class Synchronous(DataDaemonTestCase):
+    """Logs every data type from one thread; no frame is in flight at a boundary."""
+
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_SYNCHRONOUS
+
+
+@dataclass(frozen=True)
+class OldPerThread(DataDaemonTestCase):
+    """One thread per stream, joined before ``stop_recording``: races inside a
+    recording but stops clean at its edges."""
+
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_OLD_PER_THREAD
+
+
+@dataclass(frozen=True)
+class PerThread(DataDaemonTestCase):
+    """One thread per stream, running the whole context lifetime — mid-loop at
+    every recording boundary."""
+
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_PER_THREAD
+
+
+@dataclass(frozen=True)
 class DataDaemonTestBatch:
     """A named collection of test cases sharing common infrastructure parameters.
 
@@ -351,16 +375,10 @@ class DataDaemonTestBatch:
         skip: When ``True``, every case in the batch is skipped at collection
             time.  When ``False`` (default), each case keeps its own per-case
             ``skip`` value, so individual cases can still opt out.
-        producer_channels: Workload override applied to every case when set;
-            see ``DataDaemonTestCase.producer_channels``.  ``None`` (default)
-            leaves each case's own value alone.  Lets a suite declare one
-            producer model — e.g. ``"per_thread"`` — across its whole matrix
-            instead of restating it on every case.
-        producer_pacing: Workload override applied to every case when set; see
-            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
-            each case's own value alone.  A case whose shape cannot honour the
-            batch's pacing raises ``ValueError`` at construction, so a
-            batch-wide pacing must suit every case in the matrix.
+        producer_variant: Subclass applied to every case when set; ``None``
+            (default) keeps each case's own class.
+        producer_pacing: Override applied to every case when set; a case whose
+            shape cannot honour it raises ``ValueError`` at construction.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -370,7 +388,7 @@ class DataDaemonTestBatch:
     preserve_artifacts_per_test: bool = False
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
-    producer_channels: str | None = None
+    producer_variant: type[DataDaemonTestCase] | None = None
     producer_pacing: ProducerPacing | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
@@ -384,13 +402,10 @@ class DataDaemonTestBatch:
         }
         if self.skip:
             batch_overrides["skip"] = True
-        # Workload overrides are opt-in; unset = keep case default.
-        if self.producer_channels is not None:
-            batch_overrides["producer_channels"] = self.producer_channels
         if self.producer_pacing is not None:
             batch_overrides["producer_pacing"] = self.producer_pacing
         return [
-            DataDaemonTestCase(**{
+            (self.producer_variant or type(c))(**{
                 **{
                     f.name: getattr(c, f.name)
                     for f in fields(c)
@@ -408,35 +423,37 @@ class DataDaemonTestBatch:
 
 
 def case_id(case: DataDaemonTestCase) -> str:
-    """Generate a short human-readable ID for a test case."""
+    """Generate a short human-readable ID for a test case.
+
+    The variant class leads; every other value is only named when it differs
+    from *this case's own class* default.
+    """
+    default = type(case)
     mode_short = "seq" if case.mode == MODE_SEQUENTIAL else "stag"
     parts = [
+        *([] if default is DataDaemonTestCase else [default.__name__]),
         f"{case.duration_sec}s",
         f"{case.recording_count}recs",
         *(["variable"] if case.context_duration_mode == DURATION_MODE_VARIABLE else []),
     ]
-    if case.parallel_contexts > DataDaemonTestCase.parallel_contexts:
+    if case.parallel_contexts > default.parallel_contexts:
         parts.append(f"{case.parallel_contexts}ctx")
         parts.append(mode_short)
     parts.append(f"{case.joint_count}joints")
-    if case.joint_fps != DataDaemonTestCase.joint_fps:
+    if case.joint_fps != default.joint_fps:
         parts.append(f"{case.joint_fps}hz")
     if case.has_video:
         parts.append(f"{case.video_count}cam")
         parts.append(f"{case.image_width}x{case.image_height}")
-        if case.video_fps != DataDaemonTestCase.video_fps:
+        if case.video_fps != default.video_fps:
             parts.append(f"{case.video_fps}hz")
         if case.video_codec is not None:
             parts.append(case.video_codec)
-        if case.video_detail != DataDaemonTestCase.video_detail:
+        if case.video_detail != default.video_detail:
             parts.append(f"{case.video_detail}frames")
     if case.has_depth:
         parts.append(f"{case.depth_count}depth")
         parts.append(case.depth_mode)
-    if case.producer_channels == PRODUCER_OLD_PER_THREAD:
-        parts.append("old-per-thread")
-    elif case.producer_channels == PRODUCER_PER_THREAD:
-        parts.append("per-thread")
     if case.producer_pacing != DataDaemonTestCase.producer_pacing:
         parts.append(case.producer_pacing)
     if case.random_phase:
