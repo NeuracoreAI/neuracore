@@ -85,11 +85,7 @@ pub mod video_boundary {
 
     /// Leading frames published before `bound_ns`, i.e. the index of the first
     /// that is [`at_or_past_boundary`].
-    pub fn frames_before_boundary(
-        offsets_ms: &[u32],
-        chunk_open_ns: i64,
-        bound_ns: i64,
-    ) -> usize {
+    pub fn frames_before_boundary(offsets_ms: &[u32], chunk_open_ns: i64, bound_ns: i64) -> usize {
         offsets_ms
             .iter()
             .position(|offset| {

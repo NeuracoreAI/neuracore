@@ -255,6 +255,12 @@ class RecordingContext:
             self._robot_id, self._robot_instance, timestamp_ns
         )
 
+    def mark_recording_boundary(self) -> None:
+        """Arm the writer's boundary split for a process that did not start it."""
+        if not self._robot_id:
+            return
+        _load_native().mark_recording_boundary(self._robot_id, self._robot_instance)
+
     def flush_source(self) -> None:
         """Run the writer's deferred tail-chunk barrier for the bound source.
 

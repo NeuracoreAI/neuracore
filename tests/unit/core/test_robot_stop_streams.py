@@ -23,17 +23,8 @@ class _FailingStopStream(_ActiveStream):
         raise RuntimeError("stop failed")
 
 
-def test_web_stop_drains_streams_and_notifies_daemon() -> None:
-    """Callback registered at connect time must drain streams and notify the daemon."""
-    robot = Robot("robot", instance=0, org_id="org-1")
-    robot.id = "robot-id-1"
-
-    active = _ActiveStream()
-    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
-
-    fake_daemon = MagicMock()
-    robot._daemon_recording_context = fake_daemon
-
+def _remote_stop_callback(robot: Robot) -> object:
+    """Register the connect-time handler and hand back the callback it stored."""
     captured: dict[str, object] = {}
 
     class _FakeManager:
@@ -53,10 +44,44 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
 
     callback = captured["callback"]
     assert callable(callback)
-    callback("rec-abc")
+    return callback
+
+
+def test_web_stop_drains_streams_and_notifies_daemon() -> None:
+    """Callback registered at connect time must drain streams and notify the daemon."""
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+    # This process opened the window, so it is the one that closes it.
+    robot._owns_daemon_recording = True
+
+    active = _ActiveStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
+
+    fake_daemon = MagicMock()
+    robot._daemon_recording_context = fake_daemon
+
+    _remote_stop_callback(robot)("rec-abc")
 
     assert active.stop_calls == 1
     fake_daemon.stop_recording.assert_called_once_with(timestamp=None)
+    fake_daemon.flush_source.assert_called_once_with()
+
+
+def test_web_stop_in_a_non_owning_process_flushes_without_publishing_a_stop() -> None:
+    """A process that never started the recording must not publish its stop."""
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    active = _ActiveStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
+
+    fake_daemon = MagicMock()
+    robot._daemon_recording_context = fake_daemon
+
+    _remote_stop_callback(robot)("rec-abc")
+
+    assert active.stop_calls == 1
+    fake_daemon.stop_recording.assert_not_called()
     fake_daemon.flush_source.assert_called_once_with()
 
 

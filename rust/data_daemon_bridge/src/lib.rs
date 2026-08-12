@@ -377,6 +377,24 @@ fn stop_recording(
     })
 }
 
+/// Arm a window-boundary split for a source without publishing a recording
+/// lifecycle event.
+#[pyfunction]
+fn mark_recording_boundary(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: now_ns(),
+        });
+    });
+    Ok(())
+}
+
 /// Run the writer's stop barrier for a source: drain every frame still queued
 /// for it (FIFO), seal and announce the tail chunks, publish the
 /// `SourceFlushed` marker, and drain the data publisher's queue onto the wire.
@@ -556,6 +574,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(mark_recording_boundary, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
