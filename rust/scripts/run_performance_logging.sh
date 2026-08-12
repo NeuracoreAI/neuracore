@@ -114,8 +114,8 @@ export NDD_RUN_INDEX="$run_stamp"
 export NDD_STARTED_AT="$started_at"
 
 data_integrity_targets=(
-  "tests/integration/platform/data_daemon/data_integrity/test_pre_network.py"
-  "tests/integration/platform/data_daemon/data_integrity/test_network.py"
+  "tests/integration/platform/data_daemon/data_integrity/test_disk_integrity.py"
+  "tests/integration/platform/data_daemon/data_integrity/test_cloud_integrity.py"
 )
 
 # ---------------------------------------------------------------------------

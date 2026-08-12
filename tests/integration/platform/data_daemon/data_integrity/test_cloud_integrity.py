@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from tests.integration.platform.data_daemon.daemon_test_cases import (
-    PRE_NETWORK_INTEGRITY_CASES,
+    DATA_INTEGRITY_CASES,
 )
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.runners import online_daemon_
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
+    case_id,
     case_ids,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -38,10 +39,11 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_names,
     scoped_test_dir_state,
     set_case_analysis_report,
+    setup_per_test_artifact_dirs,
 )
 
 _CASES = DataDaemonTestBatch(
-    cases=PRE_NETWORK_INTEGRITY_CASES,
+    cases=DATA_INTEGRITY_CASES,
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
@@ -59,22 +61,23 @@ def test_cloud_data_integrity(
     request: pytest.FixtureRequest,
     test_wall_timer: Callable[[], float],
 ) -> None:
-    """Record data in online mode and verify cloud-side data integrity.
+    """Record data online and verify the platform holds what was recorded.
 
-    Extends pre-network integrity (local disk timestamps + SQLite write status)
-    by confirming the upload is correct on the platform side.
+    Runs the same matrix as the disk integrity test, which owns the on-disk
+    verdicts; this one reads only the cloud.
 
     - asserts no leftover daemon state before starting (isolation pre-condition)
     - records all context specs against the live platform
     - waits for every recording to reach ``upload_complete`` in the daemon DB
-    - asserts exactly one daemon PID throughout
     - structural pass: verifies recording duration, byte size, and robot ID
       from the cloud (no sync required)
-    - data pass: synchronises the dataset and validates per-episode frame
-      counts and joint values against what was recorded
-    - asserts no residual processes, files, sockets, or DB artefacts remain
-      (isolation post-condition)
+    - data pass: synchronises the dataset and validates per-episode frame counts
+      and joint values against what was recorded
+    - asserts one daemon PID throughout and no residue afterwards
     """
+    if case.preserve_artifacts_per_test:
+        setup_per_test_artifact_dirs(case_id(case))
+
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     cloud_names = cloud_resource_names(specs)
