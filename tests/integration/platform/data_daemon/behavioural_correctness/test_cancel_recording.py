@@ -28,15 +28,17 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     has_configured_org,
     joint_names_for_count,
 )
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
-    ContextResult,
-    build_context_specs,
-    create_testing_dataset_name,
-    log_frames,
-)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
+    ContextResult,
+    build_context_specs,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_worker import (
+    create_testing_dataset_name,
+    log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     cloud_resource_deleter,
