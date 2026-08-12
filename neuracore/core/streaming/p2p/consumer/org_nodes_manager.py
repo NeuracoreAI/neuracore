@@ -6,6 +6,7 @@ connection management, and automatic reconnection with exponential backoff.
 """
 
 import asyncio
+import json
 import logging
 from collections import defaultdict
 from concurrent.futures import Future
@@ -13,11 +14,14 @@ from typing import TypeAlias
 
 from aiohttp import ClientSession
 from neuracore_types import (
+    AvailableRobot,
+    AvailableRobotCapacityInit,
     AvailableRobotCapacityUpdate,
     AvailableRobotInstance,
     HandshakeMessage,
     MessageType,
     OpenConnectionRequest,
+    RobotAvailabilityEventType,
     RobotInstanceIdentifier,
     VideoFormat,
 )
@@ -106,7 +110,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
-        self.last_update: AvailableRobotCapacityUpdate | None = None
+        self.last_update: AvailableRobotCapacityInit | None = None
 
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
@@ -128,10 +132,25 @@ class OrgNodesManager(BaseSSEConsumer):
             message_data: The raw string data of the message
 
         """
-        robot_update = AvailableRobotCapacityUpdate.model_validate_json(message_data)
-        new_nodes = self.get_instance_stream_map(robot_update)
+        availability_data = json.loads(message_data)
+        event_type = RobotAvailabilityEventType(availability_data["type"])
+        if event_type == RobotAvailabilityEventType.INIT:
+            # An init starts a new snapshot, including after an SSE reconnect. Never
+            # merge it with state retained from the previous connection.
+            self.last_update = AvailableRobotCapacityInit.model_validate(
+                availability_data
+            )
+        else:
+            self._apply_availability_update(
+                AvailableRobotCapacityUpdate.model_validate(availability_data)
+            )
+
+        if self.last_update is None:
+            logger.warning("Ignoring robot availability update received before init")
+            return
+
+        new_nodes = self.get_instance_stream_map(self.last_update)
         self._apply_stream_changes(self.last_nodes, new_nodes)
-        self.last_update = robot_update
         self.last_nodes = new_nodes
 
         for consumer in self.consumers:
@@ -140,6 +159,92 @@ class OrgNodesManager(BaseSSEConsumer):
                 robot_instance=consumer.robot_instance,
             )
             self.consumers[consumer].current_track_information = track_info
+
+    def _apply_availability_update(self, update: AvailableRobotCapacityUpdate) -> None:
+        """Apply a robot availability delta to the current snapshot."""
+        if self.last_update is None:
+            return
+
+        for track in update.tracks_added:
+            robot = self._get_or_create_robot(track.robot_id)
+            instance = robot.instances.get(track.robot_instance)
+            if instance is None:
+                instance = AvailableRobotInstance(
+                    robot_instance=track.robot_instance,
+                    tracks={},
+                    connections=0,
+                )
+                robot.instances[track.robot_instance] = instance
+
+            tracks = instance.tracks.setdefault(track.stream_id, [])
+            for index, existing_track in enumerate(tracks):
+                if existing_track.id == track.id:
+                    tracks[index] = track
+                    break
+            else:
+                tracks.append(track)
+
+        for removed_track in update.tracks_removed:
+            robot = self._get_robot(removed_track.robot_id)
+            if robot is None:
+                continue
+            instance = robot.instances.get(removed_track.robot_instance)
+            if instance is None:
+                continue
+            tracks = instance.tracks.get(removed_track.stream_id)
+            if tracks is None:
+                continue
+            instance.tracks[removed_track.stream_id] = [
+                track for track in tracks if track.id != removed_track.track_id
+            ]
+
+        for connection_update in update.connection_updates:
+            robot = self._get_robot(connection_update.robot_id)
+            if robot is None:
+                continue
+            instance = robot.instances.get(connection_update.robot_instance)
+            if instance is not None:
+                instance.connections = connection_update.connections
+
+        self._remove_empty_availability_containers()
+
+    def _get_robot(self, robot_id: str) -> AvailableRobot | None:
+        """Return a robot from the current availability snapshot."""
+        if self.last_update is None:
+            return None
+        return next(
+            (robot for robot in self.last_update.robots if robot.robot_id == robot_id),
+            None,
+        )
+
+    def _get_or_create_robot(self, robot_id: str) -> AvailableRobot:
+        """Return a robot from the current snapshot, creating it if needed."""
+        robot = self._get_robot(robot_id)
+        if robot is not None:
+            return robot
+        assert self.last_update is not None
+        robot = AvailableRobot(robot_id=robot_id, instances={})
+        self.last_update.robots.append(robot)
+        return robot
+
+    def _remove_empty_availability_containers(self) -> None:
+        """Prune empty stream, instance, and robot containers from the snapshot."""
+        assert self.last_update is not None
+        for robot in self.last_update.robots:
+            for instance in robot.instances.values():
+                instance.tracks = {
+                    stream_id: tracks
+                    for stream_id, tracks in instance.tracks.items()
+                    if tracks
+                }
+            robot.instances = {
+                instance_id: instance
+                for instance_id, instance in robot.instances.items()
+                if instance.tracks
+            }
+        self.last_update.robots = [
+            robot for robot in self.last_update.robots if robot.instances
+        ]
 
     def _get_last_robot_tracks(
         self, robot_id: str, robot_instance: int
@@ -202,7 +307,7 @@ class OrgNodesManager(BaseSSEConsumer):
 
     def get_instance_stream_map(
         self,
-        update: AvailableRobotCapacityUpdate,
+        update: AvailableRobotCapacityInit,
     ) -> InstanceStreamMap:
         """Reduces the availability update down to just the available nodes.
 
