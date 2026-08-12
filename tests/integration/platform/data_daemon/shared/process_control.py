@@ -91,13 +91,66 @@ def _rearm_stack_dump() -> None:
     faulthandler.dump_traceback_later(max(remaining, 0.001), exit=False)
 
 
+LATENCY_BUCKETS_S: tuple[float, ...] = (
+    0.0005,
+    0.001,
+    0.002,
+    0.005,
+    0.01,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+)
+"""Upper bounds of the latency histogram, in seconds, log-spaced."""
+
+BUCKET_KEYS: tuple[str, ...] = tuple(f"le_{bound}" for bound in LATENCY_BUCKETS_S) + (
+    "gt_max",
+)
+"""Stat keys for the histogram, one per bucket plus an overflow bucket."""
+
+
+def _empty_stats() -> dict[str, float]:
+    """Return a zeroed stat accumulator for one label."""
+    stats = {"count": 0.0, "total": 0.0, "max": 0.0}
+    stats.update({key: 0.0 for key in BUCKET_KEYS})
+    return stats
+
+
+def _bucket_key(interval: float) -> str:
+    """Return the histogram key *interval* falls in."""
+    for bound, key in zip(LATENCY_BUCKETS_S, BUCKET_KEYS):
+        if interval <= bound:
+            return key
+    return "gt_max"
+
+
+def percentile_upper_bound(stats: dict[str, float], quantile: float) -> float | None:
+    """Return the bucket upper bound containing *quantile* of the samples.
+
+    ``None`` when the samples overflow the largest bucket, or the label has no
+    histogram.
+    """
+    count = stats.get("count", 0.0)
+    if count <= 0:
+        return None
+    target = quantile * count
+    seen = 0.0
+    for bound, key in zip(LATENCY_BUCKETS_S, BUCKET_KEYS):
+        seen += stats.get(key, 0.0)
+        if seen >= target:
+            return bound
+    return None
+
+
 class Timer:
     """Context manager that measures wall-clock elapsed time for a block.
 
-    Accumulates per-label statistics (count, total, max) in the class-level
-    ``_stats`` dictionary so that test suites can report aggregate timing at
-    the end of a run.  Optionally asserts that the block completed within
-    ``max_time`` seconds.
+    Accumulates per-label statistics in the class-level ``_stats`` so a suite
+    can report aggregate timing, and optionally asserts the block ran within
+    ``max_time``.
 
     Every logged line and assertion message apportions the elapsed time between
     HTTP requests this thread made and everything else, so a breach states on its
@@ -107,7 +160,10 @@ class Timer:
 
     Attributes:
         _stats: Class-level dict mapping label strings to aggregate timing
-            statistics with keys ``"count"``, ``"total"``, and ``"max"``.
+            statistics with keys ``"count"``, ``"total"``, ``"max"``, and one
+            per :data:`BUCKET_KEYS` entry.
+        _stats_lock: Guards :attr:`_stats`, which several producer threads
+            accumulate into at once.
         max_time: Upper time limit in seconds.
         label: Human-readable name for this timer.  Pass ``None`` to skip
             stat accumulation.
@@ -123,6 +179,7 @@ class Timer:
     """
 
     _stats: dict[str, dict[str, float]] = {}
+    _stats_lock = threading.Lock()
 
     def __init__(
         self,
@@ -163,12 +220,12 @@ class Timer:
         self.http_seconds = http_seconds - self.http_seconds_start
         had_exception = len(args) > 0 and args[0] is not None
         if self.label:
-            stats = self._stats.setdefault(
-                self.label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
-            stats["count"] += 1
-            stats["total"] += self.interval
-            stats["max"] = max(stats["max"], self.interval)
+            with self._stats_lock:
+                stats = self._stats.setdefault(self.label, _empty_stats())
+                stats["count"] += 1
+                stats["total"] += self.interval
+                stats["max"] = max(stats["max"], self.interval)
+                stats[_bucket_key(self.interval)] += 1
 
             should_log = self.always_log
             if self.log_threshold is not None and self.interval >= self.log_threshold:
@@ -221,13 +278,14 @@ class Timer:
     @classmethod
     def merge_stats(cls, stats: dict[str, dict[str, float]]) -> None:
         """Merge external timer stats (e.g. from a worker process) into the accumulator."""  # noqa: E501
-        for label, incoming in stats.items():
-            existing = cls._stats.setdefault(
-                label, {"count": 0.0, "total": 0.0, "max": 0.0}
-            )
-            existing["count"] += incoming["count"]
-            existing["total"] += incoming["total"]
-            existing["max"] = max(existing["max"], incoming["max"])
+        with cls._stats_lock:
+            for label, incoming in stats.items():
+                existing = cls._stats.setdefault(label, _empty_stats())
+                existing["count"] += incoming["count"]
+                existing["total"] += incoming["total"]
+                existing["max"] = max(existing["max"], incoming["max"])
+                for key in BUCKET_KEYS:
+                    existing[key] += incoming.get(key, 0.0)
 
 
 def surface_worker_errors(fn):
