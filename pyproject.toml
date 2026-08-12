@@ -49,7 +49,7 @@ dependencies = [
     "fastapi==0.135.2",
     "psutil",
     "typer>=0.20.0",
-    "neuracore_types>=10.0.0,<11.0.0",
+    "neuracore_types>=11.0.0,<12.0.0",
     "ordered_set",
     "aiohttp>=3.12.0",
     "pyee==13.0.0",
