@@ -16,7 +16,11 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    DataDaemonTestCase,
+    camera_names,
+    depth_camera_names,
     generate_joint_values,
+    joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BACKLOG_BACKOFF_BASE_S,
@@ -33,9 +37,8 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
     preallocate_depth_buffer,
 )
 
-# Semantic trace data type each ``nc.log_joint_*`` call writes to. Derived from
-# JOINT_KINDS so the two cannot drift apart.
-_JOINT_DATA_TYPES = {kind: kind.upper() for kind in JOINT_KINDS}
+# Derived from JOINT_KINDS so the two cannot drift apart.
+JOINT_DATA_TYPES = {kind: kind.upper() for kind in JOINT_KINDS}
 
 
 def _log_with_backlog_backoff(
@@ -120,6 +123,17 @@ class StreamPlan:
         return self.is_rgb or self.is_depth
 
     @property
+    def placement_tokens(self) -> frozenset[str]:
+        """Names a producer placement may use to move this stream to a process.
+
+        A camera answers to its channel and its kind; a joint stream answers
+        only to its kind, since its channels log in one call and can't split.
+        """
+        if self.is_video:
+            return frozenset({self.name, *self.channel_names})
+        return frozenset({self.name})
+
+    @property
     def trace_keys(self) -> list[str]:
         """Semantic trace keys one logged frame from this stream touches.
 
@@ -133,7 +147,7 @@ class StreamPlan:
         elif self.is_depth:
             data_types = ["DEPTH_IMAGES"]
         else:
-            data_types = [_JOINT_DATA_TYPES[kind] for kind in self.joint_kinds]
+            data_types = [JOINT_DATA_TYPES[kind] for kind in self.joint_kinds]
         keys = [
             f"{data_type}/{validate_safe_name(name)}"
             for data_type in data_types
@@ -201,7 +215,11 @@ def build_stream_plans(
     joint_fps: int,
     video_fps: int,
 ) -> list[StreamPlan]:
-    """Decompose a workload into one stream per camera and per joint data type."""
+    """Decompose a workload into one stream per camera and per joint data type.
+
+    An empty ``joint_names`` produces no joint-kind streams at all, which is how
+    a camera-only producer process asks for cameras alone.
+    """
     return [
         *_per_camera_plans("rgb", camera_name_list, video_fps),
         *_per_camera_plans(
@@ -216,6 +234,7 @@ def build_stream_plans(
                 joint_kinds=(kind,),
             )
             for kind in JOINT_KINDS
+            if joint_names
         ),
     ]
 
@@ -282,6 +301,41 @@ def stream_plans_for_case(
         depth_mode=depth_mode,
         joint_fps=joint_fps,
         video_fps=video_fps,
+    )
+
+
+def case_stream_plans(case: DataDaemonTestCase) -> list[StreamPlan]:
+    """The per-stream decomposition *case*'s producer placement is spread over.
+
+    One entry point so the placement guard, the late-start derivation and the
+    session that partitions the plans all read the same decomposition.
+    """
+    return build_stream_plans(
+        joint_names=joint_names_for_count(case.joint_count),
+        camera_name_list=camera_names(case.video_count),
+        depth_camera_name_list=depth_camera_names(case.depth_count),
+        depth_mode=case.depth_mode,
+        joint_fps=case.joint_fps,
+        video_fps=case.video_fps,
+    )
+
+
+def late_starting_trace_keys(case: DataDaemonTestCase) -> frozenset[str]:
+    """Trace keys *case* logs from a process that does not own the recording.
+
+    Such a producer only learns a recording is active from the SSE
+    notification, so its leading frames are legitimately missing; derived
+    from the same plans the session partitions on, so the two agree by
+    construction.
+    """
+    moved = {name for group in case.producer_process_streams for name in group}
+    if not moved:
+        return frozenset()
+    return frozenset(
+        key
+        for plan in case_stream_plans(case)
+        if plan.placement_tokens & moved
+        for key in plan.trace_keys
     )
 
 

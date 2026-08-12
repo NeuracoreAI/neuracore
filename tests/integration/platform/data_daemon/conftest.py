@@ -37,12 +37,17 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     SESSION_RUNS,
     DataDaemonTestCase,
     _format_timer_stats_line,
+    has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
+from tests.integration.platform.data_daemon.shared.test_case.streams import (
+    late_starting_trace_keys,
+)
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     apply_storage_state_action,
+    recording_notifications_available,
     set_case_analysis_report,
 )
 
@@ -179,6 +184,29 @@ def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
     request.getfixturevalue("case")
     apply_storage_state_action(STORAGE_STATE_DELETE)
     _BATCH_START_CLEANED_NODEIDS.add(nodeid_without_param)
+
+
+@pytest.fixture(autouse=True)
+def skip_cases_the_deployment_cannot_run(request: pytest.FixtureRequest) -> None:
+    """Skip a case this deployment is not equipped to run.
+
+    Properties of the case and the deployment, so every case-driven test gets
+    the same checks from here.
+    """
+    if "case" not in request.fixturenames:
+        return
+    case = request.getfixturevalue("case")
+    if not has_configured_org():
+        pytest.skip(
+            "Case-driven daemon tests require NEURACORE_ORG_ID"
+            " or a saved current organization."
+        )
+    if late_starting_trace_keys(case) and not recording_notifications_available():
+        pytest.skip(
+            "This case logs from a process that does not own the recording, "
+            "which needs the platform's recording-notification stream to learn "
+            "a recording started. See the warning logged by the probe."
+        )
 
 
 @pytest.fixture()

@@ -20,7 +20,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestBatch,
     DataDaemonTestCase,
     case_ids,
-    has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -76,12 +75,6 @@ def test_cloud_data_integrity(
     - asserts no residual processes, files, sockets, or DB artefacts remain
       (isolation post-condition)
     """
-    if not has_configured_org():
-        pytest.skip(
-            "Recording/playback matrix tests require NEURACORE_ORG_ID"
-            " or a saved current organization."
-        )
-
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     cloud_names = cloud_resource_names(specs)

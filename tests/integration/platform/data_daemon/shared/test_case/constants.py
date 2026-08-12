@@ -46,10 +46,12 @@ LOG_DELETE = "delete"
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
 
-# Producer lifetime strategies: synchronous, old_per_thread, per_thread.
-PRODUCER_SYNCHRONOUS = "synchronous"
-PRODUCER_OLD_PER_THREAD = "old_per_thread"
-PRODUCER_PER_THREAD = "per_thread"
+# producer_channels — thread allocation and producer lifetime.
+PRODUCER_SYNCHRONOUS = "synchronous"  # one thread, scoped to one recording
+PRODUCER_OLD_PER_THREAD = "old_per_thread"  # thread per stream, one recording
+PRODUCER_PER_THREAD = "per_thread"  # thread per stream, whole context lifetime
+# per_thread, but some streams run in their own OS process
+PRODUCER_MULTI_PROCESS = "multi_process"
 
 # context_duration_mode
 DURATION_MODE_FIXED = "fixed"
@@ -96,7 +98,12 @@ STORAGE_STATE_ACTIONS = (
 )
 LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_OLD_PER_THREAD, PRODUCER_PER_THREAD)
+PRODUCER_CHANNELS = (
+    PRODUCER_SYNCHRONOUS,
+    PRODUCER_OLD_PER_THREAD,
+    PRODUCER_PER_THREAD,
+    PRODUCER_MULTI_PROCESS,
+)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (
@@ -118,7 +125,9 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate", "saturate-with-backoff"]
-ProducerChannels = Literal["synchronous", "old_per_thread", "per_thread"]
+ProducerChannels = Literal[
+    "synchronous", "old_per_thread", "per_thread", "multi_process"
+]
 
 # The ``nc.log_joint_*`` calls a joint stream makes per frame.
 JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")
@@ -140,6 +149,35 @@ BACKLOG_STALL_BUDGET_S = 30.0
 
 # RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
 TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
+# How long a producer child gets to exit, and to deliver its report.
+PRODUCER_PROCESS_JOIN_TIMEOUT_S = 30.0
+PRODUCER_PROCESS_REPORT_TIMEOUT_S = 30.0
+
+# Re-check interval, so a child that dies while connecting reports its own
+# traceback rather than a timeout.
+PRODUCER_PROCESS_READY_POLL_S = 0.1
+
+# How long a producer child gets after terminate() before it reads as leaked.
+PRODUCER_PROCESS_TERMINATE_TIMEOUT_S = 5.0
+
+# watch_local_gate_close: poll interval — the width of the bracket it measures
+# (see RecordingControlBounds.stop_settled_at) — and its thread join timeout.
+GATE_CLOSE_POLL_INTERVAL_S = 0.001
+GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S = 5.0
+
+# How far either side of the control calls a condemned frame keeps its reason.
+CONDEMNED_PROVENANCE_MARGIN_S = 2.0
+
+# recording_notifications_available: one request is all it has to cover.
+NOTIFICATION_PROBE_TIMEOUT_S = 10.0
+
+# Leading sync points a non-owning process may be missing, while it waits for
+# the SSE notification (see `late_starting_trace_keys`).
+#
+# UNCALIBRATED placeholder: only an observed shortfall can size it, and no case
+# has produced one yet. Set it from the first run that gets through.
+LATE_START_SYNC_POINT_TOLERANCE = 12
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0

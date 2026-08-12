@@ -86,6 +86,9 @@ class ContextCaseSpec:
     random_phase: bool
     video_detail: str
     producer_pacing: str
+    # Deliberately without a default: an empty placement is a valid value and
+    # would silently run every stream locally if a caller forgot to pass it.
+    producer_process_streams: tuple[tuple[str, ...], ...]
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -273,6 +276,7 @@ def build_context_specs(
                     random_phase=case.random_phase,
                     video_detail=case.video_detail,
                     producer_pacing=case.producer_pacing,
+                    producer_process_streams=case.producer_process_streams,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),

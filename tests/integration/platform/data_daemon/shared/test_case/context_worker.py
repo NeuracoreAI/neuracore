@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import threading
 import time
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
+from dataclasses import dataclass
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
@@ -20,7 +24,6 @@ from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     ObservedFrameCodes,
     RecordingControlBounds,
     TraceClassification,
-    _classify_boundary_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
@@ -31,7 +34,10 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATASET_POLL_INTERVAL_S,
+    GATE_CLOSE_POLL_INTERVAL_S,
+    GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S,
     MAX_TIME_TO_START_S,
+    PRODUCER_MULTI_PROCESS,
     PRODUCER_PER_THREAD,
 )
 from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
@@ -72,6 +78,49 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
         robot._daemon_recording_context = None
 
 
+@dataclass(slots=True)
+class _GateCloseObservation:
+    """Carries the gate-close wall clock out of the block that measured it."""
+
+    result: float = 0.0
+
+
+@contextmanager
+def watch_local_gate_close(
+    robot: object, *, enabled: bool
+) -> Generator[_GateCloseObservation]:
+    """Measure when this process's local recording gate closes, if asked to.
+
+    A tighter upper bracket than ``stop_recording`` returning, which waits out
+    the flush barrier. Falls back to the block's exit time when disabled.
+    """
+    observation = _GateCloseObservation()
+    stop_polling = threading.Event()
+
+    def poll() -> None:
+        while not stop_polling.is_set():
+            if robot.get_current_recording_id() is None:  # type: ignore[attr-defined]
+                observation.result = time.time()
+                return
+            time.sleep(GATE_CLOSE_POLL_INTERVAL_S)
+
+    watcher = (
+        threading.Thread(target=poll, name="gate-close-watch", daemon=True)
+        if enabled
+        else None
+    )
+    if watcher is not None:
+        watcher.start()
+    try:
+        yield observation
+    finally:
+        stop_polling.set()
+        if watcher is not None:
+            watcher.join(timeout=GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S)
+        if observation.result == 0.0:
+            observation.result = time.time()
+
+
 def log_frames(
     spec: ContextSpec,
     *,
@@ -87,11 +136,12 @@ def log_frames(
     Returns:
         The marker series the producer wrote.
     """
-    if spec.case.producer_channels == PRODUCER_PER_THREAD:
+    if spec.case.producer_channels in (PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS):
         raise ValueError(
             f"log_frames needs a producer scoped to one recording, but "
-            f"producer_channels={PRODUCER_PER_THREAD!r} runs for the whole "
-            "context lifetime — drive it through make_producer_session instead"
+            f"producer_channels={spec.case.producer_channels!r} runs for the "
+            "whole context lifetime — drive it through make_producer_session "
+            "instead"
         )
     session = make_producer_session(spec, robot=robot, marker_name=marker_name)
     session.start()
@@ -188,8 +238,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             spec, robot=robot, marker_name="marker_synchronous"
         )
         marker_names = session.marker_names
-        session.start()
         try:
+            # Only `finish()` takes back what a half-started producer spawned.
+            session.start()
             for recording_ordinal in range(spec.recordings_per_context):
                 recording_capture_start_s = time.time()
                 recording_capture_stop_s = recording_capture_start_s + case.duration_sec
@@ -227,11 +278,18 @@ def context_worker(spec: ContextSpec) -> ContextResult:
 
                 # Brackets the window's upper bound, the mirror of the start.
                 stop_called_at = time.time()
-                with Timer(
-                    case.stop_recording_sla_s,
-                    label="nc.stop_recording",
-                    always_log=True,
-                    assert_deadline=spec.assert_deadline,
+                # The backend's id has by now replaced the start handle.
+                stop_handle = robot.get_current_recording_id()
+                with (
+                    watch_local_gate_close(
+                        robot, enabled=session.needs_stop_gate_bracket
+                    ) as gate_closed_at,
+                    Timer(
+                        case.stop_recording_sla_s,
+                        label="nc.stop_recording",
+                        always_log=True,
+                        assert_deadline=spec.assert_deadline,
+                    ),
                 ):
                     nc.stop_recording(
                         robot_name=spec.robot_name,
@@ -244,11 +302,15 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
-                    handle=recording_handle,
+                    handles=frozenset(
+                        handle
+                        for handle in (recording_handle, stop_handle)
+                        if handle is not None
+                    ),
                     start_called_at=start_called_at,
                     start_returned_at=start_returned_at,
                     stop_called_at=stop_called_at,
-                    stop_returned_at=wall_stopped_at,
+                    stop_settled_at=gate_closed_at.result,
                 )
                 ordinal_by_disk_key[disk_recording_key] = recording_ordinal
         finally:
@@ -271,7 +333,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
             codes_inside: dict[str, list[int]] = {}
             codes_unknowable: dict[str, set[int]] = {}
             for trace_key, frames in report.items():
-                classification = _classify_boundary_frames(frames, bounds)
+                classification = session.classify(trace_key, frames, bounds)
                 by_trace[trace_key] = classification
 
                 camera = rgb_trace_cameras.get(trace_key)

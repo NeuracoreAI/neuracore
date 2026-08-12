@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
     )
+    from tests.integration.platform.data_daemon.shared.test_case.streams import (
+        StreamPlan,
+    )
 
 from neuracore.core.config.config_manager import get_config_manager
 from tests.integration.platform.data_daemon.shared.process_control import (
@@ -42,6 +45,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PACING_DEADLINE,
     PACING_SATURATE,
     PACING_SATURATE_WITH_BACKOFF,
+    PRODUCER_MULTI_PROCESS,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -89,6 +93,16 @@ _BATCH_PARAMS = frozenset({
 })
 
 
+def _case_stream_plans(case: DataDaemonTestCase) -> list[StreamPlan]:
+    """The stream plans *case* will run; imported late to dodge a circular
+    import with ``streams``."""
+    from tests.integration.platform.data_daemon.shared.test_case.streams import (
+        case_stream_plans,
+    )
+
+    return case_stream_plans(case)
+
+
 def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
     """Return why *case*'s parameters cannot run together, or None if they can.
 
@@ -102,14 +116,69 @@ def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
             "depth_count > 0: only the video path is paced or backlogged"
         )
     needs_rate = (PACING_DEADLINE, PACING_BURST_VIDEO)
-    lifetime_producer = case.producer_channels == PRODUCER_PER_THREAD
-    if case.producer_pacing in needs_rate and not lifetime_producer:
+    lifetime = (PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS)
+    if case.producer_pacing in needs_rate and case.producer_channels not in lifetime:
         return (
             f"producer_pacing={case.producer_pacing!r} needs "
-            f"producer_channels={PRODUCER_PER_THREAD!r}: only a producer that "
-            "runs for the whole context lifetime is bounded by a rate, the "
-            "others by their frame count"
+            f"producer_channels in {lifetime!r}: only a producer that runs for "
+            "the whole context lifetime is bounded by a rate, the others by "
+            "their frame count"
         )
+    return _unsupported_process_placement(case)
+
+
+def _unsupported_process_placement(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s producer placement cannot run, or None if it can.
+
+    A stream placed twice would paint the same frame codes from two processes,
+    so it is refused rather than silently producing implausible data.
+    """
+    multi_process = case.producer_channels == PRODUCER_MULTI_PROCESS
+    if case.producer_process_streams and not multi_process:
+        return (
+            "producer_process_streams only applies to "
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r}, "
+            f"not {case.producer_channels!r}"
+        )
+    if not multi_process:
+        return None
+
+    if not case.producer_process_streams:
+        return (
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r} needs "
+            "producer_process_streams to name at least one stream to move: "
+            f"with none it is just {PRODUCER_PER_THREAD!r}"
+        )
+    if case.parallel_contexts != 1:
+        return (
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r} needs "
+            f"parallel_contexts=1, got {case.parallel_contexts}: parallel "
+            "contexts run in pool workers, which cannot start processes"
+        )
+
+    plans = _case_stream_plans(case)
+    placeable = {token for plan in plans for token in plan.placement_tokens}
+    for group in case.producer_process_streams:
+        if not group:
+            return "producer_process_streams entries cannot be empty"
+        for name in group:
+            if name not in placeable:
+                return (
+                    f"producer_process_streams names {name!r}, which this case "
+                    f"does not produce — it produces {sorted(placeable)}"
+                )
+
+    groups = [frozenset(group) for group in case.producer_process_streams]
+    for plan in plans:
+        claimants = sum(1 for group in groups if plan.placement_tokens & group)
+        if claimants > 1:
+            named = plan.channel_names[0] if plan.is_video else plan.name
+            return (
+                f"producer_process_streams places {named!r} in more than one "
+                "process; every stream must run in exactly one"
+            )
+    # Moving every stream out is legitimate: the owner then only opens and
+    # closes the window.
     return None
 
 
@@ -132,28 +201,19 @@ class DataDaemonTestCase:
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
-        recording_count: Total number of recordings to produce across *all*
-            parallel contexts. Work is distributed as evenly as possible:
-            each context gets ``recording_count // parallel_contexts`` recordings,
-            and the first ``recording_count % parallel_contexts`` contexts each
-            get one additional recording.
         mode: Timestamp layout across parallel contexts — *not* an execution
-            order.  Every context in a multi-context case runs concurrently in
-            a multiprocessing pool regardless of this value.  ``"sequential"``
-            gives all contexts the same timestamp origin, so their recordings
-            cover the same span; ``"staggered"`` offsets context *i* by
-            ``duration_sec / 2 * i``, so consecutive contexts' spans partly
-            overlap.  Single-context cases always use ``"sequential"``.
-            joint_count: Number of joint channels to log per frame.  Names are
-            drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
-            when the count exceeds the base list length.
-        CHANNELS: How producer threads are allocated, and how long they live —
-            a class attribute, not a field, so it is chosen by constructing the
-            matching subclass.  This class is :class:`Synchronous`; see
-            :class:`PerThread` and :class:`OldPerThread`.  Producer lifetime
-            belongs on this axis rather than a separate flag because logging
-            across recordings *requires* a thread per stream, so it is not
-            independent of the allocation.
+            order; every context runs concurrently regardless. ``"staggered"``
+            offsets each context so consecutive spans partly
+            overlap. Single-context cases always use ``"sequential"``.
+        CHANNELS: How producer threads are allocated and how long they live — a
+            class attribute, not a field, chosen by constructing the matching
+            subclass (:class:`PerThread`, :class:`OldPerThread`,
+            :class:`SeparateProcessCameras`).
+        producer_process_streams: One entry per extra producer process, naming
+            the streams (a kind, or a single camera's channel) that run there;
+            streams not named stay with the recording-owning process. Only
+            :class:`SeparateProcessCameras` and its subclasses may set it, and
+            they must.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -270,6 +330,7 @@ class DataDaemonTestCase:
     depth_mode: DepthMode = "float32"
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_SATURATE
+    producer_process_streams: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         """Reject parameter combinations this case's shape cannot run."""
@@ -353,6 +414,18 @@ class PerThread(DataDaemonTestCase):
 
 
 @dataclass(frozen=True)
+class SeparateProcessCameras(PerThread):
+    """:class:`PerThread`, with the cameras moved into their own OS process.
+
+    ``producer_process_streams`` is overridable to move other streams instead.
+    """
+
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_MULTI_PROCESS
+
+    producer_process_streams: tuple[tuple[str, ...], ...] = (("rgb",),)
+
+
+@dataclass(frozen=True)
 class DataDaemonTestBatch:
     """A named collection of test cases sharing common infrastructure parameters.
 
@@ -422,6 +495,18 @@ class DataDaemonTestBatch:
 # ---------------------------------------------------------------------------
 
 
+def _placement_id(case: DataDaemonTestCase) -> str:
+    """Name which streams *case* moved out, or "" when it took its class's default."""
+    if case.producer_process_streams == type(case).producer_process_streams:
+        return ""
+    moved = "-".join(
+        name.replace("_", "")
+        for group in case.producer_process_streams
+        for name in group
+    )
+    return f"{len(case.producer_process_streams)}proc-{moved}"
+
+
 def case_id(case: DataDaemonTestCase) -> str:
     """Generate a short human-readable ID for a test case.
 
@@ -454,7 +539,9 @@ def case_id(case: DataDaemonTestCase) -> str:
     if case.has_depth:
         parts.append(f"{case.depth_count}depth")
         parts.append(case.depth_mode)
-    if case.producer_pacing != DataDaemonTestCase.producer_pacing:
+    if placement := _placement_id(case):
+        parts.append(placement)
+    if case.producer_pacing != default.producer_pacing:
         parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
