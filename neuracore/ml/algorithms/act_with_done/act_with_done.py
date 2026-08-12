@@ -1,0 +1,1040 @@
+"""ACT with an explicit done-flag classification head.
+
+Extends Action Chunking with Transformers (Zhao et al., 2023) so continuous
+joint/gripper actions are still predicted by the ACT decoder, while binary
+done signals are predicted as ``DataType.CUSTOM_1D`` from a lightweight MLP
+on vision features only (proprioception is not used).
+"""
+
+import logging
+from typing import cast
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.transforms as T
+from neuracore_types import (
+    BatchedCustom1DData,
+    BatchedJointData,
+    BatchedNCData,
+    BatchedParallelGripperOpenAmountData,
+    BatchedRGBData,
+    CameraDataStats,
+    Custom1DDataStats,
+    DataItemStats,
+    DataType,
+    JointDataStats,
+    ModelInitDescription,
+    ParallelGripperOpenAmountDataStats,
+)
+
+from neuracore.ml import (
+    BatchedInferenceInputs,
+    BatchedTrainingOutputs,
+    BatchedTrainingSamples,
+    NeuracoreModel,
+)
+from neuracore.ml.algorithm_utils.normalizer import MeanStdNormalizer
+from neuracore.ml.core.neuracore_model import DEFAULT_OUTPUT_DATA_TYPE_ORDER
+
+from .modules import (
+    ACTImageEncoder,
+    PositionalEncoding,
+    TransformerDecoder,
+    TransformerEncoder,
+)
+
+logger = logging.getLogger(__name__)
+
+proprio_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
+action_normalizer = MeanStdNormalizer  # or MinMaxNormalizer
+RESNET_MEAN = [0.485, 0.456, 0.406]
+RESNET_STD = [0.229, 0.224, 0.225]
+
+_ACTION_OUTPUT_DATA_TYPES = frozenset({
+    DataType.JOINT_TARGET_POSITIONS,
+    DataType.JOINT_POSITIONS,
+    DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+    DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+})
+
+
+class ACTWithDone(NeuracoreModel):
+    """ACT with a separate done-flag classification head.
+
+    Continuous joint/gripper actions are predicted by the ACT transformer.
+    Binary done signals are predicted as ``DataType.CUSTOM_1D`` from a
+    lightweight MLP on pooled vision features only (proprioception is not used).
+    """
+
+    CANONICAL_OUTPUT_DATA_TYPE_ORDER = DEFAULT_OUTPUT_DATA_TYPE_ORDER + (
+        DataType.CUSTOM_1D,
+    )
+
+    def __init__(
+        self,
+        model_init_description: ModelInitDescription,
+        hidden_dim: int = 512,
+        num_encoder_layers: int = 4,
+        num_decoder_layers: int = 1,
+        nheads: int = 8,
+        dim_feedforward: int = 3200,
+        dropout: float = 0.1,
+        use_resnet_stats: bool = True,
+        lr: float = 1e-4,
+        freeze_backbone: bool = False,
+        lr_backbone: float = 1e-5,
+        weight_decay: float = 1e-4,
+        kl_weight: float = 10.0,
+        latent_dim: int = 512,
+        done_loss_weight: float = 0.1,
+    ):
+        """Initialize the ACT with Done model.
+
+        Args:
+            model_init_description: Model initialization parameters
+            hidden_dim: Hidden dimension for transformer layers and done head
+            num_encoder_layers: Number of transformer encoder layers
+            num_decoder_layers: Number of transformer decoder layers
+            nheads: Number of attention heads
+            dim_feedforward: Feedforward network dimension
+            dropout: Dropout probability
+            use_resnet_stats: Whether to use ResNet normalization statistics
+            lr: Learning rate for main parameters
+            freeze_backbone: Whether to freeze image encoder backbone
+            lr_backbone: Learning rate for image encoder backbone
+            weight_decay: Weight decay for optimizer
+            kl_weight: Weight for KL divergence loss
+            latent_dim: Dimension of latent variable space
+            done_loss_weight: Weight for the done-flag BCE loss relative to the
+                ACT L1+KL loss
+        """
+        super().__init__(model_init_description)
+        self.hidden_dim = hidden_dim
+        self.use_resnet_stats = use_resnet_stats
+        self.freeze_backbone = freeze_backbone
+        self.lr = lr
+        self.lr_backbone = lr_backbone
+        self.weight_decay = weight_decay
+        self.kl_weight = kl_weight
+        self.latent_dim = latent_dim
+        self.done_loss_weight = done_loss_weight
+
+        data_stats: dict[DataType, DataItemStats] = {}
+
+        # Setup proprioceptive data
+        self.proprio_dims: dict[DataType, tuple[int, int]] = {}
+        proprio_stats = []
+        current_dim = 0
+
+        for data_type in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]:
+            if data_type in self.input_data_types:
+                if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                    stats = cast(
+                        list[ParallelGripperOpenAmountDataStats],
+                        self.input_dataset_statistics[data_type],
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.open_amount)
+                    data_stats[data_type] = combined_stats
+                else:
+                    stats = cast(
+                        list[JointDataStats], self.input_dataset_statistics[data_type]
+                    )
+                    combined_stats = DataItemStats()
+                    for stat in stats:
+                        combined_stats = combined_stats.concatenate(stat.value)
+                    data_stats[data_type] = combined_stats
+
+                proprio_stats.append(combined_stats)
+                dim = len(combined_stats.mean)
+                self.proprio_dims[data_type] = (current_dim, current_dim + dim)
+                current_dim += dim
+
+        # State embedding
+        state_input_dim = current_dim
+        self.state_embed = None
+        if state_input_dim > 0:
+            self.state_embed = nn.Linear(state_input_dim, hidden_dim)
+
+        # Continuous action outputs only (CUSTOM_1D is handled by the done head).
+        self.action_output_data_types = [
+            data_type
+            for data_type in self.ordered_output_data_types
+            if data_type in _ACTION_OUTPUT_DATA_TYPES
+        ]
+        if not self.action_output_data_types:
+            raise ValueError(
+                "ACTWithDone requires at least one continuous action "
+                "output type (joint or gripper positions); CUSTOM_1D alone is not "
+                "supported."
+            )
+
+        # Setup continuous output data for the ACT action head
+        self.max_output_size = 0
+        output_stats = []
+        self.output_dims: dict[DataType, tuple[int, int]] = {}
+        current_output_dim = 0
+        for data_type in self.action_output_data_types:
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                stats = cast(
+                    list[JointDataStats],
+                    self.output_dataset_statistics[data_type],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.value)
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
+                stats = cast(
+                    list[ParallelGripperOpenAmountDataStats],
+                    self.output_dataset_statistics[data_type],
+                )
+                combined_stats = DataItemStats()
+                for stat in stats:
+                    combined_stats = combined_stats.concatenate(stat.open_amount)
+            else:
+                raise ValueError(f"Unsupported action output data type: {data_type}")
+
+            data_stats[data_type] = combined_stats
+            output_stats.append(combined_stats)
+            dim = len(combined_stats.mean)
+            self.output_dims[data_type] = (
+                current_output_dim,
+                current_output_dim + dim,
+            )
+            current_output_dim += dim
+            self.max_output_size += dim
+
+        # Setup CUSTOM_1D done-flag dims (classification head, not decoded)
+        self.custom_1d_slot_dims: list[int] = []
+        self.custom_1d_dim = 0
+        self.done_head: nn.Sequential | None = None
+        if DataType.CUSTOM_1D in self.output_data_types:
+            custom_stats = cast(
+                list[Custom1DDataStats],
+                self.output_dataset_statistics[DataType.CUSTOM_1D],
+            )
+            for stat in custom_stats:
+                slot_dim = len(stat.data.mean)
+                self.custom_1d_slot_dims.append(slot_dim)
+                self.custom_1d_dim += slot_dim
+            if self.custom_1d_dim == 0:
+                raise ValueError(
+                    "CUSTOM_1D is configured as an output but has zero feature "
+                    "dimensions in the dataset statistics."
+                )
+
+        # Action embedding
+        self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
+
+        # Setup normalizers
+        # Only create proprio_normalizer if there are proprioception stats
+        # This allows the algorithm to work without proprioception (visual-only)
+        self.proprio_normalizer = (
+            proprio_normalizer(name="proprioception", statistics=proprio_stats)
+            if proprio_stats
+            else None
+        )
+        self.action_normalizer = action_normalizer(
+            name="actions", statistics=output_stats
+        )
+
+        # Vision components
+        self.vision_cond_dim = 0
+        if DataType.RGB_IMAGES in self.input_data_types:
+            stats = cast(
+                list[CameraDataStats],
+                self.input_dataset_statistics[DataType.RGB_IMAGES],
+            )
+            max_cameras = len(stats)
+            self.image_normalizers = nn.ModuleList()
+            self.image_encoders = nn.ModuleList()
+            for i in range(max_cameras):
+                if use_resnet_stats:
+                    mean, std = RESNET_MEAN, RESNET_STD
+                else:
+                    mean_c_h_w, std_c_h_w = stats[i].frame.mean, stats[i].frame.std
+                    mean = mean_c_h_w.mean(axis=(1, 2)).tolist()
+                    std = std_c_h_w.mean(axis=(1, 2)).tolist()
+                self.image_normalizers.append(T.Normalize(mean=mean, std=std))
+                self.image_encoders.append(ACTImageEncoder(output_dim=hidden_dim))
+            self.vision_cond_dim = hidden_dim * max_cameras
+
+        if self.custom_1d_dim > 0:
+            if self.vision_cond_dim == 0:
+                raise ValueError(
+                    "ACTWithDone requires RGB_IMAGES input to predict "
+                    "CUSTOM_1D done flags; the done head does not use proprioception."
+                )
+            self.done_head = nn.Sequential(
+                nn.Linear(self.vision_cond_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(
+                    hidden_dim, self.output_prediction_horizon * self.custom_1d_dim
+                ),
+            )
+
+        # CLS token embedding for latent encoder
+        self.cls_embed = nn.Parameter(torch.randn(1, 1, hidden_dim))
+
+        # Main transformer for vision and action generation
+        self.transformer = nn.ModuleDict({
+            "encoder": TransformerEncoder(
+                d_model=hidden_dim,
+                nhead=nheads,
+                num_encoder_layers=num_encoder_layers,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+            ),
+            "decoder": TransformerDecoder(
+                d_model=hidden_dim,
+                nhead=nheads,
+                num_decoder_layers=num_decoder_layers,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+            ),
+        })
+
+        # Separate encoder for latent space
+        self.latent_encoder = TransformerEncoder(
+            d_model=hidden_dim,
+            nhead=nheads,
+            num_encoder_layers=num_encoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+        )
+
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(hidden_dim, dropout)
+
+        # Output heads
+        self.action_head = nn.Linear(hidden_dim, self.max_output_size)
+
+        # Latent projections
+        self.latent_mu = nn.Linear(hidden_dim, latent_dim)
+        self.latent_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.latent_out_proj = nn.Linear(latent_dim, hidden_dim)
+
+        # Query embedding for decoding
+        self.query_embed = nn.Parameter(
+            torch.randn(self.output_prediction_horizon, 1, hidden_dim)
+        )
+
+        # Additional position embeddings for proprio and latent
+        self.additional_pos_embed = nn.Parameter(torch.randn(2, 1, hidden_dim))
+
+        # Setup parameter groups
+        self._setup_optimizer_param_groups()
+
+    def _setup_optimizer_param_groups(self) -> None:
+        """Setup parameter groups for optimizer."""
+        backbone_params, other_params = [], []
+        for name, param in self.named_parameters():
+            if any(backbone in name for backbone in ["image_encoders"]):
+                backbone_params.append(param)
+            else:
+                other_params.append(param)
+
+        if self.freeze_backbone:
+            for param in backbone_params:
+                param.requires_grad = False
+            self.param_groups = [{"params": other_params, "lr": self.lr}]
+        else:
+            self.param_groups = [
+                {"params": backbone_params, "lr": self.lr_backbone},
+                {"params": other_params, "lr": self.lr},
+            ]
+
+    def _reparametrize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """Sample from latent distribution using reparametrization trick.
+
+        During training, samples from the distribution N(mu, exp(logvar)).
+        During inference, returns the mean mu.
+
+        Args:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+
+        Returns:
+            torch.Tensor: Sampled latent variable
+        """
+        if self.training:
+            std = torch.exp(0.5 * logvar)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+        return mu
+
+    def _combine_proprio(self, batch: BatchedInferenceInputs) -> torch.FloatTensor:
+        """Combine proprioceptive inputs into a single normalized feature vector.
+
+        Types configured in self.input_data_types but absent from batch.inputs
+        are zero-filled to preserve positional alignment for cross-embodiment
+        batches. Returns None when no proprioceptive types are configured.
+
+        Args:
+            batch: Input batch containing joint state data
+
+        Returns:
+            torch.FloatTensor: Combined and normalized joint state features
+        """
+        if self.state_embed is None:
+            return None
+
+        proprio_list = []
+        for data_type in [
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        ]:
+            if data_type not in self.input_data_types:
+                continue
+            if data_type not in batch.inputs:
+                start_idx, end_idx = self.proprio_dims[data_type]
+                proprio_list.append(
+                    torch.zeros(
+                        (len(batch), end_idx - start_idx),
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                )
+                continue
+
+            batched_nc_data = batch.inputs[data_type]
+            mask = batch.inputs_mask[data_type]
+
+            if data_type == DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS:
+                batched_gripper_data = cast(
+                    list[BatchedParallelGripperOpenAmountData], batched_nc_data
+                )
+                proprio_data = torch.cat(
+                    [bgd.open_amount for bgd in batched_gripper_data], dim=-1
+                )
+            else:
+                batched_joint_data = cast(list[BatchedJointData], batched_nc_data)
+                proprio_data = torch.cat(
+                    [bjd.value for bjd in batched_joint_data], dim=-1
+                )
+
+            last_proprio = proprio_data[:, -1, :]  # (B, num_features)
+            masked_proprio = last_proprio * mask
+            proprio_list.append(masked_proprio)
+
+        # If no proprioception data is available, return None
+        # This allows the algorithm to work with visual-only inputs
+        if not proprio_list:
+            return None
+
+        # Concatenate all proprio together: (B, total_proprio_dim)
+        all_proprio = torch.cat(proprio_list, dim=-1)
+
+        # Normalize once on all proprio
+        # Check if normalizer exists (it should if we have proprio data)
+        if self.proprio_normalizer is None:
+            raise ValueError(
+                "Proprioception inputs were provided but no normalizer was available."
+            )
+        normalized_proprio = self.proprio_normalizer.normalize(all_proprio)
+
+        return normalized_proprio
+
+    def _encode_latent(
+        self,
+        state: torch.FloatTensor | None,
+        actions: torch.FloatTensor,
+        actions_mask: torch.FloatTensor,
+        actions_sequence_mask: torch.FloatTensor,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Encode actions to latent space during training.
+
+        Uses a separate transformer encoder to encode the action sequence
+        along with proprioceptive state into latent distribution parameters.
+
+        Args:
+            state: Proprioceptive state features. When None the state slot is
+                omitted from the encoder input (n_prefix=1 instead of 2) and
+                the padding mask is adjusted accordingly.
+            actions: Target action sequence
+            actions_mask: Mask for valid action dimensions
+            actions_sequence_mask: Mask for valid sequence positions
+
+        Returns:
+            tuple[torch.FloatTensor, torch.FloatTensor]: Latent mean and log variance
+        """
+        # Use actions to get batch_size: state may be None for visual-only inputs
+        batch_size = actions.shape[0]
+
+        # Project state and actions
+        state_embed = (
+            self.state_embed(state)
+            if (self.state_embed is not None and state is not None)
+            else None
+        )  # [B, H] or None
+        action_embed = self.action_embed(
+            actions * actions_mask.unsqueeze(1)
+        )  # [B, T, H]
+
+        # Reshape to sequence first
+        state_embed = (
+            state_embed.unsqueeze(0) if state_embed is not None else None
+        )  # [1, B, H] or None
+        action_embed = action_embed.transpose(0, 1)  # [T, B, H]
+
+        # Concatenate [CLS, (state_emb,) action_embed]
+        cls_token = self.cls_embed.expand(-1, batch_size, -1)  # [1, B, H]
+        if state_embed is not None:
+            encoder_input = torch.cat([cls_token, state_embed, action_embed], dim=0)
+            n_prefix = 2  # CLS + state
+        else:
+            encoder_input = torch.cat([cls_token, action_embed], dim=0)
+            n_prefix = 1  # CLS only
+
+        # Update padding mask to match prefix length
+        if actions_sequence_mask is not None:
+            cls_joint_pad = torch.zeros(
+                batch_size, n_prefix, dtype=torch.bool, device=self.device
+            )
+            actions_sequence_mask = torch.cat(
+                [cls_joint_pad, actions_sequence_mask], dim=1
+            )
+
+        # Add positional encoding
+        encoder_input = self.pos_encoder(encoder_input)
+
+        # Encode sequence
+        memory = self.latent_encoder(
+            encoder_input, src_key_padding_mask=actions_sequence_mask
+        )
+
+        # Get latent parameters from CLS token
+        mu = self.latent_mu(memory[0])  # Take CLS token output
+        logvar = self.latent_logvar(memory[0])
+        return mu, logvar
+
+    def _encode_visual(
+        self,
+        states: torch.FloatTensor,
+        batched_nc_data: list[BatchedNCData],
+        camera_images_mask: torch.FloatTensor,
+        latent: torch.FloatTensor,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+        """Encode visual inputs with latent and proprioceptive features.
+
+        Processes RGB images through vision encoders and combines them with
+        proprioceptive state and latent features using a transformer encoder.
+
+        Args:
+            states: Proprioceptive state features
+            batched_nc_data: List of BatchedRGBData
+            camera_images_mask: Mask for valid camera inputs
+            latent: Latent features from action encoding
+
+        Returns:
+            tuple[torch.FloatTensor, torch.FloatTensor]: Encoded visual and
+            proprioceptive memory, plus pooled vision features
+            ``(B, vision_cond_dim)`` for the done head.
+        """
+        batched_rgb_data = cast(list[BatchedRGBData], batched_nc_data)
+        batch_size = latent.shape[0]
+
+        # Process images
+        image_features = []
+        image_pos = []
+        for cam_id, (normalizer, encoder, input_rgb) in enumerate(
+            zip(self.image_normalizers, self.image_encoders, batched_rgb_data)
+        ):
+            last_frame = input_rgb.frame[:, -1, :, :, :]  # (B, 3, H, W)
+            transformed = normalizer(last_frame)
+            features, pos = encoder(
+                transformed
+            )  # Vision backbone provides features and pos
+            features *= camera_images_mask[:, cam_id].view(batch_size, 1, 1, 1)
+            image_features.append(features)
+            image_pos.append(pos)
+
+        # Global-average-pool each camera for the vision-only done head.
+        vision_cond = torch.cat(
+            [features.mean(dim=(2, 3)) for features in image_features],
+            dim=-1,
+        )  # [B, hidden_dim * num_cameras]
+
+        # Combine image features and positions
+        combined_features = torch.cat(image_features, dim=3)  # [B, C, H, W]
+        combined_pos = torch.cat(image_pos, dim=3)  # [B, C, H, W]
+
+        # Convert to sequence [H*W, B, C]
+        src = combined_features.flatten(2).permute(2, 0, 1)
+        pos = combined_pos.flatten(2).permute(2, 0, 1)
+
+        # Process joint positions and latent
+        # If no proprioception, create zero tensor with same shape as latent
+        if states is None:
+            state_features = torch.zeros_like(latent)  # [B, H]
+        else:
+            state_features = (
+                self.state_embed(states)
+                if self.state_embed is not None
+                else torch.zeros_like(latent)
+            )  # [B, H]
+
+        # Stack latent and proprio features
+        additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
+
+        # Add position embeddings from additional_pos_embed
+        additional_pos = self.additional_pos_embed.expand(
+            -1, batch_size, -1
+        )  # [2, B, H]
+
+        # Concatenate everything
+        src = torch.cat([additional_features, src], dim=0)
+        pos = torch.cat([additional_pos, pos], dim=0)
+
+        # Fuse positional embeddings with source
+        src = src + pos
+
+        # Encode
+        memory = self.transformer["encoder"](src)
+
+        return memory, vision_cond
+
+    def _encode_proprio_only(
+        self,
+        states: torch.FloatTensor,
+        latent: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        """Encode proprio state and latent without visual input.
+
+        Used when no RGB images are available. Feeds latent and state features
+        directly into the transformer encoder as the memory sequence.
+
+        Args:
+            states: Proprioceptive state features (may be None)
+            latent: Latent features from action encoding
+
+        Returns:
+            torch.FloatTensor: Encoded memory for the decoder
+        """
+        batch_size = latent.shape[0]
+
+        if states is None:
+            state_features = torch.zeros_like(latent)
+        else:
+            state_features = (
+                self.state_embed(states)
+                if self.state_embed is not None
+                else torch.zeros_like(latent)
+            )  # [B, H]
+
+        additional_features = torch.stack([latent, state_features], dim=0)  # [2, B, H]
+        additional_pos = self.additional_pos_embed.expand(
+            -1, batch_size, -1
+        )  # [2, B, H]
+        src = additional_features + additional_pos
+
+        memory = self.transformer["encoder"](src)
+        return memory
+
+    def _decode(
+        self,
+        latent: torch.FloatTensor,
+        memory: torch.FloatTensor,
+    ) -> torch.Tensor:
+        """Decode latent and visual features to action sequence.
+
+        Uses a transformer decoder with learned query embeddings to generate
+        a sequence of action predictions conditioned on visual and latent features.
+
+        Args:
+            latent: Latent features
+            memory: Encoded visual and proprioceptive memory
+
+        Returns:
+            torch.Tensor: Predicted action sequence [B, T, action_dim]
+        """
+        batch_size = latent.shape[0]
+
+        # Convert to sequence first and expand
+        query_embed = self.query_embed.expand(-1, batch_size, -1)  # [T, B, H]
+        latent = latent.unsqueeze(0).expand_as(query_embed)  # [T, B, H]
+
+        # Add latent to query embedding
+        query_embed = query_embed + latent
+
+        # Initialize target with zeros
+        tgt = torch.zeros_like(query_embed)
+
+        # Decode sequence
+        hs = self.transformer["decoder"](tgt, memory, query_pos=query_embed)
+
+        # Project to action space (keeping sequence first)
+        actions = self.action_head(hs)  # [T, B, A]
+
+        # Convert back to batch first
+        actions = actions.transpose(0, 1)  # [B, T, A]
+
+        return actions
+
+    def _predict_action(
+        self,
+        mu: torch.FloatTensor,
+        logvar: torch.FloatTensor,
+        batch: BatchedInferenceInputs,
+        proprio_state: torch.FloatTensor | None = None,
+    ) -> tuple[torch.FloatTensor, torch.FloatTensor | None]:
+        """Predict action sequence from latent distribution and observations.
+
+        Args:
+            mu: Mean of latent distribution
+            logvar: Log variance of latent distribution
+            batch: Input observations
+            proprio_state: Pre-computed proprio features; recomputed if None
+
+        Returns:
+            tuple[torch.FloatTensor, torch.FloatTensor | None]: Predicted action
+            sequence and optional pooled vision features for the done head.
+        """
+        # Sample latent
+        latent_sample = self._reparametrize(mu, logvar)
+
+        # Project latent
+        latent = self.latent_out_proj(latent_sample)  # [B, H]
+
+        if proprio_state is None:
+            proprio_state = self._combine_proprio(batch)
+
+        if (
+            DataType.RGB_IMAGES in self.input_data_types
+            and DataType.RGB_IMAGES in batch.inputs
+        ):
+            memory, vision_cond = self._encode_visual(
+                proprio_state,
+                batch.inputs[DataType.RGB_IMAGES],
+                batch.inputs_mask[DataType.RGB_IMAGES],
+                latent,
+            )
+        else:
+            memory = self._encode_proprio_only(proprio_state, latent)
+            vision_cond = (
+                torch.zeros(len(batch), self.vision_cond_dim, device=self.device)
+                if self.vision_cond_dim > 0
+                else None
+            )
+
+        # Decode actions
+        action_preds = self._decode(latent, memory)
+        return action_preds, vision_cond
+
+    def forward(
+        self, batch: BatchedInferenceInputs
+    ) -> dict[DataType, list[BatchedNCData]]:
+        """Perform inference to predict action sequence.
+
+        Args:
+            batch: Input batch with observations
+
+        Returns:
+            dict[DataType, list[BatchedNCData]]: Model predictions with action
+            sequences and optional done-flag probabilities.
+        """
+        batch_size = len(batch)
+        mu = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        logvar = torch.zeros(batch_size, self.latent_dim, device=self.device)
+        action_preds, vision_cond = self._predict_action(mu, logvar, batch)
+
+        # (B, T, action_dim)
+        outputs = self._split_outputs(self.action_normalizer.unnormalize(action_preds))
+
+        if self.done_head is not None:
+            assert vision_cond is not None
+            done_probs = torch.sigmoid(self._predict_done_logits(vision_cond))
+            outputs[DataType.CUSTOM_1D] = self._split_done_outputs(done_probs)
+
+        return outputs
+
+    def _split_outputs(
+        self, predictions: torch.Tensor
+    ) -> dict[DataType, list[BatchedNCData]]:
+        """Split an unnormalized action tensor into per-sensor batched outputs.
+
+        Args:
+            predictions: Unnormalized actions with shape (B, T, action_dim).
+
+        Returns:
+            dict[DataType, list[BatchedNCData]]: One entry per output sensor,
+            ordered by the tensor column layout in ``self.output_dims``.
+        """
+        output_tensors: dict[DataType, list[BatchedNCData]] = {}
+
+        for data_type in self.action_output_data_types:
+            start_idx, end_idx = self.output_dims[data_type]
+            output_width = end_idx - start_idx
+            dt_preds = predictions[:, :, start_idx:end_idx]  # (B, T, dt_size)
+
+            if data_type in [DataType.JOINT_TARGET_POSITIONS, DataType.JOINT_POSITIONS]:
+                batched_outputs = []
+                for i in range(output_width):
+                    joint_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(BatchedJointData(value=joint_preds))
+                output_tensors[data_type] = batched_outputs
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
+                batched_outputs = []
+                for i in range(output_width):
+                    gripper_preds = dt_preds[:, :, i : i + 1]  # (B, T, 1)
+                    batched_outputs.append(
+                        BatchedParallelGripperOpenAmountData(open_amount=gripper_preds)
+                    )
+                output_tensors[data_type] = batched_outputs
+            else:
+                raise ValueError(f"Unsupported output data type: {data_type}")
+
+        return output_tensors
+
+    def _predict_done_logits(self, vision_cond: torch.Tensor) -> torch.Tensor:
+        """Predict done-flag logits from pooled vision features.
+
+        Args:
+            vision_cond: Pooled image features with shape (B, vision_cond_dim).
+
+        Returns:
+            torch.Tensor: Done logits with shape (B, T, custom_1d_dim).
+        """
+        assert self.done_head is not None
+        batch_size = vision_cond.shape[0]
+        logits = self.done_head(vision_cond)
+        return logits.view(
+            batch_size, self.output_prediction_horizon, self.custom_1d_dim
+        )
+
+    def _split_done_outputs(
+        self, done_probs: torch.Tensor
+    ) -> list[BatchedCustom1DData]:
+        """Split a concatenated done probability tensor into per-slot outputs.
+
+        Args:
+            done_probs: Probabilities with shape (B, T, custom_1d_dim).
+
+        Returns:
+            list[BatchedCustom1DData]: One entry per CUSTOM_1D embodiment slot.
+        """
+        batched_outputs: list[BatchedCustom1DData] = []
+        start = 0
+        for slot_dim in self.custom_1d_slot_dims:
+            end = start + slot_dim
+            batched_outputs.append(
+                BatchedCustom1DData(data=done_probs[:, :, start:end])
+            )
+            start = end
+        return batched_outputs
+
+    def _build_done_mask(self, batch: BatchedTrainingSamples) -> torch.Tensor:
+        """Build a per-feature mask for CUSTOM_1D done targets.
+
+        Expands the per-slot mask ``(B, num_slots)`` across each slot's feature
+        width so it aligns with concatenated done targets ``(B, custom_1d_dim)``.
+
+        Args:
+            batch: Training batch.
+
+        Returns:
+            torch.Tensor: Mask with shape (B, custom_1d_dim).
+        """
+        if DataType.CUSTOM_1D not in batch.outputs_mask:
+            return torch.zeros(batch.batch_size, self.custom_1d_dim, device=self.device)
+
+        slot_mask = batch.outputs_mask[DataType.CUSTOM_1D]  # (B, num_slots)
+        expanded: list[torch.Tensor] = []
+        for slot_idx, slot_dim in enumerate(self.custom_1d_slot_dims):
+            expanded.append(slot_mask[:, slot_idx : slot_idx + 1].expand(-1, slot_dim))
+        return torch.cat(expanded, dim=-1)
+
+    def training_step(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Perform a single training step.
+
+        Encodes action sequences to latent space, predicts actions, and computes
+        L1 reconstruction loss plus KL divergence regularization. When CUSTOM_1D
+        outputs are configured, also computes a masked BCE loss on the done-flag
+        classification head.
+
+        Args:
+            batch: Training batch with inputs and targets
+
+        Returns:
+            BatchedTrainingOutputs: Training outputs with losses and metrics
+        """
+        inference_sample = BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
+        )
+
+        # Extract target actions; zero-fill types absent from this batch
+        action_targets = []
+        for data_type in self.action_output_data_types:
+            start, end = self.output_dims[data_type]
+            dim = end - start
+            if data_type not in batch.outputs:
+                action_targets.append(
+                    torch.zeros(
+                        batch.batch_size,
+                        self.output_prediction_horizon,
+                        dim,
+                        device=self.device,
+                    )
+                )
+            elif data_type in [
+                DataType.JOINT_TARGET_POSITIONS,
+                DataType.JOINT_POSITIONS,
+            ]:
+                batched_joints = cast(list[BatchedJointData], batch.outputs[data_type])
+                action_targets.extend([bjd.value for bjd in batched_joints])
+            elif data_type in [
+                DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+                DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            ]:
+                grippers = cast(
+                    list[BatchedParallelGripperOpenAmountData],
+                    batch.outputs[data_type],
+                )
+                action_targets.extend([gripper.open_amount for gripper in grippers])
+            else:
+                raise ValueError(f"Unsupported output data type: {data_type}")
+
+        # Per-sample, per-sensor mask: correctly handles robots with different
+        # sensor counts for the same type in the same batch.
+        action_mask = torch.cat(
+            [
+                (
+                    batch.outputs_mask[data_type]
+                    if data_type in batch.outputs_mask
+                    else torch.zeros(
+                        batch.batch_size,
+                        self.output_dims[data_type][1] - self.output_dims[data_type][0],
+                        device=self.device,
+                    )
+                )
+                for data_type in self.action_output_data_types
+            ],
+            dim=-1,
+        )  # (B, max_output_size)
+
+        action_data = torch.cat(action_targets, dim=-1)  # (B, T, action_dim)
+
+        # All time steps valid; action dims masked per-sample above
+        pred_sequence_mask = torch.ones_like(action_data[:, :, 0])
+
+        proprio_state = self._combine_proprio(inference_sample)
+
+        # Normalize actions for encoding
+        normalized_actions = self.action_normalizer.normalize(action_data)
+
+        mu, logvar = self._encode_latent(
+            proprio_state,
+            normalized_actions,
+            action_mask,
+            pred_sequence_mask,
+        )
+
+        action_preds, vision_cond = self._predict_action(
+            mu, logvar, inference_sample, proprio_state
+        )
+        target_actions = self.action_normalizer.normalize(action_data)
+
+        l1_loss_all = F.l1_loss(action_preds, target_actions, reduction="none")
+        l1_loss = (l1_loss_all * action_mask.unsqueeze(1)).sum() / torch.clamp(
+            action_mask.sum() * action_preds.shape[1], min=1.0
+        )
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp()) / mu.shape[0]
+        loss = l1_loss + self.kl_weight * kl_loss
+
+        losses = {
+            "l1_and_kl_loss": loss,
+        }
+        metrics = {
+            "l1_loss": l1_loss,
+            "kl_loss": kl_loss,
+        }
+
+        if self.done_head is not None:
+            assert vision_cond is not None
+            done_logits = self._predict_done_logits(vision_cond)  # (B, T, D)
+
+            if DataType.CUSTOM_1D in batch.outputs:
+                custom_outputs = cast(
+                    list[BatchedCustom1DData], batch.outputs[DataType.CUSTOM_1D]
+                )
+                done_targets = torch.cat(
+                    [item.data for item in custom_outputs], dim=-1
+                )  # (B, T, D)
+            else:
+                done_targets = torch.zeros_like(done_logits)
+
+            done_mask = self._build_done_mask(batch)  # (B, D)
+            bce = F.binary_cross_entropy_with_logits(
+                done_logits, done_targets.clamp(0.0, 1.0), reduction="none"
+            )
+            done_bce_loss = (bce * done_mask.unsqueeze(1)).sum() / torch.clamp(
+                done_mask.sum() * done_logits.shape[1], min=1.0
+            )
+            weighted_done_loss = self.done_loss_weight * done_bce_loss
+            losses["done_bce_loss"] = weighted_done_loss
+            metrics["done_bce_loss"] = done_bce_loss
+
+        return BatchedTrainingOutputs(
+            losses=losses,
+            metrics=metrics,
+        )
+
+    def configure_optimizers(
+        self,
+    ) -> list[torch.optim.Optimizer]:
+        """Configure optimizer with different learning rates.
+
+        Uses separate learning rates for image encoder backbone and other
+        model parameters.
+
+        Returns:
+            list[torch.optim.Optimizer]: List of optimizers for model parameters
+        """
+        return [torch.optim.AdamW(self.param_groups, weight_decay=self.weight_decay)]
+
+    @staticmethod
+    def get_supported_input_data_types() -> set[DataType]:
+        """Get the input data types supported by this model.
+
+        Returns:
+            set[DataType]: Set of supported input data types
+        """
+        return {
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_VELOCITIES,
+            DataType.JOINT_TORQUES,
+            DataType.RGB_IMAGES,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        }
+
+    @staticmethod
+    def get_supported_output_data_types() -> set[DataType]:
+        """Get the output data types supported by this model.
+
+        Returns:
+            set[DataType]: Set of supported output data types
+        """
+        return {
+            DataType.JOINT_POSITIONS,
+            DataType.JOINT_TARGET_POSITIONS,
+            DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+            DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
+            DataType.CUSTOM_1D,
+        }
