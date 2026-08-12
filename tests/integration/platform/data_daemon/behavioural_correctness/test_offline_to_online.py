@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.runners import (
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
+    Synchronous,
     case_ids,
     has_configured_org,
 )
@@ -39,11 +40,11 @@ from tests.integration.platform.data_daemon.shared.test_infrastructure import (
 
 _CASES = DataDaemonTestBatch(
     cases=(
-        DataDaemonTestCase(
+        Synchronous(
             duration_sec=5,
             joint_count=4,
         ),
-        DataDaemonTestCase(
+        Synchronous(
             duration_sec=5,
             joint_count=4,
             video_count=1,
