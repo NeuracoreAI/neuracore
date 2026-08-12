@@ -7,6 +7,7 @@ per-test artifact directory setup, and the :func:`scoped_test_dir_state` /
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import sqlite3
@@ -17,8 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import requests
 
 import neuracore as nc
+from neuracore.core.auth import get_auth
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import STREAM_API_URL
 from neuracore.core.robot import Robot, get_robot_id_from_name
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
@@ -39,6 +44,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_DAEMON_TEST_ARTIFACTS_DIR,
     DATA_DAEMON_TEST_STATE_ROOT,
     LOG_DELETE,
+    NOTIFICATION_PROBE_TIMEOUT_S,
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
 )
@@ -224,6 +230,40 @@ def apply_storage_state_action(storage_state_action: str) -> None:
                 Path(str(db_path) + suffix).unlink(missing_ok=True)
             except OSError:
                 pass
+
+
+@functools.cache
+def recording_notifications_available() -> bool:
+    """Whether the platform serves the recording-notification stream.
+
+    Without it a multi-process case records nothing, so it skips rather than
+    failing on the deployment. Probed rather than assumed: a backend that routes
+    ``/recording/{id}`` first answers with an ordinary 404, indistinguishable
+    from the endpoint being absent.
+    """
+    ensure_login()
+    url = f"{STREAM_API_URL}/org/{get_current_org()}/recording/notifications"
+    try:
+        response = requests.get(
+            url,
+            headers=get_auth().get_headers(),
+            timeout=NOTIFICATION_PROBE_TIMEOUT_S,
+            stream=True,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Recording-notification probe failed", exc_info=True)
+        return False
+    try:
+        if response.status_code != 200:
+            logger.warning(
+                "Recording notifications unavailable: %s %s -> %s",
+                response.status_code,
+                url,
+                response.text[:200],
+            )
+        return response.status_code == 200
+    finally:
+        response.close()
 
 
 def delete_cloud_dataset(dataset_name: str) -> None:
