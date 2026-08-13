@@ -11,14 +11,16 @@ from typing import Any
 
 import torch
 from omegaconf import DictConfig
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset
 
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
+from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
 
 logger = logging.getLogger(__name__)
 
@@ -922,13 +924,33 @@ def _split_train_val_dataset(
     cfg: DictConfig,
     dataset: PytorchSynchronizedDataset,
 ) -> tuple[Dataset, Dataset]:
-    """Split dataset into deterministic train and validation subsets."""
+    """Split dataset into deterministic train and validation subsets.
+
+    Args:
+        cfg: Training config providing ``validation_split``, ``seed``, and
+            ``inference_preprocessing``.
+        dataset: Full synchronized dataset with train preprocessing.
+
+    Returns:
+        ``(train_dataset, val_dataset)`` subsets from
+        ``split_train_val_datasets``.
+    """
     dataset_size = len(dataset)
     train_split = 1 - cfg.validation_split
     train_size = int(train_split * dataset_size)
     val_size = dataset_size - train_size
-    generator = torch.Generator().manual_seed(cfg.seed)
-    train_dataset, val_dataset = random_split(
-        dataset, [train_size, val_size], generator=generator
+    (
+        inference_input_preprocessing_config,
+        inference_output_preprocessing_config,
+    ) = resolve_input_output_preprocessing(
+        cfg.get("inference_preprocessing"),
+        role_name="inference_preprocessing",
     )
-    return train_dataset, val_dataset
+    return split_train_val_datasets(
+        dataset,
+        train_size=train_size,
+        val_size=val_size,
+        seed=cfg.seed,
+        inference_input_preprocessing_config=inference_input_preprocessing_config,
+        inference_output_preprocessing_config=inference_output_preprocessing_config,
+    )

@@ -28,6 +28,12 @@ from neuracore.ml.utils.memory_monitor import OutOfMemoryError
 
 GB = 1024**3
 
+_RESIZE_PAD_TARGET = "neuracore.ml.preprocessing.methods.resize_pad.ResizePad"
+_MINIMAL_ROLE_PREPROCESSING = {
+    "input": {"RGB_IMAGES": [{"_target_": _RESIZE_PAD_TARGET, "size": [224, 224]}]},
+    "output": {"RGB_IMAGES": [{"_target_": _RESIZE_PAD_TARGET, "size": [224, 224]}]},
+}
+
 
 class DummyDataset(Dataset):
     """Simple dataset that returns a tensor sample."""
@@ -78,6 +84,8 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
         "seed": 42,
         "num_train_workers": 0,
         "num_val_workers": 0,
+        "train_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
+        "inference_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
     })
     assert "min_batch_size" not in cfg
     assert "max_batch_size" not in cfg
@@ -89,9 +97,10 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
         assert len(dataset) == 100
-        assert lengths == [80, 20]
+        assert train_size == 80
+        assert val_size == 20
         return (DummyDataset(80), DummyDataset(20))
 
     mock_autotuner_instance = MagicMock()
@@ -100,8 +109,12 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
@@ -129,6 +142,8 @@ def test_find_optimal_batch_size_default_max_allows():
         "seed": 42,
         "num_train_workers": 0,
         "num_val_workers": 0,
+        "train_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
+        "inference_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
     })
     assert "max_batch_size" not in cfg
 
@@ -139,8 +154,8 @@ def test_find_optimal_batch_size_default_max_allows():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
-        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+        return (DummyDataset(train_size), DummyDataset(val_size))
 
     mock_autotuner_instance = MagicMock()
     mock_autotuner_instance.estimate_optimal_batch_size.return_value = 4
@@ -148,8 +163,12 @@ def test_find_optimal_batch_size_default_max_allows():
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeAutotuner",
@@ -533,6 +552,8 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
         "seed": 42,
         "num_train_workers": 0,
         "num_val_workers": 0,
+        "train_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
+        "inference_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
     })
 
     mock_dataset = Mock(spec=PytorchSynchronizedDataset)
@@ -542,15 +563,20 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
-        assert lengths == [80, 20]
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+        assert train_size == 80
+        assert val_size == 20
         return (DummyDataset(80), DummyDataset(20))
 
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
@@ -841,6 +867,8 @@ def dummy_cfg_and_dataset():
         "seed": 42,
         "num_train_workers": 0,
         "num_val_workers": 0,
+        "train_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
+        "inference_preprocessing": _MINIMAL_ROLE_PREPROCESSING,
     })
     device = torch.device("cuda:0")
     dataset = Mock(spec=PytorchSynchronizedDataset)
@@ -848,12 +876,18 @@ def dummy_cfg_and_dataset():
     dataset.collate_fn = lambda x: x
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(ds, lengths, generator=None):
-        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+    def fake_split_train_val(ds, train_size, val_size, seed, **kwargs):
+        return (DummyDataset(train_size), DummyDataset(val_size))
 
-    with patch(
-        "neuracore.ml.trainers.batch_autotuner.random_split",
-        side_effect=fake_random_split,
+    with (
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
+        ),
     ):
         yield cfg, dataset, model_factory, device
 
