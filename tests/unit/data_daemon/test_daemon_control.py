@@ -25,6 +25,23 @@ INSTALLED_SDK_VERSION = "99.9.9"
 STALE_DAEMON_VERSION = "13.0.1"
 
 
+@pytest.fixture(autouse=True)
+def contain_daemon_path_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Keep ``ensure_daemon_running``'s environment side effect inside the test.
+
+    It ``os.environ.setdefault``s ``NEURACORE_DAEMON_PID_PATH`` /
+    ``NEURACORE_DAEMON_DB_PATH`` from whatever the path helpers resolve to, which
+    ``monkeypatch.setattr`` on those helpers cannot undo — the variable outlives
+    the test and governs every later one in the process. Several tests here point
+    the pid path at a file holding ``os.getpid()``, so the leak names *pytest*:
+    a later integration test then reads it as the daemon's pid and stops "the
+    daemon" by signalling us. Pre-setting both via ``monkeypatch`` makes the
+    ``setdefault`` a no-op and restores them on teardown.
+    """
+    monkeypatch.setenv("NEURACORE_DAEMON_PID_PATH", str(tmp_path / "env-daemon.pid"))
+    monkeypatch.setenv("NEURACORE_DAEMON_DB_PATH", str(tmp_path / "env-state.db"))
+
+
 class _FakePopen:
     def __init__(
         self,

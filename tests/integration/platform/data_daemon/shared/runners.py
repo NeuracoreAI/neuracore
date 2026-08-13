@@ -19,6 +19,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 )
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
+    reclaim_leftover_daemons,
     stop_daemon,
 )
 from tests.integration.platform.data_daemon.shared.profiles import (
@@ -56,6 +57,26 @@ def scoped_daemon_storage_env() -> Generator[None]:
             os.environ.pop("NEURACORE_DAEMON_DB_PATH", None)
 
 
+def stop_daemon_and_verify() -> None:
+    """Stop the daemon and assert nothing of it is left behind.
+
+    Reclaims leftovers only when that assertion fails. A leak is exactly what
+    this assertion catches, so scanning for one on every test's happy path is
+    wasted work; reclaiming on the way out of the failure keeps the leak to the
+    test that caused it rather than to every test after it.
+
+    Raises:
+        AssertionError: When a daemon process, PID file, or producer subprocess
+            survives the stop.
+    """
+    stop_daemon()
+    try:
+        assert_daemon_cleanup()
+    except AssertionError:
+        reclaim_leftover_daemons()
+        raise
+
+
 @contextmanager
 def offline_daemon_running() -> Generator[None]:
     """Run the daemon in offline mode for the duration of the block.
@@ -74,13 +95,11 @@ def offline_daemon_running() -> Generator[None]:
     """
     with scoped_daemon_storage_env(), scoped_offline_profile():
         try:
-            stop_daemon()
-            assert_daemon_cleanup()
+            stop_daemon_and_verify()
             ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
             yield
         finally:
-            stop_daemon()
-            assert_daemon_cleanup()
+            stop_daemon_and_verify()
 
 
 @contextmanager
@@ -106,8 +125,7 @@ def online_daemon_running() -> Generator[None]:
                     always_log=True,
                     assert_deadline=False,
                 ):
-                    stop_daemon()
-                    assert_daemon_cleanup()
+                    stop_daemon_and_verify()
                     ensure_daemon_running(
                         timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
                     )
@@ -120,5 +138,4 @@ def online_daemon_running() -> Generator[None]:
                     always_log=True,
                     assert_deadline=False,
                 ):
-                    stop_daemon()
-                    assert_daemon_cleanup()
+                    stop_daemon_and_verify()
