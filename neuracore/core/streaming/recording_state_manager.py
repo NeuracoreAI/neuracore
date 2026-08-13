@@ -222,9 +222,11 @@ class RecordingStateManager(BaseSSEConsumer):
                 recording_id=recording_id,
                 start_time=start_time,
             )
-        # After the state is visible, and outside the lock: this takes a few
-        # milliseconds of filesystem work, which is long enough for a
+        # After the state is visible, and outside the lock: this normally takes
+        # a few milliseconds of filesystem work, which is long enough for a
         # notification to arrive and be resolved against the tracked recording.
+        # Against a stale daemon it can block for a multiple of the daemon
+        # startup budget before the failure is logged.
         self._ensure_daemon_for_recording()
 
     def _ensure_daemon_for_recording(self) -> None:

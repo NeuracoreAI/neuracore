@@ -9,12 +9,17 @@ from __future__ import annotations
 from importlib.resources import files
 from pathlib import Path
 
+REBUILD_COMMAND_HINT = (
+    "`bash rust/scripts/build_wheel_artefacts.sh && pip install -e .`"
+)
+
+INSTALL_COMMAND_HINT = "`pip install --force-reinstall neuracore`"
+
 MISSING_BINARY_HINT = (
     "The neuracore data-daemon binary was not found. It ships in the neuracore "
     "wheel (prebuilt for Linux x86_64 and Apple-Silicon macOS); reinstall with "
-    "`pip install neuracore` on one of those platforms, or build it into a "
-    "source checkout with `bash rust/scripts/build_wheel_artefacts.sh && "
-    "pip install -e .`."
+    f"{INSTALL_COMMAND_HINT} on one of those platforms, or build it into a "
+    f"source checkout with {REBUILD_COMMAND_HINT}."
 )
 
 

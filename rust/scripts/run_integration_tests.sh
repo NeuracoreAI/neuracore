@@ -196,13 +196,14 @@ export RUST_BACKTRACE=1
 # Each entry is a pytest target relative to repo root. The order is hand-rolled
 # so a failure surfaces in the cheapest suite first:
 #   1. behavioural_correctness/test_startup        — single startup smoke
-#   2. behavioural_correctness/test_signal_cleanup — many short signal tests
-#   3. behavioural_correctness/test_cancel_recording — short, no upload
-#   4. behavioural_correctness/test_offline_to_online — recorded -> online flip
-#   5. data_integrity/test_pre_network             — disk-only integrity
-#   6. data_integrity/test_network                 — adds upload + dataset wait
-#   7. performance/test_pre_network                — disk-only perf budgets
-#   8. performance/test_network                    — full network perf run
+#   2. behavioural_correctness/test_daemon_version — daemon version check
+#   3. behavioural_correctness/test_signal_cleanup — many short signal tests
+#   4. behavioural_correctness/test_cancel_recording — short, no upload
+#   5. behavioural_correctness/test_offline_to_online — recorded -> online flip
+#   6. data_integrity/test_pre_network             — disk-only integrity
+#   7. data_integrity/test_network                 — adds upload + dataset wait
+#   8. performance/test_pre_network                — disk-only perf budgets
+#   9. performance/test_network                    — full network perf run
 #
 # The 300s (5-minute) 1920x1080 performance cases are pulled OUT of the normal
 # order and run last (see `run_tests`): they dominate wall time and their
@@ -215,6 +216,7 @@ export RUST_BACKTRACE=1
 
 test_targets=(
   "tests/integration/platform/data_daemon/behavioural_correctness/test_startup.py"
+  "tests/integration/platform/data_daemon/behavioural_correctness/test_daemon_version.py"
   "tests/integration/platform/data_daemon/behavioural_correctness/test_signal_cleanup.py"
   "tests/integration/platform/data_daemon/behavioural_correctness/test_cancel_recording.py"
   "tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py"

@@ -45,7 +45,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
     LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES,
+    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION,
+    VERSION_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -111,6 +112,11 @@ pub(crate) struct ProducerState {
     _health_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response client used by launch readiness probes.
     pub(crate) health_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the version client so port discovery
+    /// doesn't race the handle going out of scope.
+    _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used to read the running daemon's build version.
+    pub(crate) version_client: Client<ipc::Service, [u8], (), [u8], ()>,
 }
 
 /// Work item for the publisher thread.
@@ -370,6 +376,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         open_query_client(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
     let (health_service, health_client) =
         open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
+    let (version_service, version_client) =
+        open_query_client(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
 
     Ok(ProducerState {
         _node: node,
@@ -379,6 +387,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         recording_id_client,
         _health_service: health_service,
         health_client,
+        _version_service: version_service,
+        version_client,
     })
 }
 

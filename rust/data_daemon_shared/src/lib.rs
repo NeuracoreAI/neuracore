@@ -192,6 +192,22 @@ pub mod service_name {
     /// Maximum size of a single health-service sample.
     pub const HEALTH_MAX_PAYLOAD_BYTES: usize = 1024;
 
+    /// Request-response service the SDK uses to read the neuracore version the
+    /// running daemon was built from.
+    ///
+    /// The SDK compares that version with its own installed version, so a
+    /// daemon left behind by an earlier install is reported instead of being
+    /// adopted silently. It is a service of its own rather than a field on
+    /// [`crate::HealthReply`] because postcard does not tag fields: a daemon
+    /// built before this service simply never answers here, while a changed
+    /// health reply would fail to decode and break the readiness contract.
+    /// See [`crate::VersionRequest`] / [`crate::VersionReply`].
+    pub const VERSION: &str = "neuracore/data_daemon/version";
+
+    /// Maximum size of a single version-service sample. Both the request and
+    /// the reply are a nonce plus a short version string.
+    pub const VERSION_MAX_PAYLOAD_BYTES: usize = 1024;
+
     /// Request-response service the SDK uses to resolve a recording's
     /// daemon-owned cloud `recording_id`.
     ///
@@ -578,6 +594,23 @@ pub struct HealthReply {
     pub nonce: u64,
 }
 
+/// Request sent over [`service_name::VERSION`] asking the daemon which
+/// neuracore version it was built from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionRequest {
+    /// Caller-generated token echoed by the reply.
+    pub nonce: u64,
+}
+
+/// Reply to a [`VersionRequest`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionReply {
+    /// Echo of [`VersionRequest::nonce`].
+    pub nonce: u64,
+    /// The neuracore version the answering daemon was built from.
+    pub version: String,
+}
+
 impl RecordingIdQuery {
     /// Encode as a postcard byte vector for a `recording_ids` service request sample.
     pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
@@ -626,6 +659,30 @@ impl HealthReply {
     }
 }
 
+impl VersionRequest {
+    /// Encode as a postcard byte vector for a version-service request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a version-service request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl VersionReply {
+    /// Encode as a postcard byte vector for a version-service response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a version-service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,6 +701,24 @@ mod tests {
         };
         assert_eq!(
             HealthReply::decode(&reply.encode().unwrap()).unwrap(),
+            reply
+        );
+    }
+
+    #[test]
+    fn version_request_and_reply_round_trip() {
+        let request = VersionRequest { nonce: 42 };
+        assert_eq!(
+            VersionRequest::decode(&request.encode().unwrap()).unwrap(),
+            request
+        );
+
+        let reply = VersionReply {
+            nonce: 42,
+            version: "13.7.2".into(),
+        };
+        assert_eq!(
+            VersionReply::decode(&reply.encode().unwrap()).unwrap(),
             reply
         );
     }

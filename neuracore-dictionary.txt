@@ -388,6 +388,7 @@ pyfunction
 pygments
 pyinstrument
 pymodule
+pyproject
 pyquaternion
 pytest
 pytestmark

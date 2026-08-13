@@ -19,7 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply,
+    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, VersionReply,
+    VersionRequest,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -75,6 +76,7 @@ pub async fn run(
         commands = data_daemon_shared::service_name::COMMANDS,
         recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
         health = data_daemon_shared::service_name::HEALTH,
+        version = data_daemon_shared::service_name::VERSION,
         "ipc listener started"
     );
 
@@ -114,6 +116,12 @@ pub async fn run(
         // point proves the daemon has opened IPC, spawned the dispatcher, and
         // entered the listener loop that drains commands.
         serve_health(transport.health_server());
+
+        // -- Answer version queries ---------------------------------------------
+        // The SDK compares this answer with its own installed version, so a
+        // daemon left behind by an earlier install is reported to the user
+        // instead of being adopted silently.
+        serve_version(transport.version_server());
 
         // -- Answer recording-id queries ----------------------------------------
         // Each recording-id request is resolved against the daemon's own store (a single
@@ -176,6 +184,49 @@ fn serve_health(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
                 Err(error) => tracing::warn!(%error, "failed to loan health reply sample"),
             },
             Err(error) => tracing::warn!(%error, "failed to encode health reply"),
+        }
+    }
+}
+
+/// Drain every pending version query, answering each with the neuracore
+/// version this daemon was built from.
+///
+/// The rust workspace version is held equal to the neuracore version in
+/// `pyproject.toml`, so `CARGO_PKG_VERSION` is that version.
+fn serve_version(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "version server receive failed");
+                return;
+            }
+        };
+
+        let request = match VersionRequest::decode(active.payload()) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed version query");
+                continue;
+            }
+        };
+
+        let reply = VersionReply {
+            nonce: request.nonce,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send version reply");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to loan version reply sample"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode version reply"),
         }
     }
 }
