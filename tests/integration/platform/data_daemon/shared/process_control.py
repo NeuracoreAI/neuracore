@@ -363,11 +363,14 @@ def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
 # ---------------------------------------------------------------------------
 
 
+DAEMON_BINARY_MARKER = "neuracore/data_daemon/bin/data-daemon"
+"""Argv substring that identifies the bundled daemon binary."""
+
+
 def get_runner_pids() -> set[int]:
     """Return the PIDs of all running neuracore data-daemon processes.
 
-    Matches the bundled daemon binary
-    (``neuracore/data_daemon/bin/data-daemon``).
+    Matches the bundled daemon binary (:data:`DAEMON_BINARY_MARKER`).
     """
     env = {**os.environ, "COLUMNS": "32768"}
     output = subprocess.check_output(["ps", "-eo", "pid=,args="], text=True, env=env)
@@ -377,9 +380,31 @@ def get_runner_pids() -> set[int]:
         if len(parts) != 2:
             continue
         pid_text, args = parts
-        if "neuracore/data_daemon/bin/data-daemon" in args:
+        if DAEMON_BINARY_MARKER in args:
             runner_pids.add(int(pid_text))
     return runner_pids
+
+
+def pid_is_daemon(pid: int) -> bool:
+    """Whether ``pid`` is one of our daemon processes, rather than merely alive.
+
+    The PID file is written by a daemon, but nothing keeps the process it names
+    from being something else by the time we read it: a stale file outlives its
+    process and PIDs are recycled, and anything that redirects
+    ``NEURACORE_DAEMON_PID_PATH`` can leave it naming an unrelated process — a
+    unit test pointing it at a temp file containing ``os.getpid()`` is enough,
+    and that is pytest. Callers go on to SIGTERM what they are handed, so
+    identity is checked here rather than assumed.
+    """
+    try:
+        args = subprocess.check_output(
+            ["ps", "-o", "args=", "-p", str(pid)],
+            text=True,
+            env={**os.environ, "COLUMNS": "32768"},
+        )
+    except (subprocess.CalledProcessError, ValueError):
+        return False
+    return DAEMON_BINARY_MARKER in args
 
 
 def _live_daemon_pids() -> set[int]:
@@ -387,7 +412,9 @@ def _live_daemon_pids() -> set[int]:
     pid_path = get_daemon_pid_path()
     pids: set[int] = set(get_runner_pids())
     stored_pid = read_pid_from_file(pid_path)
-    if stored_pid is not None and pid_is_running(stored_pid):
+    # Running is not enough — it also has to be a daemon (see `pid_is_daemon`),
+    # or a PID file naming something else fails the isolation assertions.
+    if stored_pid is not None and pid_is_daemon(stored_pid):
         pids.add(stored_pid)
     return pids
 
@@ -398,10 +425,14 @@ def _live_daemon_pids() -> set[int]:
 
 
 def _collect_candidate_pids() -> set[int]:
-    """Return all daemon PIDs that need to be waited on or killed."""
+    """Return all daemon PIDs that need to be waited on or killed.
+
+    Every PID here is a signal target, so the PID file's is admitted only once
+    confirmed to name a daemon.
+    """
     pids: set[int] = set(get_runner_pids())
     pid_file_value = read_pid_from_file(get_daemon_pid_path())
-    if pid_file_value is not None:
+    if pid_file_value is not None and pid_is_daemon(pid_file_value):
         pids.add(pid_file_value)
     return pids
 
@@ -515,6 +546,26 @@ def stop_daemon(
         else:
             _wait_and_escalate(candidate_pids, graceful_timeout_s=graceful_timeout_s)
         _remove_ipc_artefacts()
+
+
+def reclaim_leftover_daemons() -> None:
+    """Stop daemon processes an earlier test left behind.
+
+    Raises:
+        RuntimeError: When a leftover process survives :func:`stop_daemon`.
+    """
+    leftover = sorted(get_runner_pids())
+    if not leftover:
+        return
+    logger.warning(
+        "Stopping daemon processes left over from an earlier test: %s", leftover
+    )
+    stop_daemon()
+    survivors = sorted(get_runner_pids())
+    if survivors:
+        raise RuntimeError(
+            f"Leftover daemon processes survived stop_daemon(): {survivors}"
+        )
 
 
 def _parallel_startup_worker(
