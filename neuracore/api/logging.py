@@ -1513,6 +1513,12 @@ def set_video_encoding_options(codec: Codec | str) -> None:
     before ``start_recording``. The ``NCD_VIDEO_CODEC`` environment variable
     overrides the profile value.
 
+    A model trained on data recorded with a lossy codec learned on codec-degraded
+    pixels, but inference feeds it uncompressed frames. To close that gap, set
+    ``NEURACORE_INFERENCE_VIDEO_CODEC`` on the machine serving the policy — see
+    ``docs/data_daemon.md``. It is deliberately separate from this setting, which
+    only describes how this machine records today.
+
     Example:
         >>> import neuracore as nc
         >>> nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)

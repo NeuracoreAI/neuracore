@@ -22,8 +22,13 @@ from neuracore.core.utils.embodiment_description_utils import (
     resolve_embodiment_descriptions_with_override,
 )
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.core.video_encoding import (
+    INFERENCE_CODEC_ENV_VAR,
+    resolve_inference_codec_options,
+)
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.preprocessing.methods import H264Match
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 from neuracore.ml.utils.preprocessing import (
@@ -119,9 +124,48 @@ class PolicyInference:
                 preprocessing_config=self.input_preprocessing_config
             )
 
+        # Frames arrive here uncompressed on every transport, but a model trained on a
+        # lossy-recorded dataset learned on codec-degraded pixels. Injecting the match
+        # here rather than into the preprocessing config is deliberate: the same
+        # configuration is applied by the training dataloader, which would then degrade
+        # already-degraded training frames a second time.
+        self._inference_codec_options = resolve_inference_codec_options()
+        self._codec_methods: dict[int, H264Match] = {}
+        if self._inference_codec_options is not None:
+            logger.info(
+                "Matching inference frames to lossy training video (%s); set %s to "
+                "change or unset it to feed the model uncompressed frames.",
+                ", ".join(
+                    f"{key}={value}"
+                    for key, value in sorted(self._inference_codec_options.items())
+                ),
+                INFERENCE_CODEC_ENV_VAR,
+            )
+
         self.prediction_horizon = (
             self.model.model_init_description.output_prediction_horizon
         )
+
+    def _codec_method(self, data_type: DataType, index: int) -> H264Match | None:
+        """Return this camera slot's codec-matching method, if one applies.
+
+        The encoder carries inter-frame prediction state, so each camera needs its own
+        instance; ``apply_preprocessing_methods`` passes no stream identity, hence the
+        per-slot cache here.
+
+        Args:
+            data_type: The data type being preprocessed.
+            index: The camera's index within the embodiment description.
+
+        Returns:
+            The method for this slot, or ``None`` when no matching is configured or the
+            data type is not RGB.
+        """
+        if self._inference_codec_options is None or data_type != DataType.RGB_IMAGES:
+            return None
+        if index not in self._codec_methods:
+            self._codec_methods[index] = H264Match(**self._inference_codec_options)
+        return self._codec_methods[index]
 
     def _preprocess(self, sync_point: SynchronizedPoint) -> BatchedInferenceInputs:
         """Preprocess incoming sync point into model-compatible format.
@@ -172,9 +216,21 @@ class PolicyInference:
                     tensor = batched_nc_data_class.from_nc_data(nc_data)
                     mask[index] = 1.0
 
+                methods = preprocessing_methods
+                # Skipped for absent cameras: their zero-filled placeholder is not a
+                # real observation, and feeding it would leave the encoder predicting
+                # the next real frame from a black reference.
+                codec_method = (
+                    self._codec_method(data_type, index) if mask[index] else None
+                )
+                if codec_method is not None:
+                    # Before the configured methods, so degradation happens at native
+                    # resolution -- training decodes the video and only then resizes.
+                    methods = [codec_method, *preprocessing_methods]
+
                 tensor = apply_preprocessing_methods(
                     batched_data=tensor,
-                    methods=preprocessing_methods,
+                    methods=methods,
                 )
                 inputs[data_type].append(tensor)
 

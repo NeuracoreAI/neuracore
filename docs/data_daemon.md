@@ -353,6 +353,36 @@ ways, exactly like the other profile options:
 The daemon re-reads the codec at the start of each recording, so a change takes
 effect for the next recording without restarting the daemon.
 
+### Serving a policy trained on lossy data
+
+A model trained on a `h264_medium` dataset learned on 4:2:0-subsampled, CRF 23
+pixels, but at inference the sync point carries uncompressed frames on every
+transport. That mismatch is a train/inference domain gap. Set
+`NEURACORE_INFERENCE_VIDEO_CODEC` on the machine running the policy to put
+inference frames through the same encoder first:
+
+```bash
+export NEURACORE_INFERENCE_VIDEO_CODEC=h264_medium
+```
+
+This is a **separate** variable from `NCD_VIDEO_CODEC` on purpose. That one says
+how this machine records *today*, which has nothing to do with how the data
+behind an already-trained model was encoded — recording lossy while serving a
+policy trained on lossless data must not degrade inference. Unset it, or set it
+to `h264_lossless`, to feed the model uncompressed frames.
+
+The match is close but not exact, and cannot be made exact. `-preset medium`
+gives x264 `rc-lookahead=40` and `mbtree=1`, so the quantizer for a frame
+depends on the *next* ~40 frames — information that does not exist during a live
+rollout. Inference runs the same encoder made causal (`tune=zerolatency`), which
+reproduces the RGB→YUV 4:2:0→RGB colour conversion exactly and approximates the
+quantization, while keeping inter-frame prediction across calls. Note it costs a
+per-frame encode/decode on the control loop.
+
+> This is an interim mechanism. A dataset's encoding is not currently recorded at
+> training time, so it cannot be read back off a trained model — hence the
+> environment variable rather than automatic detection.
+
 ---
 
 ## CLI reference

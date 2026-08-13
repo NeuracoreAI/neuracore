@@ -19,9 +19,19 @@ from __future__ import annotations
 import copy
 import enum
 import logging
+import os
 from typing import TypedDict
 
 logger = logging.getLogger(__name__)
+
+INFERENCE_CODEC_ENV_VAR = "NEURACORE_INFERENCE_VIDEO_CODEC"
+"""Env var naming the codec a served policy's *training data* was encoded with.
+
+Deliberately distinct from the daemon's ``NCD_VIDEO_CODEC``: that one says how the
+machine records *today*, which is unrelated to how the data behind an already-trained
+model was encoded. A user recording lossy while serving a policy trained on lossless
+data would otherwise have their inference frames silently degraded.
+"""
 
 
 class Codec(str, enum.Enum):
@@ -99,3 +109,25 @@ def codec_option_overrides(value: str | None) -> Libx264Options | None:
         return None
     options = _LOSSY_CODEC_OPTIONS.get(codec)
     return copy.copy(options) if options is not None else None
+
+
+def resolve_inference_codec_options() -> Libx264Options | None:
+    """Return the lossy encoder options a policy's training data was encoded with.
+
+    Reads :data:`INFERENCE_CODEC_ENV_VAR` and resolves it through the same
+    :func:`codec_option_overrides` the recording path uses, so the CRF/preset an
+    inference-time re-encode targets can never drift from what the daemon wrote.
+
+    ``None`` means "do not degrade": the var is unset, names the lossless default,
+    or is unrecognised (:func:`resolve_codec` warns in that last case). Frames then
+    reach the model untouched, which is the correct behaviour for a model trained on
+    the bit-exact ``lossless.mp4`` archive.
+
+    Note:
+        This is an interim mechanism. The encoding of a dataset is not recorded at
+        training time, so it cannot currently be read back off a trained model.
+
+    Returns:
+        A fresh options dict for the lossy encoder, or ``None`` to leave frames as-is.
+    """
+    return codec_option_overrides(os.getenv(INFERENCE_CODEC_ENV_VAR))

@@ -3,6 +3,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 from neuracore_types import (
@@ -11,10 +12,16 @@ from neuracore_types import (
     CrossEmbodimentDescription,
     DataType,
     JointData,
+    RGBCameraData,
     SynchronizedPoint,
 )
 
+from neuracore.core.video_encoding import (
+    INFERENCE_CODEC_ENV_VAR,
+    resolve_inference_codec_options,
+)
 from neuracore.ml.preprocessing.base import PreprocessingMethod
+from neuracore.ml.preprocessing.methods import H264Match
 from neuracore.ml.utils.policy_inference import PolicyInference
 
 
@@ -31,6 +38,8 @@ def _make_policy_inference(
     policy_inference.model = None
     policy_inference.input_dataset_statistics = {}
     policy_inference.prediction_horizon = 1
+    policy_inference._inference_codec_options = None
+    policy_inference._codec_methods = {}
     policy_inference.model = SimpleNamespace(
         model_init_description=SimpleNamespace(
             input_data_types=[],
@@ -399,3 +408,93 @@ def test_init_raises_when_input_preprocessing_method_is_not_allowed_for_data_typ
             org_id="org",
             robot_id="robot-1",
         )
+
+
+def _rgb_camera_data() -> RGBCameraData:
+    """A small even-dimensioned frame the codec matcher can encode."""
+    return RGBCameraData(
+        timestamp=123.0,
+        frame=np.full((16, 16, 3), 120, dtype=np.uint8),
+    )
+
+
+def _preprocess_with_one_camera(
+    policy_inference: PolicyInference, present: bool
+) -> None:
+    """Run _preprocess for one RGB camera, present or absent from the sync point."""
+    policy_inference.input_embodiment_description = {
+        DataType.RGB_IMAGES: _indexed_names("cam1"),
+    }
+    policy_inference.input_dataset_statistics = {DataType.RGB_IMAGES: [{}]}
+    policy_inference.input_preprocessing_config = {DataType.RGB_IMAGES: []}
+    data = {"cam1": _rgb_camera_data()} if present else {}
+    policy_inference._preprocess(
+        SynchronizedPoint(timestamp=123.0, data={DataType.RGB_IMAGES: data})
+    )
+
+
+@pytest.mark.parametrize("codec", [None, "h264_lossless", "not-a-codec"])
+def test_no_codec_matching_unless_env_selects_a_lossy_codec(
+    monkeypatch: pytest.MonkeyPatch, codec: str | None
+) -> None:
+    """Unset, lossless, and unrecognised values must all leave frames untouched."""
+    monkeypatch.delenv(INFERENCE_CODEC_ENV_VAR, raising=False)
+    if codec is not None:
+        monkeypatch.setenv(INFERENCE_CODEC_ENV_VAR, codec)
+
+    assert resolve_inference_codec_options() is None
+
+
+def test_codec_matching_applies_per_camera_before_configured_methods(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(INFERENCE_CODEC_ENV_VAR, "h264_medium")
+    policy_inference = _make_policy_inference()
+    policy_inference._inference_codec_options = resolve_inference_codec_options()
+
+    first = policy_inference._codec_method(DataType.RGB_IMAGES, 0)
+    second = policy_inference._codec_method(DataType.RGB_IMAGES, 1)
+
+    assert isinstance(first, H264Match)
+    # Each camera needs its own encoder: the codec carries inter-frame state.
+    assert first is not second
+    # Re-requesting a slot must reuse it, or the state resets every prediction.
+    assert policy_inference._codec_method(DataType.RGB_IMAGES, 0) is first
+    assert first.crf == "23"
+    assert first.preset == "medium"
+
+
+def test_codec_matching_never_applies_to_non_rgb_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Depth keeps lossless storage whatever codec was selected for recording."""
+    monkeypatch.setenv(INFERENCE_CODEC_ENV_VAR, "h264_medium")
+    policy_inference = _make_policy_inference()
+    policy_inference._inference_codec_options = resolve_inference_codec_options()
+
+    assert policy_inference._codec_method(DataType.DEPTH_IMAGES, 0) is None
+    assert policy_inference._codec_method(DataType.JOINT_POSITIONS, 0) is None
+
+
+def test_preprocess_degrades_present_cameras(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(INFERENCE_CODEC_ENV_VAR, "h264_medium")
+    policy_inference = _make_policy_inference()
+    policy_inference._inference_codec_options = resolve_inference_codec_options()
+
+    _preprocess_with_one_camera(policy_inference, present=True)
+
+    method = policy_inference._codec_methods[0]
+    assert method._resolution == (16, 16), "camera frame was not put through the codec"
+
+
+def test_preprocess_skips_codec_for_absent_cameras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zero-filled placeholder must not become the encoder's reference frame."""
+    monkeypatch.setenv(INFERENCE_CODEC_ENV_VAR, "h264_medium")
+    policy_inference = _make_policy_inference()
+    policy_inference._inference_codec_options = resolve_inference_codec_options()
+
+    _preprocess_with_one_camera(policy_inference, present=False)
+
+    assert policy_inference._codec_methods == {}
