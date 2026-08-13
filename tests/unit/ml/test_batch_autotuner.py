@@ -19,6 +19,7 @@ from neuracore.ml.trainers.batch_autotuner import (
     BatchSizeValidator,
     _BatchSizeEstimationError,
     _estimate_max_batch_size,
+    _fits_within_budget,
     _probe_batch_size,
     find_optimal_batch_size,
     is_valid_batch_size,
@@ -552,9 +553,11 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
             side_effect=fake_random_split,
         ),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.test_batch_size",
-            return_value=True,
-        ) as mock_test_batch_size,
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
+            return_value=BatchProbeResult(
+                fitted=True, peak_reserved_bytes=1 * GB, total_bytes=100 * GB
+            ),
+        ) as mock_probe_batch_size,
     ):
         result = is_valid_batch_size(
             cfg=cfg,
@@ -565,7 +568,164 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
         )
 
     assert result is True
-    mock_test_batch_size.assert_called_once_with(80)
+    mock_probe_batch_size.assert_called_once_with(80)
+
+
+def test_is_valid_batch_size_rejects_batch_that_fits_without_headroom():
+    """A batch that fits the probe but exceeds budget * safety is INVALID.
+
+    This is the regression guard: previously any batch that merely avoided OOM in
+    the short probe passed validation and then OOM'd once real training added
+    DDP/fragmentation overhead. It must now be rejected for lack of headroom.
+    """
+    cfg = OmegaConf.create({
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    })
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=100)
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model_factory = functools.partial(DummyModel, device=device)
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+
+    # Fits (no OOM) but peak reserved is 92% of total -- above the 0.9 * 0.7 =
+    # 63% budget * safety threshold, so it leaves no headroom for real training.
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
+            return_value=BatchProbeResult(
+                fitted=True, peak_reserved_bytes=92 * GB, total_bytes=100 * GB
+            ),
+        ),
+    ):
+        result = is_valid_batch_size(
+            cfg=cfg,
+            model_factory=model_factory,
+            dataset=mock_dataset,
+            batch_size=64,
+            device=device,
+        )
+
+    assert result is False
+
+
+def test_is_valid_batch_size_accepts_batch_within_headroom():
+    """A batch whose peak reserved is within budget * safety is valid."""
+    cfg = OmegaConf.create({
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    })
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=100)
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model_factory = functools.partial(DummyModel, device=device)
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+
+    # Fits at 50% of total, comfortably under the 63% budget * safety threshold.
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
+            return_value=BatchProbeResult(
+                fitted=True, peak_reserved_bytes=50 * GB, total_bytes=100 * GB
+            ),
+        ),
+    ):
+        result = is_valid_batch_size(
+            cfg=cfg,
+            model_factory=model_factory,
+            dataset=mock_dataset,
+            batch_size=64,
+            device=device,
+        )
+
+    assert result is True
+
+
+def test_is_valid_batch_size_rejects_when_probe_ooms():
+    """A probe that OOMs (fitted=False) is invalid regardless of memory fields."""
+    cfg = OmegaConf.create({
+        "validation_split": 0.2,
+        "seed": 42,
+        "num_train_workers": 0,
+        "num_val_workers": 0,
+    })
+
+    mock_dataset = Mock(spec=PytorchSynchronizedDataset)
+    mock_dataset.__len__ = Mock(return_value=100)
+    mock_dataset.collate_fn = lambda x: x
+
+    device = torch.device("cuda:0")
+    model_factory = functools.partial(DummyModel, device=device)
+
+    def fake_random_split(dataset, lengths, generator=None):
+        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+
+    with (
+        patch("torch.cuda.is_available", return_value=True),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.random_split",
+            side_effect=fake_random_split,
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
+            return_value=BatchProbeResult(fitted=False),
+        ),
+    ):
+        result = is_valid_batch_size(
+            cfg=cfg,
+            model_factory=model_factory,
+            dataset=mock_dataset,
+            batch_size=64,
+            device=device,
+        )
+
+    assert result is False
+
+
+def test_fits_within_budget_true_when_under_threshold():
+    """peak 60GB <= 100GB * 0.9 * 0.7 = 63GB -> fits with headroom."""
+    result = BatchProbeResult(
+        fitted=True, peak_reserved_bytes=60 * GB, total_bytes=100 * GB
+    )
+    assert _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
+
+
+def test_fits_within_budget_false_when_over_threshold():
+    """peak 70GB > 63GB budget * safety -> no headroom, not valid."""
+    result = BatchProbeResult(
+        fitted=True, peak_reserved_bytes=70 * GB, total_bytes=100 * GB
+    )
+    assert not _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
+
+
+def test_fits_within_budget_false_when_not_fitted():
+    """An OOM'd probe is never within budget."""
+    result = BatchProbeResult(fitted=False)
+    assert not _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
 
 
 def test_batch_probe_result_defaults():
