@@ -59,7 +59,32 @@ trim_start_end: true
 
 # Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
 # for images, we must have a resize step to reshape all images from different sources to the same size.
-preprocessing:
+# train_preprocessing is used on the training split (may include augmentations).
+# inference_preprocessing is used for validation and packaged into the model archive.
+train_preprocessing:
+  input:
+    RGB_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+      - _target_: neuracore.ml.preprocessing.methods.color_jitter.ColorJitter
+        brightness: 0.2
+        contrast: 0.2
+        saturation: 0.2
+        hue: 0.05
+      - _target_: neuracore.ml.preprocessing.methods.gaussian_noise.GaussianNoise
+        std: 5.0
+    DEPTH_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+  output:
+    RGB_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+    DEPTH_IMAGES:
+      - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad
+        size: [224, 224]
+
+inference_preprocessing:
   input:
     RGB_IMAGES:
       - _target_: neuracore.ml.preprocessing.methods.resize_pad.ResizePad

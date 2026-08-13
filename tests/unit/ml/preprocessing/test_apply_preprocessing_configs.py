@@ -18,7 +18,11 @@ def _sample_rgb(height: int = 100, width: int = 200) -> BatchedRGBData:
 
 
 class _RecordStep(PreprocessingMethod):
-    def __init__(self, call_order: list[str], label: str) -> None:
+    def __init__(
+        self,
+        call_order: list[str],
+        label: str,
+    ) -> None:
         self._call_order = call_order
         self._label = label
 

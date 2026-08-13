@@ -180,8 +180,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self.episode_indices = self._get_episode_indices()
         self._logged_in = False
 
-        self._input_preprocessing_config = input_preprocessing_config
-        self._output_preprocessing_config = output_preprocessing_config
+        self.input_preprocessing_config = input_preprocessing_config
+        self.output_preprocessing_config = output_preprocessing_config
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -468,7 +468,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
                 batched_nc_data = apply_preprocessing_methods(
                     batched_data=batched_nc_data,
-                    methods=self._input_preprocessing_config.get(data_type, []),
+                    methods=self.input_preprocessing_config.get(data_type, []),
                 )
                 inputs[data_type].append(batched_nc_data)
 
@@ -527,7 +527,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
                 batched_nc_data = apply_preprocessing_methods(
                     batched_data=batched_nc_data,
-                    methods=self._output_preprocessing_config.get(data_type, []),
+                    methods=self.output_preprocessing_config.get(data_type, []),
                 )
                 outputs[data_type].append(batched_nc_data)
 

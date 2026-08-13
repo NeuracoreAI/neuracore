@@ -21,7 +21,7 @@ from neuracore_types import (
     ModelInitDescription,
 )
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader, DistributedSampler, random_split
+from torch.utils.data import DataLoader, DistributedSampler
 
 import neuracore as nc
 from neuracore.core.const import DEFAULT_RECORDING_CACHE_DIR
@@ -49,8 +49,9 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
+from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
-from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
+from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
 from neuracore.ml.utils.training_config import (
     resolve_to_complete_config,
     resolve_user_input_config,
@@ -366,8 +367,8 @@ def run_training(
     batch_size: int,
     input_cross_embodiment_description: CrossEmbodimentDescription,
     output_cross_embodiment_description: CrossEmbodimentDescription,
-    input_preprocessing_config: PreprocessingConfiguration,
-    output_preprocessing_config: PreprocessingConfiguration,
+    inference_input_preprocessing_config: PreprocessingConfiguration,
+    inference_output_preprocessing_config: PreprocessingConfiguration,
     dataset: PytorchSynchronizedDataset,
     device: torch.device | None = None,
 ) -> None:
@@ -416,10 +417,15 @@ def run_training(
                 "or changing the validation split."
             )
 
-        # Use random split with fixed seed for deterministic behavior
-        generator = torch.Generator().manual_seed(cfg.seed)
-        train_dataset, val_dataset = random_split(
-            dataset, [train_size, val_size], generator=generator
+        # Use random split with fixed seed for deterministic behavior.
+        # Dataset already has train preprocessing; val is switched to inference.
+        train_dataset, val_dataset = split_train_val_datasets(
+            dataset,
+            train_size=train_size,
+            val_size=val_size,
+            seed=cfg.seed,
+            inference_input_preprocessing_config=inference_input_preprocessing_config,
+            inference_output_preprocessing_config=inference_output_preprocessing_config,
         )
 
         num_train_workers = min(cfg.num_train_workers, cpu_count())
@@ -511,8 +517,8 @@ def run_training(
             algorithm_config=algorithm_config,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
-            input_preprocessing_config=input_preprocessing_config,
-            output_preprocessing_config=output_preprocessing_config,
+            input_preprocessing_config=inference_input_preprocessing_config,
+            output_preprocessing_config=inference_output_preprocessing_config,
         )
 
         logger.info(
@@ -707,35 +713,19 @@ def _main(cfg: DictConfig) -> None:
         else:
             device = get_default_device()
 
-        preprocessing_dictconfig = cfg.get("preprocessing", {})
-        if not preprocessing_dictconfig:
-            raise ValueError(
-                "Preprocessing configuration is missing ! Please provide a "
-                "preprocessing configuration."
-            )
-        input_preprocessing_config_cfg = preprocessing_dictconfig.get(
-            "input", OmegaConf.create({})
+        (
+            train_input_preprocessing_config,
+            train_output_preprocessing_config,
+        ) = resolve_input_output_preprocessing(
+            cfg.get("train_preprocessing"),
+            role_name="train_preprocessing",
         )
-        if not input_preprocessing_config_cfg:
-            raise ValueError(
-                "Input preprocessing configuration is missing ! Please provide an "
-                "input preprocessing configuration."
-            )
-        output_preprocessing_config_cfg = preprocessing_dictconfig.get(
-            "output", OmegaConf.create({})
-        )
-        if not output_preprocessing_config_cfg:
-            raise ValueError(
-                "Output preprocessing configuration is missing ! Please provide an "
-                "output preprocessing configuration."
-            )
-
-        input_preprocessing_config = resolve_preprocessing_config(
-            input_preprocessing_config_cfg
-        )
-
-        output_preprocessing_config = resolve_preprocessing_config(
-            output_preprocessing_config_cfg
+        (
+            inference_input_preprocessing_config,
+            inference_output_preprocessing_config,
+        ) = resolve_input_output_preprocessing(
+            cfg.get("inference_preprocessing"),
+            role_name="inference_preprocessing",
         )
 
         # Create a pytorch synchronized dataset
@@ -746,8 +736,8 @@ def _main(cfg: DictConfig) -> None:
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=cfg.output_prediction_horizon,
-            input_preprocessing_config=input_preprocessing_config,
-            output_preprocessing_config=output_preprocessing_config,
+            input_preprocessing_config=train_input_preprocessing_config,
+            output_preprocessing_config=train_output_preprocessing_config,
         )
 
         # Handle batch size configuration
@@ -785,8 +775,8 @@ def _main(cfg: DictConfig) -> None:
                     batch_size,
                     input_cross_embodiment_description,
                     output_cross_embodiment_description,
-                    input_preprocessing_config,
-                    output_preprocessing_config,
+                    inference_input_preprocessing_config,
+                    inference_output_preprocessing_config,
                     pytorch_dataset,
                     device,
                 ),
@@ -802,8 +792,8 @@ def _main(cfg: DictConfig) -> None:
                 batch_size,
                 input_cross_embodiment_description,
                 output_cross_embodiment_description,
-                input_preprocessing_config,
-                output_preprocessing_config,
+                inference_input_preprocessing_config,
+                inference_output_preprocessing_config,
                 pytorch_dataset,
                 device,
             )

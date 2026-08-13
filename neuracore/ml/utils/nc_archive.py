@@ -131,7 +131,9 @@ def create_nc_archive(
             json.dump(
                 {
                     data_type.value: [m.to_dict() for m in methods]
-                    for data_type, methods in (input_preprocessing_config or {}).items()
+                    for data_type, methods in (
+                        input_preprocessing_config or PreprocessingConfiguration()
+                    ).items()
                 },
                 f,
                 indent=2,
@@ -141,7 +143,7 @@ def create_nc_archive(
                 {
                     data_type.value: [m.to_dict() for m in methods]
                     for data_type, methods in (
-                        output_preprocessing_config or {}
+                        output_preprocessing_config or PreprocessingConfiguration()
                     ).items()
                 },
                 f,

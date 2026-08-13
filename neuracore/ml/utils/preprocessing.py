@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from neuracore_types import DataType
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
@@ -65,11 +65,57 @@ def resolve_preprocessing_config(
     return resolved_config
 
 
+def resolve_input_output_preprocessing(
+    role_config: DictConfig | None,
+    *,
+    role_name: str,
+) -> tuple[PreprocessingConfiguration, PreprocessingConfiguration]:
+    """Resolve ``input`` / ``output`` preprocessing for a train or inference role.
+
+    Args:
+        role_config: Mapping with ``input`` and ``output`` keys, each a
+            ``Dict[DataType, List[MethodConfig]]``.
+        role_name: Name used in error messages (e.g. ``train_preprocessing``).
+
+    Returns:
+        ``(input_preprocessing_config, output_preprocessing_config)``.
+    """
+    if not role_config:
+        raise ValueError(
+            f"{role_name} configuration is missing! Please provide a "
+            f"{role_name} configuration."
+        )
+    input_cfg = role_config.get("input", OmegaConf.create({}))
+    if not input_cfg:
+        raise ValueError(
+            f"{role_name} input configuration is missing! Please provide an "
+            f"input preprocessing configuration under {role_name}.input."
+        )
+    output_cfg = role_config.get("output", OmegaConf.create({}))
+    if not output_cfg:
+        raise ValueError(
+            f"{role_name} output configuration is missing! Please provide an "
+            f"output preprocessing configuration under {role_name}.output."
+        )
+    return (
+        resolve_preprocessing_config(input_cfg),
+        resolve_preprocessing_config(output_cfg),
+    )
+
+
 def apply_preprocessing_methods(
     batched_data: BatchedNCData,
     methods: list[PreprocessingMethod],
 ) -> BatchedNCData:
-    """Apply preprocessing methods to a batch of data."""
+    """Apply preprocessing methods to a batch of data.
+
+    Args:
+        batched_data: Batch to transform.
+        methods: Ordered preprocessing methods to apply.
+
+    Returns:
+        The transformed batch.
+    """
     for method in methods:
         batched_data = method(batched_data)
     return batched_data
