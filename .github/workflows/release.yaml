@@ -378,7 +378,7 @@ jobs:
       run: |
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
-        git add .bumpversion.cfg pyproject.toml changelogs/pending-changelog.md
+        git add .bumpversion.cfg pyproject.toml changelogs/pending-changelog.md rust/Cargo.toml rust/Cargo.lock
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
 
         TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
@@ -525,7 +525,7 @@ jobs:
             summary += '**This was a DRY RUN** - no changes were made\n\n';
             summary += '## What Would Happen\n\n';
             summary += `- **Version Bump:** \`${bumpType}\` -> \`${newVersion}\`\n`;
-            summary += `- Version updated in \`.bumpversion.cfg\` and \`neuracore/__init__.py\`\n`;
+            summary += `- Version updated in \`.bumpversion.cfg\`, \`pyproject.toml\`, \`rust/Cargo.toml\` and \`rust/Cargo.lock\`\n`;
             summary += `- Changes committed and pushed to \`main\`\n`;
             summary += `- Package published to PyPI\n`;
             summary += `- Git tag \`v${newVersion}\` created\n`;

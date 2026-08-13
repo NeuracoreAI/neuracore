@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
+import logging
 import os
 import subprocess
 import time
@@ -11,13 +13,56 @@ from typing import IO, Any, cast
 
 import filelock
 
-from neuracore.data_daemon.binary import require_data_daemon_binary
+from neuracore.data_daemon.binary import (
+    INSTALL_COMMAND_HINT,
+    REBUILD_COMMAND_HINT,
+    data_daemon_binary_path,
+    require_data_daemon_binary,
+)
 from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
 from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+
+# Reported for a daemon that answers the health probe but has no version
+# service, which is every daemon built before that service existed.
+UNKNOWN_DAEMON_VERSION = "unknown (daemon too old to report a version)"
+
+STOP_COMMAND_HINT = (
+    "`neuracore data-daemon stop` (or `python -m neuracore.data_daemon stop`)"
+)
+
+STALE_EXTENSION_MESSAGE = (
+    "The neuracore native extension of this install has no daemon version "
+    "query, so it is older than this neuracore code. Build the artefacts "
+    f"again with {REBUILD_COMMAND_HINT} (source checkouts), or install the "
+    f"package again with {INSTALL_COMMAND_HINT}."
+)
+
+# The daemon's own stop path budgets 10 seconds for a graceful SIGTERM exit
+# (see rust/data_daemon/src/cli/stop.rs). A just-launched idle daemon exits
+# well inside that; the wait mostly reaps the child promptly.
+STALE_DAEMON_STOP_WAIT_SECONDS = 10.0
+
+logger = logging.getLogger(__name__)
 
 
 class DaemonLifecycleError(RuntimeError):
     """Raised when daemon lifecycle checks fail."""
+
+
+class DaemonVersionMismatchError(DaemonLifecycleError):
+    """Raised when the running daemon comes from a different neuracore version."""
+
+
+def _sdk_version() -> str | None:
+    """Return the installed neuracore package version, or None without metadata.
+
+    A bare source tree that was never pip-installed has no metadata and so no
+    version to compare against the daemon.
+    """
+    try:
+        return importlib.metadata.version("neuracore")
+    except importlib.metadata.PackageNotFoundError:
+        return None
 
 
 def read_pid_from_file(pid_path: Path) -> int | None:
@@ -38,16 +83,21 @@ def read_pid_from_file(pid_path: Path) -> int | None:
     return pid_value if pid_value > 0 else None
 
 
+def _import_data_bridge() -> Any | None:
+    """Return the native bridge module, or None when it cannot be imported."""
+    try:
+        return cast(Any, importlib.import_module("neuracore.data_daemon._data_bridge"))
+    except (ImportError, OSError):
+        return None
+
+
 def _daemon_ready(pid_path: Path, *, timeout_s: float = 0.0) -> bool:
     """Return True once the daemon answers an IPC health probe."""
     pid_value = read_pid_from_file(pid_path)
     if pid_value is None or not pid_is_running(pid_value):
         return False
-    try:
-        data_bridge = cast(
-            Any, importlib.import_module("neuracore.data_daemon._data_bridge")
-        )
-    except (ImportError, OSError):
+    data_bridge = _import_data_bridge()
+    if data_bridge is None:
         return False
 
     try:
@@ -55,6 +105,81 @@ def _daemon_ready(pid_path: Path, *, timeout_s: float = 0.0) -> bool:
     except (AttributeError, RuntimeError):
         return False
     return ready_pid == pid_value
+
+
+def _format_version_mismatch(
+    daemon_version: str | None, sdk_version: str, just_launched: bool
+) -> str:
+    """Build the user-facing message for a daemon from a different version."""
+    reported_version = (
+        UNKNOWN_DAEMON_VERSION if daemon_version is None else daemon_version
+    )
+    opening = (
+        f"The running data daemon was built from neuracore {reported_version}, "
+        f"but neuracore {sdk_version} is installed. "
+    )
+    if just_launched:
+        return opening + (
+            "This daemon was just launched from the daemon binary of this "
+            "install, so that binary is stale; it was stopped again. Build "
+            f"the binary again with {REBUILD_COMMAND_HINT} (source "
+            f"checkouts), or install the package again with {INSTALL_COMMAND_HINT}."
+        )
+    if data_daemon_binary_path() is None:
+        return opening + (
+            "This install has no daemon binary to replace it: install the "
+            f"package again with {INSTALL_COMMAND_HINT}, then stop the old daemon "
+            f"with {STOP_COMMAND_HINT}. The next use of neuracore starts the "
+            "daemon of this install automatically."
+        )
+    return opening + (
+        f"Stop the old daemon with {STOP_COMMAND_HINT}. The next use of "
+        "neuracore starts the daemon of this install automatically. In a "
+        "source checkout, the bundled daemon can itself be older than the "
+        f"installed package: build it again with {REBUILD_COMMAND_HINT}."
+    )
+
+
+def _check_daemon_version(timeout_s: float, *, just_launched: bool = False) -> None:
+    """Raise unless the running daemon matches the installed neuracore version.
+
+    Callers run this right after a passing health probe and pass the probe's
+    own time budget, so a daemon that stays silent for the whole budget has no
+    version service and is too old.
+
+    The check is skipped with a warning when the package has no installed
+    metadata (there is no version to compare), when the native extension is
+    not importable (defensive only: a passing health probe has already
+    imported it), and when the query fails in transport, where the daemon's
+    version is not the problem. A native extension that imports but has no
+    ``daemon_version`` raises a plain :class:`DaemonLifecycleError` naming the
+    extension, not the daemon, as stale.
+    """
+    sdk_version = _sdk_version()
+    if sdk_version is None:
+        logger.warning(
+            "Skipped the daemon version check: the neuracore package has no "
+            "installed metadata."
+        )
+        return
+    data_bridge = _import_data_bridge()
+    if data_bridge is None:
+        logger.warning(
+            "Skipped the daemon version check: the native extension is not "
+            "importable."
+        )
+        return
+    try:
+        daemon_version = cast("str | None", data_bridge.daemon_version(timeout_s))
+    except AttributeError:
+        raise DaemonLifecycleError(STALE_EXTENSION_MESSAGE) from None
+    except RuntimeError as error:
+        logger.warning("Skipped the daemon version check: %s", error)
+        return
+    if daemon_version != sdk_version:
+        raise DaemonVersionMismatchError(
+            _format_version_mismatch(daemon_version, sdk_version, just_launched)
+        )
 
 
 def _is_zombie(pid_value: int) -> bool:
@@ -266,6 +391,19 @@ def ensure_daemon_running(
     A stale PID file from an unclean exit needs no cleanup here: the daemon's
     ``launch`` reclaims it before acquiring its own, alongside any leftover
     iceoryx2 artefacts.
+
+    Both paths check the daemon's build version against the installed
+    neuracore version: an adopted daemon can be left over from an earlier
+    install, and a daemon just launched from a source checkout can come from a
+    binary that was built before the last change.
+
+    The readiness probe and the version check each get the full ``timeout_s``
+    budget, so against a daemon too old to serve versions the PID file lock
+    can be held for up to twice that budget before this raises; on the launch
+    path a version mismatch adds up to ``STALE_DAEMON_STOP_WAIT_SECONDS`` on
+    top, because the just-launched daemon is stopped and reaped before the
+    raise. Only a version mismatch stops that daemon: a stale-extension error
+    leaves it running, since the daemon itself may be the correct version.
     """
     pid_path = get_daemon_pid_path()
     db_path = get_daemon_db_path()
@@ -278,6 +416,7 @@ def ensure_daemon_running(
         existing_pid = read_pid_from_file(pid_path)
         if existing_pid is not None and pid_is_running(existing_pid):
             if _daemon_ready(pid_path, timeout_s=timeout_s):
+                _check_daemon_version(timeout_s)
                 return existing_pid
             raise DaemonLifecycleError(
                 f"Daemon process is running (pid={existing_pid}) but did not "
@@ -291,11 +430,24 @@ def ensure_daemon_running(
             timeout_s=timeout_s,
             env_overrides=env_overrides,
         )
+        try:
+            _check_daemon_version(timeout_s, just_launched=True)
+        except DaemonVersionMismatchError:
+            process.terminate()
+            try:
+                process.wait(timeout=STALE_DAEMON_STOP_WAIT_SECONDS)
+            except subprocess.TimeoutExpired:
+                logger.warning(
+                    "The stale daemon (pid=%s) did not exit after SIGTERM.",
+                    process.pid,
+                )
+            raise
         return process.pid
 
 
 __all__ = [
     "DaemonLifecycleError",
+    "DaemonVersionMismatchError",
     "ensure_daemon_running",
     "launch_daemon_subprocess",
     "pid_is_running",

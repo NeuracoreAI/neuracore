@@ -309,7 +309,8 @@ signature, work outside the build environment.
 ### Release path
 
 The [release workflow](../.github/workflows/release.yaml) bumps the version
-(root pyproject only, via [.bumpversion.cfg](../.bumpversion.cfg)), pushes the
+(root pyproject plus the rust workspace: `rust/Cargo.toml` and
+`rust/Cargo.lock`, via [.bumpversion.cfg](../.bumpversion.cfg)), pushes the
 tag, re-runs `build-wheels.yaml` against that tag, and publishes **all** wheels
 in a single job only after every platform leg succeeds — so a version can never
 be half-published. `twine --skip-existing` makes re-running idempotent.
