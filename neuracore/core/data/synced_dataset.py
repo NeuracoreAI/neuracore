@@ -1,6 +1,7 @@
 """SynchronizedDataset class for managing synchronized datasets."""
 
 import logging
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
@@ -12,6 +13,7 @@ from neuracore_types import (
     CrossEmbodimentUnion,
     DatasetStatisticsJob,
     DatasetStatisticsJobStatus,
+    SynchronizationDetails,
     SynchronizedDatasetStatistics,
 )
 from tqdm import tqdm
@@ -47,6 +49,9 @@ class SynchronizedDataset:
         cross_embodiment_union: CrossEmbodimentUnion | None = None,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 1,
+        max_delay_s: float = sys.float_info.max,
+        allow_duplicates: bool = True,
+        trim_start_end: bool = True,
         synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
     ):
         """Initialize a dataset from server response data.
@@ -58,6 +63,11 @@ class SynchronizedDataset:
             cross_embodiment_union: Cross-embodiment union for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             max_prefetch_workers: Number of threads to use for prefetching videos.
+            max_delay_s: Maximum allowed delay the dataset was synchronized with.
+            allow_duplicates: Whether the dataset was synchronized allowing
+                duplicate points.
+            trim_start_end: Whether the dataset was synchronized with its start
+                and end trimmed.
             synced_recording_cache: Already-fetched synced recordings keyed by
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
@@ -66,6 +76,13 @@ class SynchronizedDataset:
         self.dataset = dataset
         self.frequency = frequency
         self.cross_embodiment_union = cross_embodiment_union
+        self.synchronization_details = SynchronizationDetails(
+            frequency=frequency,
+            cross_embodiment_union=cross_embodiment_union,
+            max_delay_s=max_delay_s,
+            allow_duplicates=allow_duplicates,
+            trim_start_end=trim_start_end,
+        )
         self._prefetch_videos = prefetch_videos
         self._max_prefetch_workers = max_prefetch_workers
         self._recording_idx = 0
@@ -178,6 +195,9 @@ class SynchronizedDataset:
                 cross_embodiment_union=self.cross_embodiment_union,
                 prefetch_videos=False,  # Avoid prefetching again
                 max_prefetch_workers=self._max_prefetch_workers,
+                max_delay_s=self.synchronization_details.max_delay_s,
+                allow_duplicates=self.synchronization_details.allow_duplicates,
+                trim_start_end=self.synchronization_details.trim_start_end,
                 synced_recording_cache=sliced_cache,
             )
         else:
@@ -195,8 +215,7 @@ class SynchronizedDataset:
                         dataset=self.dataset,
                         robot_id=rec.robot_id,
                         instance=rec.instance,
-                        frequency=self.frequency,
-                        cross_embodiment_union=self.cross_embodiment_union,
+                        synchronization_details=self.synchronization_details,
                         prefetch_videos=self._prefetch_videos,
                     )
                     self._synced_recording_cache[idx] = synced_recording
@@ -226,8 +245,7 @@ class SynchronizedDataset:
                     dataset=self.dataset,
                     robot_id=recording.robot_id,
                     instance=recording.instance,
-                    frequency=self.frequency,
-                    cross_embodiment_union=self.cross_embodiment_union,
+                    synchronization_details=self.synchronization_details,
                     prefetch_videos=self._prefetch_videos,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
