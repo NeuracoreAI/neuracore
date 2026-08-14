@@ -22,13 +22,35 @@ import neuracore as nc
 import neuracore.api.endpoints as endpoints
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import DirectPolicy
-from neuracore.core.exceptions import RobotError
+from neuracore.core.exceptions import InsufficientSynchronizedPointError, RobotError
 from tests.unit.conftest import TEST_API_KEY
+from tests.unit.ml.conftest import (
+    REMOTE_CAMERA_NAME,
+    REMOTE_FRAME,
+    REMOTE_JOINT_NAMES,
+    remote_camera_data,
+    remote_joint_data,
+    remote_sync_point,
+)
 
 TEST_ROBOT_ID = "test_robot"
 TEST_ROBOT_PAYLOAD = {"robot_id": "mock_robot_id", "has_urdf": True}
 TRAIN_RUN_NAME = "test_run"
 TRAIN_JOB_ID = "job_123"
+
+
+def _indexed_names(*names: str) -> dict[int, str]:
+    """Return explicitly indexed names for embodiment descriptions."""
+    return {index: name for index, name in enumerate(names)}
+
+
+MULTI_NODE_INPUT_EMBODIMENT_DESCRIPTION = {
+    DataType.JOINT_POSITIONS: _indexed_names(*REMOTE_JOINT_NAMES),
+    DataType.RGB_IMAGES: _indexed_names(REMOTE_CAMERA_NAME),
+}
+MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION = {
+    DataType.JOINT_TARGET_POSITIONS: _indexed_names(*REMOTE_JOINT_NAMES),
+}
 
 
 def _ordered_names(names_or_mapping):
@@ -43,11 +65,6 @@ def _ordered_names(names_or_mapping):
     return list(names_or_mapping)
 
 
-def _indexed_names(*names: str) -> dict[int, str]:
-    """Return explicitly indexed names for embodiment descriptions."""
-    return {index: name for index, name in enumerate(names)}
-
-
 def _mock_policy_output(output_embodiment_description):
     """Build a named policy output from an embodiment description."""
     output = {}
@@ -57,6 +74,25 @@ def _mock_policy_output(output_embodiment_description):
             for name in _ordered_names(names_or_mapping)
         }
     return output
+
+
+def _build_multi_node_policy(mock_policy_inference_class, mock_model_path):
+    """Build a DirectPolicy over a mocked PolicyInference for the multi-node tests."""
+    mock_policy = MagicMock()
+    mock_policy.input_embodiment_description = MULTI_NODE_INPUT_EMBODIMENT_DESCRIPTION
+    mock_policy.output_embodiment_description = MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION
+    mock_policy.return_value = _mock_policy_output(
+        MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION
+    )
+    mock_policy_inference_class.return_value = mock_policy
+
+    policy = DirectPolicy(
+        input_embodiment_description=MULTI_NODE_INPUT_EMBODIMENT_DESCRIPTION,
+        output_embodiment_description=MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION,
+        model_path=mock_model_path,
+        org_id="test_org",
+    )
+    return policy, mock_policy
 
 
 def test_resolve_robot_id_returns_explicit_robot_id(monkeypatch):
@@ -907,3 +943,138 @@ def test_connect_direct_policy_with_model_file(
 
     called_sync_point = mock_policy.call_args[0][0]
     assert set(called_sync_point.data.keys()) == {DataType.JOINT_POSITIONS}
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_merges_remote_node_data_into_sync_point(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """Joints logged in this process merge with a camera logged on another node."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    patch_remote_node_data(lambda: remote_sync_point(remote_camera_data()))
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+
+    nc.log_joint_positions(positions={name: 0.5 for name in REMOTE_JOINT_NAMES})
+    policy.predict()
+
+    called_sync_point = mock_policy.call_args[0][0]
+    assert set(called_sync_point.data) == {
+        DataType.JOINT_POSITIONS,
+        DataType.RGB_IMAGES,
+    }
+    assert set(called_sync_point.data[DataType.JOINT_POSITIONS]) == set(
+        REMOTE_JOINT_NAMES
+    )
+    np.testing.assert_array_equal(
+        called_sync_point.data[DataType.RGB_IMAGES][REMOTE_CAMERA_NAME].frame,
+        REMOTE_FRAME,
+    )
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_uses_only_remote_node_data_when_nothing_logged_locally(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """The predicting process may contribute nothing and still get a full input."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    patch_remote_node_data(
+        lambda: remote_sync_point(remote_joint_data(), remote_camera_data())
+    )
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+
+    policy.predict()
+
+    called_sync_point = mock_policy.call_args[0][0]
+    assert set(called_sync_point.data) == set(
+        MULTI_NODE_INPUT_EMBODIMENT_DESCRIPTION.keys()
+    )
+    assert set(called_sync_point.data[DataType.JOINT_POSITIONS]) == set(
+        REMOTE_JOINT_NAMES
+    )
+    assert REMOTE_CAMERA_NAME in called_sync_point.data[DataType.RGB_IMAGES]
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_retries_until_remote_node_data_arrives(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    monkeypatch,
+    mock_model_path,
+):
+    """predict() keeps retrying while a remote node is still connecting."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+
+    attempts = {"count": 0}
+
+    def get_remote_data() -> SynchronizedPoint:
+        # The camera node only starts delivering frames on the third attempt.
+        attempts["count"] += 1
+        payloads = [remote_joint_data()]
+        if attempts["count"] >= 3:
+            payloads.append(remote_camera_data())
+        return remote_sync_point(*payloads)
+
+    patch_remote_node_data(get_remote_data)
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+
+    def predict_impl(sync_point):
+        if DataType.RGB_IMAGES not in sync_point.data:
+            raise InsufficientSynchronizedPointError("no camera data yet")
+        return _mock_policy_output(MULTI_NODE_OUTPUT_EMBODIMENT_DESCRIPTION)
+
+    mock_policy.side_effect = predict_impl
+    monkeypatch.setattr("neuracore.core.endpoint.time.sleep", lambda _seconds: None)
+
+    predictions = policy.predict(timeout=5)
+
+    assert DataType.JOINT_TARGET_POSITIONS in predictions
+    assert mock_policy.call_count == 3
+
+
+@patch("neuracore.ml.utils.policy_inference.PolicyInference")
+def test_predict_ignores_remote_node_data_when_consume_live_data_disabled(
+    mock_policy_inference_class,
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+    mock_model_path,
+):
+    """With live data consumption off, remote nodes are never consulted."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    consumer = patch_remote_node_data(
+        lambda: remote_sync_point(remote_camera_data()), consume_enabled=False
+    )
+    policy, mock_policy = _build_multi_node_policy(
+        mock_policy_inference_class, mock_model_path
+    )
+
+    nc.log_joint_positions(positions={name: 0.5 for name in REMOTE_JOINT_NAMES})
+    policy.predict()
+
+    assert consumer.calls == 0
+    called_sync_point = mock_policy.call_args[0][0]
+    assert set(called_sync_point.data) == {DataType.JOINT_POSITIONS}
