@@ -5,7 +5,6 @@ import logging
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -59,8 +58,7 @@ class SynchronizedRecording:
         recording_name: str | None,
         robot_id: str,
         instance: int,
-        frequency: int = 0,
-        cross_embodiment_union: CrossEmbodimentUnion | None = None,
+        synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
     ):
         """Initialize episode iterator for a specific recording.
@@ -71,16 +69,16 @@ class SynchronizedRecording:
             recording_name: Recording Name string.
             robot_id: The robot that created this recording.
             instance: The instance of the robot that created this recording.
-            frequency: Frequency at which to synchronize the recording.
-            cross_embodiment_union: Union of embodiment descriptions for
-                synchronization.
+            synchronization_details: The full synchronization parameters. The
+                server keys stored synchronized data on all of them, so these
+                must match the parameters the data was synchronized with or the
+                recording is synchronized again under a different key.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
         """
         self.dataset = dataset
         self.id = recording_id
         self.name = recording_name
-        self.frequency = frequency
-        self.cross_embodiment_union = cross_embodiment_union
+        self.synchronization_details = synchronization_details
         self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
@@ -105,6 +103,16 @@ class SynchronizedRecording:
             # NOTE: this is to start video prefetching frames into cache
             self._get_sync_point(0)
 
+    @property
+    def frequency(self) -> int:
+        """Frequency in Hz this recording was synchronized at."""
+        return self.synchronization_details.frequency
+
+    @property
+    def cross_embodiment_union(self) -> CrossEmbodimentUnion | None:
+        """Cross-embodiment union this recording was synchronized with."""
+        return self.synchronization_details.cross_embodiment_union
+
     def _get_synced_data(self) -> SynchronizedEpisodeModel:
         """Retrieve synchronized metadata for the recording.
 
@@ -120,12 +128,7 @@ class SynchronizedRecording:
             f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=self.id,
-                synchronization_details=SynchronizationDetails(
-                    frequency=self.frequency,
-                    cross_embodiment_union=self.cross_embodiment_union,
-                    max_delay_s=sys.float_info.max,
-                    allow_duplicates=True,
-                ),
+                synchronization_details=self.synchronization_details,
             ).model_dump(mode="json"),
             headers=auth.get_headers(),
         )

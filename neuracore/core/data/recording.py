@@ -1,10 +1,11 @@
 """Recording class for managing synchronized data streams in a dataset."""
 
+import sys
 from typing import TYPE_CHECKING
 
 from neuracore_types import CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
-from neuracore_types import RecordingMetadata, RecordingStatus
+from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
 
 from neuracore.core.auth import get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -79,6 +80,9 @@ class Recording:
         self,
         frequency: int = 0,
         cross_embodiment_union: CrossEmbodimentUnion | None = None,
+        max_delay_s: float = sys.float_info.max,
+        allow_duplicates: bool = True,
+        trim_start_end: bool = True,
     ) -> SynchronizedRecording:
         """Synchronize the episode with specified frequency and data types.
 
@@ -88,6 +92,9 @@ class Recording:
             cross_embodiment_union: Dict specifying data types and their
                 names to include in synchronization. If None, will use all
                 available data types from the dataset.
+            max_delay_s: Maximum allowed delay for synchronization.
+            allow_duplicates: Whether duplicate points are allowed when syncing.
+            trim_start_end: Whether to trim start/end during synchronization.
 
         Raises:
             SynchronizationError: If synchronization fails.
@@ -117,8 +124,13 @@ class Recording:
             recording_name=self.name,
             robot_id=self.robot_id,
             instance=self.instance,
-            frequency=frequency,
-            cross_embodiment_union=cross_embodiment_union,
+            synchronization_details=SynchronizationDetails(
+                frequency=frequency,
+                cross_embodiment_union=cross_embodiment_union,
+                max_delay_s=max_delay_s,
+                allow_duplicates=allow_duplicates,
+                trim_start_end=trim_start_end,
+            ),
         )
 
     def __iter__(self) -> None:
