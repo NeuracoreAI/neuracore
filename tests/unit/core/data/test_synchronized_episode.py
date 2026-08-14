@@ -7,7 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from neuracore_types import CameraData, DataType, JointData, SynchronizedPoint
+from neuracore_types import (
+    CameraData,
+    DataType,
+    JointData,
+    SynchronizationDetails,
+    SynchronizedPoint,
+)
 from PIL import Image
 
 from neuracore.core.const import API_URL
@@ -54,8 +60,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
 
     def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
@@ -84,8 +92,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=cross_embodiment_union,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=cross_embodiment_union,
+            ),
         )
 
         assert synced.cross_embodiment_union == cross_embodiment_union
@@ -106,8 +116,10 @@ class TestSynchronizedRecording:
         fake_self = SimpleNamespace(
             id="rec-1",
             dataset=SimpleNamespace(org_id="org-1"),
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
         session = MagicMock()
         response = MagicMock()
@@ -203,8 +215,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
 
         frames = synced[0:5:2]
@@ -276,8 +290,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
 
         sync_point = cast(SynchronizedPoint, synced[0])
@@ -296,8 +312,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
             prefetch_videos=True,
         )
 
@@ -313,8 +331,10 @@ class TestSynchronizedRecording:
                 recording_name="recording1",
                 robot_id="robot1",
                 instance=1,
-                frequency=30,
-                cross_embodiment_union=None,
+                synchronization_details=SynchronizationDetails(
+                    frequency=30,
+                    cross_embodiment_union=None,
+                ),
                 prefetch_videos=True,
             )
 
@@ -357,8 +377,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
 
         with patch(
@@ -411,8 +433,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=30,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=30,
+                cross_embodiment_union=None,
+            ),
         )
 
         synced_60 = SynchronizedRecording(
@@ -421,8 +445,10 @@ class TestSynchronizedRecording:
             recording_name="recording1",
             robot_id="robot1",
             instance=1,
-            frequency=60,
-            cross_embodiment_union=None,
+            synchronization_details=SynchronizationDetails(
+                frequency=60,
+                cross_embodiment_union=None,
+            ),
         )
 
         assert synced_30.frequency == 30

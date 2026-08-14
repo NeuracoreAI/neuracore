@@ -590,6 +590,9 @@ class Dataset:
             cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
+            max_delay_s=max_delay_s,
+            allow_duplicates=allow_duplicates,
+            trim_start_end=trim_start_end,
         )
 
     def get_full_embodiment_description(self, robot_id: str) -> EmbodimentDescription:

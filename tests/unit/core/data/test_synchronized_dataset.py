@@ -493,3 +493,78 @@ class TestSynchronizedDataset:
 
         # Should be different objects
         assert rec1 is not rec2
+
+
+class TestSynchronizationParameterPassthrough:
+    """The dataset and its recordings must synchronize with identical parameters.
+
+    The server keys stored synchronized data on every synchronization parameter,
+    so if a recording is fetched with a different set than the dataset was
+    synchronized with, it misses the stored data and is synchronized again from
+    scratch under a second key.
+    """
+
+    def _sync_details_sent_to(self, mock_requests, path: str) -> list[dict]:
+        """Collect the synchronization_details of every request to a path.
+
+        Args:
+            mock_requests: The requests_mock Mocker holding the request history.
+            path: Substring identifying the endpoint of interest.
+
+        Returns:
+            One synchronization_details payload per matching request.
+        """
+        return [
+            req.json()["synchronization_details"]
+            for req in mock_requests.request_history
+            if path in req.path and req.method == "POST"
+        ]
+
+    def test_recordings_are_fetched_with_the_datasets_sync_parameters(
+        self, mock_data_requests, tmp_path
+    ) -> None:
+        """Non-default parameters must reach the per-recording requests."""
+        dataset = nc.get_dataset(name="test_dataset")
+        dataset.cache_dir = tmp_path / "cache"
+        dataset.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        dataset.synchronize(
+            frequency=30,
+            # Deliberately non-default: these are exactly the parameters that
+            # used to be dropped between the dataset and its recordings.
+            max_delay_s=0.25,
+            allow_duplicates=False,
+            trim_start_end=False,
+        )
+
+        dataset_details = self._sync_details_sent_to(
+            mock_data_requests, "synchronize-dataset"
+        )
+        recording_details = self._sync_details_sent_to(
+            mock_data_requests, "synchronize-recording"
+        )
+
+        assert len(dataset_details) == 1
+        assert recording_details, "expected at least one per-recording sync request"
+        for sent in recording_details:
+            assert sent == dataset_details[0]
+
+    def test_sync_parameters_survive_slicing(
+        self, mock_data_requests, tmp_path
+    ) -> None:
+        """A sliced synchronized dataset keeps the original parameters."""
+        dataset = nc.get_dataset(name="test_dataset")
+        dataset.cache_dir = tmp_path / "cache"
+        dataset.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        synced = dataset.synchronize(
+            frequency=30,
+            max_delay_s=0.25,
+            allow_duplicates=False,
+            trim_start_end=False,
+        )
+        sliced = synced[0:1]
+
+        assert (
+            sliced.synchronization_details == synced.synchronization_details
+        ), "slicing must not reset the synchronization parameters"
