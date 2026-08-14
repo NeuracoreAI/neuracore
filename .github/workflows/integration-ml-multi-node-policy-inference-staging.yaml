@@ -1,0 +1,16 @@
+name: Integration ML - Multi-Node Policy Inference (Staging)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: NeuracoreAI/shared-workflows/.github/workflows/integration-ml-test.yaml@main
+    with:
+      environment: staging
+      test-path: tests/integration/ml/test_multi_node_policy_inference.py
+      extras: dev,ml
+      lfs: false
+    secrets: inherit

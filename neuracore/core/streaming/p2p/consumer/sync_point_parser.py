@@ -32,12 +32,16 @@ def parse_sync_point(
     """
     try:
         data_type: DataType = track_details.data_type
-        label: str = track_details.label
 
         # Get the appropriate data class from the mapping
         data_class: type[NCData] | None = DATA_TYPE_TO_NC_DATA_CLASS.get(data_type)
         if data_class is None:
             raise ValueError(f"Unsupported track data_type: {data_type}")
+
+        # Providers label JSON tracks "{DATA_TYPE}:{sensor_name}".
+        # Local streams are keyed by the bare sensor name, so strip the
+        # prefix to keep remote and local sync points addressable the same way.
+        label: str = track_details.label.removeprefix(f"{data_type.value}:")
 
         # Parse the JSON data using the appropriate class
         data: NCData = data_class.model_validate_json(message_data)

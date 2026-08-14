@@ -16,7 +16,16 @@ import neuracore as nc
 from neuracore.core.const import API_URL
 from neuracore.core.endpoint import EndpointError, Policy
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
+from neuracore.core.utils.image_string_encoder import ImageStringEncoder
 from tests.unit.conftest import TEST_API_KEY
+from tests.unit.ml.conftest import (
+    REMOTE_CAMERA_NAME,
+    REMOTE_FRAME,
+    REMOTE_GRIPPER_NAMES,
+    remote_camera_data,
+    remote_gripper_data,
+    remote_sync_point,
+)
 
 B = 1
 PREDICTION_HORIZON = 3
@@ -1010,3 +1019,50 @@ def test_connect_local_endpoint_invalid_args(
             input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
             output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
         )
+
+
+def test_remote_endpoint_sends_remote_node_data_in_predict_request(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+    patch_remote_node_data,
+):
+    """Data logged on other nodes must survive serialization onto the wire."""
+    _login_and_connect_robot(mock_auth_requests, mocked_org_id)
+    patch_remote_node_data(
+        lambda: remote_sync_point(remote_camera_data(), remote_gripper_data())
+    )
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/models/endpoints/test_endpoint_id/predict",
+        json=FAKE_PREDICTED_DATA_JSON,
+        status_code=200,
+    )
+    endpoint = _connect_test_remote_endpoint(mock_auth_requests, mocked_org_id)
+
+    # Only the joints come from this process; the camera and grippers are
+    # contributed by other nodes.
+    nc.log_joint_positions(positions={"joint1": 0.5, "joint2": 0.5, "joint3": 0.5})
+
+    _assert_joint_prediction_matches_expected(endpoint.predict())
+
+    request_body = mock_auth_requests.request_history[-1].json()
+    assert set(request_body["data"]) == {
+        "JOINT_POSITIONS",
+        "RGB_IMAGES",
+        "PARALLEL_GRIPPER_OPEN_AMOUNTS",
+    }
+    assert set(request_body["data"]["JOINT_POSITIONS"]) == {
+        "joint1",
+        "joint2",
+        "joint3",
+    }
+    assert set(request_body["data"]["PARALLEL_GRIPPER_OPEN_AMOUNTS"]) == set(
+        REMOTE_GRIPPER_NAMES
+    )
+    # Frames are transmitted as PNG data URIs, not raw arrays.
+    encoded_frame = request_body["data"]["RGB_IMAGES"][REMOTE_CAMERA_NAME]["frame"]
+    assert encoded_frame.startswith("data:image/png;base64,")
+    np.testing.assert_array_equal(
+        ImageStringEncoder.decode_image(encoded_frame), REMOTE_FRAME
+    )
