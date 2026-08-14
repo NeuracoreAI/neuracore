@@ -14,12 +14,13 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.trainers.batch_autotuner import (
+    _VALIDATION_MAX_GPU_UTILIZATION,
+    _VALIDATION_SAFETY_FACTOR,
     BatchProbeResult,
     BatchSizeAutotuner,
     BatchSizeValidator,
     _BatchSizeEstimationError,
     _estimate_max_batch_size,
-    _fits_within_budget,
     _probe_batch_size,
     find_optimal_batch_size,
     is_valid_batch_size,
@@ -618,16 +619,20 @@ def test_is_valid_batch_size_rejects_batch_that_fits_without_headroom():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
-        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+        return (DummyDataset(train_size), DummyDataset(val_size))
 
     # Fits (no OOM) but peak reserved is 92% of total -- above the 0.9 * 0.7 =
     # 63% budget * safety threshold, so it leaves no headroom for real training.
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
@@ -663,15 +668,19 @@ def test_is_valid_batch_size_accepts_batch_within_headroom():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
-        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+        return (DummyDataset(train_size), DummyDataset(val_size))
 
     # Fits at 50% of total, comfortably under the 63% budget * safety threshold.
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
@@ -707,14 +716,18 @@ def test_is_valid_batch_size_rejects_when_probe_ooms():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_random_split(dataset, lengths, generator=None):
-        return (DummyDataset(lengths[0]), DummyDataset(lengths[1]))
+    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+        return (DummyDataset(train_size), DummyDataset(val_size))
 
     with (
         patch("torch.cuda.is_available", return_value=True),
         patch(
-            "neuracore.ml.trainers.batch_autotuner.random_split",
-            side_effect=fake_random_split,
+            "neuracore.ml.trainers.batch_autotuner.resolve_input_output_preprocessing",
+            return_value=({}, {}),
+        ),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.split_train_val_datasets",
+            side_effect=fake_split_train_val,
         ),
         patch(
             "neuracore.ml.trainers.batch_autotuner.BatchSizeValidator.probe_batch_size",
@@ -733,25 +746,42 @@ def test_is_valid_batch_size_rejects_when_probe_ooms():
 
 
 def test_fits_within_budget_true_when_under_threshold():
-    """peak 60GB <= 100GB * 0.9 * 0.7 = 63GB -> fits with headroom."""
+    """A peak just under total * util * safety fits, using the autotuner's own
+    validation constants (so the test tracks any change to them)."""
+    total_bytes = 100 * GB
+    budget = total_bytes * _VALIDATION_MAX_GPU_UTILIZATION * _VALIDATION_SAFETY_FACTOR
     result = BatchProbeResult(
-        fitted=True, peak_reserved_bytes=60 * GB, total_bytes=100 * GB
+        fitted=True, peak_reserved_bytes=int(budget * 0.95), total_bytes=total_bytes
     )
-    assert _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
+    assert BatchSizeValidator._fits_within_budget(
+        result,
+        max_gpu_utilization=_VALIDATION_MAX_GPU_UTILIZATION,
+        safety_factor=_VALIDATION_SAFETY_FACTOR,
+    )
 
 
 def test_fits_within_budget_false_when_over_threshold():
-    """peak 70GB > 63GB budget * safety -> no headroom, not valid."""
+    """A peak just above total * util * safety leaves no headroom -> not valid."""
+    total_bytes = 100 * GB
+    budget = total_bytes * _VALIDATION_MAX_GPU_UTILIZATION * _VALIDATION_SAFETY_FACTOR
     result = BatchProbeResult(
-        fitted=True, peak_reserved_bytes=70 * GB, total_bytes=100 * GB
+        fitted=True, peak_reserved_bytes=int(budget * 1.05), total_bytes=total_bytes
     )
-    assert not _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
+    assert not BatchSizeValidator._fits_within_budget(
+        result,
+        max_gpu_utilization=_VALIDATION_MAX_GPU_UTILIZATION,
+        safety_factor=_VALIDATION_SAFETY_FACTOR,
+    )
 
 
 def test_fits_within_budget_false_when_not_fitted():
     """An OOM'd probe is never within budget."""
     result = BatchProbeResult(fitted=False)
-    assert not _fits_within_budget(result, max_gpu_utilization=0.9, safety_factor=0.7)
+    assert not BatchSizeValidator._fits_within_budget(
+        result,
+        max_gpu_utilization=_VALIDATION_MAX_GPU_UTILIZATION,
+        safety_factor=_VALIDATION_SAFETY_FACTOR,
+    )
 
 
 def test_batch_probe_result_defaults():
