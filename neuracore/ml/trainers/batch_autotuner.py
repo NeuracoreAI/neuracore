@@ -131,6 +131,35 @@ class BatchSizeValidator:
         """Return True if batch_size runs without an OOM-related failure."""
         return self.probe_batch_size(batch_size).fitted
 
+    @staticmethod
+    def _fits_within_budget(
+        result: BatchProbeResult,
+        max_gpu_utilization: float,
+        safety_factor: float,
+    ) -> bool:
+        """Return True if the probe fitted within budget * safety.
+
+        A probe that merely avoided OOM is not enough to call a batch size valid:
+        real training allocates memory a short, single-process probe never does
+        (DDP gradient buckets / NCCL buffers, allocator fragmentation over a full
+        epoch, grad-clipping and scheduler temporaries). Apply the same budget *
+        safety threshold the autotuner uses so a manually set batch is accepted
+        only if it would survive as an auto-selected one.
+
+        Args:
+            result: The probe result to judge.
+            max_gpu_utilization: Fraction of VRAM treated as the usable budget.
+            safety_factor: Extra headroom multiplier applied on top of the budget.
+
+        Returns:
+            True if the probe fitted and its peak reserved memory is within
+            total * max_gpu_utilization * safety_factor.
+        """
+        if not result.fitted:
+            return False
+        budget_bytes = result.total_bytes * max_gpu_utilization * safety_factor
+        return result.peak_reserved_bytes <= budget_bytes
+
     def _run_in_subprocess(self, batch_size: int) -> BatchProbeResult:
         """Spawn a subprocess that probes batch_size and return the result."""
         ctx = multiprocessing.get_context("spawn")
@@ -423,7 +452,7 @@ class BatchSizeAutotuner:
         min_batch_size: int = 2,
         max_batch_size: int = 512,
         num_iterations: int = 2,
-        safety_factor: float = 0.6,
+        safety_factor: float = _VALIDATION_SAFETY_FACTOR,
     ):
         """Initialize the batch size auto-tuner.
 
@@ -842,35 +871,6 @@ def find_optimal_batch_size(
     return optimal_batch_size
 
 
-def _fits_within_budget(
-    result: BatchProbeResult,
-    max_gpu_utilization: float,
-    safety_factor: float,
-) -> bool:
-    """Return True if the probe fitted within budget * safety.
-
-    A probe that merely avoided OOM is not enough to call a batch size valid:
-    real training allocates memory a short, single-process probe never does (DDP
-    gradient buckets / NCCL buffers, allocator fragmentation over a full epoch,
-    grad-clipping and scheduler temporaries). Apply the same budget * safety
-    threshold the autotuner uses so a manually set batch is accepted only if it
-    would survive as an auto-selected one.
-
-    Args:
-        result: The probe result to judge.
-        max_gpu_utilization: Fraction of VRAM treated as the usable budget.
-        safety_factor: Extra headroom multiplier applied on top of the budget.
-
-    Returns:
-        True if the probe fitted and its peak reserved memory is within
-        total * max_gpu_utilization * safety_factor.
-    """
-    if not result.fitted:
-        return False
-    budget_bytes = result.total_bytes * max_gpu_utilization * safety_factor
-    return result.peak_reserved_bytes <= budget_bytes
-
-
 def is_valid_batch_size(
     cfg: DictConfig,
     model_factory: Callable[[], NeuracoreModel],
@@ -913,7 +913,7 @@ def is_valid_batch_size(
     )
 
     result = validator.probe_batch_size(batch_size)
-    return _fits_within_budget(
+    return validator._fits_within_budget(
         result,
         max_gpu_utilization=_VALIDATION_MAX_GPU_UTILIZATION,
         safety_factor=_VALIDATION_SAFETY_FACTOR,
