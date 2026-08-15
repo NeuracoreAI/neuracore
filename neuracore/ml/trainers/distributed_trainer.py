@@ -637,8 +637,21 @@ class _EpochTimings:
         self._iteration_start = 0.0
 
     def start_iteration(self, index: int) -> None:
-        """Begin an iteration, deciding whether to sample it in detail."""
-        self._sampling = self.sample_interval > 0 and index % self.sample_interval == 0
+        """Begin an iteration, deciding whether to sample it in detail.
+
+        Iteration 0 is never sampled: at the start of an epoch the loader's
+        prefetch queue is empty, so its data_wait is a one-off queue-fill cost
+        rather than the steady-state stall the summary is trying to describe.
+        """
+        self._sampling = (
+            self.sample_interval > 0 and index > 0 and index % self.sample_interval == 0
+        )
+        if self._sampling:
+            # Drain work queued by the previous (unsampled, unsynchronised)
+            # iteration before the clock starts. Without this the first section
+            # of a sampled iteration absorbs the tail of the previous one's
+            # compute, which shows up as phantom data_wait.
+            _synchronize_device(self.device)
         self._iteration_start = time.perf_counter()
         self._last_mark = self._iteration_start
 
@@ -674,7 +687,8 @@ class _EpochTimings:
             f"[timing:{label}] epoch {epoch}: {iterations} iterations "
             f"in {total_s:.1f}s",
             f"  mean iteration        {mean_iter_s * 1000:9.2f} ms"
-            f"   ({1 / mean_iter_s if mean_iter_s else 0:.2f} it/s)",
+            f"   ({1 / mean_iter_s if mean_iter_s else 0:.2f} it/s)"
+            f"   slowest {max(self._iteration_times) * 1000:.2f} ms",
         ]
         if self.batch_size:
             samples_per_s = self.batch_size / mean_iter_s if mean_iter_s else 0.0
@@ -695,14 +709,19 @@ class _EpochTimings:
             lines.append(
                 f"  breakdown over {sampled} sampled iterations "
                 f"(sum {sampled_total * 1000:.2f} ms). Sampled iterations are "
-                "barrier-separated so each section can be attributed, which "
-                "removes host/device overlap - expect the sum to exceed the "
-                "mean iteration above:"
+                "barrier-separated so each section can be attributed, and "
+                "exclude the first iteration of the epoch, so this sum will "
+                "not match the mean iteration above:"
             )
             for section, mean_s in means.items():
                 share = mean_s / sampled_total * 100 if sampled_total else 0.0
+                # A worst case far above the mean is the signal for a stall
+                # that only happens sometimes -- a frame-cache miss pulling a
+                # whole video, say -- which an average would hide.
+                worst_s = max(self._sections[section])
                 lines.append(
                     f"    {section:<18}{mean_s * 1000:9.2f} ms   ({share:4.1f}%)"
+                    f"   worst {worst_s * 1000:9.2f} ms"
                 )
             data_wait = means.get("data_wait")
             if data_wait is not None and self.batch_size:
