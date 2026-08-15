@@ -14,6 +14,7 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 
+from neuracore.core.const import API_URL
 from neuracore.ml.preprocessing.base import PreprocessingMethod
 from neuracore.ml.utils.policy_inference import PolicyInference
 
@@ -399,3 +400,72 @@ def test_init_raises_when_input_preprocessing_method_is_not_allowed_for_data_typ
             org_id="org",
             robot_id="robot-1",
         )
+
+
+@pytest.fixture(autouse=True)
+def _mock_auth(monkeypatch):
+    """Patch get_auth so checkpoint-URL tests don't need real credentials."""
+    monkeypatch.setattr(
+        "neuracore.ml.utils.policy_inference.get_auth",
+        lambda: SimpleNamespace(get_headers=lambda: {"Authorization": "Bearer test"}),
+    )
+
+
+def _checkpoint_urls_base(job_id: str) -> str:
+    return f"{API_URL}/org/test_org/training/jobs/{job_id}"
+
+
+class TestGetCheckpointUrl:
+    def test_returns_signed_url_for_named_checkpoint(self, requests_mock):
+        policy_inference = _make_policy_inference()
+        policy_inference.job_id = "job123"
+        requests_mock.get(
+            f"{_checkpoint_urls_base('job123')}/checkpoint_url/checkpoint_5.pt",
+            json={"url": "https://storage.example.com/signed"},
+            status_code=200,
+        )
+
+        url = policy_inference._get_checkpoint_url("checkpoint_5.pt")
+
+        assert url == "https://storage.example.com/signed"
+
+    def test_raises_value_error_when_checkpoint_missing(self, requests_mock):
+        policy_inference = _make_policy_inference()
+        policy_inference.job_id = "job123"
+        requests_mock.get(
+            f"{_checkpoint_urls_base('job123')}/checkpoint_url/checkpoint_5.pt",
+            status_code=404,
+        )
+
+        with pytest.raises(ValueError, match="checkpoint_5.pt"):
+            policy_inference._get_checkpoint_url("checkpoint_5.pt")
+
+
+class TestGetLatestCheckpointUrl:
+    def test_returns_url_and_resolved_checkpoint_name(self, requests_mock):
+        policy_inference = _make_policy_inference()
+        policy_inference.job_id = "job123"
+        requests_mock.get(
+            f"{_checkpoint_urls_base('job123')}/latest_checkpoint_url",
+            json={
+                "url": "https://storage.example.com/signed",
+                "checkpoint_name": "checkpoint_47.pt",
+            },
+            status_code=200,
+        )
+
+        url, checkpoint_name = policy_inference._get_latest_checkpoint_url()
+
+        assert url == "https://storage.example.com/signed"
+        assert checkpoint_name == "checkpoint_47.pt"
+
+    def test_raises_value_error_when_no_checkpoints_exist(self, requests_mock):
+        policy_inference = _make_policy_inference()
+        policy_inference.job_id = "job123"
+        requests_mock.get(
+            f"{_checkpoint_urls_base('job123')}/latest_checkpoint_url",
+            status_code=404,
+        )
+
+        with pytest.raises(ValueError, match="No checkpoints found"):
+            policy_inference._get_latest_checkpoint_url()
