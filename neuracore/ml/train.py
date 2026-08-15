@@ -154,6 +154,9 @@ def _save_local_training_metadata(
                 else getattr(cfg, "max_delay_s")
             ),
             "trim_start_end": getattr(cfg, "trim_start_end", True),
+            "trim_no_movement_at_start_threshold": getattr(
+                cfg, "trim_no_movement_at_start_threshold", None
+            ),
             "cross_embodiment_union": _serialize_cross_embodiment_union(
                 cross_embodiment_union
             ),
@@ -694,6 +697,9 @@ def _main(cfg: DictConfig) -> None:
             ),
             allow_duplicates=cfg.allow_duplicates,
             trim_start_end=cfg.trim_start_end,
+            trim_no_movement_at_start_threshold=getattr(
+                cfg, "trim_no_movement_at_start_threshold", None
+            ),
         )
 
         # Check if distributed training is enabled and multiple GPUs are available
