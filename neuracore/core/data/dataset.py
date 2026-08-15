@@ -467,6 +467,7 @@ class Dataset:
         max_delay_s: float = sys.float_info.max,
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
+        trim_no_movement_at_start_threshold: float | None = None,
         cross_embodiment_union: CrossEmbodimentUnion | None = None,
     ) -> SynchronizedDatasetModel:
         """Synchronize the dataset with specified frequency and data types.
@@ -480,6 +481,10 @@ class Dataset:
             max_delay_s: Maximum allowed delay for synchronization.
             allow_duplicates: Whether duplicate points are allowed when syncing.
             trim_start_end: Whether to trim start/end during synchronization.
+            trim_no_movement_at_start_threshold: If set, drop frames at the
+                start of each episode while every joint position stays within
+                this threshold of its value in the first frame. None keeps
+                every frame.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -499,6 +504,9 @@ class Dataset:
                     max_delay_s=max_delay_s,
                     allow_duplicates=allow_duplicates,
                     trim_start_end=trim_start_end,
+                    trim_no_movement_at_start_threshold=(
+                        trim_no_movement_at_start_threshold
+                    ),
                     cross_embodiment_union=cross_embodiment_union,
                 ),
             ).model_dump(mode="json"),
@@ -534,6 +542,7 @@ class Dataset:
         max_delay_s: float = sys.float_info.max,
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
+        trim_no_movement_at_start_threshold: float | None = None,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -547,6 +556,10 @@ class Dataset:
             max_delay_s: Maximum allowed delay for synchronization.
             allow_duplicates: Whether duplicate points are allowed when syncing.
             trim_start_end: Whether to trim start/end during synchronization.
+            trim_no_movement_at_start_threshold: If set, drop frames at the
+                start of each episode while every joint position stays within
+                this threshold of its value in the first frame. None keeps
+                every frame.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -560,6 +573,7 @@ class Dataset:
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
+            trim_no_movement_at_start_threshold=trim_no_movement_at_start_threshold,
             cross_embodiment_union=cross_embodiment_union,
         )
 
@@ -593,6 +607,7 @@ class Dataset:
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
+            trim_no_movement_at_start_threshold=trim_no_movement_at_start_threshold,
         )
 
     def get_full_embodiment_description(self, robot_id: str) -> EmbodimentDescription:

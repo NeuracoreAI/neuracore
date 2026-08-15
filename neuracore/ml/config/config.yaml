@@ -57,6 +57,10 @@ max_prefetch_workers: 4
 max_delay_s: null
 trim_start_end: true
 
+# If set, drop frames at the start of each episode while every joint position
+# stays within this threshold of its value in the first frame.
+trim_no_movement_at_start_threshold: null
+
 # Dict[str, Dict[DataType, List[MethodConfig]]], e.g.:
 # for images, we must have a resize step to reshape all images from different sources to the same size.
 # train_preprocessing is used on the training split (may include augmentations).

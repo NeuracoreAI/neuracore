@@ -108,6 +108,7 @@ def start_training_run(
     output_cross_embodiment_description: CrossEmbodimentDescription | None = None,
     max_delay_s: float = sys.float_info.max,
     allow_duplicates: bool = True,
+    trim_no_movement_at_start_threshold: float | None = None,
     name_auto_increment: bool = False,
     disk_size_gb: int = 500,
 ) -> dict:
@@ -125,6 +126,9 @@ def start_training_run(
         output_cross_embodiment_description: Output cross-embodiment description.
         max_delay_s: Maximum allowable delay for data synchronization (in seconds)
         allow_duplicates: Whether to allow duplicate data during synchronization
+        trim_no_movement_at_start_threshold: If set, drop frames at the start of
+            each episode while every joint position stays within this threshold
+            of its value in the first frame. None keeps every frame.
         name_auto_increment: If True and a job with this name already exists, use
             name_1, name_2, ... instead of failing or duplicating the name.
         disk_size_gb: Disk size in GB for the training VM (default: 500).
@@ -187,6 +191,7 @@ def start_training_run(
             frequency=frequency,
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
+            trim_no_movement_at_start_threshold=trim_no_movement_at_start_threshold,
             cross_embodiment_union=merge_cross_embodiment_description(
                 input_cross_embodiment_description, output_cross_embodiment_description
             ),
