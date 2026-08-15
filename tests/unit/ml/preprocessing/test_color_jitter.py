@@ -24,6 +24,24 @@ def test_color_jitter_preserves_shape():
     assert out.frame.max() <= 255.0
 
 
+def test_color_jitter_returns_contiguous_frames():
+    """Jitter must hand back the memory layout it was given.
+
+    torchvision's hue adjustment permutes channels and returns a
+    non-contiguous view. Collation used to mask that by re-materialising the
+    tensor with torch.cat, but this runs on the device after collation now, and
+    a non-contiguous frame propagates through the backbone to a Conv2d output
+    that the image encoders then fail to flatten with .view.
+    """
+    torch.manual_seed(0)
+    data = _rgb()
+    assert data.frame.is_contiguous(), "fixture should start contiguous"
+
+    out = ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)(data)
+
+    assert out.frame.is_contiguous()
+
+
 def test_color_jitter_changes_pixels():
     torch.manual_seed(0)
     data = _rgb()

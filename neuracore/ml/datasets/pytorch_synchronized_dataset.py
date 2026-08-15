@@ -31,7 +31,10 @@ from neuracore.core.utils.training_input_args_validation import (
 )
 from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
-from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.preprocessing.base import (
+    PreprocessingConfiguration,
+    PreprocessingStage,
+)
 from neuracore.ml.utils.json_serialization import JsonValue, to_json_serializable
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
 from neuracore.ml.utils.preprocessing import apply_preprocessing_methods
@@ -303,8 +306,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self.episode_indices, self.episode_start_offsets = self._get_episode_indices()
         self._logged_in = False
 
-        self.input_preprocessing_config = input_preprocessing_config
-        self.output_preprocessing_config = output_preprocessing_config
+        # Only the worker stage runs here. Device-stage methods are applied by
+        # the trainer once the batch is on the accelerator, where they run
+        # batched rather than once per frame on a contended worker CPU.
+        self.input_preprocessing_config = input_preprocessing_config.for_stage(
+            PreprocessingStage.WORKER
+        )
+        self.output_preprocessing_config = output_preprocessing_config.for_stage(
+            PreprocessingStage.WORKER
+        )
 
         # Built lazily, and per process: workers are forked after this point,
         # so each one accumulates and reports its own timings.

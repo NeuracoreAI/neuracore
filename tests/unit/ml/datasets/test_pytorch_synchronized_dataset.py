@@ -63,10 +63,10 @@ def _full_embodiment_description() -> dict[DataType, dict[int, str]]:
 
 
 def _default_preprocessing_config() -> PreprocessingConfiguration:
-    return {
+    return PreprocessingConfiguration({
         DataType.RGB_IMAGES: [ResizePad(size=(224, 224))],
         DataType.DEPTH_IMAGES: [ResizePad(size=(224, 224))],
-    }
+    })
 
 
 NON_TARGET_OUTPUT_DATA_TYPES = tuple(
@@ -989,10 +989,10 @@ class TestDataLoading:
         }
         RGB_TEST_SHAPE = (123, 456)
         DEPTH_TEST_SHAPE = (789, 101)
-        input_preprocessing_config = {
+        input_preprocessing_config = PreprocessingConfiguration({
             DataType.RGB_IMAGES: [ResizePad(size=RGB_TEST_SHAPE)],
             DataType.DEPTH_IMAGES: [ResizePad(size=DEPTH_TEST_SHAPE)],
-        }
+        })
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset_with_depth,
             input_cross_embodiment_description=input_description,
@@ -1033,10 +1033,10 @@ class TestDataLoading:
         }
         RGB_TEST_SHAPE = (160, 200)
         DEPTH_TEST_SHAPE = (180, 220)
-        output_preprocessing_config = {
+        output_preprocessing_config = PreprocessingConfiguration({
             DataType.RGB_IMAGES: [ResizePad(size=RGB_TEST_SHAPE)],
             DataType.DEPTH_IMAGES: [ResizePad(size=DEPTH_TEST_SHAPE)],
-        }
+        })
         dataset = PytorchSynchronizedDataset(
             synchronized_dataset=mock_synchronized_dataset_with_depth,
             input_cross_embodiment_description=input_description,
@@ -1228,7 +1228,7 @@ class TestOutputTimestepAlignment:
             output_cross_embodiment_description=output_description,
             output_prediction_horizon=1,
             input_preprocessing_config=_default_preprocessing_config(),
-            output_preprocessing_config={},
+            output_preprocessing_config=PreprocessingConfiguration(),
         )
 
         with patch.object(dataset, "_memory_monitor") as mock_monitor:
@@ -1293,7 +1293,7 @@ class TestOutputTimestepAlignment:
             output_cross_embodiment_description=output_description,
             output_prediction_horizon=1,
             input_preprocessing_config=_default_preprocessing_config(),
-            output_preprocessing_config={},
+            output_preprocessing_config=PreprocessingConfiguration(),
         )
 
         timestep = 4

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from neuracore_types import BatchedNCData, BatchedRGBData, DataType
 
-from ..base import PreprocessingMethod
+from ..base import PreprocessingMethod, PreprocessingStage
 
 
 class GaussianNoise(PreprocessingMethod):
@@ -13,6 +13,11 @@ class GaussianNoise(PreprocessingMethod):
 
     Noise ``std`` is in pixel units for float frames in ``[0, 255]``.
     """
+
+    # Elementwise and shape-preserving, so it can run batched on the device.
+    # randn_like over a full frame is the expensive part, and it is far
+    # cheaper there than per frame on a contended worker CPU.
+    stage = PreprocessingStage.DEVICE
 
     def __init__(
         self,

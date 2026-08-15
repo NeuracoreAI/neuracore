@@ -28,6 +28,22 @@ def _map_tensors(
     })
 
 
+def _to_device(
+    batched_nc_data: BatchedNCData, device: torch.device, non_blocking: bool
+) -> BatchedNCData:
+    """Move one item to ``device`` and widen its storage dtypes there.
+
+    Payloads that travel in a compact storage dtype (RGB frames are carried as
+    uint8) are widened only once they are on the device, so the transfer moves
+    a quarter of the bytes and the conversion runs on the accelerator.
+    """
+    moved = _map_tensors(
+        batched_nc_data, lambda t: t.to(device, non_blocking=non_blocking)
+    )
+    moved.to_compute_dtype()
+    return moved
+
+
 @dataclass
 class BatchedTrainingSamples:
     """Container for batched training samples with inputs and target outputs.
@@ -69,6 +85,10 @@ class BatchedTrainingSamples:
     ) -> "BatchedTrainingSamples":
         """Move all tensors to the specified device.
 
+        Storage dtypes are widened to their compute dtypes on arrival, so this
+        is the single point where the compact-transfer window closes. Every
+        consumer that hands a batch to a model goes through here.
+
         Args:
             device: Target device for tensor placement
             non_blocking: Issue asynchronous copies. Only has an effect when
@@ -77,7 +97,25 @@ class BatchedTrainingSamples:
         Returns:
             BatchedTrainingSamples: New instance with tensors moved to device
         """
-        return self._map(lambda t: t.to(device, non_blocking=non_blocking))
+        return BatchedTrainingSamples(
+            inputs={
+                key: [_to_device(item, device, non_blocking) for item in value]
+                for key, value in self.inputs.items()
+            },
+            inputs_mask={
+                key: value.to(device, non_blocking=non_blocking)
+                for key, value in self.inputs_mask.items()
+            },
+            outputs={
+                key: [_to_device(item, device, non_blocking) for item in value]
+                for key, value in self.outputs.items()
+            },
+            outputs_mask={
+                key: value.to(device, non_blocking=non_blocking)
+                for key, value in self.outputs_mask.items()
+            },
+            batch_size=self.batch_size,
+        )
 
     def pin_memory(self) -> "BatchedTrainingSamples":
         """Move all tensors into pinned host memory.
@@ -136,10 +174,7 @@ class BatchedInferenceInputs:
             The same BatchedInferenceSamples instance with tensors moved to device
         """
         self.inputs = {
-            key: [
-                _map_tensors(item, lambda t: t.to(device, non_blocking=non_blocking))
-                for item in value
-            ]
+            key: [_to_device(item, device, non_blocking) for item in value]
             for key, value in self.inputs.items()
         }
         self.inputs_mask = {

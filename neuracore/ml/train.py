@@ -36,7 +36,10 @@ from neuracore.ml.logging.cloud_log_streamer import CloudLogStreamer
 from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
-from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.preprocessing.base import (
+    PreprocessingConfiguration,
+    PreprocessingStage,
+)
 from neuracore.ml.trainers.batch_autotuner import (
     find_optimal_batch_size,
     is_valid_batch_size,
@@ -467,6 +470,8 @@ def run_training(
     output_cross_embodiment_description: CrossEmbodimentDescription,
     inference_input_preprocessing_config: PreprocessingConfiguration,
     inference_output_preprocessing_config: PreprocessingConfiguration,
+    train_input_preprocessing_config: PreprocessingConfiguration,
+    train_output_preprocessing_config: PreprocessingConfiguration,
     dataset: PytorchSynchronizedDataset,
     device: torch.device | None = None,
 ) -> None:
@@ -653,6 +658,18 @@ def run_training(
             log_freq=cfg.logging_frequency,
             histogram_log_freq=cfg.get("histogram_logging_frequency", 0),
             timing_sample_interval=cfg.get("timing_sample_interval", 25),
+            train_device_preprocessing=(
+                train_input_preprocessing_config.for_stage(PreprocessingStage.DEVICE),
+                train_output_preprocessing_config.for_stage(PreprocessingStage.DEVICE),
+            ),
+            inference_device_preprocessing=(
+                inference_input_preprocessing_config.for_stage(
+                    PreprocessingStage.DEVICE
+                ),
+                inference_output_preprocessing_config.for_stage(
+                    PreprocessingStage.DEVICE
+                ),
+            ),
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
@@ -877,6 +894,8 @@ def _main(cfg: DictConfig) -> None:
                     output_cross_embodiment_description,
                     inference_input_preprocessing_config,
                     inference_output_preprocessing_config,
+                    train_input_preprocessing_config,
+                    train_output_preprocessing_config,
                     pytorch_dataset,
                     device,
                 ),
@@ -894,6 +913,8 @@ def _main(cfg: DictConfig) -> None:
                 output_cross_embodiment_description,
                 inference_input_preprocessing_config,
                 inference_output_preprocessing_config,
+                train_input_preprocessing_config,
+                train_output_preprocessing_config,
                 pytorch_dataset,
                 device,
             )

@@ -17,8 +17,10 @@ from tqdm import tqdm
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
 from neuracore.ml.logging.training_logger import TrainingLogger
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
+from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 logger = logging.getLogger(__name__)
@@ -68,6 +70,12 @@ class DistributedTrainer:
         log_freq: int = 50,
         histogram_log_freq: int = 0,
         timing_sample_interval: int = 25,
+        train_device_preprocessing: (
+            tuple[PreprocessingConfiguration, PreprocessingConfiguration] | None
+        ) = None,
+        inference_device_preprocessing: (
+            tuple[PreprocessingConfiguration, PreprocessingConfiguration] | None
+        ) = None,
         save_freq: int = 1,
         save_checkpoints: bool = True,
         keep_last_n_checkpoints: int = 5,
@@ -94,6 +102,11 @@ class DistributedTrainer:
             timing_sample_interval: Collect a device-synchronised timing
                 breakdown every N iterations, reported at the end of each
                 epoch. 0 reports only total iteration times.
+            train_device_preprocessing: ``(input, output)`` device-stage
+                preprocessing applied to training batches after they reach the
+                device. The dataset applies the worker stage; this is the rest.
+            inference_device_preprocessing: The same, for validation batches,
+                which use the inference pipeline rather than the training one.
             save_freq: Frequency to save checkpoints (in epochs)
             save_checkpoints: Whether to save checkpoints
             keep_last_n_checkpoints: Number of checkpoints to keep
@@ -127,6 +140,9 @@ class DistributedTrainer:
         self.log_freq = log_freq
         self.histogram_log_freq = histogram_log_freq
         self.timing_sample_interval = timing_sample_interval
+        empty = (PreprocessingConfiguration(), PreprocessingConfiguration())
+        self.train_device_preprocessing = train_device_preprocessing or empty
+        self.inference_device_preprocessing = inference_device_preprocessing or empty
         self.save_freq = save_freq
         self.save_checkpoints = save_checkpoints
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
@@ -202,6 +218,7 @@ class DistributedTrainer:
 
             # Move tensors to device and format batch
             batch = batch.to(self.device, non_blocking=self._transfer_non_blocking)
+            apply_device_preprocessing(batch, *self.train_device_preprocessing)
             timings.mark("to_device")
 
             # Forward pass
@@ -309,6 +326,7 @@ class DistributedTrainer:
         for batch_idx, batch in enumerate(pbar):
             timings.mark("data_wait")
             batch = batch.to(self.device, non_blocking=self._transfer_non_blocking)
+            apply_device_preprocessing(batch, *self.inference_device_preprocessing)
             timings.mark("to_device")
 
             # Forward pass

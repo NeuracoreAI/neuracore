@@ -49,7 +49,11 @@ dependencies = [
     "fastapi==0.135.2",
     "psutil",
     "typer>=0.20.0",
-    "neuracore_types>=11.0.0,<12.0.0",
+    # TEMPORARY: pinned to the perf/uint8-rgb-frames branch, which carries RGB
+    # frames as uint8 up to the device. Revert to the released constraint
+    # ("neuracore_types>=11.0.0,<12.0.0") once that branch is merged and cut --
+    # a direct URL dependency cannot be published to PyPI.
+    "neuracore_types @ git+https://github.com/NeuracoreAI/neuracore_types.git@perf/uint8-rgb-frames",
     "ordered_set",
     "aiohttp>=3.12.0",
     "pyee==13.0.0",

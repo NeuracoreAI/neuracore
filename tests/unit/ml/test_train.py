@@ -405,6 +405,10 @@ class RunTrainingTestSetup:
         inference_input, inference_output = resolve_input_output_preprocessing(
             cfg.inference_preprocessing, role_name="inference_preprocessing"
         )
+        train_input, train_output = resolve_input_output_preprocessing(
+            cfg.get("train_preprocessing", cfg.inference_preprocessing),
+            role_name="train_preprocessing",
+        )
         return run_training(
             self.rank,
             self.world_size,
@@ -414,6 +418,8 @@ class RunTrainingTestSetup:
             cfg.output_cross_embodiment_description,
             inference_input,
             inference_output,
+            train_input,
+            train_output,
             dataset,
         )
 

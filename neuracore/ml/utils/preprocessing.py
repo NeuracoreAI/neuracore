@@ -10,6 +10,8 @@ from omegaconf import DictConfig, OmegaConf
 if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
+    from neuracore.ml.core.ml_types import BatchedTrainingSamples
+
 from neuracore.ml.preprocessing.base import (
     PreprocessingConfiguration,
     PreprocessingMethod,
@@ -119,3 +121,32 @@ def apply_preprocessing_methods(
     for method in methods:
         batched_data = method(batched_data)
     return batched_data
+
+
+def apply_device_preprocessing(
+    batch: BatchedTrainingSamples,
+    input_config: PreprocessingConfiguration,
+    output_config: PreprocessingConfiguration,
+) -> None:
+    """Apply device-stage preprocessing to a batch already on the device.
+
+    Mutates ``batch`` in place: the methods transform each item and return it,
+    and the batch's lists are rebuilt entry by entry.
+
+    Args:
+        batch: Batch whose tensors are already on the target device.
+        input_config: Device-stage methods for input slots.
+        output_config: Device-stage methods for output slots.
+    """
+    for role_data, role_config in (
+        (batch.inputs, input_config),
+        (batch.outputs, output_config),
+    ):
+        for data_type, methods in role_config.items():
+            items = role_data.get(data_type)
+            if not items:
+                continue
+            role_data[data_type] = [
+                apply_preprocessing_methods(batched_data=item, methods=methods)
+                for item in items
+            ]

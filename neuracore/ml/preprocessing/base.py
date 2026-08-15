@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from enum import Enum
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from neuracore_types import DataType
 
@@ -12,8 +13,31 @@ if TYPE_CHECKING:
     from neuracore_types import BatchedNCData
 
 
+class PreprocessingStage(Enum):
+    """Where in the pipeline a preprocessing method runs.
+
+    This is a placement decision, not a change to what the pipeline does: a
+    configuration serialises and replays identically regardless of the stages
+    its methods declare.
+    """
+
+    # In the dataset, per sample, inside the DataLoader worker. Required for
+    # anything that has to happen before collation -- notably resizing, since
+    # recordings differ in resolution and cannot be stacked until they match.
+    WORKER = "worker"
+
+    # In the trainer, per batch, after the batch reaches the device. Much
+    # cheaper for elementwise work: it runs batched on the GPU instead of
+    # per frame on a contended worker CPU.
+    DEVICE = "device"
+
+
 class PreprocessingMethod(ABC):
     """Base interface for preprocessing implementations."""
+
+    # Conservative default: running in the worker is always correct, just
+    # potentially slow. Methods opt in to DEVICE.
+    stage: ClassVar[PreprocessingStage] = PreprocessingStage.WORKER
 
     @staticmethod
     @abstractmethod
@@ -51,6 +75,28 @@ class PreprocessingMethod(ABC):
 
 class PreprocessingConfiguration(dict[DataType, list[PreprocessingMethod]]):
     """Runtime preprocessing pipeline keyed by data type."""
+
+    def for_stage(self, stage: PreprocessingStage) -> PreprocessingConfiguration:
+        """Return the subset of this pipeline that runs at ``stage``.
+
+        Order within each data type is preserved. Splitting by stage only
+        reorders work across the device boundary when methods of different
+        stages are interleaved, so a pipeline that depends on strict ordering
+        should keep its methods in one stage.
+
+        Args:
+            stage: The stage to select.
+
+        Returns:
+            A configuration containing only that stage's methods, omitting data
+            types left with nothing to do.
+        """
+        selected = PreprocessingConfiguration()
+        for data_type, methods in self.items():
+            staged = [method for method in methods if method.stage is stage]
+            if staged:
+                selected[data_type] = staged
+        return selected
 
     def __str__(self) -> str:
         """Return a human-readable representation of the preprocessing pipeline."""
