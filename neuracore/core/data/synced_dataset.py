@@ -52,6 +52,7 @@ class SynchronizedDataset:
         max_delay_s: float = sys.float_info.max,
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
+        trim_no_movement_at_start_threshold: float | None = None,
         synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
     ):
         """Initialize a dataset from server response data.
@@ -68,6 +69,9 @@ class SynchronizedDataset:
                 duplicate points.
             trim_start_end: Whether the dataset was synchronized with its start
                 and end trimmed.
+            trim_no_movement_at_start_threshold: The joint movement threshold
+                the dataset was synchronized with, below which leading frames
+                were dropped, or None if no such trimming was applied.
             synced_recording_cache: Already-fetched synced recordings keyed by
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
@@ -82,6 +86,7 @@ class SynchronizedDataset:
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
+            trim_no_movement_at_start_threshold=(trim_no_movement_at_start_threshold),
         )
         self._prefetch_videos = prefetch_videos
         self._max_prefetch_workers = max_prefetch_workers
@@ -198,6 +203,9 @@ class SynchronizedDataset:
                 max_delay_s=self.synchronization_details.max_delay_s,
                 allow_duplicates=self.synchronization_details.allow_duplicates,
                 trim_start_end=self.synchronization_details.trim_start_end,
+                trim_no_movement_at_start_threshold=(
+                    self.synchronization_details.trim_no_movement_at_start_threshold
+                ),
                 synced_recording_cache=sliced_cache,
             )
         else:
