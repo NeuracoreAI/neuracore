@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import time
 from typing import cast
 
 import numpy as np
@@ -40,6 +41,125 @@ logger = logging.getLogger(__name__)
 TrainingSample = BatchedTrainingSamples
 CHECK_MEMORY_INTERVAL = 100
 
+# How many timed samples go into one summary line. With the default sampling
+# interval this is a handful of lines per worker per epoch.
+TIMING_SAMPLES_PER_SUMMARY = 20
+
+
+class _SampleTimings:
+    """Accumulates a breakdown of where ``load_sample`` spends its time.
+
+    ``load_sample`` runs inside DataLoader worker processes, so there is no
+    cheap way to ship measurements back to the trainer. Each worker instead
+    logs its own summary, tagged with its worker id, and the lines interleave
+    in the training log.
+
+    Only every ``interval``-th call is timed, so the cost on the common path is
+    a counter increment.
+    """
+
+    SECTIONS = (
+        "recording_lookup",
+        "input_load",
+        "output_load",
+        "input_build",
+        "input_preprocess",
+        "output_build",
+        "output_preprocess",
+    )
+
+    def __init__(self, interval: int, label: str) -> None:
+        """Initialize the accumulator.
+
+        Args:
+            interval: Time every Nth sample. 0 disables timing entirely.
+            label: Tag distinguishing e.g. the train split from the val split,
+                which run different preprocessing pipelines.
+        """
+        self.interval = interval
+        self.label = label
+        self._calls = 0
+        self._timing = False
+        self._section_start = 0.0
+        self._current: dict[str, float] = {}
+        self._totals: dict[str, float] = {}
+        self._worst: dict[str, float] = {}
+        self._timed_samples = 0
+        self._sample_start = 0.0
+        self._sample_total = 0.0
+        self._sample_worst = 0.0
+
+    def begin_sample(self) -> None:
+        """Decide whether to time this call, and start the clock if so."""
+        self._timing = self.interval > 0 and self._calls % self.interval == 0
+        self._calls += 1
+        if self._timing:
+            self._current.clear()
+            self._sample_start = time.perf_counter()
+            self._section_start = self._sample_start
+
+    def mark(self, section: str) -> None:
+        """Attribute time since the previous mark to ``section``.
+
+        Sections inside the per-slot loops are marked several times per sample,
+        so time lands in a per-sample bucket first and is only folded into the
+        running totals at ``end_sample``. Otherwise the reported worst case
+        would be the worst single slot rather than the worst whole sample, and
+        could come out below the mean.
+        """
+        if not self._timing:
+            return
+        now = time.perf_counter()
+        self._current[section] = (
+            self._current.get(section, 0.0) + now - self._section_start
+        )
+        self._section_start = now
+
+    def end_sample(self) -> None:
+        """Close out a timed sample and log a summary once enough have run."""
+        if not self._timing:
+            return
+        total = time.perf_counter() - self._sample_start
+        for section, elapsed in self._current.items():
+            self._totals[section] = self._totals.get(section, 0.0) + elapsed
+            self._worst[section] = max(self._worst.get(section, 0.0), elapsed)
+        self._sample_total += total
+        self._sample_worst = max(self._sample_worst, total)
+        self._timed_samples += 1
+        self._timing = False
+        if self._timed_samples >= TIMING_SAMPLES_PER_SUMMARY:
+            self._log_summary()
+
+    def _log_summary(self) -> None:
+        from torch.utils.data import get_worker_info
+
+        worker_info = get_worker_info()
+        worker = "main" if worker_info is None else f"w{worker_info.id}"
+        mean_total = self._sample_total / self._timed_samples
+
+        lines = [
+            f"[timing:dataset:{self.label}:{worker}] "
+            f"mean {mean_total * 1000:.2f} ms/sample over {self._timed_samples} "
+            f"timed samples (1 in {self.interval}), "
+            f"slowest {self._sample_worst * 1000:.2f} ms"
+        ]
+        for section in self.SECTIONS:
+            if section not in self._totals:
+                continue
+            mean_s = self._totals[section] / self._timed_samples
+            share = mean_s / mean_total * 100 if mean_total else 0.0
+            lines.append(
+                f"    {section:<20}{mean_s * 1000:9.3f} ms   ({share:4.1f}%)"
+                f"   worst {self._worst[section] * 1000:9.3f} ms"
+            )
+        logger.info("\n".join(lines))
+
+        self._totals.clear()
+        self._worst.clear()
+        self._timed_samples = 0
+        self._sample_total = 0.0
+        self._sample_worst = 0.0
+
 
 def _cacheable_cross_embodiment_description(
     description: object,
@@ -63,6 +183,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_preprocessing_config: PreprocessingConfiguration,
         output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
+        timing_sample_interval: int = 0,
     ):
         """Initialize the dataset.
 
@@ -77,6 +198,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_preprocessing_config: Preprocessing configuration applied
                 to output slots.
             output_prediction_horizon: Number of future timesteps to predict.
+            timing_sample_interval: Time every Nth ``load_sample`` call and log
+                a breakdown periodically from each worker. 0 disables it.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -182,6 +305,12 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         self.input_preprocessing_config = input_preprocessing_config
         self.output_preprocessing_config = output_preprocessing_config
+
+        # Built lazily, and per process: workers are forked after this point,
+        # so each one accumulates and reports its own timings.
+        self._timing_sample_interval = timing_sample_interval
+        self._timing_label = "train"
+        self._sample_timings: _SampleTimings | None = None
 
         # Everything below is a pure function of the cross-embodiment
         # descriptions, which never change after construction. Computing it
@@ -486,6 +615,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             nc.login()
             self._logged_in = True
 
+        if self._sample_timings is None:
+            self._sample_timings = _SampleTimings(
+                self._timing_sample_interval, self._timing_label
+            )
+        timings = self._sample_timings
+        timings.begin_sample()
+
         if self._mem_check_counter % CHECK_MEMORY_INTERVAL == 0:
             self._memory_monitor.check_memory()
             self._mem_check_counter = 0
@@ -499,11 +635,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
+        timings.mark("recording_lookup")
 
         input_sync_point = self._project_sync_point(
             cast(SynchronizedPoint, synced_recording[timestep]),
             self._merged_ordered_items[robot_id],
         )
+        timings.mark("input_load")
 
         output_sync_points = self._load_projected_output_sync_points(
             synced_recording=synced_recording,
@@ -512,6 +650,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             projected_input_sync_point=input_sync_point,
         )
         recording_name = getattr(synced_recording, "name", "recording")
+        timings.mark("output_load")
 
         # Sort out Inputs
         inputs: dict[DataType, list[BatchedNCData]] = {}
@@ -539,12 +678,14 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     nc_data = input_sync_point.data[data_type][name]
                     batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
                     input_mask_values[index] = 1.0
+                timings.mark("input_build")
 
                 batched_nc_data = apply_preprocessing_methods(
                     batched_data=batched_nc_data,
                     methods=self.input_preprocessing_config.get(data_type, []),
                 )
                 inputs[data_type].append(batched_nc_data)
+                timings.mark("input_preprocess")
 
             # Create mask for inputs
             inputs_mask[data_type] = torch.tensor(
@@ -588,18 +729,21 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                         nc_data_list
                     )
                     output_mask_values[index] = 1.0
+                timings.mark("output_build")
 
                 batched_nc_data = apply_preprocessing_methods(
                     batched_data=batched_nc_data,
                     methods=self.output_preprocessing_config.get(data_type, []),
                 )
                 outputs[data_type].append(batched_nc_data)
+                timings.mark("output_preprocess")
 
             # Create mask for outputs.
             outputs_mask[data_type] = torch.tensor(
                 output_mask_values, dtype=torch.float32
             )
 
+        timings.end_sample()
         return TrainingSample(
             inputs=inputs,
             inputs_mask=inputs_mask,

@@ -42,6 +42,10 @@ histogram_logging_frequency: 0
 # device barrier to be meaningful, so it is sampled every N iterations rather
 # than measured on all of them. 0 reports total iteration times only.
 timing_sample_interval: 25
+# Time every Nth load_sample() call inside the DataLoader workers and log a
+# breakdown of the per-sample cost (frame loading / tensor construction /
+# preprocessing). Each worker reports separately. 0 disables it.
+dataset_timing_sample_interval: 50
 keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
 

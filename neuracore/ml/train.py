@@ -849,6 +849,7 @@ def _main(cfg: DictConfig) -> None:
             output_prediction_horizon=cfg.output_prediction_horizon,
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
+            timing_sample_interval=cfg.get("dataset_timing_sample_interval", 50),
         )
 
         # Handle batch size configuration. Probing costs several subprocess

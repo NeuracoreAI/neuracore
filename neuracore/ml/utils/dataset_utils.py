@@ -54,6 +54,11 @@ def split_train_val_datasets(
     val_base = copy(dataset)
     val_base.input_preprocessing_config = inference_input_preprocessing_config
     val_base.output_preprocessing_config = inference_output_preprocessing_config
+    # The shallow copy would otherwise share the train split's timing
+    # accumulator, merging two different preprocessing pipelines into one
+    # summary. Clearing it makes val build its own on first use.
+    val_base._timing_label = "val"
+    val_base._sample_timings = None
     val_dataset = Subset(val_base, val_dataset.indices)
 
     return train_dataset, val_dataset
