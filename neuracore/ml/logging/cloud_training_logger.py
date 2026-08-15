@@ -44,6 +44,11 @@ class CloudTrainingLogger(TrainingLogger):
 
         logger.info("Cloud logger initialized.")
 
+    @property
+    def supports_histograms(self) -> bool:
+        """Histograms are not supported by the cloud metrics endpoint."""
+        return False
+
     def log_scalar(self, name: str, value: float, step: int) -> None:
         """Log a scalar metric.
 

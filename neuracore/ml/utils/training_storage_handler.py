@@ -37,6 +37,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         output_preprocessing_config: PreprocessingConfiguration = (
             PreprocessingConfiguration()
         ),
+        verify_job_exists: bool = True,
     ) -> None:
         """Initialize the storage handler.
 
@@ -52,6 +53,10 @@ class TrainingStorageHandler(UploadStorageMixin):
                 data.
             output_preprocessing_config: preprocessing configuration for the output
                 data.
+            verify_job_exists: Whether to confirm the training job is reachable
+                on construction. Costs one blocking request, so distributed
+                ranks other than rank 0 skip it — rank 0 has already verified
+                the same job, and only rank 0 writes to it.
         """
         self.local_dir = Path(local_dir or "./output")
         self.training_job_id = training_job_id
@@ -62,7 +67,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         self.output_preprocessing_config = output_preprocessing_config
         self.log_to_cloud = self.training_job_id is not None
         self.org_id = get_current_org()
-        if self.log_to_cloud:
+        if self.log_to_cloud and verify_job_exists:
             response = self._get_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}"
             )
@@ -80,6 +85,18 @@ class TrainingStorageHandler(UploadStorageMixin):
         self._upload_executor: ThreadPoolExecutor | None = None
         self._pending_uploads_lock = threading.Lock()
         self._pending_uploads: dict[Path, Future] = {}
+
+        # Progress updates are fire-and-forget from the training loop's point
+        # of view. They get their own worker rather than sharing the upload
+        # one, so a multi-gigabyte checkpoint upload can't leave reported
+        # progress stalled behind it. At most one PUT is in flight; while one
+        # is running, newer progress overwrites the queued payload, so a slow
+        # endpoint costs staleness rather than a backlog of stale PUTs.
+        self._progress_executor: ThreadPoolExecutor | None = None
+        self._progress_lock = threading.Lock()
+        self._pending_progress: tuple[int, int] | None = None
+        self._progress_future: Future | None = None
+        self._progress_worker_running = False
 
     def _get_upload_url(self, filepath: str, content_type: str) -> str:
         """Get a signed upload URL for a file in cloud storage.
@@ -373,21 +390,81 @@ class TrainingStorageHandler(UploadStorageMixin):
                 )
 
     def update_training_progress(self, epoch: int, step: int) -> None:
-        """Update training epoch/step progress in cloud storage.
+        """Queue a training epoch/step progress update for cloud storage.
+
+        This is called from inside the training loop, so the HTTP PUT runs on
+        a background worker rather than blocking the step. Updates coalesce:
+        if a PUT is already in flight, this replaces the payload that will be
+        sent next instead of queueing another request.
 
         Args:
             epoch: Current training epoch.
             step: Current training step.
         """
-        if self.log_to_cloud:
+        if not self.log_to_cloud:
+            return
+
+        with self._progress_lock:
+            self._pending_progress = (epoch, step)
+            if self._progress_worker_running:
+                # A worker is already draining; it will observe the payload we
+                # just stored. The flag is cleared under this same lock, so a
+                # worker that has decided to exit cannot still be marked
+                # running here.
+                return
+            if self._progress_executor is None:
+                self._progress_executor = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="nc-training-progress"
+                )
+            self._progress_worker_running = True
+            self._progress_future = self._progress_executor.submit(
+                self._drain_progress_updates
+            )
+
+    def _drain_progress_updates(self) -> None:
+        """Send queued progress updates until none remain."""
+        while True:
+            with self._progress_lock:
+                pending = self._pending_progress
+                self._pending_progress = None
+                if pending is None:
+                    # Clear the flag in the same critical section that observes
+                    # the empty queue, so a concurrent enqueue either lands
+                    # before this and is drained, or sees the flag cleared and
+                    # starts a fresh worker.
+                    self._progress_worker_running = False
+                    return
+            epoch, step = pending
+            self._send_training_progress(epoch, step)
+
+    def _send_training_progress(self, epoch: int, step: int) -> None:
+        """Send a single progress update, logging rather than raising on failure."""
+        try:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
                 json={"epoch": epoch, "step": step, "error": None},
             )
-            if response.status_code != 200:
-                logger.error(
-                    f"Failed to update training progress to cloud: {response.text}"
-                )
+        except Exception:
+            logger.error("Failed to update training progress to cloud.", exc_info=True)
+            return
+        if response.status_code != 200:
+            logger.error(
+                f"Failed to update training progress to cloud: {response.text}"
+            )
+
+    def wait_for_pending_progress_updates(self) -> None:
+        """Block until any queued progress update has been sent.
+
+        Called before the process exits so the final epoch/step reaches the
+        backend rather than dying with the worker thread.
+        """
+        with self._progress_lock:
+            future = self._progress_future
+        if future is not None:
+            try:
+                future.result()
+            except Exception:
+                logger.error("Progress update worker failed.", exc_info=True)
 
     def report_training_error(self, error: str) -> None:
         """Report a training failure to cloud storage.

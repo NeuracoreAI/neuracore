@@ -395,7 +395,10 @@ def test_probe_batch_size_returns_false_on_torch_cuda_oom():
 
     with (
         patch("neuracore.ml.trainers.batch_autotuner.MemoryMonitor"),
-        patch("neuracore.ml.trainers.batch_autotuner.DataLoader"),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.DataLoader",
+            return_value=[MagicMock()],
+        ),
         patch("neuracore.ml.trainers.batch_autotuner._train_probe") as mock_train_probe,
         patch("torch.cuda.reset_peak_memory_stats"),
         patch("torch.cuda.max_memory_allocated", return_value=0),
@@ -422,7 +425,10 @@ def test_probe_batch_size_raises_on_non_oom_runtime_error():
 
     with (
         patch("neuracore.ml.trainers.batch_autotuner.MemoryMonitor"),
-        patch("neuracore.ml.trainers.batch_autotuner.DataLoader"),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.DataLoader",
+            return_value=[MagicMock()],
+        ),
         patch("neuracore.ml.trainers.batch_autotuner._train_probe") as mock_train_probe,
         patch("torch.cuda.reset_peak_memory_stats"),
         patch("torch.cuda.is_available", return_value=False),
@@ -446,7 +452,10 @@ def test_probe_batch_size_raises_on_generic_exception():
 
     with (
         patch("neuracore.ml.trainers.batch_autotuner.MemoryMonitor"),
-        patch("neuracore.ml.trainers.batch_autotuner.DataLoader"),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.DataLoader",
+            return_value=[MagicMock()],
+        ),
         patch("neuracore.ml.trainers.batch_autotuner._train_probe") as mock_train_probe,
         patch("torch.cuda.reset_peak_memory_stats"),
         patch("torch.cuda.is_available", return_value=False),
@@ -471,7 +480,10 @@ def test_probe_batch_size_gives_actionable_error_on_batchnorm_single_sample():
 
     with (
         patch("neuracore.ml.trainers.batch_autotuner.MemoryMonitor"),
-        patch("neuracore.ml.trainers.batch_autotuner.DataLoader"),
+        patch(
+            "neuracore.ml.trainers.batch_autotuner.DataLoader",
+            return_value=[MagicMock()],
+        ),
         patch("neuracore.ml.trainers.batch_autotuner._train_probe") as mock_train_probe,
         patch("torch.cuda.reset_peak_memory_stats"),
         patch("torch.cuda.is_available", return_value=False),

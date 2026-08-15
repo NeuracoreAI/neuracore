@@ -551,6 +551,7 @@ class TestUpdateTrainingProgress:
         requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
 
         handler.update_training_progress(epoch=3, step=150)
+        handler.wait_for_pending_progress_updates()
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert len(put_requests) == 1
@@ -562,14 +563,47 @@ class TestUpdateTrainingProgress:
         matcher = requests_mock.put(f"{BASE_JOB_URL}/update", status_code=401)
 
         handler.update_training_progress(epoch=3, step=150)
+        handler.wait_for_pending_progress_updates()
 
         assert matcher.call_count == 1
         assert not login.called
 
     def test_makes_no_http_request_without_job_id(self, local_handler, requests_mock):
         local_handler.update_training_progress(epoch=1, step=1)
+        local_handler.wait_for_pending_progress_updates()
 
         assert len(requests_mock.request_history) == 0
+
+    def test_coalesces_updates_queued_while_one_is_in_flight(
+        self, handler, requests_mock
+    ):
+        """A backlog of stale progress must not build up behind a slow endpoint.
+
+        The first PUT is held until further updates have been queued, so the
+        worker is guaranteed to still be busy when they arrive. Only the newest
+        of those should be sent afterwards.
+        """
+        first_put_started = threading.Event()
+        release_first_put = threading.Event()
+
+        def _blocking_response(request, context):
+            if not first_put_started.is_set():
+                first_put_started.set()
+                release_first_put.wait(timeout=5)
+            context.status_code = 200
+            return ""
+
+        requests_mock.put(f"{BASE_JOB_URL}/update", text=_blocking_response)
+
+        handler.update_training_progress(epoch=1, step=10)
+        assert first_put_started.wait(timeout=5)
+        handler.update_training_progress(epoch=1, step=20)
+        handler.update_training_progress(epoch=1, step=30)
+        release_first_put.set()
+        handler.wait_for_pending_progress_updates()
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert [r.json()["step"] for r in put_requests] == [10, 30]
 
 
 class TestReportTrainingError:

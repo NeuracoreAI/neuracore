@@ -32,6 +32,16 @@ allow_duplicates: true
 resume_checkpoint_path: null  # Path to checkpoint to resume from
 
 logging_frequency: 50
+# Frequency (in steps) for weight/gradient histograms. A histogram of every
+# parameter and every gradient is orders of magnitude more expensive than the
+# scalars logged at logging_frequency, so it is off by default. Only supported
+# by the local TensorBoard logger.
+histogram_logging_frequency: 0
+# Every epoch ends with a timing summary. The per-section breakdown (dataloader
+# wait / host-to-device / forward / backward / optimizer / logging) needs a
+# device barrier to be meaningful, so it is sampled every N iterations rather
+# than measured on all of them. 0 reports total iteration times only.
+timing_sample_interval: 25
 keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
@@ -47,12 +57,22 @@ output_cross_embodiment_description: {
 
 # Batch size (can be "auto" for automatic tuning or an integer)
 batch_size: "auto"
+# Autotune results are cached on disk against the model, its input shapes, and
+# the GPU. Set to true to re-probe instead of reusing a cached result.
+force_batch_size_autotune: false
+# Whether an explicitly specified batch size is probed for a GPU memory fit.
+# Skipped automatically when a cached autotune result already covers it.
+validate_batch_size: true
 
-num_train_workers: 2
-num_val_workers: 1
+num_train_workers: 8
+num_val_workers: 4
+# Batches each worker loads ahead of the training loop.
+prefetch_factor: 4
 
-# Maximum number of workers to use for prefetching recordings
-max_prefetch_workers: 4
+# Maximum number of workers to use for prefetching recordings. The prefetch is
+# wget + ffmpeg subprocesses, so it is IO-bound rather than CPU-bound and
+# benefits from more workers than there are cores.
+max_prefetch_workers: 16
 
 max_delay_s: null
 trim_start_end: true

@@ -5,10 +5,27 @@ with support for masking, device placement, and multi-modal inputs including
 joint states, images, point clouds, poses, end-effectors, and language tokens.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from neuracore_types import BatchedNCData, DataType
+
+
+def _map_tensors(
+    batched_nc_data: BatchedNCData,
+    transform: Callable[[torch.Tensor], torch.Tensor],
+) -> BatchedNCData:
+    """Rebuild ``batched_nc_data`` with ``transform`` applied to its tensors.
+
+    ``model_construct`` skips validation: the fields already came out of a
+    validated instance, and only the tensors change. This runs once per sensor
+    per data type per batch, so the difference matters.
+    """
+    return batched_nc_data.__class__.model_construct(**{
+        name: transform(value) if isinstance(value, torch.Tensor) else value
+        for name, value in batched_nc_data.__dict__.items()
+    })
 
 
 @dataclass
@@ -25,32 +42,52 @@ class BatchedTrainingSamples:
     outputs_mask: dict[DataType, torch.Tensor]  # Dict[DataType, (B, MAX_LEN)]
     batch_size: int
 
-    def to(self, device: torch.device) -> "BatchedTrainingSamples":
+    def _map(
+        self, transform: Callable[[torch.Tensor], torch.Tensor]
+    ) -> "BatchedTrainingSamples":
+        """Return a new instance with ``transform`` applied to every tensor."""
+        return BatchedTrainingSamples(
+            inputs={
+                key: [_map_tensors(item, transform) for item in value]
+                for key, value in self.inputs.items()
+            },
+            inputs_mask={
+                key: transform(value) for key, value in self.inputs_mask.items()
+            },
+            outputs={
+                key: [_map_tensors(item, transform) for item in value]
+                for key, value in self.outputs.items()
+            },
+            outputs_mask={
+                key: transform(value) for key, value in self.outputs_mask.items()
+            },
+            batch_size=self.batch_size,
+        )
+
+    def to(
+        self, device: torch.device, non_blocking: bool = False
+    ) -> "BatchedTrainingSamples":
         """Move all tensors to the specified device.
 
         Args:
             device: Target device for tensor placement
+            non_blocking: Issue asynchronous copies. Only has an effect when
+                the source tensors are in pinned memory (see ``pin_memory``).
 
         Returns:
             BatchedTrainingSamples: New instance with tensors moved to device
         """
-        return BatchedTrainingSamples(
-            inputs={
-                key: [item.to(device) for item in value]
-                for key, value in self.inputs.items()
-            },
-            inputs_mask={
-                key: value.to(device) for key, value in self.inputs_mask.items()
-            },
-            outputs={
-                key: [item.to(device) for item in value]
-                for key, value in self.outputs.items()
-            },
-            outputs_mask={
-                key: value.to(device) for key, value in self.outputs_mask.items()
-            },
-            batch_size=self.batch_size,
-        )
+        return self._map(lambda t: t.to(device, non_blocking=non_blocking))
+
+    def pin_memory(self) -> "BatchedTrainingSamples":
+        """Move all tensors into pinned host memory.
+
+        ``DataLoader(pin_memory=True)`` dispatches to this method. Without it
+        this class is an unrecognised type to torch's pin_memory helper and is
+        passed through untouched, which in turn makes ``non_blocking=True``
+        transfers silently synchronous.
+        """
+        return self._map(lambda t: t.pin_memory())
 
     def __len__(self) -> int:
         """Get the batch size from the input data.
@@ -85,21 +122,43 @@ class BatchedInferenceInputs:
     inputs_mask: dict[DataType, torch.Tensor]  # Dict[DataType, (B, MAX_LEN)]
     batch_size: int
 
-    def to(self, device: torch.device) -> "BatchedInferenceInputs":
+    def to(
+        self, device: torch.device, non_blocking: bool = False
+    ) -> "BatchedInferenceInputs":
         """Move all tensors to the specified device.
 
         Args:
             device: Target device for tensor placement
+            non_blocking: Issue asynchronous copies. Only has an effect when
+                the source tensors are in pinned memory (see ``pin_memory``).
 
         Returns:
             The same BatchedInferenceSamples instance with tensors moved to device
         """
         self.inputs = {
-            key: [item.to(device) for item in value]
+            key: [
+                _map_tensors(item, lambda t: t.to(device, non_blocking=non_blocking))
+                for item in value
+            ]
             for key, value in self.inputs.items()
         }
         self.inputs_mask = {
-            key: value.to(device) for key, value in self.inputs_mask.items()
+            key: value.to(device, non_blocking=non_blocking)
+            for key, value in self.inputs_mask.items()
+        }
+        return self
+
+    def pin_memory(self) -> "BatchedInferenceInputs":
+        """Move all tensors into pinned host memory.
+
+        ``DataLoader(pin_memory=True)`` dispatches to this method.
+        """
+        self.inputs = {
+            key: [_map_tensors(item, lambda t: t.pin_memory()) for item in value]
+            for key, value in self.inputs.items()
+        }
+        self.inputs_mask = {
+            key: value.pin_memory() for key, value in self.inputs_mask.items()
         }
         return self
 

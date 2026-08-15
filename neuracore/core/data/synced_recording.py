@@ -519,12 +519,19 @@ class SynchronizedRecording:
                 self._delete_decoding_lock(lock_file)
 
     def _load_sync_point_payloads(
-        self, sync_point: SynchronizedPoint
+        self,
+        sync_point: SynchronizedPoint,
+        data_types: frozenset[DataType] | None = None,
     ) -> SynchronizedPoint:
         """Load lazy sensor payloads from disk cache for a sync point.
 
         Args:
             sync_point: Sync point with metadata-only camera and point cloud entries.
+            data_types: If given, only these data types are materialised and the
+                rest are dropped. Loading a camera entry means opening a decoded
+                frame off disk (and, for depth, a full PNG decode plus a 24-bit
+                unpack), so callers that only need a subset should say so rather
+                than pay for frames they will discard.
 
         Returns:
             Sync point with camera frames and point cloud arrays populated.
@@ -532,6 +539,8 @@ class SynchronizedRecording:
         # Build new data dict with loaded frames
         new_data = {}
         for data_type, data_dict in sync_point.data.items():
+            if data_types is not None and data_type not in data_types:
+                continue
             if data_type == DataType.RGB_IMAGES:
                 new_data[data_type] = self._get_frame_from_disk_cache(
                     DataType.RGB_IMAGES, data_dict
@@ -548,24 +557,55 @@ class SynchronizedRecording:
                     name: nc_data.model_copy() for name, nc_data in data_dict.items()
                 }
 
-        return SynchronizedPoint(
+        # model_construct skips validation: every value here came out of an
+        # already-validated sync point, and re-validating a smart union over
+        # every NCData subtype for each of them is not free at per-sample rates.
+        return SynchronizedPoint.model_construct(
             timestamp=sync_point.timestamp,
             robot_id=sync_point.robot_id,
             data=new_data,
         )
 
-    def _get_sync_point(self, idx: int) -> SynchronizedPoint:
+    def _get_sync_point(
+        self, idx: int, data_types: frozenset[DataType] | None = None
+    ) -> SynchronizedPoint:
         """Get synchronized data point at a specific index.
 
         Args:
             idx: Index of the sync point to retrieve.
+            data_types: Optional subset of data types to materialise. See
+                ``_load_sync_point_payloads``.
 
         Returns:
             SynchronizedPoint object containing synchronized data
                 for the specified index.
         """
         sync_point = self._episode_synced.observations[idx]
-        return self._load_sync_point_payloads(sync_point)
+        return self._load_sync_point_payloads(sync_point, data_types)
+
+    def get_range(
+        self,
+        start: int,
+        stop: int,
+        data_types: frozenset[DataType] | None = None,
+    ) -> list[SynchronizedPoint]:
+        """Get sync points in ``[start, stop)``, optionally limited to some data types.
+
+        Slice syntax cannot carry the ``data_types`` filter, so callers that
+        want to avoid decoding camera frames across a long window use this
+        instead of ``recording[start:stop]``.
+
+        Args:
+            start: First index to load, clamped to the episode bounds.
+            stop: One past the last index to load, clamped to the episode bounds.
+            data_types: Optional subset of data types to materialise.
+
+        Returns:
+            The requested sync points, in order.
+        """
+        start = max(0, min(start, len(self)))
+        stop = max(start, min(stop, len(self)))
+        return [self._get_sync_point(i, data_types) for i in range(start, stop)]
 
     def __iter__(self) -> "SynchronizedRecording":
         """Initialize iteration over the episode.

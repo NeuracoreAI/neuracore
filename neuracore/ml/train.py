@@ -1,6 +1,5 @@
 """Hydra-based training script for Neuracore models."""
 
-import copy
 import gc
 import json
 import logging
@@ -49,6 +48,11 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
+from neuracore.ml.utils.batch_size_cache import (
+    batch_size_cache_key,
+    load_cached_batch_size,
+    store_cached_batch_size,
+)
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
@@ -64,8 +68,6 @@ os.environ["PJRT_DEVICE"] = "GPU"
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
 
 
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
@@ -263,10 +265,9 @@ def assert_valid_batch_size(
 
     logger.info(f"Validating batch size {batch_size} on {device}...")
 
-    # Avoid altering the original dataset
-    assert_dataset = copy.deepcopy(dataset)
-
-    dataset_statistics_by_role = assert_dataset.dataset_statistics
+    # No defensive copy: the probe runs in a spawned subprocess, so it operates
+    # on a pickled clone and cannot reach this object.
+    dataset_statistics_by_role = dataset.dataset_statistics
     model_init_description = ModelInitDescription(
         input_dataset_statistics=dataset_statistics_by_role["input"],
         output_dataset_statistics=dataset_statistics_by_role["output"],
@@ -282,7 +283,7 @@ def assert_valid_batch_size(
         valid = is_valid_batch_size(
             cfg=cfg,
             model_factory=model_factory,
-            dataset=assert_dataset,
+            dataset=dataset,
             batch_size=batch_size,
             device=device,
         )
@@ -290,7 +291,6 @@ def assert_valid_batch_size(
         logger.error("Batch size validation failed", exc_info=True)
         raise
     finally:
-        del assert_dataset
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -324,10 +324,9 @@ def determine_optimal_batch_size(
 
     logger.info(f"Starting batch size autotuning on {device}...")
 
-    # Avoid altering the original dataset
-    autotuning_dataset = copy.deepcopy(dataset)
-
-    dataset_statistics_by_role = autotuning_dataset.dataset_statistics
+    # No defensive copy: probes run in spawned subprocesses, so they operate on
+    # pickled clones and cannot reach this object.
+    dataset_statistics_by_role = dataset.dataset_statistics
     model_init_description = ModelInitDescription(
         input_dataset_statistics=dataset_statistics_by_role["input"],
         output_dataset_statistics=dataset_statistics_by_role["output"],
@@ -343,7 +342,7 @@ def determine_optimal_batch_size(
         optimal_batch_size = find_optimal_batch_size(
             cfg=cfg,
             model_factory=model_factory,
-            dataset=autotuning_dataset,
+            dataset=dataset,
             device=device,
         )
     except Exception:
@@ -351,7 +350,6 @@ def determine_optimal_batch_size(
         raise
     finally:
         # Clean up
-        del autotuning_dataset
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
@@ -361,6 +359,103 @@ def determine_optimal_batch_size(
     )
 
     return optimal_batch_size
+
+
+def _resolve_batch_size(
+    cfg: DictConfig,
+    batch_size: Any,
+    dataset: PytorchSynchronizedDataset,
+    input_cross_embodiment_description: CrossEmbodimentDescription,
+    output_cross_embodiment_description: CrossEmbodimentDescription,
+    device: torch.device | None,
+) -> int:
+    """Resolve the per-GPU batch size, reusing a cached probe result if possible.
+
+    ``batch_size`` is either the string ``"auto"`` or an integer. Autotuning it
+    means spawning several probe subprocesses; validating a user-supplied value
+    means spawning one. Both results are cached against the model, its input
+    shapes, and the GPU, so a repeat run of the same configuration skips
+    straight to the answer.
+
+    Args:
+        cfg: Fully resolved Hydra configuration.
+        batch_size: ``"auto"`` or an integer batch size.
+        dataset: Dataset used to build probe batches.
+        input_cross_embodiment_description: Input embodiment mapping.
+        output_cross_embodiment_description: Output embodiment mapping.
+        device: Device training will run on.
+
+    Returns:
+        The batch size to train with.
+    """
+    is_auto = isinstance(batch_size, str) and batch_size.lower() == "auto"
+    probe_device = device if device is not None else get_default_device()
+
+    # The cache only describes GPU memory behaviour, and neither code path
+    # probes anything off-GPU.
+    can_cache = probe_device.type == "cuda" and torch.cuda.is_available()
+    cache_key: str | None = None
+    if can_cache and not cfg.get("force_batch_size_autotune", False):
+        dataset_statistics_by_role = dataset.dataset_statistics
+        cache_key = batch_size_cache_key(
+            algorithm_name=cfg.get("algorithm_name"),
+            algorithm_id=cfg.get("algorithm_id"),
+            algorithm_config=(
+                OmegaConf.to_container(cfg.algorithm_params, resolve=True)
+                if cfg.get("algorithm_params") is not None
+                else {}
+            ),
+            model_init_description=ModelInitDescription(
+                input_dataset_statistics=dataset_statistics_by_role["input"],
+                output_dataset_statistics=dataset_statistics_by_role["output"],
+                input_data_types=extract_data_types(input_cross_embodiment_description),
+                output_data_types=extract_data_types(
+                    output_cross_embodiment_description
+                ),
+                output_prediction_horizon=cfg.output_prediction_horizon,
+            ),
+            device=probe_device,
+        )
+    cached = load_cached_batch_size(cache_key) if cache_key is not None else None
+    if cached is not None:
+        if is_auto:
+            logger.info(f"Using cached autotuned batch size: {cached}")
+            return cached
+        if int(batch_size) <= cached:
+            # The autotuner already found a larger batch size that fits on
+            # this GPU for this model, so this one fits too.
+            logger.info(
+                f"Batch size {int(batch_size)} is within the cached "
+                f"autotuned limit of {cached}; skipping validation."
+            )
+            return int(batch_size)
+
+    if not is_auto:
+        resolved = int(batch_size)
+        if cfg.get("validate_batch_size", True):
+            assert_valid_batch_size(
+                batch_size=resolved,
+                cfg=cfg,
+                dataset=dataset,
+                input_cross_embodiment_description=input_cross_embodiment_description,
+                output_cross_embodiment_description=output_cross_embodiment_description,
+                device=device,
+            )
+        # Deliberately not cached: "this size fits" is a weaker claim than the
+        # autotuned optimum, and writing it here would make a later
+        # batch_size="auto" run return a value the autotuner never chose.
+        return resolved
+
+    resolved = determine_optimal_batch_size(
+        cfg=cfg,
+        dataset=dataset,
+        input_cross_embodiment_description=input_cross_embodiment_description,
+        output_cross_embodiment_description=output_cross_embodiment_description,
+        device=device,
+    )
+    if cache_key is not None:
+        store_cached_batch_size(cache_key, resolved)
+    return resolved
 
 
 def run_training(
@@ -390,11 +485,6 @@ def run_training(
 
     try:
         logger.info(f"Using batch size: {batch_size}")
-
-        # Merge data_types for synchronization
-        merge_cross_embodiment_description(
-            input_cross_embodiment_description, output_cross_embodiment_description
-        )
 
         # Split dataset
         dataset_size = len(dataset)
@@ -434,6 +524,14 @@ def run_training(
         num_train_workers = min(cfg.num_train_workers, cpu_count())
         num_val_workers = min(cfg.num_val_workers, cpu_count())
 
+        # prefetch_factor is only a valid DataLoader argument when workers are
+        # in play; passing it with num_workers=0 raises.
+        prefetch_factor = cfg.get("prefetch_factor", 4)
+        train_prefetch = (
+            {"prefetch_factor": prefetch_factor} if num_train_workers else {}
+        )
+        val_prefetch = {"prefetch_factor": prefetch_factor} if num_val_workers else {}
+
         if world_size > 1:
             train_sampler = DistributedSampler(
                 train_dataset,
@@ -458,6 +556,7 @@ def run_training(
                 pin_memory=True,
                 persistent_workers=num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
+                **train_prefetch,
             )
 
             val_loader = DataLoader(
@@ -468,6 +567,7 @@ def run_training(
                 pin_memory=True,
                 persistent_workers=num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
+                **val_prefetch,
             )
         else:
             # Regular data loaders for single GPU training
@@ -479,6 +579,7 @@ def run_training(
                 pin_memory=True,
                 persistent_workers=num_train_workers > 0,
                 collate_fn=dataset.collate_fn,
+                **train_prefetch,
             )
 
             val_loader = DataLoader(
@@ -489,6 +590,7 @@ def run_training(
                 pin_memory=True,
                 persistent_workers=num_val_workers > 0,
                 collate_fn=dataset.collate_fn,
+                **val_prefetch,
             )
 
         # Log data loader information
@@ -522,6 +624,7 @@ def run_training(
             output_cross_embodiment_description=output_cross_embodiment_description,
             input_preprocessing_config=inference_input_preprocessing_config,
             output_preprocessing_config=inference_output_preprocessing_config,
+            verify_job_exists=rank == 0,
         )
 
         logger.info(
@@ -548,6 +651,8 @@ def run_training(
             output_dir=Path(cfg.local_output_dir),
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
+            histogram_log_freq=cfg.get("histogram_logging_frequency", 0),
+            timing_sample_interval=cfg.get("timing_sample_interval", 25),
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
@@ -746,30 +851,18 @@ def _main(cfg: DictConfig) -> None:
             output_preprocessing_config=train_output_preprocessing_config,
         )
 
-        # Handle batch size configuration
-        if isinstance(batch_size, str) and batch_size.lower() == "auto":
-            # Find the largest batch size that fits in RAM and GPU memory
-            optimal_batch_size = determine_optimal_batch_size(
-                cfg=cfg,
-                dataset=pytorch_dataset,
-                input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=output_cross_embodiment_description,
-                device=device,
-            )
-
-            batch_size = optimal_batch_size
-        else:
-            # Check if the specified batch size fits in RAM and GPU memory
-            assert_valid_batch_size(
-                batch_size=int(batch_size),
-                cfg=cfg,
-                dataset=pytorch_dataset,
-                input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=output_cross_embodiment_description,
-                device=device,
-            )
-
-            batch_size = int(batch_size)
+        # Handle batch size configuration. Probing costs several subprocess
+        # spawns, each paying a fresh CUDA context, so both the autotuned and
+        # the user-supplied paths consult a cache first — the answer depends
+        # only on the model, its input shapes, and the GPU.
+        batch_size = _resolve_batch_size(
+            cfg=cfg,
+            batch_size=batch_size,
+            dataset=pytorch_dataset,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            device=device,
+        )
 
         if world_size > 1:
             # Use multiprocessing to launch multiple processes

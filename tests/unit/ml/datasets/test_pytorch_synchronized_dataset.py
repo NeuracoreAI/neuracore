@@ -312,16 +312,22 @@ def mock_synced_recording(
         def __len__(self):
             return len(self.sync_points)
 
-        def __getitem__(self, idx):
-            if isinstance(idx, int):
-                return self.sync_points[idx]
-            elif isinstance(idx, slice):
-                start = idx.start or 0
-                stop = idx.stop or len(self.sync_points)
-                step = idx.step or 1
-                return self.sync_points[start:stop:step]
-            else:
-                raise TypeError(f"Invalid index type: {type(idx)}")
+        def _get_sync_point(self, idx, data_types=None):
+            # Override the payload-loading seam rather than __getitem__, so the
+            # real indexing and range logic (including the data_types filter
+            # used by get_range) is exercised.
+            sync_point = self.sync_points[idx]
+            if data_types is None:
+                return sync_point
+            return SynchronizedPoint.model_construct(
+                timestamp=sync_point.timestamp,
+                robot_id=sync_point.robot_id,
+                data={
+                    data_type: values
+                    for data_type, values in sync_point.data.items()
+                    if data_type in data_types
+                },
+            )
 
         def __iter__(self):
             return iter(self.sync_points)
@@ -519,16 +525,22 @@ def mock_synced_recording_with_depth(
         def __len__(self):
             return len(self.sync_points)
 
-        def __getitem__(self, idx):
-            if isinstance(idx, int):
-                return self.sync_points[idx]
-            elif isinstance(idx, slice):
-                start = idx.start or 0
-                stop = idx.stop or len(self.sync_points)
-                step = idx.step or 1
-                return self.sync_points[start:stop:step]
-            else:
-                raise TypeError(f"Invalid index type: {type(idx)}")
+        def _get_sync_point(self, idx, data_types=None):
+            # Override the payload-loading seam rather than __getitem__, so the
+            # real indexing and range logic (including the data_types filter
+            # used by get_range) is exercised.
+            sync_point = self.sync_points[idx]
+            if data_types is None:
+                return sync_point
+            return SynchronizedPoint.model_construct(
+                timestamp=sync_point.timestamp,
+                robot_id=sync_point.robot_id,
+                data={
+                    data_type: values
+                    for data_type, values in sync_point.data.items()
+                    if data_type in data_types
+                },
+            )
 
         def __iter__(self):
             return iter(self.sync_points)
@@ -1132,15 +1144,22 @@ class TestOutputTimestepAlignment:
             def __len__(self) -> int:
                 return len(self.sync_points)
 
-            def __getitem__(self, idx):
-                if isinstance(idx, int):
-                    return self.sync_points[idx]
-                if isinstance(idx, slice):
-                    start = idx.start or 0
-                    stop = idx.stop or len(self.sync_points)
-                    step = idx.step or 1
-                    return self.sync_points[start:stop:step]
-                raise TypeError(f"Invalid index type: {type(idx)}")
+            def _get_sync_point(self, idx, data_types=None):
+                # Override the payload-loading seam rather than __getitem__, so
+                # the real indexing and range logic (including the data_types
+                # filter used by get_range) is exercised.
+                sync_point = self.sync_points[idx]
+                if data_types is None:
+                    return sync_point
+                return SynchronizedPoint.model_construct(
+                    timestamp=sync_point.timestamp,
+                    robot_id=sync_point.robot_id,
+                    data={
+                        data_type: values
+                        for data_type, values in sync_point.data.items()
+                        if data_type in data_types
+                    },
+                )
 
         return TimestepRecording()
 
@@ -1324,6 +1343,102 @@ class TestDatasetIntegration:
         assert isinstance(sample, BatchedTrainingSamples)
         assert sample.inputs is not None
         assert sample.outputs is not None
+
+    @patch("neuracore.login")
+    def test_output_window_does_not_load_input_only_data_types(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        """The output window is narrowed to the output data types.
+
+        RGB is an input here and not an output, so the prediction-horizon
+        window must not ask the recording for camera frames — loading them
+        means decoding a frame per camera per horizon step, all discarded.
+        """
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+        )
+        recording = mock_synchronized_dataset[0]
+
+        with (
+            patch.object(dataset, "_memory_monitor") as mock_monitor,
+            patch.object(
+                recording, "get_range", wraps=recording.get_range
+            ) as mock_get_range,
+        ):
+            mock_monitor.check_memory.return_value = None
+            dataset[5]
+
+        mock_get_range.assert_called_once()
+        requested = mock_get_range.call_args.kwargs["data_types"]
+        assert requested == frozenset({DataType.JOINT_TARGET_POSITIONS})
+        assert DataType.RGB_IMAGES not in requested
+
+    @patch("neuracore.login")
+    def test_getitem_recovers_timestep_from_episode_offsets(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        """Timesteps are derived from precomputed per-episode start offsets.
+
+        The offsets replace a linear scan of ``episode_indices`` that ran on
+        every single ``__getitem__``, so they have to stay consistent with it.
+        """
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+        )
+
+        # Every offset must point at the first sample of its episode, which is
+        # exactly what the old index() scan returned.
+        for episode_idx, offset in enumerate(dataset.episode_start_offsets):
+            assert dataset.episode_indices.index(episode_idx) == offset
+
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            with patch.object(
+                dataset, "load_sample", wraps=dataset.load_sample
+            ) as mock_load:
+                dataset[5]
+
+        episode_idx = dataset.episode_indices[5]
+        expected_timestep = 5 - dataset.episode_indices.index(episode_idx)
+        mock_load.assert_called_once_with(episode_idx, expected_timestep)
 
     @patch("neuracore.login")
     def test_getitem_negative_index(self, mock_login, mock_synchronized_dataset):

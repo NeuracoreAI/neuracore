@@ -177,6 +177,9 @@ class MainTestSetup:
         self.mock_synchronized_dataset = Mock()
         self.mock_pytorch_dataset = Mock(spec=PytorchSynchronizedDataset)
         self.mock_pytorch_dataset.cross_embodiment_description = Mock()
+        # Read when building the batch-size cache key, so it has to be a real
+        # mapping rather than a bare Mock.
+        self.mock_pytorch_dataset.dataset_statistics = {"input": {}, "output": {}}
         self.mock_pytorch_dataset.__len__ = Mock(return_value=100)
         self.mock_pytorch_dataset.load_sample = Mock(return_value=Mock())
         self.mock_pytorch_dataset.__getitem__ = Mock(
@@ -262,6 +265,19 @@ class MainTestSetup:
             self.mock_assert_valid_batch_size,
         )
         self.monkeypatch.setattr("torch.cuda.device_count", self.mock_cuda_device_count)
+        # Keep the on-disk batch-size cache out of unit tests: a real cache hit
+        # would short-circuit the autotune/validate paths these tests assert on,
+        # and a real write would leak into the developer's home directory.
+        self.mock_load_cached_batch_size = Mock(return_value=None)
+        self.mock_store_cached_batch_size = Mock()
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.load_cached_batch_size",
+            self.mock_load_cached_batch_size,
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.store_cached_batch_size",
+            self.mock_store_cached_batch_size,
+        )
         self.monkeypatch.setattr(
             "neuracore.ml.train.AlgorithmStorageHandler",
             self.mock_storage_handler_class,

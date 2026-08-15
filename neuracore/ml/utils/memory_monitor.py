@@ -64,7 +64,8 @@ class MemoryMonitor:
             )
 
         if self.gpu_id is not None and torch.cuda.is_available():
-            torch.cuda.synchronize()
+            # memory_reserved() reads the caching allocator's host-side
+            # bookkeeping, so it is accurate without a device barrier.
             gpu_mem_reserved = torch.cuda.memory_reserved(self.gpu_id) / (1024**3)
             gpu_mem_total = torch.cuda.get_device_properties(
                 self.gpu_id
