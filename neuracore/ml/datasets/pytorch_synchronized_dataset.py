@@ -177,7 +177,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self.synchronized_dataset
         )
 
-        self.episode_indices = self._get_episode_indices()
+        self.episode_indices, self.episode_start_offsets = self._get_episode_indices()
         self._logged_in = False
 
         # Only the worker-side half runs here. Device-side methods are applied
@@ -187,6 +187,60 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self.output_preprocessing_config, _ = (
             output_preprocessing_config.split_by_stage()
         )
+
+        # Everything below is a pure function of the cross-embodiment
+        # descriptions, which are fixed once the dataset exists. Deriving it
+        # here keeps it out of load_sample, which runs once per sample.
+        self._max_items_per_input_type = self._get_max_items_per_data_type(
+            self.input_cross_embodiment_description
+        )
+        self._max_items_per_output_type = self._get_max_items_per_data_type(
+            self.output_cross_embodiment_description
+        )
+        # Index-ordered (index, name) pairs per robot, so projecting a sync
+        # point does not re-sort the same keys for every one of the
+        # output_prediction_horizon + 1 sync points a sample touches.
+        self._merged_ordered_items = {
+            robot_id: self._order_embodiment_items(
+                self._convert_to_embodiment_description(embodiment_union)
+            )
+            for robot_id, embodiment_union in (
+                self.merged_cross_embodiment_description.items()
+            )
+        }
+
+    @staticmethod
+    def _get_max_items_per_data_type(
+        cross_embodiment_description: CrossEmbodimentDescription,
+    ) -> dict[DataType, int]:
+        """Return the padded slot count for each data type.
+
+        The count is the highest index used for that data type across every
+        robot, plus one, so samples from different embodiments pad out to a
+        common width.
+        """
+        highest_index: dict[DataType, int] = {}
+        for data_types in cross_embodiment_description.values():
+            for data_type, indexed_names in data_types.items():
+                # Floored at 0 so a data type declared with no sensors still
+                # gets a single padded slot, matching the per-sample scan this
+                # replaces.
+                highest_index[data_type] = max(
+                    highest_index.get(data_type, 0), *indexed_names, 0
+                )
+        return {data_type: highest + 1 for data_type, highest in highest_index.items()}
+
+    @staticmethod
+    def _order_embodiment_items(
+        description: EmbodimentDescription,
+    ) -> dict[DataType, list[tuple[int, str]]]:
+        """Flatten an embodiment description into index-ordered (index, name) pairs."""
+        return {
+            data_type: [
+                (index, indexed_names[index]) for index in sorted(indexed_names)
+            ]
+            for data_type, indexed_names in description.items()
+        }
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -233,15 +287,21 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             description_kind="Output",
         )
 
-    def _get_episode_indices(self) -> list[int]:
-        """Return a list mapping each sample index to its episode (recording) index.
+    def _get_episode_indices(self) -> tuple[list[int], list[int]]:
+        """Map each sample to its episode, and each episode to its first sample.
 
         Omit the last frame of each episode because it is not used for training.
 
         Returns:
-            A list mapping each sample index to its episode (recording) index.
+            ``(episode_indices, episode_start_offsets)`` where
+            ``episode_indices[sample_idx]`` is the recording index, and
+            ``episode_start_offsets[recording_idx]`` is the sample index that
+            recording starts at. The offsets let ``__getitem__`` recover a
+            timestep by subtraction rather than by scanning
+            ``episode_indices`` for the episode's first occurrence.
         """
-        episode_indices = []
+        episode_indices: list[int] = []
+        episode_start_offsets: list[int] = []
         for recording_idx, recording in enumerate(self.synchronized_dataset):
             # Each recording must have at least 2 timesteps because we drop the
             # last frame from training. Otherwise alignment with per-recording
@@ -252,9 +312,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     f"'{recording.name}' has only {len(recording)} frame(s); "
                     "need >= 2 frames to generate training samples."
                 )
+            episode_start_offsets.append(len(episode_indices))
             episode_indices.extend([recording_idx] * (len(recording) - 1))
 
-        return episode_indices
+        return episode_indices, episode_start_offsets
 
     def _convert_to_embodiment_description(
         self, value: EmbodimentUnion
@@ -301,33 +362,39 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         return embodiment_description
 
     @staticmethod
-    def _project_sync_point_to_embodiment_description(
+    def _project_sync_point(
         sync_point: SynchronizedPoint,
-        embodiment_description: EmbodimentDescription,
+        ordered_items: dict[DataType, list[tuple[int, str]]],
     ) -> SynchronizedPoint:
         """Project a sync point onto the requested spec in deterministic order.
 
         Extra data types or sensor names in the source sync point are ignored.
         Missing required data types or sensor names raise a ValueError.
+
+        Args:
+            sync_point: The sync point to project.
+            ordered_items: Index-ordered ``{data_type: [(index, name), ...]}``
+                built once at construction, so this does not re-sort the same
+                keys for every sync point of every sample.
         """
         projected_data: dict[DataType, dict[str, object]] = {}
 
-        for data_type, indexed_names in embodiment_description.items():
+        for data_type, indexed_names in ordered_items.items():
             source_data_for_type = sync_point.data.get(data_type)
             if source_data_for_type is None:
                 raise ValueError(
                     f"SynchronizedPoint is missing required data type: {data_type}"
                 )
 
-            projected_data[data_type] = {}
-            for index in sorted(indexed_names):
-                name = indexed_names[index]
+            projected_for_type: dict[str, object] = {}
+            for _, name in indexed_names:
                 if name not in source_data_for_type:
                     raise ValueError(
                         "SynchronizedPoint is missing required sensor name "
                         f"'{name}' for data type {data_type}"
                     )
-                projected_data[data_type][name] = source_data_for_type[name]
+                projected_for_type[name] = source_data_for_type[name]
+            projected_data[data_type] = projected_for_type
 
         return SynchronizedPoint.model_construct(
             timestamp=sync_point.timestamp,
@@ -344,7 +411,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self,
         synced_recording: SynchronizedRecording,
         timestep: int,
-        embodiment_description: EmbodimentDescription,
+        ordered_items: dict[DataType, list[tuple[int, str]]],
     ) -> list[SynchronizedPoint]:
         """Load the superset window for all output data types.
 
@@ -357,9 +424,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             synced_recording[timestep : timestep + 1 + self.output_prediction_horizon],
         )
         return [
-            self._project_sync_point_to_embodiment_description(
-                sync_point, embodiment_description
-            )
+            self._project_sync_point(sync_point, ordered_items)
             for sync_point in output_sync_points
         ]
 
@@ -417,20 +482,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
 
-        robot_embodiment_union: EmbodimentUnion = (
-            self.merged_cross_embodiment_description[robot_id]
-        )
-        robot_merged_embodiment_description: EmbodimentDescription = (
-            self._convert_to_embodiment_description(robot_embodiment_union)
-        )
-        input_sync_point = self._project_sync_point_to_embodiment_description(
-            input_sync_point, robot_merged_embodiment_description
+        merged_ordered_items = self._merged_ordered_items[robot_id]
+        input_sync_point = self._project_sync_point(
+            input_sync_point, merged_ordered_items
         )
 
         output_sync_points = self._load_projected_output_sync_points(
             synced_recording=synced_recording,
             timestep=timestep,
-            embodiment_description=robot_merged_embodiment_description,
+            ordered_items=merged_ordered_items,
         )
         recording_name = getattr(synced_recording, "name", "recording")
 
@@ -442,17 +502,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             inputs[data_type] = []
 
-            max_items_trained_on = 0
-            # Iterate through all robots and find the max index for this data
-            # type across all robots to determine padding length.
-            for other_robot_id in self.input_cross_embodiment_description:
-                for index in self.input_cross_embodiment_description[other_robot_id][
-                    data_type
-                ].keys():
-                    if index > max_items_trained_on:
-                        max_items_trained_on = index
-
-            max_items_trained_on += 1
+            max_items_trained_on = self._max_items_per_input_type[data_type]
             input_mask_values: list[float] = [0.0] * max_items_trained_on
             for index in range(max_items_trained_on):
                 name = self.input_cross_embodiment_description[robot_id][data_type].get(
@@ -488,17 +538,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             batched_nc_data_class = DATA_TYPE_TO_BATCHED_NC_DATA_CLASS[data_type]
             outputs[data_type] = []
 
-            max_items_trained_on = 0
-            # Iterate through all robots and find the max index for this data
-            # type across all robots to determine padding length.
-            for other_robot_id in self.output_cross_embodiment_description:
-                for index in self.output_cross_embodiment_description[other_robot_id][
-                    data_type
-                ].keys():
-                    if index > max_items_trained_on:
-                        max_items_trained_on = index
-
-            max_items_trained_on += 1
+            max_items_trained_on = self._max_items_per_output_type[data_type]
             aligned_output_sync_points = self._output_sync_points_for_data_type(
                 output_sync_points,
                 data_type,
@@ -577,7 +617,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             )
 
         episode_idx = self.episode_indices[idx]
-        timestep = idx - self.episode_indices.index(episode_idx)
+        timestep = idx - self.episode_start_offsets[episode_idx]
         return self.load_sample(episode_idx, timestep)
 
     @property
