@@ -550,6 +550,7 @@ def run_training(
             output_dir=Path(cfg.local_output_dir),
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
+            system_log_freq=cfg.get("system_logging_frequency", 200),
             train_device_preprocessing=(
                 train_input_preprocessing_config.split_by_stage()[1],
                 train_output_preprocessing_config.split_by_stage()[1],
