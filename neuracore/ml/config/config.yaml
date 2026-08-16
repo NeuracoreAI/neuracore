@@ -46,6 +46,10 @@ timing_sample_interval: 25
 # breakdown of the per-sample cost (frame loading / tensor construction /
 # preprocessing). Each worker reports separately. 0 disables it.
 dataset_timing_sample_interval: 50
+# Diagnostic: round-trip timed samples through disk to measure what a
+# per-sample tensor cache would cost, and report it alongside the breakdown.
+# Measurement only -- nothing is cached. Requires the timing above.
+dataset_tensor_cache_probe: true
 keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
 

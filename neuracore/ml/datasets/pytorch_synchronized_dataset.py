@@ -3,7 +3,9 @@
 import hashlib
 import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import cast
 
 import numpy as np
@@ -49,6 +51,101 @@ CHECK_MEMORY_INTERVAL = 100
 TIMING_SAMPLES_PER_SUMMARY = 20
 
 
+def _force_frame_decode(nc_data: object) -> None:
+    """Force a lazily-opened image to decode now.
+
+    ``_get_frame_from_disk_cache`` returns ``Image.open`` handles, which only
+    read the PNG header; the pixels are inflated later, when the batched type
+    calls ``np.asarray`` on them. That hides decode cost inside tensor
+    construction. Calling ``load()`` first pulls it into its own timed section.
+    Idempotent, and only the ordering changes, never the total work -- but it
+    is still only invoked on timed samples so the common path is untouched.
+    """
+    frame = getattr(nc_data, "frame", None)
+    load = getattr(frame, "load", None)
+    if callable(load):
+        load()
+
+
+class _TensorCacheProbe:
+    """Measures what a per-sample tensor cache would cost, without building one.
+
+    A cache like this existed until commit 2813e45 and was removed on the
+    grounds that decoded frames were already cached on disk. The per-section
+    timings show that only covers download and video decode: PNG decode plus
+    tensor construction still dominates every sample, every epoch.
+
+    Caching is only sound now because augmentation moved to the device. The
+    worker stage that would sit behind a cache is deterministic (resize only),
+    so a cache hit cannot freeze the random jitter and noise the way it would
+    have if reinstated before that change.
+
+    This writes and re-reads a real sample so the numbers reflect actual
+    serialisation cost and on-disk size, then deletes the file. It measures;
+    it does not cache.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        """Initialize the probe.
+
+        Args:
+            directory: Where to write probe files. Should sit on the volume a
+                real cache would use, so the IO cost is representative.
+        """
+        self.directory = directory
+        self.save_seconds = 0.0
+        self.load_seconds = 0.0
+        self.total_bytes = 0
+        self.samples = 0
+        self.failed = False
+
+    def measure(self, sample: TrainingSample) -> None:
+        """Round-trip ``sample`` through disk and record the cost."""
+        if self.failed:
+            return
+        path = self.directory / f"probe_{os.getpid()}.pt"
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            start = time.perf_counter()
+            torch.save(sample, path)
+            saved = time.perf_counter()
+            torch.load(path, weights_only=False)
+            loaded = time.perf_counter()
+
+            self.save_seconds += saved - start
+            self.load_seconds += loaded - saved
+            self.total_bytes += path.stat().st_size
+            self.samples += 1
+        except Exception:
+            # A probe must never take training down with it.
+            logger.warning("Tensor cache probe failed; disabling.", exc_info=True)
+            self.failed = True
+        finally:
+            path.unlink(missing_ok=True)
+
+    def summary_line(self, mean_build_seconds: float) -> str | None:
+        """Describe the trade against the measured cost of building a sample."""
+        if not self.samples:
+            return None
+        save_ms = self.save_seconds / self.samples * 1000
+        load_ms = self.load_seconds / self.samples * 1000
+        kib = self.total_bytes / self.samples / 1024
+        saved_ms = mean_build_seconds * 1000 - load_ms
+        return (
+            f"  tensor-cache probe over {self.samples} samples: "
+            f"save {save_ms:.2f} ms | load {load_ms:.2f} ms | {kib:.1f} KiB/sample\n"
+            f"    a warm cache would trade {mean_build_seconds * 1000:.2f} ms of "
+            f"build for {load_ms:.2f} ms of load ({saved_ms:.2f} ms/sample saved)"
+        )
+
+    def reset(self) -> None:
+        """Clear the accumulated measurements."""
+        self.save_seconds = 0.0
+        self.load_seconds = 0.0
+        self.total_bytes = 0
+        self.samples = 0
+
+
 class _SampleTimings:
     """Accumulates a breakdown of where ``load_sample`` spends its time.
 
@@ -65,22 +162,29 @@ class _SampleTimings:
         "recording_lookup",
         "input_load",
         "output_load",
-        "input_build",
+        "input_decode",
+        "input_tensor",
+        "input_pad",
         "input_preprocess",
         "output_build",
         "output_preprocess",
     )
 
-    def __init__(self, interval: int, label: str) -> None:
+    def __init__(
+        self, interval: int, label: str, cache_probe: "_TensorCacheProbe | None" = None
+    ) -> None:
         """Initialize the accumulator.
 
         Args:
             interval: Time every Nth sample. 0 disables timing entirely.
             label: Tag distinguishing e.g. the train split from the val split,
                 which run different preprocessing pipelines.
+            cache_probe: Optional probe measuring what a per-sample tensor
+                cache would cost, reported alongside the breakdown.
         """
         self.interval = interval
         self.label = label
+        self.cache_probe = cache_probe
         self._calls = 0
         self._timing = False
         self._section_start = 0.0
@@ -91,6 +195,11 @@ class _SampleTimings:
         self._sample_start = 0.0
         self._sample_total = 0.0
         self._sample_worst = 0.0
+
+    @property
+    def is_timing(self) -> bool:
+        """Whether the call in progress is being timed."""
+        return self._timing
 
     def begin_sample(self) -> None:
         """Decide whether to time this call, and start the clock if so."""
@@ -118,11 +227,19 @@ class _SampleTimings:
         )
         self._section_start = now
 
-    def end_sample(self) -> None:
-        """Close out a timed sample and log a summary once enough have run."""
+    def end_sample(self, sample: TrainingSample | None = None) -> None:
+        """Close out a timed sample and log a summary once enough have run.
+
+        Args:
+            sample: The finished sample, handed to the tensor-cache probe if
+                one is configured. Probe time is excluded from the sample's
+                own total, since it is measurement, not work the sample needs.
+        """
         if not self._timing:
             return
         total = time.perf_counter() - self._sample_start
+        if self.cache_probe is not None and sample is not None:
+            self.cache_probe.measure(sample)
         for section, elapsed in self._current.items():
             self._totals[section] = self._totals.get(section, 0.0) + elapsed
             self._worst[section] = max(self._worst.get(section, 0.0), elapsed)
@@ -155,6 +272,11 @@ class _SampleTimings:
                 f"    {section:<20}{mean_s * 1000:9.3f} ms   ({share:4.1f}%)"
                 f"   worst {self._worst[section] * 1000:9.3f} ms"
             )
+        if self.cache_probe is not None:
+            probe_line = self.cache_probe.summary_line(mean_total)
+            if probe_line is not None:
+                lines.append(probe_line)
+            self.cache_probe.reset()
         logger.info("\n".join(lines))
 
         self._totals.clear()
@@ -187,6 +309,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
         timing_sample_interval: int = 0,
+        tensor_cache_probe: bool = False,
     ):
         """Initialize the dataset.
 
@@ -203,6 +326,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_prediction_horizon: Number of future timesteps to predict.
             timing_sample_interval: Time every Nth ``load_sample`` call and log
                 a breakdown periodically from each worker. 0 disables it.
+            tensor_cache_probe: Round-trip timed samples through disk to measure
+                what a per-sample tensor cache would cost. Measurement only --
+                nothing is cached. Requires timing to be enabled.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -319,6 +445,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # Built lazily, and per process: workers are forked after this point,
         # so each one accumulates and reports its own timings.
         self._timing_sample_interval = timing_sample_interval
+        self._tensor_cache_probe = tensor_cache_probe
         self._timing_label = "train"
         self._sample_timings: _SampleTimings | None = None
 
@@ -626,8 +753,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self._logged_in = True
 
         if self._sample_timings is None:
+            probe = (
+                _TensorCacheProbe(DEFAULT_CACHE_DIR / "tensor_cache_probe")
+                if self._tensor_cache_probe
+                else None
+            )
             self._sample_timings = _SampleTimings(
-                self._timing_sample_interval, self._timing_label
+                self._timing_sample_interval, self._timing_label, probe
             )
         timings = self._sample_timings
         timings.begin_sample()
@@ -682,13 +814,19 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     batched_nc_data = batched_nc_data_class.sample(
                         batch_size=1, time_steps=1
                     )
+                    timings.mark("input_pad")
                 else:
                     # If the current robot has a name for this index, use it to
                     # get the data.
                     nc_data = input_sync_point.data[data_type][name]
+                    if timings.is_timing:
+                        # Separate image decode from tensor construction; see
+                        # _force_frame_decode for why they otherwise merge.
+                        _force_frame_decode(nc_data)
+                        timings.mark("input_decode")
                     batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
                     input_mask_values[index] = 1.0
-                timings.mark("input_build")
+                    timings.mark("input_tensor")
 
                 batched_nc_data = apply_preprocessing_methods(
                     batched_data=batched_nc_data,
@@ -753,14 +891,15 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 output_mask_values, dtype=torch.float32
             )
 
-        timings.end_sample()
-        return TrainingSample(
+        sample = TrainingSample(
             inputs=inputs,
             inputs_mask=inputs_mask,
             outputs=outputs,
             outputs_mask=outputs_mask,
             batch_size=1,
         )
+        timings.end_sample(sample)
+        return sample
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset.
