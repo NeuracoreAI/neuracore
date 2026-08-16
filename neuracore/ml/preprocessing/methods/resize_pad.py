@@ -15,6 +15,10 @@ class ResizePad(PreprocessingMethod):
     padded with zeros to get the output to the target size (height, width).
     """
 
+    # Has to run before collation: recordings differ in source resolution, and
+    # a batch cannot be stacked until every frame is the same size.
+    on_cpu = True
+
     def __init__(self, size: list[int] | tuple[int, int] = (224, 224)) -> None:
         """Initialize resize target as (height, width)."""
         self.size = size

@@ -52,8 +52,14 @@ def split_train_val_datasets(
 
     # Both subsets share the train-configured dataset; give val its own copy.
     val_base = copy(dataset)
-    val_base.input_preprocessing_config = inference_input_preprocessing_config
-    val_base.output_preprocessing_config = inference_output_preprocessing_config
+    # Worker-side half only, matching what the dataset constructor keeps. The
+    # trainer applies the device-side half of the inference pipeline.
+    val_base.input_preprocessing_config = (
+        inference_input_preprocessing_config.split_by_stage()[0]
+    )
+    val_base.output_preprocessing_config = (
+        inference_output_preprocessing_config.split_by_stage()[0]
+    )
     val_dataset = Subset(val_base, val_dataset.indices)
 
     return train_dataset, val_dataset

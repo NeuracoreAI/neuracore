@@ -65,6 +65,12 @@ trim_no_movement_at_start_threshold: null
 # for images, we must have a resize step to reshape all images from different sources to the same size.
 # train_preprocessing is used on the training split (may include augmentations).
 # inference_preprocessing is used for validation and packaged into the model archive.
+#
+# ORDERING: methods do not necessarily run in the order listed here. Each method
+# declares, via its `on_cpu` attribute, whether it runs per sample in a
+# DataLoader worker or per batch once the batch is on the training device, and
+# every worker-side method runs before every device-side one. Relative order is
+# preserved within each of those two groups.
 train_preprocessing:
   input:
     RGB_IMAGES:

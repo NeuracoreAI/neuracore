@@ -14,6 +14,9 @@ class GaussianNoise(PreprocessingMethod):
     Noise ``std`` is in pixel units for float frames in ``[0, 255]``.
     """
 
+    # randn_like over a full frame is expensive; far cheaper batched on the device
+    on_cpu = False
+
     def __init__(
         self,
         std: float = 5.0,

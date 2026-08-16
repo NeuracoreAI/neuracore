@@ -13,7 +13,22 @@ class ColorJitter(PreprocessingMethod):
 
     Expects float frames in ``[0, 255]`` (as produced by ``BatchedRGBData``),
     applies torchvision color jitter in ``[0, 1]``, then scales back.
+
+    Jitter is uniform across the batch. ``T.ColorJitter`` draws one factor set
+    per call and applies it to whatever it is handed, so running per batch on
+    the device means every sample in that batch shares a colour transform,
+    where running per sample on a worker CPU gave each its own. That is a
+    deliberate trade: the augmentation still varies from batch to batch, and
+    keeping torchvision's implementation is worth more than the extra
+    within-batch variation would be. Per-sample factors would mean
+    reimplementing all four adjustments with broadcasting, including a batched
+    RGB/HSV conversion for hue, since torchvision exposes no batched-factor
+    path.
     """
+
+    # Batched on the device it costs one pass over the batch rather
+    # than one pass per frame on a contended worker CPU.
+    on_cpu = False
 
     def __init__(
         self,
@@ -62,5 +77,5 @@ class ColorJitter(PreprocessingMethod):
             )
 
         jittered = self._jitter(data.frame / 255.0)
-        data.frame = (jittered * 255.0).clamp(0.0, 255.0)
+        data.frame = (jittered * 255.0).clamp(0.0, 255.0).contiguous()
         return data

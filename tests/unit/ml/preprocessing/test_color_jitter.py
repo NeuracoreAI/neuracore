@@ -41,3 +41,42 @@ def test_color_jitter_rejects_non_rgb():
     )
     with pytest.raises(TypeError, match="Unsupported batched data type"):
         ColorJitter()(depth)
+
+
+def test_color_jitter_is_uniform_across_the_batch():
+    """Pins the documented trade-off rather than treating it as a defect.
+
+    T.ColorJitter draws one factor set per call, so running it per batch on
+    the device gives every sample in that batch the same colour transform.
+    Augmentation still varies batch to batch. Change this test only alongside
+    a deliberate decision to reintroduce per-sample factors.
+    """
+    torch.manual_seed(0)
+    identical = BatchedRGBData(
+        frame=torch.full((4, 1, 3, 16, 16), 128.0, dtype=torch.float32),
+        extrinsics=torch.zeros((4, 1, 4, 4), dtype=torch.float32),
+        intrinsics=torch.zeros((4, 1, 3, 3), dtype=torch.float32),
+    )
+
+    out = ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1)(identical)
+
+    assert all(torch.equal(out.frame[0], out.frame[i]) for i in range(4))
+
+
+def test_color_jitter_returns_contiguous_frames():
+    """The hue path returns a non-contiguous view; encoders flatten with .view.
+
+    Collation used to mask this by re-materialising the tensor with torch.cat,
+    but this runs after collation now.
+    """
+    torch.manual_seed(0)
+    data = _rgb()
+    assert data.frame.is_contiguous(), "fixture should start contiguous"
+
+    out = ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05)(data)
+
+    assert out.frame.is_contiguous()
+
+
+def test_color_jitter_runs_on_the_device_stage():
+    assert ColorJitter().on_cpu is False
