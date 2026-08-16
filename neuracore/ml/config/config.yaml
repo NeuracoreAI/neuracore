@@ -77,10 +77,11 @@ num_val_workers: 4
 # Batches each worker loads ahead of the training loop.
 prefetch_factor: 4
 
-# Maximum number of workers to use for prefetching recordings. The prefetch is
-# wget + ffmpeg subprocesses, so it is IO-bound rather than CPU-bound and
-# benefits from more workers than there are cores.
-max_prefetch_workers: 16
+# Maximum number of workers to use for prefetching recordings. Each one holds
+# an open TLS connection to cloud storage for the length of a video download,
+# so this bounds concurrency against the storage backend, not just local work.
+# Video downloads have no retry, so a single connection reset fails the run.
+max_prefetch_workers: 4
 
 max_delay_s: null
 trim_start_end: true
