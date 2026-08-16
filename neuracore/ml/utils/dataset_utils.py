@@ -64,10 +64,13 @@ def split_train_val_datasets(
         inference_output_preprocessing_config.for_stage(PreprocessingStage.WORKER)
     )
     # The shallow copy would otherwise share the train split's timing
-    # accumulator, merging two different preprocessing pipelines into one
-    # summary. Clearing it makes val build its own on first use.
+    # accumulator and sample cache. The accumulator would merge two different
+    # preprocessing pipelines into one summary, and the cache would be keyed on
+    # the train pipeline while storing val samples. Clearing both makes val
+    # build its own on first use, keyed on the preprocessing set just above.
     val_base._timing_label = "val"
     val_base._sample_timings = None
+    val_base._sample_cache = None
     val_dataset = Subset(val_base, val_dataset.indices)
 
     return train_dataset, val_dataset

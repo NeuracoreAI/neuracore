@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import cast
@@ -26,6 +27,7 @@ from neuracore_types.nc_data.nc_data import DataItemStats
 
 import neuracore as nc
 from neuracore.core.const import DEFAULT_CACHE_DIR
+from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.utils.training_input_args_validation import (
@@ -67,83 +69,99 @@ def _force_frame_decode(nc_data: object) -> None:
         load()
 
 
-class _TensorCacheProbe:
-    """Measures what a per-sample tensor cache would cost, without building one.
+class _SampleCache:
+    """On-disk cache of fully built training samples, shared across runs.
 
-    A cache like this existed until commit 2813e45 and was removed on the
-    grounds that decoded frames were already cached on disk. The per-section
-    timings show that only covers download and video decode: PNG decode plus
-    tensor construction still dominates every sample, every epoch.
+    Building a sample is dominated by inflating a full-resolution PNG and then
+    discarding most of it during resize -- work that is identical every epoch
+    and every run of the same configuration. Caching the finished sample skips
+    all of it.
 
-    Caching is only sound now because augmentation moved to the device. The
-    worker stage that would sit behind a cache is deterministic (resize only),
-    so a cache hit cannot freeze the random jitter and noise the way it would
-    have if reinstated before that change.
+    This is only sound because augmentation runs on the device. Everything
+    behind this cache is deterministic (projection, tensor construction, and
+    worker-stage preprocessing, which is resize only), so a hit cannot freeze
+    the random jitter and noise that a model actually needs to vary. Adding a
+    non-deterministic worker-stage method would break that and require this
+    cache to be disabled.
 
-    This writes and re-reads a real sample so the numbers reflect actual
-    serialisation cost and on-disk size, then deletes the file. It measures;
-    it does not cache.
+    Entries live under a hash of everything that changes what a sample
+    contains, so a configuration change starts a fresh tree rather than
+    silently serving stale tensors. It sits outside the per-run output
+    directory so a repeat of the same run hits a warm cache immediately.
     """
 
-    def __init__(self, directory: Path) -> None:
-        """Initialize the probe.
+    # Bump when the structure or dtype of a built sample changes, so existing
+    # entries are ignored rather than loaded back into the wrong shape.
+    FORMAT_VERSION = 1
+
+    def __init__(self, root: Path, spec_hash: str) -> None:
+        """Initialize the cache.
 
         Args:
-            directory: Where to write probe files. Should sit on the volume a
-                real cache would use, so the IO cost is representative.
+            root: Directory holding every spec's entries.
+            spec_hash: Digest of the configuration these entries belong to.
         """
-        self.directory = directory
-        self.save_seconds = 0.0
-        self.load_seconds = 0.0
-        self.total_bytes = 0
-        self.samples = 0
-        self.failed = False
+        self.directory = root / spec_hash
+        self.cache_manager = CacheManager(self.directory)
+        self.hits = 0
+        self.misses = 0
 
-    def measure(self, sample: TrainingSample) -> None:
-        """Round-trip ``sample`` through disk and record the cost."""
-        if self.failed:
-            return
-        path = self.directory / f"probe_{os.getpid()}.pt"
-        try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            start = time.perf_counter()
-            torch.save(sample, path)
-            saved = time.perf_counter()
-            torch.load(path, weights_only=False)
-            loaded = time.perf_counter()
+    def _path(self, recording_id: str, timestep: int) -> Path:
+        # Sharded by recording to keep any one directory a reasonable size,
+        # mirroring the layout of the decoded frame cache.
+        return self.directory / recording_id / f"{timestep}.pt"
 
-            self.save_seconds += saved - start
-            self.load_seconds += loaded - saved
-            self.total_bytes += path.stat().st_size
-            self.samples += 1
-        except Exception:
-            # A probe must never take training down with it.
-            logger.warning("Tensor cache probe failed; disabling.", exc_info=True)
-            self.failed = True
-        finally:
-            path.unlink(missing_ok=True)
-
-    def summary_line(self, mean_build_seconds: float) -> str | None:
-        """Describe the trade against the measured cost of building a sample."""
-        if not self.samples:
+    def load(self, recording_id: str, timestep: int) -> TrainingSample | None:
+        """Return the cached sample, or None if it is absent or unreadable."""
+        path = self._path(recording_id, timestep)
+        if not path.exists():
+            self.misses += 1
             return None
-        save_ms = self.save_seconds / self.samples * 1000
-        load_ms = self.load_seconds / self.samples * 1000
-        kib = self.total_bytes / self.samples / 1024
-        saved_ms = mean_build_seconds * 1000 - load_ms
-        return (
-            f"  tensor-cache probe over {self.samples} samples: "
-            f"save {save_ms:.2f} ms | load {load_ms:.2f} ms | {kib:.1f} KiB/sample\n"
-            f"    a warm cache would trade {mean_build_seconds * 1000:.2f} ms of "
-            f"build for {load_ms:.2f} ms of load ({saved_ms:.2f} ms/sample saved)"
-        )
+        try:
+            # weights_only=False is required to rebuild the batched pydantic
+            # types. Safe here: these files are written by this process on the
+            # local disk and are never fetched from anywhere.
+            sample = torch.load(path, weights_only=False)
+        except Exception:
+            # A truncated or stale entry must cost a rebuild, never a crash.
+            logger.warning("Discarding unreadable sample cache entry %s", path)
+            path.unlink(missing_ok=True)
+            self.misses += 1
+            return None
+        self.hits += 1
+        return cast(TrainingSample, sample)
 
-    def reset(self) -> None:
-        """Clear the accumulated measurements."""
-        self.save_seconds = 0.0
-        self.load_seconds = 0.0
-        self.total_bytes = 0
-        self.samples = 0
+    def store(self, recording_id: str, timestep: int, sample: TrainingSample) -> None:
+        """Write a built sample. A failure here costs a rebuild, nothing more."""
+        path = self._path(recording_id, timestep)
+        staging: Path | None = None
+        try:
+            self.cache_manager.ensure_space_available()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # Write then rename: several workers populate this concurrently and
+            # a reader must never see a half-written entry.
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, suffix=".tmp", delete=False
+            ) as handle:
+                staging = Path(handle.name)
+                torch.save(sample, handle)
+            os.replace(staging, path)
+        except Exception:
+            logger.warning("Could not write sample cache entry %s", path, exc_info=True)
+            if staging is not None:
+                staging.unlink(missing_ok=True)
+
+    def summary(self) -> str:
+        """One-line hit rate, reset for the next window."""
+        total = self.hits + self.misses
+        rate = self.hits / total * 100 if total else 0.0
+        line = (
+            f"  sample cache: {self.hits}/{total} hits ({rate:.0f}%) "
+            f"at {self.directory}"
+        )
+        self.hits = 0
+        self.misses = 0
+        return line
 
 
 class _SampleTimings:
@@ -160,6 +178,7 @@ class _SampleTimings:
 
     SECTIONS = (
         "recording_lookup",
+        "sample_cache_load",
         "input_load",
         "output_load",
         "input_decode",
@@ -168,23 +187,24 @@ class _SampleTimings:
         "input_preprocess",
         "output_build",
         "output_preprocess",
+        "sample_cache_store",
     )
 
     def __init__(
-        self, interval: int, label: str, cache_probe: "_TensorCacheProbe | None" = None
+        self, interval: int, label: str, cache: "_SampleCache | None" = None
     ) -> None:
         """Initialize the accumulator.
 
         Args:
             interval: Time every Nth sample. 0 disables timing entirely.
+            cache: Sample cache whose hit rate is reported alongside the
+                breakdown, if one is in use.
             label: Tag distinguishing e.g. the train split from the val split,
                 which run different preprocessing pipelines.
-            cache_probe: Optional probe measuring what a per-sample tensor
-                cache would cost, reported alongside the breakdown.
         """
         self.interval = interval
         self.label = label
-        self.cache_probe = cache_probe
+        self.cache = cache
         self._calls = 0
         self._timing = False
         self._section_start = 0.0
@@ -227,19 +247,11 @@ class _SampleTimings:
         )
         self._section_start = now
 
-    def end_sample(self, sample: TrainingSample | None = None) -> None:
-        """Close out a timed sample and log a summary once enough have run.
-
-        Args:
-            sample: The finished sample, handed to the tensor-cache probe if
-                one is configured. Probe time is excluded from the sample's
-                own total, since it is measurement, not work the sample needs.
-        """
+    def end_sample(self) -> None:
+        """Close out a timed sample and log a summary once enough have run."""
         if not self._timing:
             return
         total = time.perf_counter() - self._sample_start
-        if self.cache_probe is not None and sample is not None:
-            self.cache_probe.measure(sample)
         for section, elapsed in self._current.items():
             self._totals[section] = self._totals.get(section, 0.0) + elapsed
             self._worst[section] = max(self._worst.get(section, 0.0), elapsed)
@@ -272,11 +284,8 @@ class _SampleTimings:
                 f"    {section:<20}{mean_s * 1000:9.3f} ms   ({share:4.1f}%)"
                 f"   worst {self._worst[section] * 1000:9.3f} ms"
             )
-        if self.cache_probe is not None:
-            probe_line = self.cache_probe.summary_line(mean_total)
-            if probe_line is not None:
-                lines.append(probe_line)
-            self.cache_probe.reset()
+        if self.cache is not None:
+            lines.append(self.cache.summary())
         logger.info("\n".join(lines))
 
         self._totals.clear()
@@ -309,7 +318,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
         timing_sample_interval: int = 0,
-        tensor_cache_probe: bool = False,
+        sample_cache: bool = False,
     ):
         """Initialize the dataset.
 
@@ -326,9 +335,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_prediction_horizon: Number of future timesteps to predict.
             timing_sample_interval: Time every Nth ``load_sample`` call and log
                 a breakdown periodically from each worker. 0 disables it.
-            tensor_cache_probe: Round-trip timed samples through disk to measure
-                what a per-sample tensor cache would cost. Measurement only --
-                nothing is cached. Requires timing to be enabled.
+            sample_cache: Reuse fully built samples from an on-disk cache
+                across runs, rebuilding on a miss. See _SampleCache. Off by
+                default so constructing a dataset never silently reads or
+                writes the shared cache; training turns it on via config.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -445,7 +455,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # Built lazily, and per process: workers are forked after this point,
         # so each one accumulates and reports its own timings.
         self._timing_sample_interval = timing_sample_interval
-        self._tensor_cache_probe = tensor_cache_probe
         self._timing_label = "train"
         self._sample_timings: _SampleTimings | None = None
 
@@ -464,6 +473,18 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.merged_cross_embodiment_description.items()
             )
         }
+        self._sample_cache_enabled = sample_cache
+        self._sample_cache: _SampleCache | None = None
+        # Sample cache keys are recording ids, not episode indices, which are
+        # positions in a server-ordered list and can point at a different
+        # recording after the dataset changes. Resolved up front so a cache
+        # read costs a list index rather than a recording lookup.
+        self._episode_recording_ids: list[str] = (
+            [recording.id for recording in self.synchronized_dataset]
+            if sample_cache
+            else []
+        )
+
         # Pre-sorted index order per (robot, data type), so projecting a sync
         # point does not re-sort the same keys for every one of the
         # output_prediction_horizon + 1 sync points a sample touches.
@@ -481,6 +502,56 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.output_cross_embodiment_description.items()
             )
         }
+
+    def _sample_spec_hash(self) -> str:
+        """Digest everything that changes what a built sample contains.
+
+        A cache entry is only reusable if all of this matches: the synchronized
+        dataset it came from (which the server keys on the synchronization
+        parameters), which sensors get projected in and how they are padded,
+        how many future steps the outputs span, and the worker-stage
+        preprocessing that shapes the tensors.
+
+        Erring toward including a field costs a cache miss. Erring toward
+        omitting one serves tensors that silently do not match the config, so
+        anything doubtful belongs in here.
+        """
+
+        def preprocessing_spec(
+            config: PreprocessingConfiguration,
+        ) -> dict[str, list[dict[str, object]]]:
+            return {
+                data_type.value: [method.to_dict() for method in methods]
+                for data_type, methods in sorted(
+                    config.items(), key=lambda item: item[0].value
+                )
+            }
+
+        spec = {
+            "format_version": _SampleCache.FORMAT_VERSION,
+            "synchronized_dataset_id": self.synchronized_dataset.id,
+            "input_cross_embodiment_description": (
+                _cacheable_cross_embodiment_description(
+                    self.input_cross_embodiment_description
+                )
+            ),
+            "output_cross_embodiment_description": (
+                _cacheable_cross_embodiment_description(
+                    self.output_cross_embodiment_description
+                )
+            ),
+            "output_prediction_horizon": self.output_prediction_horizon,
+            # Worker-stage only: the device stage runs after the cache and so
+            # does not change what is stored.
+            "input_preprocessing": preprocessing_spec(self.input_preprocessing_config),
+            "output_preprocessing": preprocessing_spec(
+                self.output_preprocessing_config
+            ),
+        }
+        serialized = json.dumps(
+            spec, sort_keys=True, separators=(",", ":"), default=str
+        )
+        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
     def _order_embodiment_items(
@@ -744,6 +815,26 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
 
         return aligned_output_sync_points
 
+    def _init_worker_state(self) -> "_SampleTimings":
+        """Build the per-process timing and cache state on first use.
+
+        Deferred rather than built in ``__init__`` because DataLoader workers
+        are forked afterwards and each needs its own, and because the shallow
+        copy taken for the validation split swaps in different preprocessing
+        and so must key its cache differently.
+
+        Returns:
+            The timing accumulator for this process.
+        """
+        if self._sample_cache_enabled:
+            self._sample_cache = _SampleCache(
+                DEFAULT_CACHE_DIR / "sample_cache", self._sample_spec_hash()
+            )
+        self._sample_timings = _SampleTimings(
+            self._timing_sample_interval, self._timing_label, self._sample_cache
+        )
+        return self._sample_timings
+
     def load_sample(
         self, episode_idx: int, timestep: int | None = None
     ) -> TrainingSample:
@@ -752,22 +843,26 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             nc.login()
             self._logged_in = True
 
-        if self._sample_timings is None:
-            probe = (
-                _TensorCacheProbe(DEFAULT_CACHE_DIR / "tensor_cache_probe")
-                if self._tensor_cache_probe
-                else None
-            )
-            self._sample_timings = _SampleTimings(
-                self._timing_sample_interval, self._timing_label, probe
-            )
-        timings = self._sample_timings
+        timings = self._sample_timings or self._init_worker_state()
         timings.begin_sample()
 
         if self._mem_check_counter % CHECK_MEMORY_INTERVAL == 0:
             self._memory_monitor.check_memory()
             self._mem_check_counter = 0
         self._mem_check_counter += 1
+
+        # Served before the recording is touched at all. A hit needs only the
+        # episode's recording id, which is resolved at construction, so the
+        # whole load collapses to one file read. Skipped when the caller left
+        # the timestep unset, since choosing one needs the episode length.
+        if self._sample_cache is not None and timestep is not None:
+            cached = self._sample_cache.load(
+                self._episode_recording_ids[episode_idx], timestep
+            )
+            if cached is not None:
+                timings.mark("sample_cache_load")
+                timings.end_sample()
+                return cached
 
         synced_recording = self.synchronized_dataset[episode_idx]
         synced_recording = cast(SynchronizedRecording, synced_recording)
@@ -898,7 +993,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             outputs_mask=outputs_mask,
             batch_size=1,
         )
-        timings.end_sample(sample)
+        if self._sample_cache is not None:
+            self._sample_cache.store(synced_recording.id, timestep, sample)
+            timings.mark("sample_cache_store")
+        timings.end_sample()
         return sample
 
     def __len__(self) -> int:

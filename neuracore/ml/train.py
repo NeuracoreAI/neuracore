@@ -867,7 +867,7 @@ def _main(cfg: DictConfig) -> None:
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
             timing_sample_interval=cfg.get("dataset_timing_sample_interval", 50),
-            tensor_cache_probe=cfg.get("dataset_tensor_cache_probe", False),
+            sample_cache=cfg.get("dataset_sample_cache", True),
         )
 
         # Handle batch size configuration. Probing costs several subprocess
