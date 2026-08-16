@@ -1514,6 +1514,91 @@ class TestPerformanceAndOptimization:
         assert all(idx == 0 for idx in dataset.episode_indices[:9])
         assert all(idx == 1 for idx in dataset.episode_indices[9:18])
 
+        # Offsets must agree with a scan for the episode's first occurrence,
+        # which is what they replace in __getitem__.
+        assert dataset.episode_start_offsets == [0, 9, 18, 27, 36]
+        for episode_idx, offset in enumerate(dataset.episode_start_offsets):
+            assert dataset.episode_indices.index(episode_idx) == offset
+
+    @patch("neuracore.login")
+    def test_precomputed_padding_widths_match_a_per_sample_scan(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        """Padding widths are derived once; they must match the old scan.
+
+        The width is the highest index used for a data type across every
+        robot, plus one, so mixed-embodiment batches pad to a common size.
+        """
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 2),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+        )
+
+        def scan(description, data_type):
+            widest = 0
+            for robot in description:
+                for index in description[robot][data_type]:
+                    widest = max(widest, index)
+            return widest + 1
+
+        for data_type in input_description[ROBOT_ID]:
+            assert dataset._max_items_per_input_type[data_type] == scan(
+                input_description, data_type
+            )
+        for data_type in output_description[ROBOT_ID]:
+            assert dataset._max_items_per_output_type[data_type] == scan(
+                output_description, data_type
+            )
+
+    @patch("neuracore.login")
+    def test_precomputed_ordering_is_index_sorted(
+        self, mock_login, mock_synchronized_dataset
+    ):
+        """Projection order is fixed at construction, not re-sorted per sample."""
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3)
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+        )
+
+        for ordered in dataset._merged_ordered_items[ROBOT_ID].values():
+            indices = [index for index, _ in ordered]
+            assert indices == sorted(indices)
+
 
 class TestIntegrationWithPyTorchDataLoader:
     """Integration tests with PyTorch DataLoader."""

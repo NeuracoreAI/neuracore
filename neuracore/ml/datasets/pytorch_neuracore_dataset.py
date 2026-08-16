@@ -74,6 +74,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             self.input_cross_embodiment_description,
             self.output_cross_embodiment_description,
         )
+        self._tensor_attribute_cache: dict[type[BatchedNCData], list[str]] = {}
 
     @abstractmethod
     def load_sample(
@@ -118,6 +119,28 @@ class PytorchNeuracoreDataset(Dataset, ABC):
             Exception: If sample loading fails after exhausting retry attempts.
         """
         pass
+
+    def _tensor_attribute_names(
+        self, item_type: type[BatchedNCData], example: BatchedNCData
+    ) -> list[str]:
+        """Return the tensor-valued attribute names for ``item_type``, cached.
+
+        Args:
+            item_type: The batched data class to inspect.
+            example: An instance of ``item_type`` to read the layout from.
+
+        Returns:
+            The names of every attribute holding a tensor.
+        """
+        cached = self._tensor_attribute_cache.get(item_type)
+        if cached is None:
+            cached = [
+                attr_name
+                for attr_name in vars(example)
+                if isinstance(getattr(example, attr_name), torch.Tensor)
+            ]
+            self._tensor_attribute_cache[item_type] = cached
+        return cached
 
     def _collate_input_outputs(
         self,
@@ -165,12 +188,13 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                 # Collect all samples for this specific item across the batch
                 items_to_batch = [sample[data_type][item_idx] for sample in samples]
 
-                # Get attribute names from the first item
-                attrib_names_of_tensors = [
-                    attr_name
-                    for attr_name in vars(items_to_batch[0])
-                    if isinstance(getattr(items_to_batch[0], attr_name), torch.Tensor)
-                ]
+                # Which attributes hold tensors is a property of the type,
+                # not the instance, so discover it once instead of per item of
+                # per data type of every batch.
+                item_type = type(items_to_batch[0])
+                attrib_names_of_tensors = self._tensor_attribute_names(
+                    item_type, items_to_batch[0]
+                )
 
                 # Stack each attribute across samples
                 batched_attributes = {}
@@ -184,7 +208,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                         batched_attributes[attr_name] = None
 
                 # Create new batched object of the same type
-                batched_item = type(items_to_batch[0])(**batched_attributes)
+                batched_item = item_type(**batched_attributes)
                 batched_data[data_type].append(batched_item)
 
         return batched_data
