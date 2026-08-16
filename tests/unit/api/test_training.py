@@ -904,7 +904,7 @@ def test_start_training_run_raises_when_disk_size_too_small(
     algorithm_list_response,
     mocked_org_id,
 ):
-    """start_training_run rejects disks that cannot fit the dataset."""
+    """start_training_run rejects disks below the estimated minimum."""
     nc.login("test_api_key")
     dataset_id = "dataset123"
     dataset_response = Dataset(
@@ -936,14 +936,20 @@ def test_start_training_run_raises_when_disk_size_too_small(
         status_code=200,
     )
     mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_id}",
+        json={"data": [], "total": 20, "limit": 1, "start_after": None},
+        status_code=200,
+    )
+    mock_auth_requests.post(
         f"{API_URL}/org/{mocked_org_id}/training/jobs",
         json={"id": "should_not_create"},
         status_code=200,
     )
 
     expected_message = (
-        "Dataset test_dataset is 2.00 GB, but selected VM disk is 1 GB. "
-        "Please increase disk_size_gb."
+        "Estimated minimum disk for this training job is "
+        r"\d+ GB, but selected VM disk is 1 GB\. "
+        "Please increase disk_size_gb\\."
     )
     with pytest.raises(ValueError, match=expected_message):
         nc.start_training_run(
