@@ -180,8 +180,13 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         self.episode_indices = self._get_episode_indices()
         self._logged_in = False
 
-        self.input_preprocessing_config = input_preprocessing_config
-        self.output_preprocessing_config = output_preprocessing_config
+        # Only the worker-side half runs here. Device-side methods are applied
+        # by the trainer once the batch is on the accelerator, where they run
+        # batched rather than once per frame on a contended worker CPU.
+        self.input_preprocessing_config, _ = input_preprocessing_config.split_by_stage()
+        self.output_preprocessing_config, _ = (
+            output_preprocessing_config.split_by_stage()
+        )
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training

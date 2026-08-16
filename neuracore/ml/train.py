@@ -372,6 +372,8 @@ def run_training(
     output_cross_embodiment_description: CrossEmbodimentDescription,
     inference_input_preprocessing_config: PreprocessingConfiguration,
     inference_output_preprocessing_config: PreprocessingConfiguration,
+    train_input_preprocessing_config: PreprocessingConfiguration,
+    train_output_preprocessing_config: PreprocessingConfiguration,
     dataset: PytorchSynchronizedDataset,
     device: torch.device | None = None,
 ) -> None:
@@ -548,6 +550,14 @@ def run_training(
             output_dir=Path(cfg.local_output_dir),
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
+            train_device_preprocessing=(
+                train_input_preprocessing_config.split_by_stage()[1],
+                train_output_preprocessing_config.split_by_stage()[1],
+            ),
+            inference_device_preprocessing=(
+                inference_input_preprocessing_config.split_by_stage()[1],
+                inference_output_preprocessing_config.split_by_stage()[1],
+            ),
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
             rank=rank,
@@ -783,6 +793,8 @@ def _main(cfg: DictConfig) -> None:
                     output_cross_embodiment_description,
                     inference_input_preprocessing_config,
                     inference_output_preprocessing_config,
+                    train_input_preprocessing_config,
+                    train_output_preprocessing_config,
                     pytorch_dataset,
                     device,
                 ),
@@ -800,6 +812,8 @@ def _main(cfg: DictConfig) -> None:
                 output_cross_embodiment_description,
                 inference_input_preprocessing_config,
                 inference_output_preprocessing_config,
+                train_input_preprocessing_config,
+                train_output_preprocessing_config,
                 pytorch_dataset,
                 device,
             )

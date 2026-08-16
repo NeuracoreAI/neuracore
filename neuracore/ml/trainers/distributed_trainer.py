@@ -15,8 +15,10 @@ from tqdm import tqdm
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
 from neuracore.ml.logging.training_logger import TrainingLogger
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
+from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,12 @@ class DistributedTrainer:
         output_dir: Path,
         num_epochs: int,
         log_freq: int = 50,
+        train_device_preprocessing: (
+            tuple[PreprocessingConfiguration, PreprocessingConfiguration] | None
+        ) = None,
+        inference_device_preprocessing: (
+            tuple[PreprocessingConfiguration, PreprocessingConfiguration] | None
+        ) = None,
         save_freq: int = 1,
         save_checkpoints: bool = True,
         keep_last_n_checkpoints: int = 5,
@@ -78,6 +86,12 @@ class DistributedTrainer:
             output_dir: Directory for output files
             num_epochs: Number of epochs to train
             log_freq: Frequency to log metrics (in steps)
+            train_device_preprocessing: ``(input, output)`` device-side
+                preprocessing applied to training batches once they reach the
+                device. The dataset applies the worker-side half; this is the
+                rest.
+            inference_device_preprocessing: The same, for validation batches,
+                which use the inference pipeline rather than the training one.
             save_freq: Frequency to save checkpoints (in epochs)
             save_checkpoints: Whether to save checkpoints
             keep_last_n_checkpoints: Number of checkpoints to keep
@@ -109,6 +123,9 @@ class DistributedTrainer:
         self.output_dir = output_dir
         self.num_epochs = num_epochs
         self.log_freq = log_freq
+        empty = (PreprocessingConfiguration(), PreprocessingConfiguration())
+        self.train_device_preprocessing = train_device_preprocessing or empty
+        self.inference_device_preprocessing = inference_device_preprocessing or empty
         self.save_freq = save_freq
         self.save_checkpoints = save_checkpoints
         self.keep_last_n_checkpoints = keep_last_n_checkpoints
@@ -161,6 +178,7 @@ class DistributedTrainer:
 
             # Move tensors to device and format batch
             batch = batch.to(self.device)
+            apply_device_preprocessing(batch, *self.train_device_preprocessing)
 
             # Forward pass
             if self.world_size > 1:
@@ -247,6 +265,7 @@ class DistributedTrainer:
 
         for batch_idx, batch in enumerate(pbar):
             batch = batch.to(self.device)
+            apply_device_preprocessing(batch, *self.inference_device_preprocessing)
 
             # Forward pass
             if self.world_size > 1:
