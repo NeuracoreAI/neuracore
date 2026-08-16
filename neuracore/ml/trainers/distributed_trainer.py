@@ -12,8 +12,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
+from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.core.ml_types import BatchedTrainingSamples
+from neuracore.ml.logging.system_metrics import (
+    SYSTEM_METRIC_PREFIX,
+    SystemMetricsCollector,
+)
 from neuracore.ml.logging.training_logger import TrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
@@ -61,6 +66,7 @@ class DistributedTrainer:
         output_dir: Path,
         num_epochs: int,
         log_freq: int = 50,
+        system_log_freq: int = 0,
         train_device_preprocessing: (
             tuple[PreprocessingConfiguration, PreprocessingConfiguration] | None
         ) = None,
@@ -86,6 +92,10 @@ class DistributedTrainer:
             output_dir: Directory for output files
             num_epochs: Number of epochs to train
             log_freq: Frequency to log metrics (in steps)
+            system_log_freq: Frequency to log host and accelerator utilisation
+                (in steps). 0 disables it. Sampled far less often than the
+                model metrics because each sample costs syscalls and an NVML
+                query, and utilisation moves slowly.
             train_device_preprocessing: ``(input, output)`` device-side
                 preprocessing applied to training batches once they reach the
                 device. The dataset applies the worker-side half; this is the
@@ -123,6 +133,13 @@ class DistributedTrainer:
         self.output_dir = output_dir
         self.num_epochs = num_epochs
         self.log_freq = log_freq
+        self.system_log_freq = system_log_freq
+        # Only rank 0 logs, matching _log_scalars, so only rank 0 samples.
+        self._system_metrics = (
+            SystemMetricsCollector(self.device, disk_path=DEFAULT_CACHE_DIR)
+            if system_log_freq > 0 and rank == 0
+            else None
+        )
         empty = (PreprocessingConfiguration(), PreprocessingConfiguration())
         self.train_device_preprocessing = train_device_preprocessing or empty
         self.inference_device_preprocessing = inference_device_preprocessing or empty
@@ -216,6 +233,16 @@ class DistributedTrainer:
                 )
                 self._log_gradients(self.global_train_step)
                 self._log_weights(self.global_train_step)
+
+            if (
+                self._system_metrics is not None
+                and self.global_train_step % self.system_log_freq == 0
+            ):
+                self._log_scalars(
+                    self._system_metrics.collect(),
+                    self.global_train_step,
+                    prefix=SYSTEM_METRIC_PREFIX,
+                )
             pbar.set_postfix(
                 {"loss": f"{loss.item():.4f}", "step": self.global_train_step}
             )

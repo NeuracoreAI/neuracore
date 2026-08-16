@@ -333,6 +333,7 @@ nostdin
 nprocs
 numer
 numpy
+nvml
 octomap
 offsamples
 omegaconf
