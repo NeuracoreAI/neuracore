@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 # Only update the training metadata every N steps to avoid excessive API calls
 UPDATE_TRAINING_METADATA_EVERY = 20
 
+# Checking RAM/VRAM headroom reads /proc/meminfo and the CUDA allocator, far
+# more often than a slow-moving quantity needs. Matches the interval the
+# dataset uses for the same check (see PytorchSynchronizedDataset).
+CHECK_MEMORY_INTERVAL = 100
+
 
 class NestedModule(nn.Module):
     """A special case to allow NeuracoreModel to be used in DDP."""
@@ -134,6 +139,15 @@ class DistributedTrainer:
         self.num_epochs = num_epochs
         self.log_freq = log_freq
         self.system_log_freq = system_log_freq
+        # Progress bars render only on rank 0, and never when logs are shipped
+        # to the cloud. Cached because it also decides whether the loss is
+        # worth pulling off the device to display.
+        self._pbar_enabled = rank == 0 and not storage_handler.log_to_cloud
+        # Histograms ride the same cadence as the other scalars, but are
+        # skipped when the backend discards them (CloudTrainingLogger records
+        # nothing) and on non-zero ranks, which would otherwise race each other
+        # writing into one TensorBoard directory.
+        self._histograms_enabled = rank == 0 and training_logger.supports_histograms
         # Only rank 0 logs, matching _log_scalars, so only rank 0 samples.
         self._system_metrics = (
             SystemMetricsCollector(self.device, disk_path=DEFAULT_CACHE_DIR)
@@ -173,25 +187,28 @@ class DistributedTrainer:
             A dictionary of averaged metrics for the epoch
         """
         self.model.train()
-        epoch_losses: list[dict[str, float]] = []
-        epoch_metrics: list[dict[str, float]] = []
+        accumulator = _MetricAccumulator()
 
         memory_monitor = MemoryMonitor(
-            max_ram_utilization=0.8, max_gpu_utilization=0.95
+            max_ram_utilization=0.8,
+            max_gpu_utilization=0.95,
+            # The default gpu_id=0 would have every rank watch GPU 0.
+            gpu_id=self.device.index if self.device.type == "cuda" else None,
         )
 
         # Progress bar only on rank 0
         pbar = tqdm(
             self.train_loader,
             desc=f"Training Epoch {epoch}",
-            disable=self.rank != 0 or self.storage_handler.log_to_cloud,
+            disable=not self._pbar_enabled,
         )
 
         for optimizer in self.optimizers:
             optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(pbar):
-            memory_monitor.check_memory()
+            if batch_idx % CHECK_MEMORY_INTERVAL == 0:
+                memory_monitor.check_memory()
 
             # Move tensors to device and format batch
             batch = batch.to(self.device)
@@ -220,7 +237,10 @@ class DistributedTrainer:
                 for scheduler in self.schedulers:
                     scheduler.step()
 
-            if self.log_freq > 0 and self.global_train_step % self.log_freq == 0:
+            is_log_step = self.log_freq > 0 and (
+                self.global_train_step % self.log_freq == 0
+            )
+            if is_log_step:
                 self._log_scalars(
                     batch_output.losses,
                     self.global_train_step,
@@ -243,12 +263,13 @@ class DistributedTrainer:
                     self.global_train_step,
                     prefix=SYSTEM_METRIC_PREFIX,
                 )
-            pbar.set_postfix(
-                {"loss": f"{loss.item():.4f}", "step": self.global_train_step}
-            )
-            epoch_losses, epoch_metrics = self._accumulate_epoch_metrics(
-                batch_output, epoch_losses, epoch_metrics
-            )
+            # loss.item() is a device sync. Only pay for it when a human is
+            # actually watching the bar, and then only as often as we log.
+            if self._pbar_enabled and is_log_step:
+                pbar.set_postfix(
+                    {"loss": f"{loss.item():.4f}", "step": self.global_train_step}
+                )
+            accumulator.update(batch_output)
             self.global_train_step += 1
             if (
                 self.rank == 0
@@ -264,9 +285,7 @@ class DistributedTrainer:
 
             del batch, batch_output, loss
 
-        avg_epoch_losses, avg_epoch_metrics = self._average_epoch_metrics(
-            epoch_losses, epoch_metrics, epoch
-        )
+        avg_epoch_losses, avg_epoch_metrics = accumulator.averages()
         self._log_scalars(avg_epoch_losses, epoch, prefix="train/epoch/loss")
         self._log_scalars(avg_epoch_metrics, epoch, prefix="train/epoch/metrics")
         return avg_epoch_losses
@@ -281,13 +300,12 @@ class DistributedTrainer:
             A dictionary of averaged validation metrics
         """
         self.model.train()  # Keep in train mode to get losses
-        val_losses: list[dict[str, float]] = []
-        val_metrics: list[dict[str, float]] = []
+        accumulator = _MetricAccumulator()
 
         pbar = tqdm(
             self.val_loader,
             desc=f"Validation Epoch {epoch}",
-            disable=self.rank != 0 or self.storage_handler.log_to_cloud,
+            disable=not self._pbar_enabled,
         )
 
         for batch_idx, batch in enumerate(pbar):
@@ -309,14 +327,10 @@ class DistributedTrainer:
                     self.global_val_step,
                     prefix="val/step/metrics",
                 )
-            val_losses, val_metrics = self._accumulate_epoch_metrics(
-                batch_output, val_losses, val_metrics
-            )
+            accumulator.update(batch_output)
             self.global_val_step += 1
 
-        avg_losses, avg_metrics = self._average_epoch_metrics(
-            val_losses, val_metrics, epoch
-        )
+        avg_losses, avg_metrics = accumulator.averages()
         self._log_scalars(avg_losses, epoch, prefix="val/epoch/loss")
         self._log_scalars(avg_metrics, epoch, prefix="val/epoch/metrics")
         return avg_losses
@@ -383,6 +397,9 @@ class DistributedTrainer:
                 # VM/container be torn down — while the final checkpoint is
                 # still mid-upload.
                 self.storage_handler.wait_for_pending_uploads()
+                # Progress updates are sent off-thread too, so flush the last
+                # one rather than letting it die with the worker.
+                self.storage_handler.wait_for_pending_progress_updates()
                 # Close the logger
                 self.training_logger.close()
 
@@ -467,6 +484,8 @@ class DistributedTrainer:
         Args:
             step: Training step.
         """
+        if not self._histograms_enabled:
+            return
         model = self.get_model_without_ddp()
         for name, param in model.named_parameters():
             if param.grad is not None:
@@ -480,6 +499,8 @@ class DistributedTrainer:
         Args:
             step: Training step.
         """
+        if not self._histograms_enabled:
+            return
         model = self.get_model_without_ddp()
         for name, param in model.named_parameters():
             self.training_logger.log_histogram(f"weights/{name}", param, step)
@@ -506,70 +527,60 @@ class DistributedTrainer:
                 f"{prefix}/{scalar_name}", scalar_value, step
             )
 
-    def _accumulate_epoch_metrics(
-        self,
-        batch_output: BatchedTrainingOutputs,
-        epoch_losses: list[dict[str, float]],
-        epoch_metrics: list[dict[str, float]],
-    ) -> tuple[list[dict[str, float]], list[dict[str, float]]]:
-        """Accumulate metrics for the current epoch.
 
-        Args:
-            batch_output: Outputs from the training step
-            epoch_losses: List of losses accumulated for the epoch
-            epoch_metrics: List of metrics accumulated for the epoch
+class _MetricAccumulator:
+    """Running sums of per-step losses and metrics for one epoch.
 
-        Returns:
-            Updated lists of losses and metrics for the epoch
-        """
-        # Accumulate losses
+    Tensor values are summed on whichever device they arrive on and read back
+    once, when the epoch ends. Summing on the host instead would mean a
+    blocking device-to-host copy per loss and per metric on every single step.
+    """
+
+    def __init__(self) -> None:
+        """Initialize empty accumulators."""
+        self._loss_sums: dict[str, torch.Tensor | float] = {}
+        self._metric_sums: dict[str, torch.Tensor | float] = {}
+        self._loss_steps = 0
+        self._metric_steps = 0
+
+    @staticmethod
+    def _add(
+        sums: dict[str, torch.Tensor | float], values: dict[str, torch.Tensor]
+    ) -> None:
+        for key, value in values.items():
+            contribution = value.detach() if isinstance(value, torch.Tensor) else value
+            if key in sums:
+                sums[key] = sums[key] + contribution
+            else:
+                sums[key] = contribution
+
+    def update(self, batch_output: BatchedTrainingOutputs) -> None:
+        """Add one step's losses and metrics to the running totals."""
         if batch_output.losses:
-            epoch_losses.append({
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in batch_output.losses.items()
-            })
-
-        # Accumulate metrics
+            self._add(self._loss_sums, batch_output.losses)
+            self._loss_steps += 1
         if batch_output.metrics:
-            epoch_metrics.append({
-                k: v.item() if isinstance(v, torch.Tensor) else v
-                for k, v in batch_output.metrics.items()
-            })
+            self._add(self._metric_sums, batch_output.metrics)
+            self._metric_steps += 1
 
-        return epoch_losses, epoch_metrics
+    @staticmethod
+    def _finalize(
+        sums: dict[str, torch.Tensor | float], steps: int
+    ) -> dict[str, float]:
+        if steps == 0:
+            return {}
+        return {
+            key: (total.item() if isinstance(total, torch.Tensor) else float(total))
+            / steps
+            for key, total in sums.items()
+        }
 
-    def _average_epoch_metrics(
-        self,
-        epoch_losses: list[dict[str, float]],
-        epoch_metrics: list[dict[str, float]],
-        epoch: int,
-    ) -> tuple[dict[str, float], dict[str, float]]:
-        """Average metrics across the epoch.
-
-        Args:
-            epoch_losses: List of losses accumulated for the epoch
-            epoch_metrics: List of metrics accumulated for the epoch
-            epoch: Current epoch number
-
-        Returns:
-            A dictionary of averaged losses and metrics for the epoch
-        """
-        avg_epoch_losses = {}
-        avg_epoch_metrics = {}
-
-        if epoch_losses:
-            for key in epoch_losses[0].keys():
-                avg_epoch_losses[key] = sum(x[key] for x in epoch_losses) / len(
-                    epoch_losses
-                )
-
-        if epoch_metrics:
-            for key in epoch_metrics[0].keys():
-                avg_epoch_metrics[key] = sum(x[key] for x in epoch_metrics) / len(
-                    epoch_metrics
-                )
-
-        return avg_epoch_losses, avg_epoch_metrics
+    def averages(self) -> tuple[dict[str, float], dict[str, float]]:
+        """Return the epoch-averaged losses and metrics as plain floats."""
+        return (
+            self._finalize(self._loss_sums, self._loss_steps),
+            self._finalize(self._metric_sums, self._metric_steps),
+        )
 
 
 def setup_distributed(rank: int, world_size: int) -> None:

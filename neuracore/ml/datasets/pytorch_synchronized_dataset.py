@@ -219,6 +219,16 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.merged_cross_embodiment_description.items()
             )
         }
+        # The output window is projected onto the output description alone.
+        # Only output data types are ever read back out of it, and narrowing it
+        # is what lets the recording skip decoding camera frames across the
+        # whole prediction horizon.
+        self._output_ordered_items = {
+            robot_id: self._order_embodiment_items(description)
+            for robot_id, description in (
+                self.output_cross_embodiment_description.items()
+            )
+        }
 
         self._sample_cache = self._build_sample_cache() if sample_cache else None
 
@@ -459,18 +469,28 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         synced_recording: SynchronizedRecording,
         timestep: int,
         ordered_items: dict[DataType, list[tuple[int, str]]],
+        projected_input_sync_point: SynchronizedPoint,
     ) -> list[SynchronizedPoint]:
         """Load the superset window for all output data types.
 
-        Fetches ``[timestep, timestep + 1 + horizon]`` once so target types
-        (aligned to the input step) and non-target types (next step onward)
-        can share the same loaded sync points.
+        Covers ``[timestep, timestep + 1 + horizon]`` so target types (aligned
+        to the input step) and non-target types (next step onward) can share
+        the same loaded sync points.
+
+        Only the data types in ``ordered_items`` are materialised. Loading a
+        sync point decodes camera frames off disk, and the output window is
+        usually joints-only, so without the filter every sample would pay for
+        ``horizon + 1`` frames per camera and then discard them.
+
+        The sync point at ``timestep`` is reused from
+        ``projected_input_sync_point`` rather than being loaded a second time.
         """
-        output_sync_points = cast(
-            list[SynchronizedPoint],
-            synced_recording[timestep : timestep + 1 + self.output_prediction_horizon],
+        output_sync_points = synced_recording.get_range(
+            timestep + 1,
+            timestep + 1 + self.output_prediction_horizon,
+            data_types=frozenset(ordered_items),
         )
-        return [
+        return [projected_input_sync_point] + [
             self._project_sync_point(sync_point, ordered_items)
             for sync_point in output_sync_points
         ]
@@ -545,7 +565,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         output_sync_points = self._load_projected_output_sync_points(
             synced_recording=synced_recording,
             timestep=timestep,
-            ordered_items=merged_ordered_items,
+            ordered_items=self._output_ordered_items[robot_id],
+            projected_input_sync_point=input_sync_point,
         )
         recording_name = getattr(synced_recording, "name", "recording")
 

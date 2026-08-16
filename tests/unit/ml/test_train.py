@@ -37,14 +37,16 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 from neuracore.ml.train import (
     _resolve_recording_cache_dir,
     _serialize_cross_embodiment_description,
-    assert_valid_batch_size,
-    determine_optimal_batch_size,
     get_model_and_algorithm_config,
     main,
     run_training,
     setup_logging,
 )
 from neuracore.ml.trainers.batch_autotuner import find_optimal_batch_size
+from neuracore.ml.utils.batch_size import (
+    assert_valid_batch_size,
+    determine_optimal_batch_size,
+)
 from neuracore.ml.utils.preprocessing import (
     resolve_input_output_preprocessing,
     resolve_preprocessing_config,
@@ -177,6 +179,9 @@ class MainTestSetup:
         self.mock_synchronized_dataset = Mock()
         self.mock_pytorch_dataset = Mock(spec=PytorchSynchronizedDataset)
         self.mock_pytorch_dataset.cross_embodiment_description = Mock()
+        # Read when building the batch-size cache key, so it has to be a real
+        # mapping rather than a bare Mock.
+        self.mock_pytorch_dataset.dataset_statistics = {"input": {}, "output": {}}
         self.mock_pytorch_dataset.__len__ = Mock(return_value=100)
         self.mock_pytorch_dataset.load_sample = Mock(return_value=Mock())
         self.mock_pytorch_dataset.__getitem__ = Mock(
@@ -258,10 +263,23 @@ class MainTestSetup:
         )
         self.mock_assert_valid_batch_size = Mock()
         self.monkeypatch.setattr(
-            "neuracore.ml.train.assert_valid_batch_size",
+            "neuracore.ml.utils.batch_size.assert_valid_batch_size",
             self.mock_assert_valid_batch_size,
         )
         self.monkeypatch.setattr("torch.cuda.device_count", self.mock_cuda_device_count)
+        # Keep the on-disk batch-size cache out of unit tests: a real hit would
+        # short-circuit the autotune and validate paths these tests assert on,
+        # and a real write would leak into the developer's home directory.
+        self.mock_load_cached_batch_size = Mock(return_value=None)
+        self.mock_store_cached_batch_size = Mock()
+        self.monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.load_cached_batch_size",
+            self.mock_load_cached_batch_size,
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.store_cached_batch_size",
+            self.mock_store_cached_batch_size,
+        )
         self.monkeypatch.setattr(
             "neuracore.ml.train.AlgorithmStorageHandler",
             self.mock_storage_handler_class,
@@ -293,7 +311,7 @@ class MainTestSetup:
         if include_determine_optimal_batch_size:
             self.mock_determine_optimal_batch_size = Mock()
             self.monkeypatch.setattr(
-                "neuracore.ml.train.determine_optimal_batch_size",
+                "neuracore.ml.utils.batch_size.determine_optimal_batch_size",
                 self.mock_determine_optimal_batch_size,
             )
 
@@ -1121,9 +1139,11 @@ class TestDetermineOptimalBatchSize:
             return_value=(mock_model_class(model_init_description), {})
         )
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
         monkeypatch.setattr(
-            "neuracore.ml.train.find_optimal_batch_size", mock_find_optimal
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.find_optimal_batch_size", mock_find_optimal
         )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
@@ -1135,6 +1155,7 @@ class TestDetermineOptimalBatchSize:
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
+            Mock(),  # create_model: never called, probes are patched
         )
 
         assert result == 16
@@ -1149,7 +1170,9 @@ class TestDetermineOptimalBatchSize:
         monkeypatch,
     ):
         mock_get_device = Mock(return_value=torch.device("cpu"))
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
         monkeypatch.setattr("torch.cuda.is_available", lambda: False)
 
         with pytest.raises(ValueError, match="Autotuning is only supported on GPUs"):
@@ -1158,6 +1181,7 @@ class TestDetermineOptimalBatchSize:
                 mock_dataset,
                 mock_cfg_batch_size.input_cross_embodiment_description,
                 mock_cfg_batch_size.output_cross_embodiment_description,
+                Mock(),  # create_model: never called, probes are patched
             )
 
     @pytest.mark.skipif(SKIP_TEST, reason="Skipping test in CI environment")
@@ -1175,7 +1199,7 @@ class TestDetermineOptimalBatchSize:
         )
 
         monkeypatch.setattr(
-            "neuracore.ml.train.find_optimal_batch_size", mock_find_optimal
+            "neuracore.ml.utils.batch_size.find_optimal_batch_size", mock_find_optimal
         )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
@@ -1188,6 +1212,7 @@ class TestDetermineOptimalBatchSize:
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
+            Mock(),  # create_model: never called, probes are patched
             device=device,
         )
 
@@ -1223,9 +1248,11 @@ class TestDetermineOptimalBatchSize:
             cleanup_called["cuda_empty_cache"] = True
             return original_cuda_empty_cache()
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
         monkeypatch.setattr(
-            "neuracore.ml.train.find_optimal_batch_size", mock_find_optimal
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.find_optimal_batch_size", mock_find_optimal
         )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
@@ -1239,6 +1266,7 @@ class TestDetermineOptimalBatchSize:
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
+            Mock(),  # create_model: never called, probes are patched
         )
 
         assert result == 16
@@ -1260,9 +1288,11 @@ class TestDetermineOptimalBatchSize:
             return_value=(mock_model_class(model_init_description), {})
         )
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
         monkeypatch.setattr(
-            "neuracore.ml.train.find_optimal_batch_size", mock_find_optimal
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.find_optimal_batch_size", mock_find_optimal
         )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
@@ -1274,6 +1304,7 @@ class TestDetermineOptimalBatchSize:
             mock_dataset,
             mock_cfg_batch_size.input_cross_embodiment_description,
             mock_cfg_batch_size.output_cross_embodiment_description,
+            Mock(),  # create_model: never called, probes are patched
         )
 
         assert result == 16
@@ -1295,6 +1326,7 @@ class TestDetermineOptimalBatchSize:
                 mock_dataset,
                 mock_cfg_batch_size.input_cross_embodiment_description,
                 mock_cfg_batch_size.output_cross_embodiment_description,
+                Mock(),  # create_model: never called, probes are patched
                 device=device,
             )
 
@@ -1317,8 +1349,12 @@ class TestAssertValidBatchSize:
             return_value=(mock_model_class(model_init_description), {})
         )
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
-        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.is_valid_batch_size", mock_is_valid
+        )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
         )
@@ -1334,6 +1370,7 @@ class TestAssertValidBatchSize:
             output_cross_embodiment_description=(
                 mock_cfg_batch_size.output_cross_embodiment_description
             ),
+            create_model=Mock(),  # never called: the check exits before probing
         )
 
         assert result is None
@@ -1357,8 +1394,12 @@ class TestAssertValidBatchSize:
             return_value=(mock_model_class(model_init_description), {})
         )
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
-        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.is_valid_batch_size", mock_is_valid
+        )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
         )
@@ -1384,7 +1425,9 @@ class TestAssertValidBatchSize:
     ):
         """On CPU the memory check must be skipped without raising."""
         mock_is_valid = Mock()
-        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.is_valid_batch_size", mock_is_valid
+        )
         monkeypatch.setattr("torch.cuda.is_available", lambda: False)
 
         result = assert_valid_batch_size(
@@ -1397,6 +1440,7 @@ class TestAssertValidBatchSize:
             output_cross_embodiment_description=(
                 mock_cfg_batch_size.output_cross_embodiment_description
             ),
+            create_model=Mock(),  # never called: the check exits before probing
         )
 
         assert result is None
@@ -1407,7 +1451,9 @@ class TestAssertValidBatchSize:
     ):
         """Explicit CPU device should also skip the memory check."""
         mock_is_valid = Mock()
-        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.is_valid_batch_size", mock_is_valid
+        )
         monkeypatch.setattr("torch.cuda.is_available", lambda: True)
 
         result = assert_valid_batch_size(
@@ -1420,6 +1466,7 @@ class TestAssertValidBatchSize:
             output_cross_embodiment_description=(
                 mock_cfg_batch_size.output_cross_embodiment_description
             ),
+            create_model=Mock(),  # never called: the check exits before probing
             device=torch.device("cpu"),
         )
 
@@ -1455,8 +1502,12 @@ class TestAssertValidBatchSize:
             cleanup_call_counts["cuda_empty_cache"] += 1
             return original_cuda_empty_cache()
 
-        monkeypatch.setattr("neuracore.ml.train.get_default_device", mock_get_device)
-        monkeypatch.setattr("neuracore.ml.train.is_valid_batch_size", mock_is_valid)
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.get_default_device", mock_get_device
+        )
+        monkeypatch.setattr(
+            "neuracore.ml.utils.batch_size.is_valid_batch_size", mock_is_valid
+        )
         monkeypatch.setattr(
             "neuracore.ml.train.get_model_and_algorithm_config", mock_get_model_config
         )
@@ -1476,6 +1527,7 @@ class TestAssertValidBatchSize:
             output_cross_embodiment_description=(
                 mock_cfg_batch_size.output_cross_embodiment_description
             ),
+            create_model=Mock(),  # never called: the check exits before probing
         )
 
         assert cleanup_call_counts["gc_collect"] == 1

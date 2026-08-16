@@ -1,14 +1,11 @@
 """Hydra-based training script for Neuracore models."""
 
-import copy
-import gc
 import json
 import logging
 import os
 import sys
 import time
 import traceback
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,10 +35,6 @@ from neuracore.ml.logging.cloud_training_logger import CloudTrainingLogger
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.logging.tensorboard_training_logger import TensorboardTrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
-from neuracore.ml.trainers.batch_autotuner import (
-    find_optimal_batch_size,
-    is_valid_batch_size,
-)
 from neuracore.ml.trainers.distributed_trainer import (
     DistributedTrainer,
     cleanup_distributed,
@@ -49,6 +42,7 @@ from neuracore.ml.trainers.distributed_trainer import (
 )
 from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
+from neuracore.ml.utils.batch_size import resolve_batch_size
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
@@ -64,8 +58,6 @@ os.environ["PJRT_DEVICE"] = "GPU"
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
 
 
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
@@ -228,141 +220,6 @@ def get_model_and_algorithm_config(
     return model, algorithm_config
 
 
-def _create_model_for_batch_validation(
-    cfg: DictConfig, model_init_description: ModelInitDescription
-) -> NeuracoreModel:
-    """Create a model instance for batch size validation (called inside subprocess)."""
-    model, _ = get_model_and_algorithm_config(cfg, model_init_description)
-    return model
-
-
-def assert_valid_batch_size(
-    batch_size: int,
-    cfg: DictConfig,
-    dataset: PytorchSynchronizedDataset,
-    input_cross_embodiment_description: CrossEmbodimentDescription,
-    output_cross_embodiment_description: CrossEmbodimentDescription,
-    device: torch.device | None = None,
-) -> None:
-    """Assert that a user-selected batch size fits in GPU memory.
-
-    The check is skipped on CPU (or when CUDA is unavailable). The user-selected
-    batch size is trusted in that case.
-
-    Raises:
-        ValueError: If ``batch_size`` does not fit in GPU memory.
-    """
-    if not torch.cuda.is_available() or (
-        device is not None and "cuda" not in device.type
-    ):
-        logger.warning("Skipping batch size memory check: GPU not available.")
-        return
-
-    if device is None:
-        device = get_default_device()
-
-    logger.info(f"Validating batch size {batch_size} on {device}...")
-
-    # Avoid altering the original dataset
-    assert_dataset = copy.deepcopy(dataset)
-
-    dataset_statistics_by_role = assert_dataset.dataset_statistics
-    model_init_description = ModelInitDescription(
-        input_dataset_statistics=dataset_statistics_by_role["input"],
-        output_dataset_statistics=dataset_statistics_by_role["output"],
-        input_data_types=extract_data_types(input_cross_embodiment_description),
-        output_data_types=extract_data_types(output_cross_embodiment_description),
-        output_prediction_horizon=cfg.output_prediction_horizon,
-    )
-    model_factory = partial(
-        _create_model_for_batch_validation, cfg, model_init_description
-    )
-
-    try:
-        valid = is_valid_batch_size(
-            cfg=cfg,
-            model_factory=model_factory,
-            dataset=assert_dataset,
-            batch_size=batch_size,
-            device=device,
-        )
-    except Exception:
-        logger.error("Batch size validation failed", exc_info=True)
-        raise
-    finally:
-        del assert_dataset
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-
-    if not valid:
-        raise ValueError(
-            f"Batch size {batch_size} is not valid: it does not fit in "
-            "memory for the current algorithm, dataset, and GPU type. "
-            "Try a smaller batch size, or use batch_size='auto' to automatically "
-            "find the largest batch size that fits."
-        )
-
-    logger.info(f"Batch size {batch_size} is valid.")
-
-
-def determine_optimal_batch_size(
-    cfg: DictConfig,
-    dataset: PytorchSynchronizedDataset,
-    input_cross_embodiment_description: CrossEmbodimentDescription,
-    output_cross_embodiment_description: CrossEmbodimentDescription,
-    device: torch.device | None = None,
-) -> int:
-    """Run batch size autotuning on a single GPU and return the result."""
-    if not torch.cuda.is_available() or (
-        device is not None and "cuda" not in device.type
-    ):
-        raise ValueError("Autotuning is only supported on GPUs.")
-
-    if device is None:
-        device = get_default_device()
-
-    logger.info(f"Starting batch size autotuning on {device}...")
-
-    # Avoid altering the original dataset
-    autotuning_dataset = copy.deepcopy(dataset)
-
-    dataset_statistics_by_role = autotuning_dataset.dataset_statistics
-    model_init_description = ModelInitDescription(
-        input_dataset_statistics=dataset_statistics_by_role["input"],
-        output_dataset_statistics=dataset_statistics_by_role["output"],
-        input_data_types=extract_data_types(input_cross_embodiment_description),
-        output_data_types=extract_data_types(output_cross_embodiment_description),
-        output_prediction_horizon=cfg.output_prediction_horizon,
-    )
-    model_factory = partial(
-        _create_model_for_batch_validation, cfg, model_init_description
-    )
-
-    try:
-        optimal_batch_size = find_optimal_batch_size(
-            cfg=cfg,
-            model_factory=model_factory,
-            dataset=autotuning_dataset,
-            device=device,
-        )
-    except Exception:
-        logger.error("Batch size autotuning failed", exc_info=True)
-        raise
-    finally:
-        # Clean up
-        del autotuning_dataset
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        gc.collect()
-
-    logger.info(
-        f"Autotuning complete. Optimal batch size per GPU: {optimal_batch_size}"
-    )
-
-    return optimal_batch_size
-
-
 def run_training(
     rank: int,
     world_size: int,
@@ -392,11 +249,6 @@ def run_training(
 
     try:
         logger.info(f"Using batch size: {batch_size}")
-
-        # Merge data_types for synchronization
-        merge_cross_embodiment_description(
-            input_cross_embodiment_description, output_cross_embodiment_description
-        )
 
         # Split dataset
         dataset_size = len(dataset)
@@ -524,6 +376,7 @@ def run_training(
             output_cross_embodiment_description=output_cross_embodiment_description,
             input_preprocessing_config=inference_input_preprocessing_config,
             output_preprocessing_config=inference_output_preprocessing_config,
+            verify_job_exists=rank == 0,
         )
 
         logger.info(
@@ -758,30 +611,19 @@ def _main(cfg: DictConfig) -> None:
             sample_cache=cfg.get("dataset_sample_cache", True),
         )
 
-        # Handle batch size configuration
-        if isinstance(batch_size, str) and batch_size.lower() == "auto":
-            # Find the largest batch size that fits in RAM and GPU memory
-            optimal_batch_size = determine_optimal_batch_size(
-                cfg=cfg,
-                dataset=pytorch_dataset,
-                input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=output_cross_embodiment_description,
-                device=device,
-            )
-
-            batch_size = optimal_batch_size
-        else:
-            # Check if the specified batch size fits in RAM and GPU memory
-            assert_valid_batch_size(
-                batch_size=int(batch_size),
-                cfg=cfg,
-                dataset=pytorch_dataset,
-                input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=output_cross_embodiment_description,
-                device=device,
-            )
-
-            batch_size = int(batch_size)
+        batch_size = resolve_batch_size(
+            cfg=cfg,
+            batch_size=batch_size,
+            dataset=pytorch_dataset,
+            input_cross_embodiment_description=input_cross_embodiment_description,
+            output_cross_embodiment_description=output_cross_embodiment_description,
+            # Algorithm construction lives here, so hand it over rather than
+            # have the batch-size module import this one.
+            create_model=lambda description: get_model_and_algorithm_config(
+                cfg, description
+            )[0],
+            device=device,
+        )
 
         if world_size > 1:
             # Use multiprocessing to launch multiple processes

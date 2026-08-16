@@ -314,16 +314,22 @@ def mock_synced_recording(
         def __len__(self):
             return len(self.sync_points)
 
-        def __getitem__(self, idx):
-            if isinstance(idx, int):
-                return self.sync_points[idx]
-            elif isinstance(idx, slice):
-                start = idx.start or 0
-                stop = idx.stop or len(self.sync_points)
-                step = idx.step or 1
-                return self.sync_points[start:stop:step]
-            else:
-                raise TypeError(f"Invalid index type: {type(idx)}")
+        def _get_sync_point(self, idx, data_types=None):
+            # Override the payload-loading seam rather than __getitem__, so the
+            # real indexing and range logic (including the data_types filter
+            # used by get_range) is exercised.
+            sync_point = self.sync_points[idx]
+            if data_types is None:
+                return sync_point
+            return SynchronizedPoint.model_construct(
+                timestamp=sync_point.timestamp,
+                robot_id=sync_point.robot_id,
+                data={
+                    data_type: values
+                    for data_type, values in sync_point.data.items()
+                    if data_type in data_types
+                },
+            )
 
         def __iter__(self):
             return iter(self.sync_points)
@@ -522,16 +528,22 @@ def mock_synced_recording_with_depth(
         def __len__(self):
             return len(self.sync_points)
 
-        def __getitem__(self, idx):
-            if isinstance(idx, int):
-                return self.sync_points[idx]
-            elif isinstance(idx, slice):
-                start = idx.start or 0
-                stop = idx.stop or len(self.sync_points)
-                step = idx.step or 1
-                return self.sync_points[start:stop:step]
-            else:
-                raise TypeError(f"Invalid index type: {type(idx)}")
+        def _get_sync_point(self, idx, data_types=None):
+            # Override the payload-loading seam rather than __getitem__, so the
+            # real indexing and range logic (including the data_types filter
+            # used by get_range) is exercised.
+            sync_point = self.sync_points[idx]
+            if data_types is None:
+                return sync_point
+            return SynchronizedPoint.model_construct(
+                timestamp=sync_point.timestamp,
+                robot_id=sync_point.robot_id,
+                data={
+                    data_type: values
+                    for data_type, values in sync_point.data.items()
+                    if data_type in data_types
+                },
+            )
 
         def __iter__(self):
             return iter(self.sync_points)
@@ -1136,15 +1148,22 @@ class TestOutputTimestepAlignment:
             def __len__(self) -> int:
                 return len(self.sync_points)
 
-            def __getitem__(self, idx):
-                if isinstance(idx, int):
-                    return self.sync_points[idx]
-                if isinstance(idx, slice):
-                    start = idx.start or 0
-                    stop = idx.stop or len(self.sync_points)
-                    step = idx.step or 1
-                    return self.sync_points[start:stop:step]
-                raise TypeError(f"Invalid index type: {type(idx)}")
+            def _get_sync_point(self, idx, data_types=None):
+                # Override the payload-loading seam rather than __getitem__, so the
+                # real indexing and range logic (including the data_types filter
+                # used by get_range) is exercised.
+                sync_point = self.sync_points[idx]
+                if data_types is None:
+                    return sync_point
+                return SynchronizedPoint.model_construct(
+                    timestamp=sync_point.timestamp,
+                    robot_id=sync_point.robot_id,
+                    data={
+                        data_type: values
+                        for data_type, values in sync_point.data.items()
+                        if data_type in data_types
+                    },
+                )
 
         return TimestepRecording()
 

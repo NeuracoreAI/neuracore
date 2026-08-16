@@ -2,8 +2,9 @@
 
 import copy
 import re
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import hydra
 from names_generator import generate_name
@@ -125,13 +126,24 @@ def _normalize_algorithm_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
+@lru_cache(maxsize=None)
+def _load_packaged_config(config_path: Path) -> DictConfig:
+    """Load and cache a packaged YAML config.
+
+    The packaged configs ship with the library and cannot change while the
+    process is running, but the resolution path reads them several times per
+    run. Callers must treat the result as read-only and merge into a copy.
+    """
+    return cast(DictConfig, OmegaConf.load(config_path))
+
+
 def _load_algorithm_config_from_name(algorithm_name: str) -> DictConfig:
     """Load a packaged algorithm config from a file stem or target class name."""
     requested_name = _normalize_algorithm_name(algorithm_name)
     available_names: list[str] = []
 
     for config_path in sorted(ALGORITHM_CONFIG_DIR.glob("*.yaml")):
-        algorithm_cfg = OmegaConf.load(config_path)
+        algorithm_cfg = _load_packaged_config(config_path)
         cfg_algorithm = algorithm_cfg.get("algorithm")
         if cfg_algorithm is None or "_target_" not in cfg_algorithm:
             continue
@@ -181,7 +193,7 @@ def resolve_to_merged_config(cfg: DictConfig) -> DictConfig:
     # Merge with the default config to ensure all expected keys are present,
     # even if the user provided a custom config that may not include all the
     # default values.
-    default_cfg = OmegaConf.load(
+    default_cfg = _load_packaged_config(
         Path(__file__).resolve().parents[1] / "config" / "config.yaml"
     )
     cfg = OmegaConf.merge(default_cfg, cfg)

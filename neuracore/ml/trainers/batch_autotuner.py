@@ -14,6 +14,7 @@ from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
+from neuracore.ml.core.ml_types import BatchedTrainingSamples
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
@@ -267,13 +268,21 @@ def _probe_batch_size(
 
         optimizers = model.configure_optimizers()
 
+        # One real batch, reused for warmup and measurement alike.
+        probe_batch = next(iter(train_loader), None)
+        if probe_batch is None:
+            raise ValueError(
+                f"Cannot probe batch size {batch_size}: the training dataloader "
+                "yielded no batches."
+            )
+
         # Warm up first; this triggers any one-time compilation / autotuning and
         # allocates lazy optimizer state, none of which should count toward the
         # steady-state peak used for extrapolation.
         if _NUM_WARMUP_ITERATIONS > 0:
             _train_probe(
                 model,
-                train_loader,
+                probe_batch,
                 optimizers,
                 memory_monitor,
                 _NUM_WARMUP_ITERATIONS,
@@ -287,7 +296,7 @@ def _probe_batch_size(
         # no backward and no optimizer step, so its peak memory is strictly below
         # the training-step peak that sets the OOM point.
         _train_probe(
-            model, train_loader, optimizers, memory_monitor, num_iterations, device
+            model, probe_batch, optimizers, memory_monitor, num_iterations, device
         )
 
         # Reserved (not allocated) is what the caching allocator holds and what
@@ -364,45 +373,45 @@ def _probe_batch_size(
 
 def _train_probe(
     model: NeuracoreModel,
-    data_loader: DataLoader,
+    batch: BatchedTrainingSamples,
     optimizers: list[torch.optim.Optimizer],
     memory_monitor: MemoryMonitor,
     num_iterations: int,
     device: torch.device,
 ) -> None:
-    """Run a short training loop for memory profiling."""
+    """Run a short training loop against one batch, for memory profiling.
+
+    The same host-side batch is reused for every iteration. Peak memory depends
+    on batch shape, not on the values in it, and loading a fresh batch per
+    iteration would mean decoding real frames off disk — serially, since the
+    probe loader runs with no workers — several times per probe.
+    """
     model.train()
 
     for optimizer in optimizers:
         optimizer.zero_grad()
 
-    i = 0
-    while i < num_iterations:
-        for batch in data_loader:
-            memory_monitor.check_memory(log=True)
+    for _ in range(num_iterations):
+        memory_monitor.check_memory(log=True)
 
-            batch = batch.to(device)
+        device_batch = batch.to(device)
 
-            outputs: BatchedTrainingOutputs = model.training_step(batch)
-            loss = sum(outputs.losses.values()).mean()
+        outputs: BatchedTrainingOutputs = model.training_step(device_batch)
+        loss = sum(outputs.losses.values()).mean()
 
-            loss.backward()
+        loss.backward()
 
-            for optimizer in optimizers:
-                optimizer.step()
+        for optimizer in optimizers:
+            optimizer.step()
 
-            # Check again before freeing up gradients
-            memory_monitor.check_memory(log=True)
+        # Check again before freeing up gradients
+        memory_monitor.check_memory(log=True)
 
-            # Free-up GPU during validation or before next forward pass
-            for optimizer in optimizers:
-                optimizer.zero_grad()
+        # Free-up GPU during validation or before next forward pass
+        for optimizer in optimizers:
+            optimizer.zero_grad()
 
-            del batch, outputs, loss
-
-            i += 1
-            if i >= num_iterations:
-                break
+        del device_batch, outputs, loss
 
 
 class BatchSizeAutotuner:

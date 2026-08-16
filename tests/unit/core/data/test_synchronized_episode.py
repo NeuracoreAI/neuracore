@@ -192,6 +192,51 @@ class TestSynchronizedRecording:
         assert len(frames) == 2
         assert all(isinstance(f, SynchronizedPoint) for f in frames)
 
+    def test_get_range_matches_equivalent_slice(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
+        """get_range covers the same window as the equivalent slice."""
+        assert [point.timestamp for point in synced_recording.get_range(0, 2)] == [
+            point.timestamp for point in synced_recording[0:2]
+        ]
+
+    def test_get_range_clamps_to_episode_bounds(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
+        """An over-long range truncates rather than raising, matching slicing."""
+        frames = synced_recording.get_range(1, 500)
+
+        assert len(frames) == len(synced_recording) - 1
+        assert synced_recording.get_range(500, 600) == []
+
+    def test_get_range_only_materialises_requested_data_types(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
+        """Filtered-out data types are dropped instead of being loaded.
+
+        This is what keeps a sample from decoding camera frames across the
+        whole output prediction horizon when the outputs are joints only.
+        """
+        unfiltered = synced_recording.get_range(0, 2)
+        assert any(DataType.JOINT_POSITIONS in point.data for point in unfiltered)
+
+        filtered = synced_recording.get_range(
+            0, 2, data_types=frozenset({DataType.JOINT_POSITIONS})
+        )
+
+        assert len(filtered) == len(unfiltered)
+        for point in filtered:
+            assert set(point.data) <= {DataType.JOINT_POSITIONS}
+
+    def test_get_range_with_empty_filter_loads_nothing(
+        self, synced_recording: SynchronizedRecording, mock_wget_download
+    ):
+        """An empty data type set yields sync points carrying no payloads."""
+        frames = synced_recording.get_range(0, 2, data_types=frozenset())
+
+        assert len(frames) == 2
+        assert all(point.data == {} for point in frames)
+
     def test_getitem_slice_with_step(
         self,
         dataset_mock,
