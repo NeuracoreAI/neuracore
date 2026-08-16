@@ -32,7 +32,7 @@ allow_duplicates: true
 resume_checkpoint_path: null  # Path to checkpoint to resume from
 
 logging_frequency: 50
-# Frequency (in steps) for host and accelerator utilisation under System/.
+# Frequency (in steps) for host and accelerator utilisation under system/.
 # Sampled far less often than the model metrics: each sample costs syscalls and
 # an NVML query, and utilisation moves slowly enough that a fine cadence buys
 # nothing. 0 disables it.

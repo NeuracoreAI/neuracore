@@ -13,7 +13,7 @@ BYTES_PER_GB = 1024**3
 
 # Scalars logged under this prefix are about the machine, not the model, and
 # group separately from train/ and val/ in TensorBoard.
-SYSTEM_METRIC_PREFIX = "System"
+SYSTEM_METRIC_PREFIX = "system"
 
 
 class SystemMetricsCollector:
