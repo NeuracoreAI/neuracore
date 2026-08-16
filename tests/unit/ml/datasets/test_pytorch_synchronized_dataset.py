@@ -23,6 +23,7 @@ from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
 )
 from neuracore.ml import BatchedTrainingSamples
+from neuracore.ml.datasets import batch_sample_cache
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
     _cacheable_cross_embodiment_description,
@@ -308,6 +309,7 @@ def mock_synced_recording(
         def __init__(self):
             self.sync_points = sync_points
             self.robot_id = ROBOT_ID
+            self.id = "mock_recording"
 
         def __len__(self):
             return len(self.sync_points)
@@ -515,6 +517,7 @@ def mock_synced_recording_with_depth(
         def __init__(self):
             self.sync_points = sync_points
             self.robot_id = ROBOT_ID
+            self.id = "mock_recording"
 
         def __len__(self):
             return len(self.sync_points)
@@ -1127,6 +1130,7 @@ class TestOutputTimestepAlignment:
             def __init__(self) -> None:
                 self.sync_points = sync_points
                 self.robot_id = ROBOT_ID
+                self.id = "timestep_recording_id"
                 self.name = "timestep_recording"
 
             def __len__(self) -> int:
@@ -1185,6 +1189,11 @@ class TestOutputTimestepAlignment:
 
             def __getitem__(self, idx: int) -> SynchronizedRecording:
                 return recording
+
+            def __iter__(self):
+                # Explicit, rather than inheriting an implementation that walks
+                # internals this mock does not set up.
+                return iter([recording])
 
         return TimestepSynchronizedDataset()
 
@@ -1780,3 +1789,90 @@ class TestDatasetStatistics:
         assert cache_path.exists()
 
         assert cache_path.exists()
+
+
+class TestSampleCache:
+    """Tests for the on-disk cache of fully built samples."""
+
+    @staticmethod
+    def _dataset(mock_synchronized_dataset, horizon=3, resize=(224, 224)):
+        return PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description={
+                ROBOT_ID: {
+                    DataType.JOINT_POSITIONS: _indexed_names(
+                        DataType.JOINT_POSITIONS, 3
+                    ),
+                    DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+                }
+            },
+            output_cross_embodiment_description={
+                ROBOT_ID: {
+                    DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                        DataType.JOINT_TARGET_POSITIONS, 3
+                    )
+                }
+            },
+            output_prediction_horizon=horizon,
+            input_preprocessing_config=PreprocessingConfiguration({
+                DataType.RGB_IMAGES: [ResizePad(size=resize)],
+                DataType.DEPTH_IMAGES: [ResizePad(size=resize)],
+            }),
+            output_preprocessing_config=_default_preprocessing_config(),
+            sample_cache=True,
+        )
+
+    def test_cache_can_be_turned_off(self, mock_synchronized_dataset):
+        """Caching is on by default; opting out must leave no cache at all."""
+
+        def build(sample_cache):
+            return PytorchSynchronizedDataset(
+                synchronized_dataset=mock_synchronized_dataset,
+                input_cross_embodiment_description={
+                    ROBOT_ID: {
+                        DataType.JOINT_POSITIONS: _indexed_names(
+                            DataType.JOINT_POSITIONS, 3
+                        )
+                    }
+                },
+                output_cross_embodiment_description={
+                    ROBOT_ID: {
+                        DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                            DataType.JOINT_TARGET_POSITIONS, 3
+                        )
+                    }
+                },
+                output_prediction_horizon=3,
+                input_preprocessing_config=_default_preprocessing_config(),
+                output_preprocessing_config=_default_preprocessing_config(),
+                sample_cache=sample_cache,
+            )
+
+        assert build(sample_cache=True)._sample_cache is not None
+        assert build(sample_cache=False)._sample_cache is None
+
+    @patch("neuracore.login")
+    def test_hit_matches_a_rebuild_and_skips_the_recording(
+        self, mock_login, mock_synchronized_dataset, tmp_path
+    ):
+        """A hit must return the same tensors without touching the recording."""
+        with patch.object(batch_sample_cache, "SAMPLE_CACHE_DIR", tmp_path):
+            dataset = self._dataset(mock_synchronized_dataset)
+            with patch.object(dataset, "_memory_monitor"):
+                built = dataset[4]
+                # Any read of the recording now would mean the cache was missed.
+                with patch.object(dataset, "synchronized_dataset") as untouchable:
+                    untouchable.__getitem__.side_effect = AssertionError(
+                        "recording read on a cache hit"
+                    )
+                    cached = dataset[4]
+
+        for data_type, items in built.inputs.items():
+            for original, restored in zip(items, cached.inputs[data_type]):
+                for name, value in vars(original).items():
+                    if isinstance(value, torch.Tensor):
+                        assert torch.equal(value, getattr(restored, name))
+        assert torch.equal(
+            built.inputs_mask[DataType.RGB_IMAGES],
+            cached.inputs_mask[DataType.RGB_IMAGES],
+        )

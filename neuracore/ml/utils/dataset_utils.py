@@ -60,6 +60,10 @@ def split_train_val_datasets(
     val_base.output_preprocessing_config = (
         inference_output_preprocessing_config.split_by_stage()[0]
     )
+    # The shallow copy would otherwise share a cache keyed on the train
+    # pipeline while storing samples built with the inference one. Re-key it
+    # against the preprocessing just assigned above.
+    val_base.rebuild_sample_cache()
     val_dataset = Subset(val_base, val_dataset.indices)
 
     return train_dataset, val_dataset

@@ -29,6 +29,7 @@ from neuracore.core.utils.training_input_args_validation import (
     _validate_cross_embodiment_description_against_dataset,
 )
 from neuracore.ml import BatchedTrainingSamples
+from neuracore.ml.datasets.batch_sample_cache import BatchSampleCache
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.json_serialization import JsonValue, to_json_serializable
@@ -63,6 +64,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_preprocessing_config: PreprocessingConfiguration,
         output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
+        sample_cache: bool = True,
     ):
         """Initialize the dataset.
 
@@ -77,6 +79,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_preprocessing_config: Preprocessing configuration applied
                 to output slots.
             output_prediction_horizon: Number of future timesteps to predict.
+            sample_cache: Reuse fully built samples from an on-disk cache
+                across epochs and runs, rebuilding on a miss.
         """
         self._validate_cross_embodiment_specs(
             synchronized_dataset,
@@ -177,7 +181,14 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self.synchronized_dataset
         )
 
-        self.episode_indices, self.episode_start_offsets = self._get_episode_indices()
+        (
+            self.episode_indices,
+            self.episode_start_offsets,
+            # Keys the sample cache: an episode index is a position in a
+            # server-ordered list and can point at a different recording once
+            # the dataset changes, where an id cannot.
+            self._episode_recording_ids,
+        ) = self._get_sample_to_episode_mapping()
         self._logged_in = False
 
         # Only the worker-side half runs here. Device-side methods are applied
@@ -208,6 +219,36 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.merged_cross_embodiment_description.items()
             )
         }
+
+        self._sample_cache = self._build_sample_cache() if sample_cache else None
+
+    def rebuild_sample_cache(self) -> None:
+        """Re-key the sample cache against the current preprocessing.
+
+        Call after swapping a preprocessing configuration on an existing
+        dataset, so entries are stored under a key describing what is actually
+        being built rather than what the dataset was constructed with.
+        """
+        if self._sample_cache is not None:
+            self._sample_cache = self._build_sample_cache()
+
+    def _build_sample_cache(self) -> BatchSampleCache:
+        """Create the cache for the currently configured preprocessing."""
+        cache = BatchSampleCache(
+            synchronized_dataset_id=self.synchronized_dataset.id,
+            input_cross_embodiment_description=(
+                self.input_cross_embodiment_description
+            ),
+            output_cross_embodiment_description=(
+                self.output_cross_embodiment_description
+            ),
+            output_prediction_horizon=self.output_prediction_horizon,
+            # Worker-side halves only; the dataset already discarded the rest.
+            input_preprocessing_config=self.input_preprocessing_config,
+            output_preprocessing_config=self.output_preprocessing_config,
+        )
+        logger.info("Caching built samples under %s", cache.directory)
+        return cache
 
     @staticmethod
     def _get_max_items_per_data_type(
@@ -287,21 +328,26 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             description_kind="Output",
         )
 
-    def _get_episode_indices(self) -> tuple[list[int], list[int]]:
-        """Map each sample to its episode, and each episode to its first sample.
+    def _get_sample_to_episode_mapping(self) -> tuple[list[int], list[int], list[str]]:
+        """Map each sample index to its episode index, start offset, and recording ID.
 
         Omit the last frame of each episode because it is not used for training.
 
         Returns:
-            ``(episode_indices, episode_start_offsets)`` where
-            ``episode_indices[sample_idx]`` is the recording index, and
-            ``episode_start_offsets[recording_idx]`` is the sample index that
-            recording starts at. The offsets let ``__getitem__`` recover a
-            timestep by subtraction rather than by scanning
-            ``episode_indices`` for the episode's first occurrence.
+            ``(episode_indices, episode_start_offsets, episode_recording_ids)``
+            where ``episode_indices[sample_idx]`` is the episode index,
+            ``episode_start_offsets[episode_idx]`` is the sample index that
+            episode starts at, and ``episode_recording_ids[episode_idx]``
+            is its id. The offsets let ``__getitem__`` recover a timestep by
+            subtraction rather than by scanning ``episode_indices`` for the
+            episode's first occurrence. The ids let the sample cache be keyed
+            without a recording lookup; they are gathered here because
+            iterating the synchronized dataset is not guaranteed to be
+            restartable, so it must be walked exactly once.
         """
         episode_indices: list[int] = []
         episode_start_offsets: list[int] = []
+        episode_recording_ids: list[str] = []
         for recording_idx, recording in enumerate(self.synchronized_dataset):
             # Each recording must have at least 2 timesteps because we drop the
             # last frame from training. Otherwise alignment with per-recording
@@ -313,9 +359,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     "need >= 2 frames to generate training samples."
                 )
             episode_start_offsets.append(len(episode_indices))
+            episode_recording_ids.append(recording.id)
             episode_indices.extend([recording_idx] * (len(recording) - 1))
 
-        return episode_indices, episode_start_offsets
+        return episode_indices, episode_start_offsets, episode_recording_ids
 
     def _convert_to_embodiment_description(
         self, value: EmbodimentUnion
@@ -471,6 +518,14 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             self._mem_check_counter = 0
         self._mem_check_counter += 1
 
+        # Check for a cached sample first, keyed by recording id and timestep.
+        if self._sample_cache is not None and timestep is not None:
+            cached = self._sample_cache.load(
+                self._episode_recording_ids[episode_idx], timestep
+            )
+            if cached is not None:
+                return cached
+
         synced_recording = self.synchronized_dataset[episode_idx]
         synced_recording = cast(SynchronizedRecording, synced_recording)
         episode_length = len(synced_recording)
@@ -581,13 +636,16 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 output_mask_values, dtype=torch.float32
             )
 
-        return TrainingSample(
+        sample = TrainingSample(
             inputs=inputs,
             inputs_mask=inputs_mask,
             outputs=outputs,
             outputs_mask=outputs_mask,
             batch_size=1,
         )
+        if self._sample_cache is not None:
+            self._sample_cache.store(synced_recording.id, timestep, sample)
+        return sample
 
     def __len__(self) -> int:
         """Return the number of samples in the dataset.

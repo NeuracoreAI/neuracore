@@ -22,6 +22,8 @@ from neuracore_types import (
     SynchronizedPoint,
 )
 
+from neuracore.ml.datasets import batch_sample_cache
+
 REMOTE_TIMESTAMP = 1234567890.0
 REMOTE_JOINT_NAMES = ("joint1", "joint2")
 REMOTE_CAMERA_NAME = "top_camera"
@@ -70,6 +72,21 @@ def remote_sync_point(*payloads: RemoteData) -> SynchronizedPoint:
     for payload in payloads:
         data.update(payload)
     return SynchronizedPoint(timestamp=REMOTE_TIMESTAMP, data=data)
+
+
+@pytest.fixture(autouse=True)
+def isolate_sample_cache(tmp_path_factory, monkeypatch):
+    """Keep the built-sample cache out of the developer's real cache directory.
+
+    The dataset enables the cache by default, so any test that constructs one
+    would otherwise read and write ``~/.neuracore/training/sample_cache``,
+    leaking entries between tests and onto the machine running them.
+    """
+    monkeypatch.setattr(
+        batch_sample_cache,
+        "SAMPLE_CACHE_DIR",
+        tmp_path_factory.mktemp("sample_cache"),
+    )
 
 
 @pytest.fixture

@@ -754,6 +754,7 @@ def _main(cfg: DictConfig) -> None:
             output_prediction_horizon=cfg.output_prediction_horizon,
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
+            sample_cache=cfg.get("dataset_sample_cache", True),
         )
 
         # Handle batch size configuration

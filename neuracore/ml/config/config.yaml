@@ -48,6 +48,12 @@ output_cross_embodiment_description: {
 # Batch size (can be "auto" for automatic tuning or an integer)
 batch_size: "auto"
 
+# Cache fully built training samples under ~/.neuracore/training/sample_cache,
+# keyed by a hash of everything that changes what a sample contains. Skips
+# frame decode and tensor construction on every epoch after the first, and on
+# any later run of the same configuration. Disable to always rebuild.
+dataset_sample_cache: true
+
 num_train_workers: 2
 num_val_workers: 1
 
