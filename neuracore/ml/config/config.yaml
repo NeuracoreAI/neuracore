@@ -32,6 +32,11 @@ allow_duplicates: true
 resume_checkpoint_path: null  # Path to checkpoint to resume from
 
 logging_frequency: 50
+# Frequency (in steps) for host and accelerator utilisation under System/.
+# Sampled far less often than the model metrics: each sample costs syscalls and
+# an NVML query, and utilisation moves slowly enough that a fine cadence buys
+# nothing. 0 disables it.
+system_logging_frequency: 200
 keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
@@ -54,8 +59,8 @@ batch_size: "auto"
 # any later run of the same configuration. Disable to always rebuild.
 dataset_sample_cache: true
 
-num_train_workers: 2
-num_val_workers: 1
+num_train_workers: 4
+num_val_workers: 2
 
 # Maximum number of workers to use for prefetching recordings
 max_prefetch_workers: 4
