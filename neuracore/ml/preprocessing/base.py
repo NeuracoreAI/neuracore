@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from neuracore_types import DataType
 
@@ -14,6 +14,17 @@ if TYPE_CHECKING:
 
 class PreprocessingMethod(ABC):
     """Base interface for preprocessing implementations."""
+
+    # Where in the pipeline this method runs.
+    #
+    # True runs it in the dataset, per sample, inside a DataLoader worker.
+    #
+    # False runs it in the trainer, per batch, once the batch has reached the
+    # training device.
+    # A method that opts out must handle a batched input: it sees a whole
+    # batch rather than one sample, so anything random has to draw per sample
+    # explicitly or the entire batch gets one draw.
+    on_cpu: ClassVar[bool] = True
 
     @staticmethod
     @abstractmethod
@@ -51,6 +62,27 @@ class PreprocessingMethod(ABC):
 
 class PreprocessingConfiguration(dict[DataType, list[PreprocessingMethod]]):
     """Runtime preprocessing pipeline keyed by data type."""
+
+    def split_by_stage(
+        self,
+    ) -> tuple[PreprocessingConfiguration, PreprocessingConfiguration]:
+        """Partition into the worker-side and device-side halves.
+
+        Order within each data type is preserved. Interleaving methods of
+        different stages reorders them relative to each other, so a pipeline
+        that depends on strict ordering should keep its methods on one side.
+
+        Returns:
+            ``(on_cpu, on_device)``, each omitting data types left with
+            nothing to do.
+        """
+        on_cpu = PreprocessingConfiguration()
+        on_device = PreprocessingConfiguration()
+        for data_type, methods in self.items():
+            for method in methods:
+                target = on_cpu if method.on_cpu else on_device
+                target.setdefault(data_type, []).append(method)
+        return on_cpu, on_device
 
     def __str__(self) -> str:
         """Return a human-readable representation of the preprocessing pipeline."""
