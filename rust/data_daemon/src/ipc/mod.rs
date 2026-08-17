@@ -13,5 +13,6 @@
 //! `IDLE_POLL_INTERVAL` (25 ms) once the subscriber has been empty for a while,
 //! keeping active-load latency low while leaving idle daemons near-quiescent.
 
+pub mod announcer;
 pub mod listener;
 pub mod node;
