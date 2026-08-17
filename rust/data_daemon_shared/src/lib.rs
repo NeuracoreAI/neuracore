@@ -267,13 +267,21 @@ pub mod service_name {
     /// cap and the producer's later open observes the same attribute set.
     pub const MAX_PUBLISHERS_PER_SERVICE: usize = 128;
 
-    /// Maximum number of concurrent subscribers per service.
+    /// Maximum number of concurrent subscribers per service, for the services
+    /// only the daemon subscribes to.
     ///
-    /// The daemon opens exactly one subscriber per service; producers never
-    /// subscribe. iceoryx2 sizes every publisher's data segment as
+    /// The daemon opens exactly one subscriber on each of those. iceoryx2 sizes
+    /// every publisher's data segment as
     /// `max_subscribers × (buffer + borrowed) × slice`, so the default of 8
-    /// inflates each segment 8× for subscribers that never exist. Pinning
-    /// this to 1 keeps the segment proportional to the real topology.
+    /// inflates each segment 8× for subscribers that never exist; pinning this to
+    /// 1 keeps the segment proportional to the real topology.
+    ///
+    /// **Not usable for a service producers subscribe to.** [`WINDOW_STATE`] is
+    /// one, and reusing this there fails in the worst way: the first subscriber
+    /// takes the only slot and every later one silently cannot connect, so a
+    /// producer simply never hears anything. That service carries its own
+    /// [`WINDOW_STATE_MAX_SUBSCRIBERS`], sized with the same segment arithmetic
+    /// in mind.
     pub const MAX_SUBSCRIBERS_PER_SERVICE: usize = 1;
 
     /// Maximum number of concurrent iceoryx2 nodes attached to any service.
@@ -339,6 +347,60 @@ pub mod service_name {
     /// Maximum size of a single `recording_ids` service sample. Both the request and
     /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
     pub const RECORDING_ID_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+
+    /// Pub/sub service the **daemon** uses to announce which sources have a
+    /// recording window open. The only IPC that flows daemon → producer.
+    ///
+    /// The daemon owns window state, so it announces rather than being asked:
+    /// a producer that did not open a window has nothing to offer a query and
+    /// would only be guessing at when to ask. Announcements carry no recording
+    /// identity — just the source and a boolean — so nothing here lets a
+    /// producer name the window it contributes to.
+    ///
+    /// Two kinds of announcement, and the second is what makes the design
+    /// self-healing: a **transition** the instant a window opens or closes, and
+    /// a periodic **re-announcement** of every live window. Edge-triggered push
+    /// alone would strand a producer that attached after the open or missed the
+    /// message — it would hear nothing until the close, and silently record
+    /// nothing for the whole recording. With re-announcement, hearing nothing
+    /// only ever means "no window", which is exactly what a producer should
+    /// then do: nothing. An idle daemon with no live windows publishes nothing
+    /// at all.
+    ///
+    /// See [`crate::WindowStateAnnouncement`].
+    pub const WINDOW_STATE: &str = "neuracore/data_daemon/window_state";
+
+    /// Maximum size of a single `window_state` sample: a robot id plus an
+    /// instance and a flag, so a few dozen bytes.
+    ///
+    /// Kept small on purpose. iceoryx2 sizes a publisher's data segment as
+    /// `max_subscribers × (buffer + borrowed) × slice`, and this is the only
+    /// service with more than one subscriber, so the slice length is a
+    /// multiplier on real memory here in a way it is not elsewhere.
+    pub const WINDOW_STATE_MAX_PAYLOAD_BYTES: usize = 256;
+
+    /// How many announcements a producer's subscriber may buffer.
+    ///
+    /// Ample for the traffic — one message per window transition plus a
+    /// periodic re-announcement per live source — while staying small because it
+    /// multiplies the segment size (see
+    /// [`WINDOW_STATE_MAX_PAYLOAD_BYTES`]). Overflow is survivable regardless:
+    /// the next re-announcement restates the truth.
+    pub const WINDOW_STATE_SUBSCRIBER_BUFFER_SIZE: usize = 16;
+
+    /// Maximum number of concurrent `window_state` subscribers.
+    ///
+    /// The one service producers subscribe to, so
+    /// [`MAX_SUBSCRIBERS_PER_SERVICE`] (pinned to 1 on the documented
+    /// assumption that they never do) cannot be reused here — with it, the first
+    /// subscriber takes the only slot and every other producer silently fails to
+    /// connect.
+    ///
+    /// Sized per *process*, not per thread: the gate owns a single subscriber
+    /// for the whole process, on the one thread that drains it. That is what
+    /// keeps this a small multiple rather than the 128 a per-thread port would
+    /// need.
+    pub const WINDOW_STATE_MAX_SUBSCRIBERS: usize = 64;
 
     /// Maximum number of concurrent request-response clients. Mirrors
     /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
@@ -731,6 +793,32 @@ pub struct RecordingIdReply {
     pub recording_id: Option<String>,
 }
 
+/// One announcement on [`service_name::WINDOW_STATE`]: whether this source has a
+/// recording window open, as the daemon sees it.
+///
+/// Idempotent by construction — a re-announcement of a state the producer
+/// already holds is a no-op — so the daemon can restate the truth freely and a
+/// producer never has to reason about whether it already knew.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStateAnnouncement {
+    pub robot_id: String,
+    pub robot_instance: i64,
+    /// Whether a recording is open for this source.
+    pub live: bool,
+}
+
+impl WindowStateAnnouncement {
+    /// Encode as a postcard byte vector for a `window_state` sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `window_state` sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthRequest {
@@ -874,6 +962,21 @@ mod tests {
             VersionReply::decode(&reply.encode().unwrap()).unwrap(),
             reply
         );
+    }
+
+    #[test]
+    fn window_state_announcement_round_trips() {
+        for live in [true, false] {
+            let announcement = WindowStateAnnouncement {
+                robot_id: "robot-1".into(),
+                robot_instance: 3,
+                live,
+            };
+            assert_eq!(
+                WindowStateAnnouncement::decode(&announcement.encode().unwrap()).unwrap(),
+                announcement
+            );
+        }
     }
 
     #[test]
