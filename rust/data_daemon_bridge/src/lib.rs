@@ -168,6 +168,17 @@ fn log_joints(
     Ok(())
 }
 
+// A distinct type (rather than a bare `PyRuntimeError`, which `log_frame` also
+// raises for an unrelated failure below) so callers can retry on this specific
+// condition without inspecting the message. Subclasses `RuntimeError` so
+// existing broad catches still work.
+pyo3::create_exception!(
+    _data_bridge,
+    LoggingStalledError,
+    PyRuntimeError,
+    "The daemon is not draining its on-disk spool backlog fast enough to admit a frame."
+);
+
 /// Log one video frame for a camera. The frame is appended to the
 /// `(source, sensor)` in-progress NUT chunk under the inbox; when the chunk
 /// crosses the chunk-flush threshold a [`Envelope::VideoChunkReady`] is
@@ -253,7 +264,7 @@ fn log_frame(
         writer_queue().push(WriterMsg::Frame(job))
     })
     .map_err(|_| {
-        PyRuntimeError::new_err(
+        LoggingStalledError::new_err(
             "video logging stalled: the data daemon is not draining the spool \
              backlog (frame rejected after 1s of backpressure)",
         )
@@ -562,6 +573,10 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;
+    module.add(
+        "LoggingStalledError",
+        module.py().get_type::<LoggingStalledError>(),
+    )?;
     Ok(())
 }
 
