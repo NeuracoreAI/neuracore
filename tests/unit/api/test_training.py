@@ -7,6 +7,19 @@ from neuracore.api.training import _resolve_next_name
 from neuracore.core.const import API_URL
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
+TEST_DATASET_ID = "dataset123"
+
+# What the dataset reports it contains, and the slice of it the tests train on.
+TEST_EMBODIMENT_DESCRIPTION = {
+    DataType.RGB_IMAGES: {0: "angle"},
+    DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
+}
+TEST_INPUT_DESCRIPTION = {TEST_ROBOT_ID: {DataType.RGB_IMAGES: {0: "angle"}}}
+TEST_OUTPUT_DESCRIPTION = {
+    TEST_ROBOT_ID: {
+        DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"}
+    }
+}
 
 
 def test_resolve_next_name_uses_base_name_when_available():
@@ -73,135 +86,138 @@ def algorithm_list_response():
     ]
 
 
-def test_start_training_run(
+@pytest.fixture
+def mock_start_training_run_endpoints(
     mock_auth_requests,
-    training_job_response,
-    algorithm_list_response,
     mocked_org_id,
+    algorithm_list_response,
+    training_job_response,
 ):
+    """Register the endpoints start_training_run walks through.
+
+    Returns a callable so each test only states what it cares about: the
+    dataset's size, the response to the job-creation POST, and any jobs that
+    already exist.
+    """
+
+    def register(
+        dataset_size_bytes: int = 2048,
+        job_response: dict | None = None,
+        job_status_code: int = 200,
+        existing_jobs: list[dict] | None = None,
+    ) -> None:
+        dataset = Dataset(
+            id=TEST_DATASET_ID,
+            name="test_dataset",
+            created_at=0.0,
+            modified_at=0.0,
+            description="A test dataset",
+            size_bytes=dataset_size_bytes,
+            tags=[],
+            is_shared=False,
+            num_demonstrations=20,
+            all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
+            common_data_types={
+                DataType.RGB_IMAGES: 1,
+                DataType.JOINT_TARGET_POSITIONS: 1,
+            },
+        )
+        org_url = f"{API_URL}/org/{mocked_org_id}"
+
+        mock_auth_requests.get(
+            f"{org_url}/datasets",
+            json=[dataset.model_dump(mode="json")],
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/datasets/search/by-name",
+            json=dataset.model_dump(mode="json"),
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/datasets/shared",
+            json=[],
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/datasets/{TEST_DATASET_ID}/recordings",
+            json={"recordings": []},
+            status_code=200,
+        )
+        mock_auth_requests.post(
+            f"{org_url}/recording/by-dataset/{TEST_DATASET_ID}",
+            json={"data": [], "total": 10, "limit": 1, "start_after": None},
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/datasets/{TEST_DATASET_ID}/robot_ids",
+            json=[TEST_ROBOT_ID],
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/robots",
+            json=[{"id": TEST_ROBOT_ID, "name": "fake_robot_name"}],
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/datasets/{TEST_DATASET_ID}"
+            f"/full-embodiment-description/{TEST_ROBOT_ID}",
+            json=TEST_EMBODIMENT_DESCRIPTION,
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/algorithms",
+            json=algorithm_list_response,
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/algorithms?shared=true",
+            json=[],
+            status_code=200,
+        )
+        mock_auth_requests.get(
+            f"{org_url}/training/jobs",
+            json=existing_jobs or [],
+            status_code=200,
+        )
+        mock_auth_requests.post(
+            f"{org_url}/training/jobs",
+            json=training_job_response if job_response is None else job_response,
+            status_code=job_status_code,
+        )
+
+    return register
+
+
+def _training_job_post_requests(mock_auth_requests) -> list:
+    """Every job-creation request the client made."""
+    return [
+        request
+        for request in mock_auth_requests.request_history
+        if request.method == "POST" and request.url.endswith("/training/jobs")
+    ]
+
+
+def test_start_training_run(mock_start_training_run_endpoints):
     """Test starting a training run."""
     # Ensure login
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=["test"],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-
-    # Mock datasets endpoint to return a dataset
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-
-    # Mock shared datasets endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-
-    # Mock algorithms endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-
-    # Mock shared algorithms endpoint
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-
-    # Mock training job creation endpoint
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=training_job_response,
-        status_code=200,
-    )
-
-    robot_id = TEST_ROBOT_ID
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[robot_id],
-        status_code=200,
-    )
-    robot_name = "fake_robot_name"
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": robot_id, "name": robot_name}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
-        json={
-            DataType.RGB_IMAGES: {0: "angle"},
-            DataType.JOINT_TARGET_POSITIONS: {
-                0: "joint1",
-                1: "joint2",
-                2: "joint3",
-            },
-        },
-        status_code=200,
-    )
-
-    # Start training run
-    algorithm_config = {
-        "hidden_dim": 512,
-        "num_layers": 3,
-        "cnn_output_dim": 64,
-    }
-    input_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.RGB_IMAGES: {0: "angle"},
-        }
-    }
-
-    output_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
-        }
-    }
+    mock_start_training_run_endpoints()
 
     job = nc.start_training_run(
         name="test_training_run",
         dataset_name="test_dataset",
         algorithm_name="cnnmlp",
-        algorithm_config=algorithm_config,
+        algorithm_config={
+            "hidden_dim": 512,
+            "num_layers": 3,
+            "cnn_output_dim": 64,
+        },
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
     )
 
     # Verify job was created with expected values
@@ -243,106 +259,15 @@ def test_get_training_job_data(
 
 def test_start_training_run_raises_on_duplicate_name(
     temp_config_dir,
-    mock_auth_requests,
     reset_neuracore,
-    algorithm_list_response,
-    mocked_org_id,
+    mock_start_training_run_endpoints,
 ):
     """Starting a cloud run with an existing name should raise an API error."""
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=["test"],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
+    mock_start_training_run_endpoints(
+        job_response={"detail": "Training job with name already exists"},
+        job_status_code=409,
     )
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        status_code=409,
-        json={"detail": "Training job with name already exists"},
-    )
-
-    robot_id = TEST_ROBOT_ID
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[robot_id],
-        status_code=200,
-    )
-    robot_name = "fake_robot_name"
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": robot_id, "name": robot_name}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
-        json={
-            DataType.RGB_IMAGES: {0: "angle"},
-            DataType.JOINT_TARGET_POSITIONS: {
-                0: "joint1",
-                1: "joint2",
-                2: "joint3",
-            },
-        },
-        status_code=200,
-    )
-
-    input_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.RGB_IMAGES: {0: "angle"},
-        }
-    }
-
-    output_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
-        }
-    }
 
     with pytest.raises(requests.exceptions.HTTPError):
         nc.start_training_run(
@@ -353,8 +278,8 @@ def test_start_training_run_raises_on_duplicate_name(
             gpu_type=GPUType.NVIDIA_TESLA_T4,
             num_gpus=1,
             frequency=10,
-            input_cross_embodiment_description=input_cross_embodiment_description,
-            output_cross_embodiment_description=output_cross_embodiment_description,
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
         )
 
 
@@ -363,115 +288,19 @@ def test_start_training_run_name_auto_increment(
     mock_auth_requests,
     reset_neuracore,
     training_job_response,
-    algorithm_list_response,
-    mocked_org_id,
+    mock_start_training_run_endpoints,
 ):
     """With name_auto_increment=True, an existing name is resolved to name_1."""
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=["test"],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_response.id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/dataset123",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-    # Existing job with the same name so that name_auto_increment resolves to name_1
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=[{"id": "existing_123", "name": "test_training_run"}],
-        status_code=200,
-    )
-
-    response_with_incremented_name = {
-        **training_job_response,
-        "name": "test_training_run_1",
-        "id": "train_job_456",
-    }
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=response_with_incremented_name,
-        status_code=200,
-    )
-
-    robot_id = TEST_ROBOT_ID
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[robot_id],
-        status_code=200,
-    )
-    robot_name = "fake_robot_name"
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": robot_id, "name": robot_name}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{robot_id}",
-        json={
-            DataType.RGB_IMAGES: {0: "angle"},
-            DataType.JOINT_TARGET_POSITIONS: {
-                0: "joint1",
-                1: "joint2",
-                2: "joint3",
-            },
+    mock_start_training_run_endpoints(
+        # An existing job with the same name is what forces the increment.
+        existing_jobs=[{"id": "existing_123", "name": "test_training_run"}],
+        job_response={
+            **training_job_response,
+            "name": "test_training_run_1",
+            "id": "train_job_456",
         },
-        status_code=200,
     )
-
-    input_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.RGB_IMAGES: {0: "angle"},
-        }
-    }
-
-    output_cross_embodiment_description = {
-        TEST_ROBOT_ID: {
-            DataType.JOINT_TARGET_POSITIONS: {0: "joint1", 1: "joint2", 2: "joint3"},
-        }
-    }
 
     job = nc.start_training_run(
         name="test_training_run",
@@ -481,17 +310,13 @@ def test_start_training_run_name_auto_increment(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_cross_embodiment_description=input_cross_embodiment_description,
-        output_cross_embodiment_description=output_cross_embodiment_description,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
         name_auto_increment=True,
     )
 
     assert job["name"] == "test_training_run_1"
-    post_requests = [
-        r
-        for r in mock_auth_requests.request_history
-        if r.method == "POST" and "/training/jobs" in r.url
-    ]
+    post_requests = _training_job_post_requests(mock_auth_requests)
     assert len(post_requests) == 1
     assert post_requests[0].json()["name"] == "test_training_run_1"
 
@@ -795,84 +620,11 @@ def test_get_training_job_logs_error(
 
 def test_start_training_run_sends_disk_size_gb(
     mock_auth_requests,
-    training_job_response,
-    algorithm_list_response,
-    mocked_org_id,
+    mock_start_training_run_endpoints,
 ):
     """start_training_run sends the specified disk_size_gb in the POST body."""
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=[],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_id}",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=training_job_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[TEST_ROBOT_ID],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": TEST_ROBOT_ID, "name": "fake_robot"}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{TEST_ROBOT_ID}",
-        json={
-            DataType.RGB_IMAGES: {0: "angle"},
-            DataType.JOINT_TARGET_POSITIONS: {0: "joint1"},
-        },
-        status_code=200,
-    )
+    mock_start_training_run_endpoints()
 
     nc.start_training_run(
         name="disk_test_run",
@@ -883,63 +635,21 @@ def test_start_training_run_sends_disk_size_gb(
         num_gpus=1,
         frequency=10,
         disk_size_gb=1000,
-        input_cross_embodiment_description={
-            TEST_ROBOT_ID: {DataType.RGB_IMAGES: {0: "angle"}}
-        },
-        output_cross_embodiment_description={
-            TEST_ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: {0: "joint1"}}
-        },
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
     )
 
-    post_request = next(
-        r
-        for r in mock_auth_requests.request_history
-        if r.method == "POST" and r.url.endswith("/training/jobs")
-    )
+    post_request = _training_job_post_requests(mock_auth_requests)[0]
     assert post_request.json()["disk_size_gb"] == 1000
 
 
 def test_start_training_run_raises_when_disk_size_too_small(
     mock_auth_requests,
-    algorithm_list_response,
-    mocked_org_id,
+    mock_start_training_run_endpoints,
 ):
     """start_training_run rejects disks that cannot fit the dataset."""
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2_000_000_000,
-        tags=[],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json={"id": "should_not_create"},
-        status_code=200,
-    )
+    mock_start_training_run_endpoints(dataset_size_bytes=2_000_000_000)
 
     expected_message = (
         "Dataset test_dataset is 2.00 GB, but selected VM disk is 1 GB. "
@@ -955,102 +665,20 @@ def test_start_training_run_raises_when_disk_size_too_small(
             num_gpus=1,
             frequency=10,
             disk_size_gb=1,
-            input_cross_embodiment_description={
-                TEST_ROBOT_ID: {DataType.RGB_IMAGES: {0: "angle"}}
-            },
-            output_cross_embodiment_description={
-                TEST_ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: {0: "joint1"}}
-            },
+            input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+            output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
         )
 
-    training_job_requests = [
-        r
-        for r in mock_auth_requests.request_history
-        if r.method == "POST" and r.url.endswith("/training/jobs")
-    ]
-    assert training_job_requests == []
+    assert _training_job_post_requests(mock_auth_requests) == []
 
 
 def test_start_training_run_default_disk_size_gb(
     mock_auth_requests,
-    training_job_response,
-    algorithm_list_response,
-    mocked_org_id,
+    mock_start_training_run_endpoints,
 ):
     """start_training_run sends disk_size_gb=500 by default."""
     nc.login("test_api_key")
-    dataset_id = "dataset123"
-    dataset_response = Dataset(
-        id=dataset_id,
-        name="test_dataset",
-        created_at=0.0,
-        modified_at=0.0,
-        description="A test dataset",
-        size_bytes=2048,
-        tags=[],
-        is_shared=False,
-        num_demonstrations=20,
-        all_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-        common_data_types={DataType.RGB_IMAGES: 1, DataType.JOINT_TARGET_POSITIONS: 1},
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets",
-        json=[dataset_response.model_dump(mode="json")],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/search/by-name",
-        json=dataset_response.model_dump(mode="json"),
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/recordings",
-        json={"recordings": []},
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/recording/by-dataset/{dataset_id}",
-        json={"data": [], "total": 10, "limit": 1, "start_after": None},
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/shared",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms",
-        json=algorithm_list_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/algorithms?shared=true",
-        json=[],
-        status_code=200,
-    )
-    mock_auth_requests.post(
-        f"{API_URL}/org/{mocked_org_id}/training/jobs",
-        json=training_job_response,
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/robot_ids",
-        json=[TEST_ROBOT_ID],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/robots",
-        json=[{"id": TEST_ROBOT_ID, "name": "fake_robot"}],
-        status_code=200,
-    )
-    mock_auth_requests.get(
-        f"{API_URL}/org/{mocked_org_id}/datasets/{dataset_id}/full-embodiment-description/{TEST_ROBOT_ID}",
-        json={
-            DataType.RGB_IMAGES: {0: "angle"},
-            DataType.JOINT_TARGET_POSITIONS: {0: "joint1"},
-        },
-        status_code=200,
-    )
+    mock_start_training_run_endpoints()
 
     nc.start_training_run(
         name="default_disk_run",
@@ -1060,17 +688,58 @@ def test_start_training_run_default_disk_size_gb(
         gpu_type=GPUType.NVIDIA_TESLA_T4,
         num_gpus=1,
         frequency=10,
-        input_cross_embodiment_description={
-            TEST_ROBOT_ID: {DataType.RGB_IMAGES: {0: "angle"}}
-        },
-        output_cross_embodiment_description={
-            TEST_ROBOT_ID: {DataType.JOINT_TARGET_POSITIONS: {0: "joint1"}}
-        },
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
     )
 
-    post_request = next(
-        r
-        for r in mock_auth_requests.request_history
-        if r.method == "POST" and r.url.endswith("/training/jobs")
-    )
+    post_request = _training_job_post_requests(mock_auth_requests)[0]
     assert post_request.json()["disk_size_gb"] == 500
+
+
+def test_start_training_run_sends_resume_from_job_id(
+    mock_auth_requests,
+    mock_start_training_run_endpoints,
+):
+    """start_training_run forwards the job whose checkpoint the run continues."""
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints()
+
+    nc.start_training_run(
+        name="continued_run",
+        dataset_name="test_dataset",
+        algorithm_name="cnnmlp",
+        algorithm_config={"hidden_dim": 64},
+        gpu_type=GPUType.NVIDIA_TESLA_T4,
+        num_gpus=1,
+        frequency=10,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+        resume_from_job_id="previous_job_123",
+    )
+
+    post_request = _training_job_post_requests(mock_auth_requests)[0]
+    assert post_request.json()["resume_from_job_id"] == "previous_job_123"
+
+
+def test_start_training_run_defaults_to_no_resume(
+    mock_auth_requests,
+    mock_start_training_run_endpoints,
+):
+    """start_training_run trains from scratch unless a source job is given."""
+    nc.login("test_api_key")
+    mock_start_training_run_endpoints()
+
+    nc.start_training_run(
+        name="fresh_run",
+        dataset_name="test_dataset",
+        algorithm_name="cnnmlp",
+        algorithm_config={"hidden_dim": 64},
+        gpu_type=GPUType.NVIDIA_TESLA_T4,
+        num_gpus=1,
+        frequency=10,
+        input_cross_embodiment_description=TEST_INPUT_DESCRIPTION,
+        output_cross_embodiment_description=TEST_OUTPUT_DESCRIPTION,
+    )
+
+    post_request = _training_job_post_requests(mock_auth_requests)[0]
+    assert post_request.json()["resume_from_job_id"] is None
