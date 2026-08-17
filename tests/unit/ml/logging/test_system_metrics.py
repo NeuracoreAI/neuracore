@@ -88,5 +88,8 @@ def test_unavailable_nvml_is_tolerated_and_not_retried():
 
 
 def test_prefix_groups_separately_from_model_metrics():
-    assert SYSTEM_METRIC_PREFIX == "System"
+    """These are machine metrics, so they must not land under train/ or val/."""
+    assert SYSTEM_METRIC_PREFIX
+    assert SYSTEM_METRIC_PREFIX not in ("train", "val")
+    # _log_scalars joins with a slash, so carrying one here would double it.
     assert not SYSTEM_METRIC_PREFIX.endswith("/")

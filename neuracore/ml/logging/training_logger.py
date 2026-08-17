@@ -13,6 +13,16 @@ logger = logging.getLogger(__name__)
 class TrainingLogger(ABC):
     """Abstract base class for training loggers."""
 
+    @property
+    def supports_histograms(self) -> bool:
+        """Whether ``log_histogram`` persists anything.
+
+        Callers use this to skip building histogram inputs when the backend
+        would discard them. For model weights and gradients that means walking
+        every parameter and copying it off the device, which is far from free.
+        """
+        return True
+
     @abstractmethod
     def log_scalar(self, name: str, value: float, step: int) -> None:
         """Log a scalar metric.
