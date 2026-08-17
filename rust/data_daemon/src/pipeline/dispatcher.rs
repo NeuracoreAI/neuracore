@@ -90,6 +90,13 @@ const IDLE_REAP: Duration = Duration::from_secs(30);
 /// negligible against the holdback.
 const HOUSEKEEP_INTERVAL: Duration = Duration::from_millis(25);
 
+/// How often every live window is restated to producers.
+///
+/// Only bounds the *cold* path — a producer already subscribed when a window
+/// opens hears the transition immediately. It bounds how long a producer that
+/// attached mid-recording, or that missed a message, keeps doing nothing.
+const WINDOW_STATE_REANNOUNCE_INTERVAL: Duration = Duration::from_millis(100);
+
 /// Upper bound on how long a `RefreshConfig` may park the dispatcher loop
 /// waiting for the watcher's ack. The refresh is a fast `spawn_blocking` profile
 /// read, so this only guards against a stalled watcher wedging the hot path; on
@@ -326,6 +333,13 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// Publishes window-state announcements to producers, so a process that did
+    /// not open a window still learns of it. `None` when the service could not be
+    /// opened — recording for the owning process is unaffected.
+    announcer: Option<crate::ipc::announcer::WindowStateAnnouncer>,
+    /// When every live window was last restated. See
+    /// [`WINDOW_STATE_REANNOUNCE_INTERVAL`].
+    last_reannounce: Instant,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -348,8 +362,41 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            announcer: crate::ipc::announcer::WindowStateAnnouncer::bring_up(),
+            last_reannounce: Instant::now(),
             last_housekeep: Instant::now(),
         }
+    }
+
+    /// Tell producers whether a source has a window open.
+    fn announce_window(&self, source: &Source, live: bool) {
+        if let Some(announcer) = &self.announcer {
+            announcer.announce(&source.0, source.1, live);
+        }
+    }
+
+    /// Restate every live window, so a producer that attached late or missed a
+    /// transition converges without ever having to ask.
+    fn reannounce_live_windows(&mut self, now: Instant) {
+        if now.duration_since(self.last_reannounce) < WINDOW_STATE_REANNOUNCE_INTERVAL {
+            return;
+        }
+        self.last_reannounce = now;
+        let live: Vec<Source> = self
+            .windows
+            .iter()
+            .filter(|(_, entry)| entry.live.is_some())
+            .map(|(source, _)| source.clone())
+            .collect();
+        for source in live {
+            self.announce_window(&source, true);
+        }
+    }
+
+    /// Whether any source has a window open, which keeps the loop on its short
+    /// cadence so re-announcements stay timely.
+    fn any_live(&self) -> bool {
+        self.windows.values().any(|entry| entry.live.is_some())
     }
 
     async fn run(
@@ -365,7 +412,10 @@ impl Dispatcher {
         loop {
             // When there is in-flight work, poll frequently for due releases /
             // evictions; otherwise sleep until the next idle-reap horizon.
-            let housekeep_after = if self.held.is_empty() && !self.any_closing() {
+            // A live window is a reason not to be idle even with nothing held:
+            // its re-announcement is what lets a late producer converge.
+            let housekeep_after = if self.held.is_empty() && !self.any_closing() && !self.any_live()
+            {
                 IDLE_REAP
             } else {
                 HOUSEKEEP_INTERVAL
@@ -390,6 +440,7 @@ impl Dispatcher {
             // Holdback releases run on every wake-up; the housekeeping scans
             // are throttled to HOUSEKEEP_INTERVAL (see `last_housekeep`).
             let now = Instant::now();
+            self.reannounce_live_windows(now);
             self.release_due_holdback(now).await;
             if now.duration_since(self.last_housekeep) >= HOUSEKEEP_INTERVAL {
                 self.housekeep(now).await;
@@ -631,7 +682,7 @@ impl Dispatcher {
         };
         tracing::info!(recording_index, robot_id = source.0, "recording started");
 
-        let entry = self.windows.entry(source).or_default();
+        let entry = self.windows.entry(source.clone()).or_default();
         entry.last_seen = Some(recv_at);
         // An idle-reaped window sits in `closing` with an open upper bound
         // (`i64::MAX`) to catch stragglers; clamp any such window to this new
@@ -675,6 +726,9 @@ impl Dispatcher {
             flushed_producers: HashSet::new(),
             traces: HashMap::new(),
         });
+        // Tell producers the moment the window exists. A camera process already
+        // subscribed sees this with no round trip and no polling latency.
+        self.announce_window(&source, true);
 
         if let Some(retired_index) = retired {
             tracing::warn!(
@@ -734,6 +788,12 @@ impl Dispatcher {
             window.awaiting_flush = true;
             let recording_index = window.recording_index;
             entry.closing.push(window);
+            // No longer live, so producers must stop spending work on it. A
+            // closing window still *accepts* late data — that is what retention
+            // is for — but the process that owns the stop has already published
+            // it, and any other process's tail is bounded by its own flush
+            // rather than by how long it keeps logging.
+            self.announce_window(&source, false);
             // Persist `stopped_at` before publishing the event: the cloud
             // stop-notifier reads this row on `RecordingStopped`, so the
             // timestamp must be on disk first.
@@ -832,6 +892,7 @@ impl Dispatcher {
             windows.push(live);
         }
         windows.append(&mut entry.closing);
+        self.announce_window(&source, false);
 
         for window in windows {
             let recording_index = window.recording_index;
@@ -987,6 +1048,9 @@ impl Dispatcher {
             })
             .map(|(source, _)| source.clone())
             .collect();
+        // Collected rather than announced inline: the announce borrows `self`
+        // immutably while the loop below holds a mutable borrow of `self.windows`.
+        let mut force_closed: Vec<Source> = Vec::new();
         for source in stale {
             tracing::warn!(
                 robot_id = source.0,
@@ -998,6 +1062,7 @@ impl Dispatcher {
             let Some(mut window) = entry.live.take() else {
                 continue;
             };
+            force_closed.push(source.clone());
             // The producer crashed without a Stop, so there is no next
             // recording to partition against — keep the window's publish upper
             // bound open (`i64::MAX`) to catch any straggler data before
@@ -1018,6 +1083,9 @@ impl Dispatcher {
             } else if let Some(bus) = self.context.event_bus.as_ref() {
                 bus.publish(DaemonEvent::RecordingStopped { recording_index });
             }
+        }
+        for source in force_closed {
+            self.announce_window(&source, false);
         }
     }
 
