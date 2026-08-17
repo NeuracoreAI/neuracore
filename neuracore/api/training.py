@@ -111,6 +111,7 @@ def start_training_run(
     trim_no_movement_at_start_threshold: float | None = None,
     name_auto_increment: bool = False,
     disk_size_gb: int = 500,
+    resume_from_job_id: str | None = None,
 ) -> dict:
     """Start a new training run.
 
@@ -132,6 +133,10 @@ def start_training_run(
         name_auto_increment: If True and a job with this name already exists, use
             name_1, name_2, ... instead of failing or duplicating the name.
         disk_size_gb: Disk size in GB for the training VM (default: 500).
+        resume_from_job_id: ID of a training job whose latest checkpoint this run
+            continues from. The algorithm, data types, number of data slots per
+            data type and output prediction horizon must match that job, and
+            ``algorithm_config["epochs"]`` must exceed the epoch it reached.
 
     Returns:
         dict: Training job data including job ID and status
@@ -198,6 +203,7 @@ def start_training_run(
         ),
         input_cross_embodiment_description=input_cross_embodiment_description,
         output_cross_embodiment_description=output_cross_embodiment_description,
+        resume_from_job_id=resume_from_job_id,
     )
 
     auth = get_auth()
