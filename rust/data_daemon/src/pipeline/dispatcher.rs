@@ -193,6 +193,9 @@ struct TraceHandle {
 /// the producer published, which is exactly "which recording was active then".
 struct ActiveWindow {
     recording_index: i64,
+    /// The window's own start capture marker (`StartRecording`'s
+    /// `timestamp_ns`).
+    capture_marker_ns: i64,
     /// Inclusive lower bound — the lifecycle publish time of the start.
     started_at_ns: i64,
     /// Exclusive upper bound — the lifecycle publish time of the stop. `None`
@@ -426,11 +429,13 @@ impl Dispatcher {
                 robot_instance,
                 publish_timestamp_ns,
                 timestamp_ns,
+                window_marker_ns,
             } => {
                 self.handle_stop(
                     (robot_id, robot_instance),
                     publish_timestamp_ns,
                     timestamp_ns,
+                    window_marker_ns,
                     recv_at,
                 )
                 .await;
@@ -667,6 +672,7 @@ impl Dispatcher {
         }
         entry.live = Some(ActiveWindow {
             recording_index,
+            capture_marker_ns: timestamp_ns,
             started_at_ns: publish_timestamp_ns,
             stopped_at_ns: None,
             stop_recv_at: None,
@@ -703,6 +709,7 @@ impl Dispatcher {
         source: Source,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
+        window_marker_ns: Option<i64>,
         recv_at: Instant,
     ) {
         let Some(entry) = self.windows.get_mut(&source) else {
@@ -711,17 +718,22 @@ impl Dispatcher {
         };
         entry.last_seen = Some(recv_at);
 
-        // A stop whose publish time falls inside the live window closes the live
-        // recording normally. A stop that predates the live window is a delayed
+        // A stop naming a marker identifies its window by that marker alone,
+        // regardless of whether the stop's publish time happens to fall inside
+        // some other window.
+        let window_matches = |window: &ActiveWindow| match window_marker_ns {
+            Some(token) => token == window.capture_marker_ns,
+            None => window.contains(publish_timestamp_ns),
+        };
+
+        // A stop matching the live window closes it normally. A stop matching
+        // no live window (predates it / names a different one) is a delayed
         // stop for a recording `handle_start` already retired (an inverted
-        // start/stop pair) — it is matched against the closing windows instead.
-        // Both paths converge on the shared post-persist tail below, so a
-        // retired recording also becomes notifiable (fires `RecordingStopped`).
-        let recording_index = if entry
-            .live
-            .as_ref()
-            .is_some_and(|window| window.contains(publish_timestamp_ns))
-        {
+        // start/stop pair, or a slow non-owner) — matched against the closing
+        // windows instead. Both paths converge on the shared post-persist tail
+        // below, so a retired recording also becomes notifiable (fires
+        // `RecordingStopped`).
+        let recording_index = if entry.live.as_ref().is_some_and(&window_matches) {
             let mut window = entry
                 .live
                 .take()
@@ -746,11 +758,7 @@ impl Dispatcher {
                 return;
             }
             recording_index
-        } else if let Some(position) = entry
-            .closing
-            .iter()
-            .rposition(|window| window.contains(publish_timestamp_ns))
-        {
+        } else if let Some(position) = entry.closing.iter().rposition(window_matches) {
             let window = &mut entry.closing[position];
             let recording_index = window.recording_index;
             // Deliberately DO NOT narrow the window's in-memory `stopped_at_ns`
@@ -770,30 +778,45 @@ impl Dispatcher {
             window.stop_recv_at = Some(recv_at);
             window.awaiting_flush = true;
             window.flushed_producers.clear();
-            tracing::warn!(
-                robot_id = source.0,
-                recording_index,
-                "stop arrived after a later recording started; refining the retired recording's stop"
-            );
-            // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
-            // this true capture stop. `handle_start` already marked the row with
-            // the successor start's time, and `mark_recording_stopped` is
-            // COALESCE-idempotent, so a plain re-mark would no-op — a forced
-            // overwrite is required, and correct because `stop < successor
-            // start`.
-            if let Err(error) = self
-                .store
-                .refine_recording_stop(recording_index, timestamp_ns)
-                .await
-            {
-                tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
-                return;
+            // A marker match can land here from a stop that is simply late;
+            // only refine the stop time if it's actually earlier than what's
+            // already recorded.
+            let refines_stop = window
+                .stopped_at_ns
+                .is_none_or(|stop| publish_timestamp_ns < stop);
+            if refines_stop {
+                tracing::warn!(
+                    robot_id = source.0,
+                    recording_index,
+                    "stop arrived after a later recording started; refining the retired recording's stop"
+                );
+                // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
+                // this true capture stop. `handle_start` already marked the row with
+                // the successor start's time, and `mark_recording_stopped` is
+                // COALESCE-idempotent, so a plain re-mark would no-op — a forced
+                // overwrite is required, and correct because `stop < successor
+                // start`.
+                if let Err(error) = self
+                    .store
+                    .refine_recording_stop(recording_index, timestamp_ns)
+                    .await
+                {
+                    tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
+                    return;
+                }
+            } else {
+                tracing::debug!(
+                    robot_id = source.0,
+                    recording_index,
+                    "late stop matched a retired window by marker but carries no new stop time; retention bumped only"
+                );
             }
             recording_index
         } else {
             tracing::debug!(
                 robot_id = source.0,
                 publish_timestamp_ns,
+                window_marker_ns,
                 "stop does not belong to any retained recording window; ignoring"
             );
             return;
@@ -1468,11 +1491,22 @@ mod tests {
     }
 
     fn stop(robot: &str, publish_timestamp_ns: i64) -> Envelope {
+        stop_with_marker(robot, publish_timestamp_ns, None)
+    }
+
+    /// As [`stop`], naming the window it means via `window_marker_ns` — what a
+    /// non-owning process sends once it has resolved one.
+    fn stop_with_marker(
+        robot: &str,
+        publish_timestamp_ns: i64,
+        window_marker_ns: Option<i64>,
+    ) -> Envelope {
         Envelope::StopRecording {
             robot_id: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns,
             timestamp_ns: publish_timestamp_ns,
+            window_marker_ns,
         }
     }
 
@@ -1796,6 +1830,76 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn late_marked_stop_names_its_own_window_not_whatever_is_live() {
+        // Unlike the inversion above, this late stop's publish time does NOT
+        // predate the next recording's start — it arrives well *inside* B's
+        // live window, exactly as a non-owning process's SSE-driven stop for A
+        // would if delayed past B's start. A time-only match would wrongly
+        // close B here; naming A's marker must route it to the already-closed
+        // A instead and leave B running.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        tx.send(start("robot-1", 100)).await.unwrap(); // A, marker=100
+        tx.send(stop_with_marker("robot-1", 150, Some(100)))
+            .await
+            .unwrap(); // A's own, on-time stop
+        tx.send(start("robot-1", 200)).await.unwrap(); // B, marker=200
+        tx.send(datum("robot-1", 210, 1)).await.unwrap();
+        // A's late, non-owner stop: publish time 250 is inside B's live range.
+        tx.send(stop_with_marker("robot-1", 250, Some(100)))
+            .await
+            .unwrap();
+        tx.send(datum("robot-1", 260, 2)).await.unwrap();
+        tx.send(stop_with_marker("robot-1", 300, Some(200)))
+            .await
+            .unwrap(); // B's own stop
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+        let recording_a = &recordings[0];
+        let recording_b = &recordings[1];
+
+        assert_eq!(
+            recording_a.stop_timestamp_ns,
+            Some(150),
+            "A's late, marker-matched stop must not overwrite its true (earlier) stop time"
+        );
+        assert_eq!(
+            recording_b.stop_timestamp_ns,
+            Some(300),
+            "B must close only on its own stop, not the late stop meant for A"
+        );
+
+        let b_traces = store
+            .list_traces_for_recording(recording_b.recording_index)
+            .await
+            .unwrap();
+        assert_eq!(
+            b_traces.len(),
+            1,
+            "B keeps both its data points (ts=210 and ts=260), not orphaned by an early close"
+        );
+        let b_dir = TracePath::new(
+            recording_b.recording_index.to_string(),
+            "joints",
+            b_traces[0].trace_id.clone(),
+        )
+        .directory(context.recordings_root.as_path());
+        let b: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(b_dir.join("trace.json")).unwrap()).unwrap();
+        assert_eq!(b, serde_json::json!([{"i": 1}, {"i": 2}]));
+    }
+
     #[test]
     fn frames_inside_window_cuts_at_the_stop_boundary() {
         // `video_boundary` tests the cut; this pins the argument order.
@@ -1953,7 +2057,7 @@ mod tests {
             .handle_start(source.clone(), None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, None, opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -1997,7 +2101,7 @@ mod tests {
             .handle_start(source.clone(), None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, None, opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -2286,7 +2390,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
         assert_eq!(
             dispatcher.windows.get(&source).unwrap().closing.len(),
@@ -2328,7 +2432,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // Well past the retention deadline.
@@ -2374,7 +2478,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
@@ -2428,7 +2532,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // The lifecycle process owns no video, so its marker lands at once.
@@ -2489,7 +2593,7 @@ mod tests {
             .handle_start(source.clone(), None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), 200, 200, opened_at)
+            .handle_stop(source.clone(), 200, 200, None, opened_at)
             .await;
 
         // Published after the stop: past every window's upper bound.
@@ -2538,7 +2642,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // Producer B owns no video, so its marker lands immediately.

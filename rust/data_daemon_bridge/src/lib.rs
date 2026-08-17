@@ -48,7 +48,7 @@ mod publisher;
 mod query;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery};
+use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery, WindowMarkerQuery};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -57,7 +57,7 @@ use crate::publisher::{
     flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
 };
 use crate::query::{
-    daemon_version as daemon_version_impl, resolve_recording_id,
+    daemon_version as daemon_version_impl, resolve_recording_id, resolve_window_marker_ns,
     wait_until_ready as wait_until_ready_impl,
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
@@ -330,13 +330,17 @@ fn log_json(
 /// supplied, else the publish time) is separate — it is stored as
 /// `stop_timestamp_ns` and POSTed as the backend `end_time`, never used for
 /// window membership.
+///
+/// `window_marker_ns` names the window this stop is meant for (the start's
+/// own capture marker), so any process may call this.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None))]
+#[pyo3(signature = (robot_id, robot_instance, timestamp_ns = None, window_marker_ns = None))]
 fn stop_recording(
     py: Python<'_>,
     robot_id: &str,
     robot_instance: i64,
     timestamp_ns: Option<i64>,
+    window_marker_ns: Option<i64>,
 ) -> PyResult<()> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
@@ -370,11 +374,30 @@ fn stop_recording(
             robot_instance,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
+            window_marker_ns,
         })?;
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
     })
+}
+
+/// Arm a window-boundary split for a source without publishing a recording
+/// lifecycle event.
+#[pyfunction]
+fn mark_recording_boundary(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
+        let _ = writer_queue().push(WriterMsg::Boundary {
+            robot_id,
+            robot_instance,
+            publish_ns: now_ns(),
+        });
+    });
+    Ok(())
 }
 
 /// Run the writer's stop barrier for a source: drain every frame still queued
@@ -515,6 +538,28 @@ fn get_recording_id(
     })
 }
 
+/// Resolve a recording's start capture marker from its cloud `recording_id`,
+/// blocking with the GIL released until it is available or `timeout_s`
+/// elapses. The marker is meant for `stop_recording`'s `window_marker_ns`.
+#[pyfunction]
+#[pyo3(signature = (recording_id, timeout_s))]
+fn resolve_window_marker(
+    py: Python<'_>,
+    recording_id: &str,
+    timeout_s: f64,
+) -> PyResult<Option<i64>> {
+    if recording_id.is_empty() {
+        return Err(PyValueError::new_err("recording_id must not be empty"));
+    }
+    let query = WindowMarkerQuery {
+        recording_id: recording_id.to_string(),
+    };
+    let request_bytes = query.encode().map_err(ProducerError::from)?;
+    py.detach(|| -> PyResult<Option<i64>> {
+        Ok(resolve_window_marker_ns(&request_bytes, timeout_s)?)
+    })
+}
+
 /// Wait until the Rust daemon answers a side-effect-free IPC health probe.
 #[pyfunction]
 #[pyo3(signature = (timeout_s))]
@@ -556,9 +601,11 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(mark_recording_boundary, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
+    module.add_function(wrap_pyfunction!(resolve_window_marker, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;

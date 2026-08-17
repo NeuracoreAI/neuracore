@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use data_daemon_shared::{
     Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, VersionReply,
-    VersionRequest,
+    VersionRequest, WindowMarkerQuery, WindowMarkerReply,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -77,6 +77,7 @@ pub async fn run(
         recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
+        window_markers = data_daemon_shared::service_name::WINDOW_MARKERS,
         "ipc listener started"
     );
 
@@ -129,6 +130,12 @@ pub async fn run(
         // borrow makes this future `!Send`, which is fine: `run` is awaited
         // inline under `block_on`, never `tokio::spawn`'d.
         serve_recording_id_queries(transport.recording_id_server(), &store).await;
+
+        // -- Answer window-marker queries -----------------------------------
+        // A non-owning producer resolves the marker it needs to name a
+        // `StopRecording`'s window from the daemon's own store, same as the
+        // recording-id queries above.
+        serve_window_marker_queries(transport.window_marker_server(), &store).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -294,6 +301,58 @@ async fn serve_recording_id_queries(
                 Err(error) => tracing::warn!(%error, "failed to loan recording-id reply sample"),
             },
             Err(error) => tracing::warn!(%error, "failed to encode recording-id reply"),
+        }
+    }
+}
+
+/// Drain every pending window-marker query, answering each from the daemon's
+/// own store. Mirrors [`serve_recording_id_queries`], reversed (cloud id →
+/// marker rather than marker → cloud id).
+async fn serve_window_marker_queries(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    store: &Arc<SqliteStateStore>,
+) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "window-marker server receive failed");
+                return;
+            }
+        };
+
+        let query = match WindowMarkerQuery::decode(active.payload()) {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed window-marker query");
+                continue;
+            }
+        };
+
+        let window_marker_ns = match store
+            .resolve_marker_for_recording_id(&query.recording_id)
+            .await
+        {
+            Ok(window_marker_ns) => window_marker_ns,
+            Err(error) => {
+                tracing::warn!(%error, recording_id = query.recording_id, "window-marker lookup failed");
+                None
+            }
+        };
+
+        let reply = WindowMarkerReply { window_marker_ns };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send window-marker reply");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to loan window-marker reply sample"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode window-marker reply"),
         }
     }
 }

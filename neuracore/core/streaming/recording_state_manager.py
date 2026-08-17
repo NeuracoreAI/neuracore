@@ -62,7 +62,9 @@ class TrackedRecording(NamedTuple):
     start_time: float
 
 
-def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
+def _notify_data_bridge_of_expiry(
+    robot_id: str, instance: int, recording_id: str
+) -> None:
     """Tell the producer a source's recording has been locally auto-expired.
 
     Publishes the stop, then runs ``flush_source``, which is not part of the
@@ -72,7 +74,10 @@ def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
     """
     try:
         native = _recording_context._load_native()
-        native.stop_recording(robot_id, instance, time.time_ns())
+        # A short timeout: this runs on the shared SSE event loop, so a slow
+        # or absent daemon must not stall every other instance's stream.
+        window_marker_ns = native.resolve_window_marker(recording_id, 1.0)
+        native.stop_recording(robot_id, instance, time.time_ns(), window_marker_ns)
         native.flush_source(robot_id, instance)
     except Exception:
         logger.exception(
@@ -292,7 +297,7 @@ class RecordingStateManager(BaseSSEConsumer):
                 )
                 self._expired_recording_ids.add(recording_id)
                 self.recording_stopped(robot_id, instance, recording_id)
-                _notify_data_bridge_of_expiry(robot_id, instance)
+                _notify_data_bridge_of_expiry(robot_id, instance, recording_id)
 
         loop = get_running_loop()
 

@@ -85,11 +85,7 @@ pub mod video_boundary {
 
     /// Leading frames published before `bound_ns`, i.e. the index of the first
     /// that is [`at_or_past_boundary`].
-    pub fn frames_before_boundary(
-        offsets_ms: &[u32],
-        chunk_open_ns: i64,
-        bound_ns: i64,
-    ) -> usize {
+    pub fn frames_before_boundary(offsets_ms: &[u32], chunk_open_ns: i64, bound_ns: i64) -> usize {
         offsets_ms
             .iter()
             .position(|offset| {
@@ -349,6 +345,17 @@ pub mod service_name {
 
     /// Maximum number of concurrent request-response servers. The daemon opens exactly one.
     pub const MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE: usize = 1;
+
+    /// Request-response service a non-owning producer uses to resolve the
+    /// capture marker (see [`crate::Envelope::StartRecording::timestamp_ns`])
+    /// of the window behind a cloud `recording_id` it only learned about over
+    /// SSE.
+    pub const WINDOW_MARKERS: &str = "neuracore/data_daemon/window_markers";
+
+    /// Maximum size of a single `window_markers` service sample. Both the
+    /// request and the reply are a UUID string plus one integer; 4 KiB is
+    /// generous.
+    pub const WINDOW_MARKER_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -402,6 +409,10 @@ pub enum Envelope {
         /// the row's `stop_timestamp_ns` and POSTed to the backend as
         /// `end_time`; never used for routing.
         timestamp_ns: i64,
+        /// The window's own start capture marker, when the sender knows it —
+        /// names which window this stop means instead of matching by time
+        /// range alone. `None` falls back to matching by time range.
+        window_marker_ns: Option<i64>,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -732,6 +743,44 @@ pub struct RecordingIdReply {
     pub recording_id: Option<String>,
 }
 
+/// Request sent on [`service_name::WINDOW_MARKERS`] to resolve a window's
+/// start capture marker from its cloud `recording_id` — the reverse of
+/// [`RecordingIdQuery`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowMarkerQuery {
+    pub recording_id: String,
+}
+
+/// Reply to a [`WindowMarkerQuery`]. `None` when no such recording exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowMarkerReply {
+    pub window_marker_ns: Option<i64>,
+}
+
+impl WindowMarkerQuery {
+    /// Encode as a postcard byte vector for a `window_markers` service request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `window_markers` service request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl WindowMarkerReply {
+    /// Encode as a postcard byte vector for a `window_markers` service response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `window_markers` service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthRequest {
@@ -1035,6 +1084,7 @@ mod tests {
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_ns: 1_700_000_000_000_000_000,
+            window_marker_ns: Some(1_700_000_000_000_000_000),
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));

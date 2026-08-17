@@ -57,11 +57,13 @@ class RecordingContext:
     A *thin shipper* bridge: ``start_recording`` / ``log_joints`` / ``log_frame``
     / ``log_json`` / ``stop_recording`` / ``cancel_recording`` forward straight
     through to ``_data_bridge`` over iceoryx2, tagged only with the **source**
-    ``(robot_id, robot_instance)``. The daemon owns all recording identity —
-    there is no recording id on the wire, so this class carries none. Routing
-    is by a producer-stamped *publish* timestamp (wall clock), decoupled from
-    the data's own capture timestamp, so the daemon partitions recordings by
+    ``(robot_id, robot_instance)``. The daemon owns all recording identity — no
+    recording id travels on the data-plane envelopes. Routing is by a
+    producer-stamped *publish* timestamp (wall clock), decoupled from the
+    data's own capture timestamp, so the daemon partitions recordings by
     when data was published rather than what clock it carries.
+    ``stop_recording`` is the exception: it carries the window's start
+    marker so any process may call it.
     """
 
     def __init__(self) -> None:
@@ -251,9 +253,27 @@ class RecordingContext:
         if not self._robot_id:
             return
         timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
+        window_marker_ns = self._recording_marker_ns or None
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, timestamp_ns
+            self._robot_id, self._robot_instance, timestamp_ns, window_marker_ns
         )
+
+    def adopt_recording_marker(self, recording_id: str, timeout_s: float = 5.0) -> None:
+        """Resolve and adopt the marker of a recording this context didn't open.
+
+        No-op if the daemon doesn't resolve one within ``timeout_s``.
+        """
+        if not self._robot_id:
+            return
+        marker_ns = _load_native().resolve_window_marker(recording_id, timeout_s)
+        if marker_ns is not None:
+            self._recording_marker_ns = marker_ns
+
+    def mark_recording_boundary(self) -> None:
+        """Arm the writer's boundary split for a process that did not start it."""
+        if not self._robot_id:
+            return
+        _load_native().mark_recording_boundary(self._robot_id, self._robot_instance)
 
     def flush_source(self) -> None:
         """Run the writer's deferred tail-chunk barrier for the bound source.

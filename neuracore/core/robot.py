@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import threading
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -121,6 +122,11 @@ class Robot:
         )
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
+        # Did *this* process open the daemon's window for the current recording?
+        self._owns_daemon_recording = False
+        # Guarded by `_boundary_lock` so concurrent camera threads arm once.
+        self._armed_boundary_handle: str | None = None
+        self._boundary_lock = threading.Lock()
 
         self.org_id = org_id or get_current_org()
 
@@ -308,6 +314,8 @@ class Robot:
                 dataset_name=None,
                 timestamp=timestamp,
             )
+            self._owns_daemon_recording = True
+            self._armed_boundary_handle = local_handle
         except Exception:
             # The gate is open with no window behind it.
             get_recording_state_manager().recording_stopped(
@@ -348,15 +356,10 @@ class Robot:
         recording_id: str | None,
         timestamp: float | None = None,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon.
+        """Stop all streams and send the recording-stopped IPC message.
 
-        The local ``log_*`` gate closes in the instant between the window
-        closing and the writer's tail-chunk barrier. Closing
-        it before the notify would silently discard data the daemon would still
-        have accepted — the window is open until it receives the stop. Closing it
-        after the barrier instead leaves it open for as long as the writer's
-        backlog takes to drain (over a second under burst logging), publishing
-        data the daemon has already stopped accepting and simply throws away.
+        Every process publishes its own stop; the daemon reconciles it
+        against the window it names rather than whichever's live.
         """
         try:
             self._stop_all_streams()
@@ -364,6 +367,7 @@ class Robot:
             try:
                 context.stop_recording(timestamp=timestamp)
             finally:
+                self._owns_daemon_recording = False
                 # Both run even if the notify failed.
                 self._close_local_recording_gate()
                 context.flush_source()
@@ -426,6 +430,21 @@ class Robot:
         return get_recording_state_manager().get_current_recording_id(
             robot_id=self.id, instance=self.instance
         )
+
+    def arm_video_boundary_if_new_recording(self, recording_id: str) -> None:
+        """Roll this process's video chunk and adopt its stop marker for *recording_id*.
+
+        A no-op in the owning process, which already has both.
+        """
+        if self._owns_daemon_recording:
+            return
+        with self._boundary_lock:
+            if self._armed_boundary_handle == recording_id:
+                return
+            self._armed_boundary_handle = recording_id
+        context = self._get_daemon_recording_context()
+        context.adopt_recording_marker(recording_id)
+        context.mark_recording_boundary()
 
     def get_cloud_recording_id(
         self, timestamp_ns: int | None = None, timeout_s: float = 30.0

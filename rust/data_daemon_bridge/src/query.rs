@@ -8,7 +8,7 @@
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
-    HealthReply, HealthRequest, RecordingIdReply, VersionReply, VersionRequest,
+    HealthReply, HealthRequest, RecordingIdReply, VersionReply, VersionRequest, WindowMarkerReply,
 };
 
 use crate::publisher::{now_ns, with_producer, ProducerError, ProducerState};
@@ -202,6 +202,62 @@ fn resolve_recording_id_once(
                 // deadline, matching this function's documented `Ok(None)`
                 // contract (it is a receive failure, not a send failure).
                 tracing::debug!(%error, "recording-id receive failed; treating as no reply");
+                return Ok(None);
+            }
+        }
+        if Instant::now() >= response_deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(RECORDING_ID_RECEIVE_POLL);
+    }
+}
+
+/// Block (with the GIL released by the caller) until the window-marker query
+/// is answered or `timeout_s` elapses. Returns `None` on timeout / when no daemon is
+/// answering / when the recording is unknown, all of which the caller treats
+/// the same way: publish the stop with no marker.
+pub(crate) fn resolve_window_marker_ns(
+    request_bytes: &[u8],
+    timeout_s: f64,
+) -> Result<Option<i64>, ProducerError> {
+    let deadline = Instant::now() + bounded_timeout(timeout_s);
+    loop {
+        let resolved = with_producer(|state| resolve_window_marker_once(state, request_bytes))?;
+        if resolved.is_some() {
+            return Ok(resolved);
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(RECORDING_ID_POLL_INTERVAL);
+    }
+}
+
+/// Send one window-marker request and wait briefly for the daemon's reply.
+/// See [`resolve_recording_id_once`].
+fn resolve_window_marker_once(
+    state: &ProducerState,
+    request_bytes: &[u8],
+) -> Result<Option<i64>, ProducerError> {
+    let request = state
+        .window_marker_client
+        .loan_slice_uninit(request_bytes.len())
+        .map_err(|error| ProducerError::Loan(error.to_string()))?;
+    let request = request.write_from_slice(request_bytes);
+    let pending = request
+        .send()
+        .map_err(|error| ProducerError::Send(error.to_string()))?;
+
+    let response_deadline = Instant::now() + RECORDING_ID_RESPONSE_WAIT;
+    loop {
+        match pending.receive() {
+            Ok(Some(response)) => {
+                let reply = WindowMarkerReply::decode(response.payload())?;
+                return Ok(reply.window_marker_ns);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, "window-marker receive failed; treating as no reply");
                 return Ok(None);
             }
         }

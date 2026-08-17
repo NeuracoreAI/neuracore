@@ -303,6 +303,13 @@ pub trait StateStore: Send + Sync {
         start_timestamp_ns: i64,
     ) -> Result<Option<String>, StateStoreError>;
 
+    /// Resolve the start capture marker (`start_timestamp_ns`) of the
+    /// recording identified by its cloud `recording_id`.
+    async fn resolve_marker_for_recording_id(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<i64>, StateStoreError>;
+
     /// Atomically transition `progress_reported` for `recording_id`.
     ///
     /// `expected` is the status the caller observed before the request — if
@@ -1318,6 +1325,21 @@ impl StateStore for SqliteStateStore {
         // Outer `Option` = row present; inner = the nullable column. A matching
         // row whose cloud id has not been minted yet flattens to `None`.
         Ok(recording_id.flatten())
+    }
+
+    async fn resolve_marker_for_recording_id(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<i64>, StateStoreError> {
+        let marker = sqlx::query_scalar::<_, i64>(
+            "SELECT start_timestamp_ns FROM recordings \
+              WHERE recording_id = ?1 AND cancelled_at IS NULL \
+           ORDER BY recording_index DESC LIMIT 1",
+        )
+        .bind(recording_id)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(marker)
     }
 
     async fn mark_recording_stop_notified(
