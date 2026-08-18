@@ -744,8 +744,13 @@ impl VideoEncoder {
 /// `min(1, …)` is escaped (`\,`) because ffmpeg's filtergraph parser otherwise
 /// reads it as a filter separator. Works for any resolution or aspect ratio
 /// (landscape, portrait, ultrawide); guarded by the `preview_scale_filter_*` tests.
+/// `flags=fast_bilinear` replaces the default swscale bicubic scaler: it uses
+/// fewer taps per output pixel, and the quality cost is acceptable because
+/// this output is only a 480p `-qp 23` proxy.
 fn preview_scale_filter(max_height: u32) -> String {
-    format!("scale=trunc(iw*min(1\\,{max_height}/ih)/2)*2:trunc(ih*min(1\\,{max_height}/ih)/2)*2")
+    format!(
+        "scale=trunc(iw*min(1\\,{max_height}/ih)/2)*2:trunc(ih*min(1\\,{max_height}/ih)/2)*2:flags=fast_bilinear"
+    )
 }
 
 /// Build the path to the temporary concat list file used by
@@ -961,7 +966,7 @@ mod tests {
         // preserved, no upscale) and round to even (`trunc(/2)*2`).
         assert_eq!(
             preview_scale_filter(480),
-            "scale=trunc(iw*min(1\\,480/ih)/2)*2:trunc(ih*min(1\\,480/ih)/2)*2"
+            "scale=trunc(iw*min(1\\,480/ih)/2)*2:trunc(ih*min(1\\,480/ih)/2)*2:flags=fast_bilinear"
         );
         // The cap is interpolated, so a different target reshapes the filter.
         assert!(preview_scale_filter(720).contains("720/ih"));
