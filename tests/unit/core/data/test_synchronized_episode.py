@@ -3,23 +3,103 @@
 import re
 from types import SimpleNamespace
 from typing import cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+import requests
 from neuracore_types import (
     CameraData,
     DataType,
     JointData,
     SynchronizationDetails,
+    SynchronizedEpisode,
     SynchronizedPoint,
+    SynchronizeRecordingRequest,
 )
 from PIL import Image
 
 from neuracore.core.const import API_URL
-from neuracore.core.data.synced_recording import SynchronizedRecording
+from neuracore.core.data.synced_recording import (
+    SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S,
+    SynchronizedRecording,
+)
+from neuracore.core.exceptions import SynchronizationError
+from neuracore.core.utils.http_session import DEFAULT_TIMEOUT, thread_local_session
 
 MODULE = "neuracore.core.data.synced_recording"
+
+SIGNED_URL = "https://storage.example/synced/rec1.json?X-Goog-Signature=secret"
+
+
+def start_json(
+    recording_id: str = "rec1", synchronized_recording_id: str = "synced-rec1"
+) -> dict:
+    """Build the payload the API answers a synchronization start with.
+
+    Args:
+        recording_id: Recording the synchronization was requested for.
+        synchronized_recording_id: Artifact the synchronization produces.
+
+    Returns:
+        The identifiers and the PENDING status, and nothing else.
+    """
+    return {
+        "recording_id": recording_id,
+        "synchronized_recording_id": synchronized_recording_id,
+        "status": "PENDING",
+    }
+
+
+def job_json(
+    status: str = "PENDING",
+    download_url: str | None = None,
+    error: str | None = None,
+    recording_id: str = "rec1",
+    synchronized_recording_id: str = "synced-rec1",
+) -> dict:
+    """Build a synchronization progress payload.
+
+    Args:
+        status: Lifecycle stage the poll reports.
+        download_url: Signed URL a READY poll carries.
+        error: Failure message a FAILED poll carries.
+        recording_id: Recording the synchronization was requested for.
+        synchronized_recording_id: Artifact the synchronization produces.
+
+    Returns:
+        The progress payload.
+    """
+    return {
+        "recording_id": recording_id,
+        "synchronized_recording_id": synchronized_recording_id,
+        "status": status,
+        "download_url": download_url,
+        "error": error,
+    }
+
+
+def build_recording(dataset, recording_id: str = "rec1") -> SynchronizedRecording:
+    """Construct a recording, which retrieves its synchronized episode.
+
+    Args:
+        dataset: Parent dataset supplying the org and the cache directory.
+        recording_id: Recording to synchronize.
+
+    Returns:
+        The constructed recording.
+    """
+    return SynchronizedRecording(
+        dataset=dataset,
+        recording_id=recording_id,
+        recording_name="recording1",
+        robot_id="robot1",
+        instance=1,
+        synchronization_details=SynchronizationDetails(
+            frequency=30,
+            cross_embodiment_union=None,
+        ),
+    )
 
 
 @pytest.mark.usefixtures("mock_login")
@@ -27,44 +107,11 @@ class TestSynchronizedRecording:
     """Tests for the SynchronizedRecording class."""
 
     @pytest.fixture
-    def dataset_mock(self, dataset_dict, recordings_list, tmp_path):
-        """Create a mock dataset object."""
-        from neuracore.core.data.dataset import Dataset
-
-        dataset = Dataset(**dataset_dict, recordings=recordings_list)
-        dataset.cache_dir = tmp_path / "cache"
-        dataset.cache_dir.mkdir(parents=True, exist_ok=True)
-        return dataset
-
-    @pytest.fixture
-    def mock_synced_api(self, mock_data_requests, synced_data, mocked_org_id):
-        """Set up mocks for synchronization API endpoints."""
-        # Mock sync endpoint
-        mock_data_requests.post(
-            re.compile(
-                f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-recording"
-            ),
-            json=synced_data.model_dump(mode="json"),
-            status_code=200,
-        )
-        yield mock_data_requests
-
-    @pytest.fixture
     def synced_recording(
         self, dataset_mock, mock_data_requests
     ) -> SynchronizedRecording:
         """Create a SynchronizedRecording instance for testing."""
-        return SynchronizedRecording(
-            dataset=dataset_mock,
-            recording_id="rec1",
-            recording_name="recording1",
-            robot_id="robot1",
-            instance=1,
-            synchronization_details=SynchronizationDetails(
-                frequency=30,
-                cross_embodiment_union=None,
-            ),
-        )
+        return build_recording(dataset_mock)
 
     def test_init(self, synced_recording: SynchronizedRecording, dataset_mock):
         """Test SynchronizedRecording initialization."""
@@ -111,31 +158,69 @@ class TestSynchronizedRecording:
         assert result.start_time == synced_data.start_time
         assert result.end_time == synced_data.end_time
 
-    def test_get_synced_data_requests_a_retrying_session(self, synced_data) -> None:
-        """Test that _get_synced_data requests the retrying session."""
-        fake_self = SimpleNamespace(
-            id="rec-1",
-            dataset=SimpleNamespace(org_id="org-1"),
-            synchronization_details=SynchronizationDetails(
-                frequency=30,
-                cross_embodiment_union=None,
+    def test_construction_initializes_episode_state(
+        self, synced_recording: SynchronizedRecording, synced_data
+    ):
+        """Construction still populates the episode state from the download."""
+        assert synced_recording._episode_synced is not None
+        assert synced_recording._episode_length == len(synced_data.observations)
+        assert synced_recording.start_time == synced_data.start_time
+        assert synced_recording.end_time == synced_data.end_time
+
+    def test_episode_retrieval_makes_three_requests(
+        self,
+        synced_recording: SynchronizedRecording,
+        mock_data_requests,
+        mocked_org_id,
+        synced_recording_id,
+    ):
+        """Retrieval starts the synchronization, polls it, then downloads."""
+        requested = [
+            (request.method, request.url.split("?")[0])
+            for request in mock_data_requests.request_history
+            if "synchronize" in request.path or "storage.example" in request.hostname
+        ]
+
+        base = f"{API_URL}/org/{mocked_org_id}/synchronize"
+        assert requested == [
+            ("POST", f"{base}/synchronize-recording"),
+            (
+                "GET",
+                f"{base}/synchronized-recording-progress/{synced_recording_id}",
             ),
+            ("GET", "https://storage.example/synced-episodes/rec1.json"),
+        ]
+
+    def test_failed_download_yields_no_recording(
+        self, dataset_mock, mock_data_requests, synced_episode_download_url
+    ):
+        """A failed artifact download must not produce a partial recording."""
+        mock_data_requests.get(
+            synced_episode_download_url, status_code=403, text="Forbidden"
         )
-        session = MagicMock()
-        response = MagicMock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = synced_data.model_dump(mode="json")
-        session.post.return_value = response
-        auth = MagicMock()
-        auth.get_headers = MagicMock(return_value={})
 
-        with (
-            patch(f"{MODULE}.thread_local_session", return_value=session) as mock,
-            patch(f"{MODULE}.get_auth", return_value=auth),
-        ):
-            SynchronizedRecording._get_synced_data(fake_self)
+        with pytest.raises(SynchronizationError, match="rec1"):
+            build_recording(dataset_mock)
 
-        mock.assert_called_with(retry_transient=True)
+    def test_every_request_uses_a_retrying_session(
+        self, dataset_mock, mock_data_requests
+    ) -> None:
+        """Both API calls and the download go through retrying sessions."""
+        requested_policies = []
+
+        def record(**kwargs):
+            requested_policies.append(kwargs)
+            return thread_local_session(**kwargs)
+
+        with patch(f"{MODULE}.thread_local_session", side_effect=record):
+            build_recording(dataset_mock)
+
+        assert requested_policies == [
+            {"retry_transient": True},  # start
+            {"retry_transient": True},  # poll
+            # The download is an idempotent GET, so read timeouts are retried too.
+            {"retry_transient": True, "retry_read_timeout": True},
+        ]
 
     def test_len(self, synced_recording):
         """Test __len__ returns correct number of frames."""
@@ -200,26 +285,30 @@ class TestSynchronizedRecording:
         synced_data_multiple_frames,
     ):
         """Test slicing with step parameter."""
-        # Mock the API to return more frames
+        # Mock the API to serve an artifact with more frames
+        download_url = "https://storage.example/synced-episodes/multi-frame.json"
+        base = f"{API_URL}/org/{dataset_mock.org_id}/synchronize"
         mock_data_requests.post(
-            re.compile(
-                f"{API_URL}/org/{dataset_mock.org_id}/synchronize/synchronize-recording"
+            re.compile(f"{base}/synchronize-recording"),
+            json=start_json(synchronized_recording_id="synced-multi-frame"),
+            status_code=200,
+        )
+        mock_data_requests.get(
+            f"{base}/synchronized-recording-progress/synced-multi-frame",
+            json=job_json(
+                "READY",
+                download_url=download_url,
+                synchronized_recording_id="synced-multi-frame",
             ),
+            status_code=200,
+        )
+        mock_data_requests.get(
+            download_url,
             json=synced_data_multiple_frames.model_dump(mode="json"),
             status_code=200,
         )
 
-        synced = SynchronizedRecording(
-            dataset=dataset_mock,
-            recording_id="rec1",
-            recording_name="recording1",
-            robot_id="robot1",
-            instance=1,
-            synchronization_details=SynchronizationDetails(
-                frequency=30,
-                cross_embodiment_union=None,
-            ),
-        )
+        synced = build_recording(dataset_mock)
 
         frames = synced[0:5:2]
 
@@ -608,3 +697,320 @@ class TestResolveFrameSyncArg:
             assert _resolve_frame_sync_arg() == "-fps_mode"
 
         mock_run.assert_called_once()
+
+
+@pytest.mark.usefixtures("mock_login")
+class TestSyncedEpisodeRetrieval:
+    """Tests for the start, poll and download flow behind one episode.
+
+    Synchronization is asynchronous: starting it only ever reports tracking
+    metadata, the terminal state arrives from the progress endpoint, and the
+    episode itself is downloaded straight from object storage.
+    """
+
+    @pytest.fixture(autouse=True)
+    def no_poll_delay(self, monkeypatch):
+        """Remove the poll delay so the loop runs at full speed."""
+        monkeypatch.setattr(f"{MODULE}.SYNCED_RECORDING_POLL_INTERVAL_S", 0)
+
+    @pytest.fixture
+    def endpoints(self, mocked_org_id):
+        """The three requests one episode retrieval makes."""
+        base = f"{API_URL}/org/{mocked_org_id}/synchronize"
+        return {
+            "start": f"{base}/synchronize-recording",
+            "progress": f"{base}/synchronized-recording-progress/synced-rec1",
+            "download": SIGNED_URL,
+        }
+
+    def test_start_response_is_only_tracking_metadata(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """Starting identifies the artifact; the episode arrives from storage."""
+        start = mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        download = mock_data_requests.get(
+            endpoints["download"], json=synced_data.model_dump(mode="json")
+        )
+
+        recording = build_recording(dataset_mock)
+
+        # The synchronization request body is unchanged by the async contract.
+        assert start.call_count == 1
+        assert start.last_request.json() == (
+            SynchronizeRecordingRequest(
+                recording_id="rec1",
+                synchronization_details=recording.synchronization_details,
+            ).model_dump(mode="json")
+        )
+        # Both identifiers the start reported are used to poll the artifact.
+        assert progress.call_count == 1
+        assert progress.last_request.qs == {"recording_id": ["rec1"]}
+        assert download.call_count == 1
+        assert isinstance(recording._episode_synced, SynchronizedEpisode)
+        assert recording._episode_synced.robot_id == synced_data.robot_id
+        assert len(recording) == len(synced_data.observations)
+
+    def test_pending_polls_until_ready(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """Polling continues while the artifact is still being built."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(
+            endpoints["progress"],
+            [
+                {"json": job_json("PENDING")},
+                {"json": job_json("PENDING")},
+                {"json": job_json("READY", download_url=SIGNED_URL)},
+            ],
+        )
+        download = mock_data_requests.get(
+            endpoints["download"], json=synced_data.model_dump(mode="json")
+        )
+
+        recording = build_recording(dataset_mock)
+
+        assert progress.call_count == 3
+        assert download.call_count == 1
+        assert len(recording) == len(synced_data.observations)
+
+    def test_cached_artifact_is_ready_on_the_first_poll(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """A cached artifact costs one poll and no waiting at all."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        mock_data_requests.get(
+            endpoints["download"], json=synced_data.model_dump(mode="json")
+        )
+
+        with patch(f"{MODULE}.time.sleep") as sleep:
+            build_recording(dataset_mock)
+
+        assert progress.call_count == 1
+        sleep.assert_not_called()
+
+    def test_failed_synchronization_raises_with_the_server_error(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A FAILED poll surfaces the server's reason and downloads nothing."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(
+            endpoints["progress"],
+            json=job_json("FAILED", error="joint stream missing"),
+        )
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(SynchronizationError, match="joint stream missing") as exc:
+            build_recording(dataset_mock)
+
+        assert "rec1" in str(exc.value)
+        assert download.call_count == 0
+
+    def test_failed_without_a_reason_still_names_the_recording(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A FAILED poll carrying no message still identifies the recording."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(endpoints["progress"], json=job_json("FAILED"))
+
+        with pytest.raises(SynchronizationError, match="rec1") as exc:
+            build_recording(dataset_mock)
+
+        assert "no reason given" in str(exc.value)
+
+    def test_ready_without_a_download_url_is_invalid(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """READY without a URL is a broken server response, not a retry."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=None)
+        )
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(
+            SynchronizationError, match="READY without a download URL"
+        ) as exc:
+            build_recording(dataset_mock)
+
+        assert "rec1" in str(exc.value)
+        assert progress.call_count == 1
+        assert download.call_count == 0
+
+    def test_polling_gives_up_at_the_deadline(
+        self, mock_data_requests, dataset_mock, endpoints, monkeypatch
+    ):
+        """A synchronization that never finishes fails with a timeout."""
+        monkeypatch.setattr(f"{MODULE}.SYNCED_RECORDING_TIMEOUT_S", 0)
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(endpoints["progress"], json=job_json())
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(SynchronizationError, match="Timed out") as exc:
+            build_recording(dataset_mock)
+
+        assert "rec1" in str(exc.value)
+        assert "PENDING" in str(exc.value)
+        assert progress.call_count == 1
+        assert download.call_count == 0
+
+    def test_start_response_is_never_parsed_as_an_episode(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """An inline episode body is rejected instead of being used as one."""
+        mock_data_requests.post(
+            endpoints["start"], json=synced_data.model_dump(mode="json")
+        )
+        progress = mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(SynchronizationError, match="start response") as exc:
+            build_recording(dataset_mock)
+
+        assert "not tracking metadata" in str(exc.value)
+        assert progress.call_count == 0
+        assert download.call_count == 0
+
+    def test_malformed_progress_response_is_rejected(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A progress body that is not tracking metadata fails clearly."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(endpoints["progress"], text="not json at all")
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(SynchronizationError, match="progress response") as exc:
+            build_recording(dataset_mock)
+
+        assert "rec1" in str(exc.value)
+        assert download.call_count == 0
+
+    def test_start_failure_is_surfaced_before_any_polling(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A failed start propagates and nothing downstream is attempted."""
+        mock_data_requests.post(endpoints["start"], status_code=500, text="boom")
+        progress = mock_data_requests.get(endpoints["progress"], json=job_json())
+        download = mock_data_requests.get(endpoints["download"], json={})
+
+        with pytest.raises(requests.HTTPError):
+            build_recording(dataset_mock)
+
+        assert progress.call_count == 0
+        assert download.call_count == 0
+
+    def test_auth_headers_are_sent_only_to_the_api(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """Neuracore credentials reach the API but never object storage."""
+        start = mock_data_requests.post(endpoints["start"], json=start_json())
+        progress = mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        download = mock_data_requests.get(
+            endpoints["download"], json=synced_data.model_dump(mode="json")
+        )
+
+        build_recording(dataset_mock)
+
+        assert start.last_request.headers["Authorization"]
+        assert progress.last_request.headers["Authorization"]
+        # The URL is already signed; forwarding Neuracore credentials to object
+        # storage would have the request rejected.
+        assert "Authorization" not in download.last_request.headers
+
+    def test_download_uses_its_own_read_timeout(
+        self, mock_data_requests, dataset_mock, endpoints, synced_data
+    ):
+        """The object download gets a longer read budget than API calls."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        download = mock_data_requests.get(
+            endpoints["download"], json=synced_data.model_dump(mode="json")
+        )
+
+        build_recording(dataset_mock)
+
+        assert download.last_request.timeout == SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S
+        assert SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S[1] > DEFAULT_TIMEOUT[1]
+
+    def test_download_failure_reports_recording_and_stage(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A failed download names the recording without leaking the URL."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        mock_data_requests.get(endpoints["download"], status_code=403, text="Forbidden")
+
+        with pytest.raises(SynchronizationError) as exc:
+            build_recording(dataset_mock)
+
+        message = str(exc.value)
+        assert "download" in message
+        assert "rec1" in message
+        assert "HTTP 403" in message
+        # The signed URL carries temporary credentials: neither it nor the
+        # requests error that embeds it may reach the caller.
+        assert "X-Goog-Signature" not in message
+        assert exc.value.__cause__ is None
+
+    def test_download_transport_failure_hides_the_signed_url(
+        self, mock_data_requests, dataset_mock, endpoints
+    ):
+        """A transport failure names the recording without exposing the URL."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        mock_data_requests.get(
+            endpoints["download"],
+            exc=requests.ConnectionError(
+                f"Max retries exceeded with url: {SIGNED_URL}"
+            ),
+        )
+
+        with pytest.raises(SynchronizationError) as exc:
+            build_recording(dataset_mock)
+
+        message = str(exc.value)
+        assert "rec1" in message
+        assert "ConnectionError" in message
+        assert "X-Goog-Signature" not in message
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            b"",
+            b"{not json",
+            b"\xff\xfe\x00not-utf8",
+            b'{"observations": "not-a-list"}',
+            b"[1, 2, 3]",
+        ],
+        ids=["empty", "malformed", "invalid-utf8", "wrong-types", "wrong-shape"],
+    )
+    def test_invalid_downloaded_artifact_fails_validation(
+        self, mock_data_requests, dataset_mock, endpoints, content
+    ):
+        """A malformed or structurally invalid artifact fails clearly."""
+        mock_data_requests.post(endpoints["start"], json=start_json())
+        mock_data_requests.get(
+            endpoints["progress"], json=job_json("READY", download_url=SIGNED_URL)
+        )
+        mock_data_requests.get(endpoints["download"], content=content)
+
+        with pytest.raises(SynchronizationError, match="rec1") as exc:
+            build_recording(dataset_mock)
+
+        assert "valid synchronized episode" in str(exc.value)
+        assert "validation errors" in str(exc.value)
