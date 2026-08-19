@@ -18,7 +18,10 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.streaming.recording_state_manager import (
+    get_recording_state_manager,
+    shutdown_recording_state_manager,
+)
 from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
@@ -103,7 +106,16 @@ def logout() -> None:
     Logs out from the Neuracore server and resets all global state including
     active robots, recording IDs, dataset IDs, and version validation status.
     """
-    get_auth().logout()
+    # Stop and drain every task that uses the shared Auth instance before its
+    # token is cleared. Each cleanup remains best-effort with respect to the
+    # next one, and credentials are always cleared even if cleanup raises.
+    try:
+        try:
+            StreamManagerOrchestrator.shutdown_global()
+        finally:
+            shutdown_recording_state_manager()
+    finally:
+        get_auth().logout()
     GlobalSingleton()._active_robot = None
     GlobalSingleton()._active_dataset_id = None
     GlobalSingleton()._active_dataset = None

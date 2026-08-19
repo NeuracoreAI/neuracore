@@ -24,7 +24,10 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
+from neuracore.core.streaming.recording_state_manager import (
+    get_initialized_recording_state_manager,
+    get_recording_state_manager,
+)
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon import bridge as recording_context
@@ -330,11 +333,15 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        stop_time = timestamp if timestamp is not None else time.time()
         active_handle = get_recording_state_manager().get_current_recording_id(
             self.id, self.instance
         )
         get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=active_handle
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=active_handle,
+            stop_time=stop_time,
         )
         self._drain_streams_and_notify_daemon(recording_id, timestamp=timestamp)
 
@@ -683,12 +690,16 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         self._stop_all_streams()
+        stop_time = timestamp if timestamp is not None else time.time()
         self._get_daemon_recording_context().cancel_recording(timestamp=timestamp)
         active_handle = get_recording_state_manager().get_current_recording_id(
             self.id, self.instance
         )
         get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=active_handle
+            robot_id=self.id,
+            instance=self.instance,
+            recording_id=active_handle,
+            stop_time=stop_time,
         )
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
@@ -761,10 +772,9 @@ class Robot:
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()
-        if self.id is not None:
-            get_recording_state_manager().deregister_remote_stop_handler(
-                self.id, self.instance
-            )
+        recording_manager = get_initialized_recording_state_manager()
+        if self.id is not None and recording_manager is not None:
+            recording_manager.deregister_remote_stop_handler(self.id, self.instance)
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None

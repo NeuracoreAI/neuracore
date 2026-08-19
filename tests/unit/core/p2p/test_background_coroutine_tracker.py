@@ -68,3 +68,22 @@ async def test_handles_closed_event_loop(caplog):
 
     # Ensure no task was added
     assert len(tracker.background_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_prevents_queued_coroutine_from_starting():
+    """Stopping must reject submissions already queued on the event loop."""
+    started = False
+
+    async def queued_coroutine():
+        nonlocal started
+        started = True
+
+    tracker = BackgroundCoroutineTracker(loop=asyncio.get_running_loop())
+    tracker.submit_background_coroutine(queued_coroutine())
+    tracker.stop_background_coroutines()
+
+    await asyncio.sleep(0)
+
+    assert started is False
+    assert tracker.background_tasks == []

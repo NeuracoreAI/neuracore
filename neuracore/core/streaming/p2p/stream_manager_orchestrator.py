@@ -6,6 +6,8 @@ integrates with the signalling server to route messages.
 """
 
 import asyncio
+import logging
+from concurrent.futures import TimeoutError as FutureTimeoutError
 
 from aiohttp import ClientSession, ClientTimeout
 from neuracore_types import RobotInstanceIdentifier
@@ -35,6 +37,10 @@ from neuracore.core.streaming.p2p.signalling_events_consumer import (
 from neuracore.core.utils.http_session import retry_connection_failures
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
+logger = logging.getLogger(__name__)
+
+_SHUTDOWN_TIMEOUT_S = 5.0
+
 
 class StreamManagerOrchestrator(
     BaseStreamManagerOrchestrator, metaclass=SingletonMetaclass
@@ -52,7 +58,6 @@ class StreamManagerOrchestrator(
         self,
         org_id: str | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
     ):
         """Initialize the stream manager factory.
@@ -62,8 +67,6 @@ class StreamManagerOrchestrator(
                 defaults to the current org.
             loop: the event loop to run on. Defaults to the running loop if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
         """
@@ -77,7 +80,7 @@ class StreamManagerOrchestrator(
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
         self.loop = loop or get_running_loop()
-        self.client_session = client_session or ClientSession(
+        self.client_session = ClientSession(
             timeout=ClientTimeout(sock_read=None, total=None),
             loop=self.loop,
             middlewares=(retry_connection_failures,),
@@ -94,6 +97,57 @@ class StreamManagerOrchestrator(
                 get_consume_live_data_enabled_manager(),
             ),
         )
+
+    def _close_streaming_resources(self) -> None:
+        """Stop signalling and every manager before authentication is removed."""
+        self.signalling_consumer.close()
+
+        # Manager disable listeners remove themselves from these dictionaries.
+        # Clear the dictionaries first so those callbacks do not recursively
+        # call close() on the manager that is already being disabled.
+        consumer_managers = list(self.consumer_managers.values())
+        provider_managers = list(self.provider_managers.values())
+        self.consumer_managers.clear()
+        self.provider_managers.clear()
+
+        for consumer_manager in consumer_managers:
+            consumer_manager.close()
+        for provider_manager in provider_managers:
+            provider_manager.close()
+
+    async def _finish_shutdown(self) -> None:
+        """Drain cancellation callbacks and close the owned HTTP session."""
+        # Let task-cancellation callbacks run before the authenticated session
+        # is closed and, subsequently, the caller clears authentication.
+        await asyncio.sleep(0)
+        await self.client_session.close()
+
+    def shutdown(self) -> None:
+        """Synchronously stop streaming so logout can safely clear credentials."""
+        # Do this before scheduling anything on the loop. Even if the loop is
+        # blocked, trackers immediately reject new work while cancellation is
+        # queued for tasks already running there.
+        self._close_streaming_resources()
+
+        future = asyncio.run_coroutine_threadsafe(self._finish_shutdown(), self.loop)
+        try:
+            future.result(timeout=_SHUTDOWN_TIMEOUT_S)
+        except FutureTimeoutError:
+            future.cancel()
+            logger.warning(
+                "Timed out waiting for streaming resources to shut down cleanly"
+            )
+
+    @classmethod
+    def shutdown_global(cls) -> None:
+        """Shut down and forget the singleton, allowing a later fresh session."""
+        instance = SingletonMetaclass._instances.get(cls)
+        if instance is None:
+            return
+        try:
+            instance.shutdown()
+        finally:
+            SingletonMetaclass._instances.pop(cls, None)
 
     def get_manager(
         self, type: ManagerType, robot_id: str, robot_instance: int

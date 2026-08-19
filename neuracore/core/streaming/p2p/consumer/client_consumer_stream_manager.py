@@ -264,7 +264,7 @@ class ClientConsumerStreamManager(BaseP2PStreamManager):
 
     def _on_close(self) -> None:
         """Internal cleanup method called when streaming is disabled."""
-        for connection in self.connections.values():
+        for connection in list(self.connections.values()):
             connection.close()
 
         self.connections.clear()
