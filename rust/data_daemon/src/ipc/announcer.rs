@@ -5,10 +5,10 @@
 //! asked: a producer that did not open a window has nothing to identify it with
 //! and could only guess at when to ask.
 //!
-//! Announcements are idempotent and carry no recording identity — a source and a
-//! flag. That is deliberate: a producer needs to know *whether* to spend work,
-//! never which recording the work belongs to, so no announcement can be replayed
-//! as a claim about a particular window.
+//! Announcements are idempotent and carry no recording identity — a source, a
+//! flag, and the live window's publish-clock lower bound. That is deliberate: a
+//! producer needs to know *whether* to spend work and *which window* its own stop
+//! would close, never which recording the daemon has decided that window is.
 //!
 //! ## Why it also re-announces
 //!
@@ -39,7 +39,7 @@ use iceoryx2::prelude::*;
 /// a dedicated thread.) So the dispatcher holds only a channel, and the thread
 /// on the other end owns the node, service and publisher.
 pub struct WindowStateAnnouncer {
-    tx: Sender<(String, i64, bool)>,
+    tx: Sender<(String, i64, bool, Option<i64>)>,
 }
 
 impl WindowStateAnnouncer {
@@ -49,7 +49,7 @@ impl WindowStateAnnouncer {
     /// that cannot be announced costs producers that did not open it, and is not a
     /// reason to refuse recording for the process that did.
     pub fn bring_up() -> Option<Self> {
-        let (tx, rx) = channel::<(String, i64, bool)>();
+        let (tx, rx) = channel::<(String, i64, bool, Option<i64>)>();
         // Bring the ports up on the thread that will own them, and report back
         // whether it worked so a failure is visible here rather than as silent
         // non-announcement.
@@ -65,29 +65,39 @@ impl WindowStateAnnouncer {
         Some(WindowStateAnnouncer { tx })
     }
 
-    /// Announce whether `(robot_id, robot_instance)` has a window open.
+    /// Announce whether `(robot_id, robot_instance)` has a window open, and for
+    /// a live one the publish-clock boundary it opened on.
     ///
     /// Never blocks the dispatcher: the send is to an unbounded channel, and a
     /// dead announcer thread is ignored. Every announcement is either restated by
     /// the next re-announcement or superseded by the next transition, so one lost
     /// message is not worth surfacing.
-    pub fn announce(&self, robot_id: &str, robot_instance: i64, live: bool) {
-        let _ = self.tx.send((robot_id.to_string(), robot_instance, live));
+    pub fn announce(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+        live: bool,
+        started_at_ns: Option<i64>,
+    ) {
+        let _ = self
+            .tx
+            .send((robot_id.to_string(), robot_instance, live, started_at_ns));
     }
 }
 
 /// Own the iceoryx2 ports and publish whatever the dispatcher hands over.
-fn announce_loop(rx: Receiver<(String, i64, bool)>, ready_tx: Sender<bool>) {
+fn announce_loop(rx: Receiver<(String, i64, bool, Option<i64>)>, ready_tx: Sender<bool>) {
     let Some(publisher) = build_publisher() else {
         let _ = ready_tx.send(false);
         return;
     };
     let _ = ready_tx.send(true);
-    while let Ok((robot_id, robot_instance, live)) = rx.recv() {
+    while let Ok((robot_id, robot_instance, live, started_at_ns)) = rx.recv() {
         let announcement = WindowStateAnnouncement {
             robot_id,
             robot_instance,
             live,
+            started_at_ns,
         };
         let bytes = match announcement.encode() {
             Ok(bytes) => bytes,

@@ -108,8 +108,9 @@ fn start_recording(
         })?;
         // This process opened the window, so its own gate needs no round trip
         // and must not lag: frames logged between here and the daemon's row
-        // write would otherwise be dropped.
-        gate::note_window_opened_locally(&robot_id, robot_instance);
+        // write would otherwise be dropped. The boundary is recorded with it, so
+        // a later stop can name this window without waiting to be told it.
+        gate::note_window_opened_locally(&robot_id, robot_instance, publish_timestamp_ns);
         // Tell the writer where the window opened, so no chunk spans it.
         let _ = writer_queue().push(WriterMsg::Boundary {
             robot_id,
@@ -349,6 +350,12 @@ fn log_json(
 
 /// Drain the data publisher, then publish one `StopRecording`.
 ///
+/// Any producer may stop a recording, whether or not it opened the window. The
+/// stop names the window it means ([`gate::window_started_at_ns`], read before
+/// the drain barrier), so the daemon closes *that* window or drops the stop —
+/// several processes stopping the same recording, which one web-initiated stop
+/// causes, cannot end up closing a later one.
+///
 /// Two barriers, in order: the data publisher's queue is drained first, so the
 /// recording's joint/JSON tail is on the wire before the window's upper bound
 /// is stamped, and only then is the stop published. The writer's tail video
@@ -381,6 +388,11 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
+        // Which window this stop means, read BEFORE the flush barrier below. That
+        // barrier is the slow part — over a second under burst logging — and the
+        // window it was called against is the one the caller means to stop, not
+        // whichever has become live by the time the drain finishes.
+        let window_started_at_ns = gate::window_started_at_ns(&robot_id, robot_instance);
         // Drain the data publisher before stamping the window's upper bound.
         // `log_joint_*` / `log_json` only hand their envelope to the background
         // publisher thread's unbounded queue, which nothing drains at process
@@ -408,6 +420,7 @@ fn stop_recording(
             robot_instance,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
+            window_started_at_ns,
         })?;
         // Shut our own gate with the window. Deliberately after the publish, so
         // the boundary the daemon records and the last frame we admit are on the
