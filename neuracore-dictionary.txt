@@ -470,6 +470,7 @@ startcodes
 staticmethod
 statvfs
 subdirs
+swscale
 synchronizable
 syncpoint
 syncpoints
