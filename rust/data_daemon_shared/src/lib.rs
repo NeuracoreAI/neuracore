@@ -463,6 +463,19 @@ pub enum Envelope {
         /// the row's `stop_timestamp_ns` and POSTed to the backend as
         /// `end_time`; never used for routing.
         timestamp_ns: i64,
+        /// Which window this stop means: the `publish_timestamp_ns` of the
+        /// [`Envelope::StartRecording`] that opened it, as the producer knows it
+        /// — from opening the window itself, or from the daemon's
+        /// [`WindowStateAnnouncement`].
+        ///
+        /// Not recording identity on the wire: it is a publish-clock boundary,
+        /// the same quantity `StartRecording` already carries, and the daemon
+        /// still decides which recording that window is. It exists because
+        /// `publish_timestamp_ns` above is stamped at the *send*, so a stop
+        /// delayed behind a slow flush arrives looking like a stop for whatever
+        /// recording is live by then. `None` from a producer that never learned
+        /// the boundary, which the daemon falls back to matching by publish time.
+        window_started_at_ns: Option<i64>,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -805,6 +818,10 @@ pub struct WindowStateAnnouncement {
     pub robot_instance: i64,
     /// Whether a recording is open for this source.
     pub live: bool,
+    /// The live window's publish-clock lower bound, so a producer that did not
+    /// open the window can still say which one its stop means. `None` when
+    /// `live` is false.
+    pub started_at_ns: Option<i64>,
 }
 
 impl WindowStateAnnouncement {
@@ -966,14 +983,22 @@ mod tests {
 
     #[test]
     fn window_state_announcement_round_trips() {
-        for live in [true, false] {
+        for (live, started_at_ns) in [(true, Some(1_700_000_000_000_000_000)), (false, None)] {
             let announcement = WindowStateAnnouncement {
                 robot_id: "robot-1".into(),
                 robot_instance: 3,
                 live,
+                started_at_ns,
             };
+            let bytes = announcement.encode().unwrap();
+            assert!(
+                bytes.len() <= service_name::WINDOW_STATE_MAX_PAYLOAD_BYTES,
+                "announcement ({} bytes) must fit the window_state slice ({} bytes)",
+                bytes.len(),
+                service_name::WINDOW_STATE_MAX_PAYLOAD_BYTES,
+            );
             assert_eq!(
-                WindowStateAnnouncement::decode(&announcement.encode().unwrap()).unwrap(),
+                WindowStateAnnouncement::decode(&bytes).unwrap(),
                 announcement
             );
         }
@@ -1132,15 +1157,18 @@ mod tests {
 
     #[test]
     fn stop_and_cancel_round_trip() {
-        let stop = Envelope::StopRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 2,
-            publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
-        };
-        let bytes = stop.encode().expect("encode");
-        assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
-        assert_eq!(stop.kind(), "stop_recording");
+        for window_started_at_ns in [Some(1_699_999_999_000_000_000), None] {
+            let stop = Envelope::StopRecording {
+                robot_id: "robot-1".into(),
+                robot_instance: 2,
+                publish_timestamp_ns: 1_700_000_000_000_000_000,
+                timestamp_ns: 1_700_000_000_000_000_000,
+                window_started_at_ns,
+            };
+            let bytes = stop.encode().expect("encode");
+            assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
+            assert_eq!(stop.kind(), "stop_recording");
+        }
 
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),

@@ -21,8 +21,11 @@
 //!    to a process that did *not* open a window, and the only signal that works
 //!    offline, where no cloud recording id exists to name one with.
 //!
-//! Announcements carry no recording identity, just a source and a flag. A
-//! producer learns whether to work, never which recording the work belongs to.
+//! Announcements carry no recording identity: a source, a flag, and the live
+//! window's publish-clock lower bound. A producer learns whether to work and
+//! which window it is working on — never which recording the daemon has decided
+//! that window is. The boundary is what lets a stop from this process name the
+//! window it means, so a delayed one cannot close a later recording.
 //!
 //! ## Why nothing here polls, and why nothing here gets stuck
 //!
@@ -94,6 +97,12 @@ struct GateState {
     /// gate survives the daemon going away; `None` for a source we have never
     /// heard is live.
     confirmed_at: Option<Instant>,
+    /// Publish-clock lower bound of the last window this process knew of, so a
+    /// stop can say which window it means. Deliberately *not* cleared when the
+    /// window closes: a stop published just after a close still means that
+    /// window, and letting it fall back to `None` is what allows it to be read
+    /// as a stop for the next recording.
+    window_started_at_ns: Option<i64>,
 }
 
 impl GateState {
@@ -103,6 +112,7 @@ impl GateState {
             open: false,
             owned: false,
             confirmed_at: None,
+            window_started_at_ns: None,
         }
     }
 }
@@ -245,18 +255,36 @@ fn settle_transitions(transitions: Vec<GateTransition>) {
     }
 }
 
-/// Record that *this* process opened a window for the source.
+/// Record that *this* process opened a window for the source, at
+/// `started_at_ns` on the publish clock.
 ///
 /// Called from `start_recording`, so the gate is open before the call returns
-/// and the owner's first frame is never dropped.
-pub(crate) fn note_window_opened_locally(robot_id: &str, robot_instance: i64) {
+/// and the owner's first frame is never dropped. Recording the boundary here
+/// rather than waiting for the daemon to announce it back means an opener can
+/// name its window from the instant it exists.
+pub(crate) fn note_window_opened_locally(robot_id: &str, robot_instance: i64, started_at_ns: i64) {
     with_registry(|sources| {
         let state = sources
             .entry((robot_id.to_string(), robot_instance))
             .or_insert_with(GateState::unknown);
         state.open = true;
         state.owned = true;
+        state.window_started_at_ns = Some(started_at_ns);
     });
+}
+
+/// The publish-clock lower bound of the last window this process knew of.
+///
+/// What a [`crate::stop_recording`] puts on the wire to say which window it
+/// means. `None` for a source whose window this process has neither opened nor
+/// heard announced — the daemon then falls back to matching the stop by its
+/// publish time, as it did before stops named anything.
+pub(crate) fn window_started_at_ns(robot_id: &str, robot_instance: i64) -> Option<i64> {
+    with_registry(|sources| {
+        sources
+            .get(&(robot_id.to_string(), robot_instance))
+            .and_then(|state| state.window_started_at_ns)
+    })
 }
 
 /// Record that this process closed the window it opened.
@@ -314,8 +342,8 @@ fn drain_announcements(subscriber: &Subscriber<ipc::Service, [u8], ()>) -> Vec<G
     let deadline = Instant::now() + DRAIN_POLL;
     loop {
         match next_announcement(subscriber) {
-            Some((source, live)) => {
-                if let Some(transition) = apply_announcement(source, live) {
+            Some((source, live, started_at_ns)) => {
+                if let Some(transition) = apply_announcement(source, live, started_at_ns) {
                     transitions.push(transition);
                 }
                 // Keep draining without waiting: a burst is one wake-up.
@@ -332,7 +360,11 @@ fn drain_announcements(subscriber: &Subscriber<ipc::Service, [u8], ()>) -> Vec<G
 }
 
 /// Record one announcement, returning the transition if the gate moved.
-fn apply_announcement(source: Source, live: bool) -> Option<GateTransition> {
+fn apply_announcement(
+    source: Source,
+    live: bool,
+    started_at_ns: Option<i64>,
+) -> Option<GateTransition> {
     with_registry(|sources| {
         let state = sources
             .entry(source.clone())
@@ -346,8 +378,16 @@ fn apply_announcement(source: Source, live: bool) -> Option<GateTransition> {
             // Refresh the lease even when already open — that is the whole point
             // of a re-announcement.
             state.confirmed_at = Some(Instant::now());
+            // Which window, so a stop from this process can name it. Taken from
+            // every live announcement, not just the opening one, so a producer
+            // that attached mid-recording learns it too.
+            if started_at_ns.is_some() {
+                state.window_started_at_ns = started_at_ns;
+            }
         } else {
             state.confirmed_at = None;
+            // The boundary is deliberately kept, so a stop published just after
+            // the close still names the window it means.
         }
         if state.open == live {
             return None;
@@ -406,13 +446,16 @@ pub(crate) fn expire_stale_leases() -> Vec<GateTransition> {
 ///
 /// A decode failure is dropped rather than retried: the next re-announcement
 /// restates the same truth.
-fn next_announcement(subscriber: &Subscriber<ipc::Service, [u8], ()>) -> Option<(Source, bool)> {
+fn next_announcement(
+    subscriber: &Subscriber<ipc::Service, [u8], ()>,
+) -> Option<(Source, bool, Option<i64>)> {
     match subscriber.receive() {
         Ok(Some(sample)) => WindowStateAnnouncement::decode(sample.payload())
             .map(|announcement| {
                 (
                     (announcement.robot_id, announcement.robot_instance),
                     announcement.live,
+                    announcement.started_at_ns,
                 )
             })
             .ok(),
@@ -481,12 +524,12 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
 
-        note_window_opened_locally("owner-robot", 0);
+        note_window_opened_locally("owner-robot", 0, 100);
         assert!(admits_data("owner-robot", 0));
 
         // The daemon's view of our own window can only be older than ours, so a
         // stale "closed" must not shut a window this process is holding open.
-        assert!(apply_announcement(source("owner-robot"), false).is_none());
+        assert!(apply_announcement(source("owner-robot"), false, None).is_none());
         assert!(admits_data("owner-robot", 0));
 
         // And an owned window never expires: we know first-hand that it lives.
@@ -499,7 +542,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
 
-        note_window_opened_locally("stopping-robot", 0);
+        note_window_opened_locally("stopping-robot", 0, 100);
         note_window_closed_locally("stopping-robot", 0);
 
         let state = with_registry(|sources| sources[&source("stopping-robot")]);
@@ -509,6 +552,47 @@ mod tests {
             "another process may still hold this source open"
         );
         assert!(state.confirmed_at.is_none());
+    }
+
+    #[test]
+    fn an_opener_can_name_its_window_without_being_told() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+
+        assert_eq!(window_started_at_ns("unopened-robot", 0), None);
+
+        // The opener knows the boundary first-hand, from the instant it opened
+        // the window — a stop right after the start still names it.
+        note_window_opened_locally("owner-robot", 0, 100);
+        assert_eq!(window_started_at_ns("owner-robot", 0), Some(100));
+
+        // And keeps it across the close: a stop published just after the window
+        // shut still means that window. Losing it here is what would let the
+        // daemon read the stop as one for the next recording.
+        note_window_closed_locally("owner-robot", 0);
+        assert_eq!(window_started_at_ns("owner-robot", 0), Some(100));
+    }
+
+    #[test]
+    fn a_non_opener_learns_the_boundary_from_the_announcement() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_test();
+
+        // Opened elsewhere: the announcement is the only way to know which
+        // window this process is contributing to.
+        apply_announcement(source("elsewhere-robot"), true, Some(500));
+        assert!(admits_data("elsewhere-robot", 0));
+        assert_eq!(window_started_at_ns("elsewhere-robot", 0), Some(500));
+
+        // A close leaves it in place, for the same reason as the opener's.
+        apply_announcement(source("elsewhere-robot"), false, None);
+        assert!(!admits_data("elsewhere-robot", 0));
+        assert_eq!(window_started_at_ns("elsewhere-robot", 0), Some(500));
+
+        // The next recording replaces it, so a stop names the window that is
+        // actually live rather than a stale one.
+        apply_announcement(source("elsewhere-robot"), true, Some(900));
+        assert_eq!(window_started_at_ns("elsewhere-robot", 0), Some(900));
     }
 
     #[test]
@@ -531,7 +615,7 @@ mod tests {
         // would have nothing to ask. This is the hot path's contract — no IPC
         // inside any `log_*`, ever.
         assert_eq!(
-            apply_announcement(source("cached-robot"), true),
+            apply_announcement(source("cached-robot"), true, Some(100)),
             Some(GateTransition::Opened {
                 source: source("cached-robot")
             })
@@ -544,14 +628,14 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
 
-        assert!(apply_announcement(source("held-robot"), true).is_some());
+        assert!(apply_announcement(source("held-robot"), true, Some(100)).is_some());
         let first = with_registry(|sources| sources[&source("held-robot")].confirmed_at);
 
         // Restating the same state must not read as a change — the daemon
         // restates constantly — but it must push the lease out, or a healthy
         // window would expire under us.
         assert!(
-            apply_announcement(source("held-robot"), true).is_none(),
+            apply_announcement(source("held-robot"), true, Some(100)).is_none(),
             "a re-announcement of a known state is a no-op"
         );
         let renewed = with_registry(|sources| sources[&source("held-robot")].confirmed_at);
@@ -574,6 +658,7 @@ mod tests {
                     open: true,
                     owned: false,
                     confirmed_at: Some(Instant::now() - LIVE_LEASE - Duration::from_millis(1)),
+                    window_started_at_ns: Some(100),
                 },
             );
         });
@@ -592,7 +677,7 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
 
-        apply_announcement(source("healthy-robot"), true);
+        apply_announcement(source("healthy-robot"), true, Some(100));
         assert!(
             expire_stale_leases().is_empty(),
             "a window confirmed just now must not be shut"
@@ -605,16 +690,16 @@ mod tests {
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_for_test();
 
-        apply_announcement(source("cycling-robot"), true);
+        apply_announcement(source("cycling-robot"), true, Some(100));
         assert_eq!(
-            apply_announcement(source("cycling-robot"), false),
+            apply_announcement(source("cycling-robot"), false, None),
             Some(GateTransition::Closed {
                 source: source("cycling-robot")
             })
         );
         assert!(!admits_data("cycling-robot", 0));
         assert!(
-            apply_announcement(source("cycling-robot"), false).is_none(),
+            apply_announcement(source("cycling-robot"), false, None).is_none(),
             "a repeated close is not a second transition"
         );
     }
