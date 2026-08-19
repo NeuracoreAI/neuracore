@@ -540,7 +540,7 @@ class TestSynchronizationParameterPassthrough:
             mock_data_requests, "synchronize-dataset"
         )
         recording_details = self._sync_details_sent_to(
-            mock_data_requests, "synchronize-recording"
+            mock_data_requests, "trigger-synchronize-recording"
         )
 
         assert len(dataset_details) == 1
