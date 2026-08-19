@@ -20,3 +20,5 @@ The data daemon now works with ffmpeg 8 and later. It selects the frame timing o
 Dataset video decoding now works with ffmpeg 8 and later too. It selects the frame timing option the installed ffmpeg accepts, instead of falling back to the slower PyAV decoder.
 
 Synchronizing a recording is now asynchronous: the SDK starts the synchronization, waits for it to finish, and then downloads the episode directly from storage through a short-lived signed URL instead of receiving it inline from the API. Already-synchronized recordings are ready on the first check, so opening them no longer waits on multi-megabyte responses travelling through the API.
+
+The data daemon batches video chunk encodes under backlog, so a machine that falls behind recovers with fewer ffmpeg invocations.
