@@ -12,3 +12,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 <!-- Append your summary here -->
 
 The data daemon now reports the neuracore version it was built from, and the SDK checks it before it uses the daemon. A daemon left over from an earlier install is reported with the steps to fix it instead of being used silently.
+
+The data daemon encodes video chunks faster on slow machines with a lighter preview scaling filter.
