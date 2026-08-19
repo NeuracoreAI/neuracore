@@ -2,7 +2,7 @@ name: Integration PF - Consume Stream (Staging)
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    - cron: "18 0 * * *"
   workflow_dispatch:
     inputs:
       ref:
