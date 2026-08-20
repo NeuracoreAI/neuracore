@@ -6,6 +6,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
+    PACING_BURST_VIDEO,
+    PACING_SATURATE,
     PRODUCER_PER_THREAD,
 )
 
@@ -15,6 +17,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_count=7,
         parallel_contexts=1,
         recording_count=1,
+        producer_pacing=PACING_SATURATE,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -30,6 +33,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         # producer modes.
         depth_count=1,
         depth_mode="float32",
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -42,6 +46,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -64,6 +69,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         # can't rely on sync-iteration order lining up with capture order.
         depth_count=1,
         depth_mode="float16",
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -76,6 +82,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         wait=False,
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -89,6 +96,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -99,6 +107,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         image_width=64,
         video_codec="h264_medium",
+        producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
 )
@@ -131,6 +140,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     # Large number of joints without cameras
@@ -161,6 +171,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_FIXED,
         video_fps=15,
         joint_fps=15,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -175,6 +186,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         random_phase=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -187,6 +199,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         wait=False,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
 )
@@ -229,6 +242,7 @@ NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -244,6 +258,7 @@ NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         wait=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     # Large number of joints without cameras
@@ -282,6 +297,7 @@ NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_FIXED,
         video_fps=15,
         joint_fps=15,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -296,6 +312,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         wait=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -310,6 +327,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         random_phase=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -325,6 +343,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         random_phase=True,
         wait=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -336,6 +355,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=120,
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -348,6 +368,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
         wait=True,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
@@ -361,6 +382,7 @@ NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
+        producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
 )
