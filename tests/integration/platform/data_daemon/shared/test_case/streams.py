@@ -15,12 +15,23 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    DataDaemonTestCase,
     generate_joint_values,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DATA_TYPE_BY_STREAM,
+    DATA_TYPE_CUSTOM_1D,
     JOINT_KINDS,
     PRODUCER_SYNCHRONOUS,
+    STREAM_DEPTH,
+    STREAM_JOINTS,
+    STREAM_RGB,
     DepthMode,
+    camera_names,
+    depth_camera_names,
+    joint_names_for_count,
+    marker_name_for,
+    trace_key_for,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
     encode_depth_frame,
@@ -28,10 +39,6 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
     make_camera_feed,
     preallocate_depth_buffer,
 )
-
-# Semantic trace data type each ``nc.log_joint_*`` call writes to. Derived from
-# JOINT_KINDS so the two cannot drift apart.
-_JOINT_DATA_TYPES = {kind: kind.upper() for kind in JOINT_KINDS}
 
 
 def rgb_frame_code(
@@ -73,12 +80,12 @@ class StreamPlan:
     @property
     def is_rgb(self) -> bool:
         """Whether this stream logs RGB camera frames."""
-        return self.name == "rgb"
+        return self.name == STREAM_RGB
 
     @property
     def is_depth(self) -> bool:
         """Whether this stream logs depth camera frames."""
-        return self.name == "depth"
+        return self.name == STREAM_DEPTH
 
     @property
     def is_video(self) -> bool:
@@ -90,27 +97,30 @@ class StreamPlan:
         return self.is_rgb or self.is_depth
 
     @property
+    def placement_tokens(self) -> frozenset[str]:
+        """Names a producer placement may use to move this stream to a process."""
+        if self.is_video:
+            return frozenset({self.name, *self.channel_names})
+        return frozenset({self.name})
+
+    @property
     def trace_keys(self) -> list[str]:
         """Semantic trace keys one logged frame from this stream touches.
 
         Matches the ``data_type/data_type_name`` keys disk_helpers resolves from
         the DB, plus this stream's own ``CUSTOM_1D`` marker when it has one.
         """
-        from neuracore_types.utils import validate_safe_name
-
-        if self.is_rgb:
-            data_types = ["RGB_IMAGES"]
-        elif self.is_depth:
-            data_types = ["DEPTH_IMAGES"]
+        if self.is_video:
+            data_types = [DATA_TYPE_BY_STREAM[self.name]]
         else:
-            data_types = [_JOINT_DATA_TYPES[kind] for kind in self.joint_kinds]
+            data_types = [DATA_TYPE_BY_STREAM[kind] for kind in self.joint_kinds]
         keys = [
-            f"{data_type}/{validate_safe_name(name)}"
+            trace_key_for(data_type, name)
             for data_type in data_types
             for name in self.channel_names
         ]
         if self.marker_name is not None:
-            keys.append(f"CUSTOM_1D/{validate_safe_name(self.marker_name)}")
+            keys.append(trace_key_for(DATA_TYPE_CUSTOM_1D, self.marker_name))
         return keys
 
 
@@ -129,7 +139,7 @@ def _per_camera_plans(
     return [
         StreamPlan(
             name=kind,
-            marker_name=f"marker_{camera_name}",
+            marker_name=marker_name_for(camera_name),
             fps=video_fps,
             channel_names=(camera_name,),
             camera_indexes=(camera_index,),
@@ -173,19 +183,20 @@ def build_stream_plans(
 ) -> list[StreamPlan]:
     """Decompose a workload into one stream per camera and per joint data type."""
     return [
-        *_per_camera_plans("rgb", camera_name_list, video_fps),
+        *_per_camera_plans(STREAM_RGB, camera_name_list, video_fps),
         *_per_camera_plans(
-            "depth", depth_camera_name_list, video_fps, depth_mode=depth_mode
+            STREAM_DEPTH, depth_camera_name_list, video_fps, depth_mode=depth_mode
         ),
         *(
             StreamPlan(
                 name=kind,
-                marker_name=f"marker_{kind}",
+                marker_name=marker_name_for(kind),
                 fps=joint_fps,
                 channel_names=tuple(joint_names),
                 joint_kinds=(kind,),
             )
             for kind in JOINT_KINDS
+            if joint_names
         ),
     ]
 
@@ -206,15 +217,15 @@ def build_synchronous_stream_plans(
     camera of a kind together; only the joint stream carries a marker.
     """
     joint_plan = StreamPlan(
-        name="joints",
+        name=STREAM_JOINTS,
         marker_name=marker_name,
         fps=joint_fps,
         channel_names=tuple(joint_names),
         joint_kinds=JOINT_KINDS,
     )
-    video_plan = _bundled_camera_plan("rgb", camera_name_list, video_fps)
+    video_plan = _bundled_camera_plan(STREAM_RGB, camera_name_list, video_fps)
     depth_plan = _bundled_camera_plan(
-        "depth", depth_camera_name_list, video_fps, depth_mode=depth_mode
+        STREAM_DEPTH, depth_camera_name_list, video_fps, depth_mode=depth_mode
     )
     return joint_plan, video_plan, depth_plan
 
@@ -252,6 +263,31 @@ def stream_plans_for_case(
         depth_mode=depth_mode,
         joint_fps=joint_fps,
         video_fps=video_fps,
+    )
+
+
+def case_stream_plans(case: DataDaemonTestCase) -> list[StreamPlan]:
+    """The per-stream decomposition *case*'s producer placement is spread over."""
+    return build_stream_plans(
+        joint_names=joint_names_for_count(case.joint_count),
+        camera_name_list=camera_names(case.video_count),
+        depth_camera_name_list=depth_camera_names(case.depth_count),
+        depth_mode=case.depth_mode,
+        joint_fps=case.joint_fps,
+        video_fps=case.video_fps,
+    )
+
+
+def late_starting_trace_keys(case: DataDaemonTestCase) -> frozenset[str]:
+    """Trace keys *case* logs from a process that does not own the recording."""
+    moved = {name for group in case.producer_process_streams for name in group}
+    if not moved:
+        return frozenset()
+    return frozenset(
+        key
+        for plan in case_stream_plans(case)
+        if plan.placement_tokens & moved
+        for key in plan.trace_keys
     )
 
 

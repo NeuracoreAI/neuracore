@@ -82,6 +82,7 @@ class ContextCaseSpec:
     random_phase: bool
     video_detail: str
     producer_pacing: str
+    producer_process_streams: tuple[tuple[str, ...], ...]
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -113,12 +114,12 @@ class ContextCaseSpec:
             * STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S
         )
         video_budget = 0.0
-        camera_count = self.video_count + self.depth_count
-        if camera_count and self.image_width and self.image_height:
+        image_stream_count = self.video_count + self.depth_count
+        if image_stream_count and self.image_width and self.image_height:
             video_budget = (
                 self.duration_sec
                 * self.video_fps
-                * camera_count
+                * image_stream_count
                 * self.image_width
                 * self.image_height
                 * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
@@ -257,6 +258,7 @@ def build_context_specs(
                     random_phase=case.random_phase,
                     video_detail=case.video_detail,
                     producer_pacing=case.producer_pacing,
+                    producer_process_streams=case.producer_process_streams,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),
