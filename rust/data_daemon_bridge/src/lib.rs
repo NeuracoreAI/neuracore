@@ -60,7 +60,7 @@ use crate::query::{
     daemon_version as daemon_version_impl, resolve_recording_id,
     wait_until_ready as wait_until_ready_impl,
 };
-use crate::writer::{writer_queue, FrameJob, WriterMsg};
+use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
 /// Announce that a recording has started for a source. Fire-and-forget: the
 /// daemon opens a window and owns all recording identity.
@@ -248,13 +248,16 @@ fn log_frame(
     // GIL would stall every Python thread in the process. A frame that cannot be
     // admitted before the spool-stall window elapses surfaces as an error rather
     // than being silently dropped, so the caller learns the daemon has stalled.
-    py.detach(move || writer_queue().push(WriterMsg::Frame(job)))
-        .map_err(|_| {
-            PyRuntimeError::new_err(
-                "video logging stalled: the data daemon is not draining the spool \
-                 backlog (frame rejected after 1s of backpressure)",
-            )
-        })?;
+    py.detach(move || {
+        note_video_activity(&job.robot_id, job.robot_instance, job.publish_ns);
+        writer_queue().push(WriterMsg::Frame(job))
+    })
+    .map_err(|_| {
+        PyRuntimeError::new_err(
+            "video logging stalled: the data daemon is not draining the spool \
+             backlog (frame rejected after 1s of backpressure)",
+        )
+    })?;
     Ok(())
 }
 
