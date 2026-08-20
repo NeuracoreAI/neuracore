@@ -44,8 +44,62 @@ if TYPE_CHECKING:
 MAX_DECODING_ATTEMPTS = 3
 _FFMPEG_AVAILABLE: bool | None = None
 
+# `-fps_mode` is accepted from ffmpeg 5.1 onwards and is the only spelling
+# accepted from 8.0, where the legacy `-vsync` name was removed. Resolved
+# once per process and cached, like _FFMPEG_AVAILABLE above.
+_FPS_MODE_ARG = "-fps_mode"
+_VSYNC_ARG = "-vsync"
+_FFMPEG_FRAME_SYNC_ARG: str | None = None
+
 _RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
 _DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
+
+
+def _resolve_frame_sync_arg() -> str:
+    """Return the flag the local ffmpeg accepts for passthrough frame timing.
+
+    Probes with one synthetic frame piped to the null muxer: `-fps_mode` fails
+    with "Unrecognized option" on ffmpeg < 5.1, so any other outcome (success,
+    or a failure unrelated to the flag) is treated as accepted.
+
+    Returns:
+        "-fps_mode" if the local ffmpeg accepts it, otherwise "-vsync".
+    """
+    global _FFMPEG_FRAME_SYNC_ARG
+    if _FFMPEG_FRAME_SYNC_ARG is not None:
+        return _FFMPEG_FRAME_SYNC_ARG
+
+    frame = bytes([128]) * (16 * 16 * 3 // 2)  # one 16x16 yuv420p frame
+    try:
+        probe = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "yuv420p",
+                "-video_size",
+                "16x16",
+                "-i",
+                "-",
+                _FPS_MODE_ARG,
+                "passthrough",
+                "-f",
+                "null",
+                "-",
+            ],
+            input=frame,
+            capture_output=True,
+        )
+        rejected = b"Unrecognized option" in probe.stderr
+    except FileNotFoundError:
+        rejected = True
+
+    _FFMPEG_FRAME_SYNC_ARG = _VSYNC_ARG if rejected else _FPS_MODE_ARG
+    return _FFMPEG_FRAME_SYNC_ARG
 
 
 class SynchronizedRecording:
@@ -232,14 +286,15 @@ class SynchronizedRecording:
 
         if _FFMPEG_AVAILABLE:
             output_pattern = str(video_frame_cache_path / "%d.png")
+            frame_sync_arg = _resolve_frame_sync_arg()
             try:
                 subprocess.run(
                     [
                         "ffmpeg",
                         "-i",
                         str(video_location),
-                        "-vsync",
-                        "0",
+                        frame_sync_arg,
+                        "passthrough",
                         "-pix_fmt",
                         "rgb24",
                         "-q:v",

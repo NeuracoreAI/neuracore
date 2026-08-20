@@ -16,3 +16,5 @@ The data daemon now reports the neuracore version it was built from, and the SDK
 The data daemon encodes video chunks faster on slow machines with a lighter preview scaling filter.
 
 The data daemon now works with ffmpeg 8 and later. It selects the frame timing option that the installed ffmpeg accepts, so new and old ffmpeg builds are both supported.
+
+Dataset video decoding now works with ffmpeg 8 and later too. It selects the frame timing option the installed ffmpeg accepts, instead of falling back to the slower PyAV decoder.
