@@ -26,6 +26,7 @@ class BackgroundCoroutineTracker:
         """
         self.background_tasks: list[asyncio.Task] = []
         self.loop = loop or get_running_loop()
+        self._stopped = False
 
     def _task_done(self, task: asyncio.Task) -> None:
         """Cleanup after task completion.
@@ -57,11 +58,18 @@ class BackgroundCoroutineTracker:
         Args:
             coroutine: the coroutine to be run at another time.
         """
+        if self._stopped:
+            coroutine.close()
+            return
         if self.loop.is_closed():
+            coroutine.close()
             logger.warning("Cannot submit coroutine; event loop is closed.")
             return
 
         def _submit_coroutine(coroutine: Coroutine) -> None:
+            if self._stopped:
+                coroutine.close()
+                return
             task = self.loop.create_task(coroutine)
             self.background_tasks.append(task)
             task.add_done_callback(self._task_done)
@@ -73,6 +81,23 @@ class BackgroundCoroutineTracker:
 
         cancels all running background coroutines
         """
-        for task in self.background_tasks:
-            task.cancel()
-        self.background_tasks.clear()
+        self._stopped = True
+
+        def _cancel_tasks() -> None:
+            for task in self.background_tasks:
+                task.cancel()
+            self.background_tasks.clear()
+
+        if self.loop.is_closed():
+            self.background_tasks.clear()
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        if running_loop is self.loop:
+            _cancel_tasks()
+        else:
+            self.loop.call_soon_threadsafe(_cancel_tasks)

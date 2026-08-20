@@ -11,6 +11,9 @@ from neuracore.core import robot as core_robot
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
+from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
+    StreamManagerOrchestrator,
+)
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -60,6 +63,87 @@ def test_logout(temp_config_dir, monkeypatch):
         config = json.load(f)
         assert config["api_key"] is None
         assert config["current_org_id"] is None
+
+
+def test_logout_shuts_down_managers_before_clearing_auth(monkeypatch):
+    """Authentication remains valid until all background managers are stopped."""
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        StreamManagerOrchestrator,
+        "shutdown_global",
+        lambda: calls.append("streaming_shutdown"),
+    )
+    monkeypatch.setattr(
+        api_core,
+        "shutdown_recording_state_manager",
+        lambda: calls.append("recording_shutdown"),
+    )
+    monkeypatch.setattr(
+        api_core.get_auth(),
+        "logout",
+        lambda: calls.append("auth_logout"),
+    )
+
+    nc.logout()
+
+    assert calls == [
+        "streaming_shutdown",
+        "recording_shutdown",
+        "auth_logout",
+    ]
+
+
+def test_logout_runs_remaining_cleanup_when_streaming_shutdown_fails(monkeypatch):
+    """A P2P cleanup failure must not skip recording cleanup or auth logout."""
+    calls: list[str] = []
+
+    def fail_streaming_shutdown() -> None:
+        calls.append("streaming_shutdown")
+        raise RuntimeError("streaming cleanup failed")
+
+    monkeypatch.setattr(
+        StreamManagerOrchestrator,
+        "shutdown_global",
+        fail_streaming_shutdown,
+    )
+    monkeypatch.setattr(
+        api_core,
+        "shutdown_recording_state_manager",
+        lambda: calls.append("recording_shutdown"),
+    )
+    monkeypatch.setattr(
+        api_core.get_auth(),
+        "logout",
+        lambda: calls.append("auth_logout"),
+    )
+
+    with pytest.raises(RuntimeError, match="streaming cleanup failed"):
+        nc.logout()
+
+    assert calls == [
+        "streaming_shutdown",
+        "recording_shutdown",
+        "auth_logout",
+    ]
+
+
+def test_logout_clears_auth_when_recording_shutdown_fails(monkeypatch):
+    """A recording cleanup failure must still clear authentication."""
+    auth_logout = Mock()
+
+    monkeypatch.setattr(StreamManagerOrchestrator, "shutdown_global", Mock())
+    monkeypatch.setattr(
+        api_core,
+        "shutdown_recording_state_manager",
+        Mock(side_effect=RuntimeError("recording cleanup failed")),
+    )
+    monkeypatch.setattr(api_core.get_auth(), "logout", auth_logout)
+
+    with pytest.raises(RuntimeError, match="recording cleanup failed"):
+        nc.logout()
+
+    auth_logout.assert_called_once_with()
 
 
 def test_auth_instance_singleton():

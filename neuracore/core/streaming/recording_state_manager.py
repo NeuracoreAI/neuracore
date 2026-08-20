@@ -12,9 +12,9 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import NamedTuple
 
-from aiohttp import ClientSession
 from neuracore_types import (
     BaseRecodingUpdatePayload,
     RecordingNotification,
@@ -37,6 +37,8 @@ from neuracore.data_daemon import bridge as _recording_context
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
+
+_SHUTDOWN_TIMEOUT_S = 5.0
 
 # The producer stamps a recording's start as `int(start_time * 1e9)`, so the
 # value echoed back in a notification can sit a nanosecond below the one held
@@ -101,7 +103,6 @@ class RecordingStateManager(BaseSSEConsumer):
         loop: asyncio.AbstractEventLoop | None = None,
         enabled_manager: EnabledManager | None = None,
         background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
     ):
         """Initialize the recording state manager.
@@ -116,8 +117,6 @@ class RecordingStateManager(BaseSSEConsumer):
             background_coroutine_tracker: The storage for background tasks
                 scheduled on receiving events. Defaults to a new tracker if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
         """
@@ -125,7 +124,6 @@ class RecordingStateManager(BaseSSEConsumer):
             loop=loop,
             enabled_manager=enabled_manager,
             background_coroutine_tracker=background_coroutine_tracker,
-            client_session=client_session,
         )
         self.org_id = org_id or get_current_org()
         self.auth = auth if auth is not None else get_auth()
@@ -140,13 +138,59 @@ class RecordingStateManager(BaseSSEConsumer):
         # Not taken by `get_current_recording_id` / `is_recording`: those sit on
         # the `log_*` hot path and a single dict lookup is already atomic.
         self._state_lock = threading.RLock()
+        self._stopped = False
         self.recording_robot_instances: dict[
             RobotInstanceIdentifier, TrackedRecording
         ] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
+        self._latest_stopped_times: dict[RobotInstanceIdentifier, float] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
         self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
+
+    def _close_recording_resources(self) -> list[asyncio.TimerHandle]:
+        """Stop SSE work and clear all state that can outlive authentication."""
+        with self._state_lock:
+            self._stopped = True
+            timer_handles = [
+                handle
+                for handles in self._recording_timers.values()
+                for handle in handles
+            ]
+            self._recording_timers.clear()
+            self.recording_robot_instances.clear()
+            self._expired_recording_ids.clear()
+            self._latest_stopped_times.clear()
+            self.active_dataset_ids.clear()
+            self._drain_callbacks.clear()
+            self._connected_robot_id = None
+
+        super().close()
+        return timer_handles
+
+    async def _finish_shutdown(self, timer_handles: list[asyncio.TimerHandle]) -> None:
+        """Cancel expiry callbacks and close this manager's HTTP session."""
+        for handle in timer_handles:
+            handle.cancel()
+
+        # Give SSE/background-task cancellation callbacks one loop turn to drain.
+        await asyncio.sleep(0)
+        await self.client_session.close()
+
+    def shutdown(self) -> None:
+        """Synchronously tear down recording state before auth is cleared."""
+        timer_handles = self._close_recording_resources()
+
+        future = asyncio.run_coroutine_threadsafe(
+            self._finish_shutdown(timer_handles), self.loop
+        )
+        try:
+            future.result(timeout=_SHUTDOWN_TIMEOUT_S)
+        except FutureTimeoutError:
+            future.cancel()
+            logger.warning(
+                "Timed out waiting for recording state manager to shut down cleanly"
+            )
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
@@ -216,6 +260,8 @@ class RecordingStateManager(BaseSSEConsumer):
                 notifications can be ordered against it.
         """
         with self._state_lock:
+            if self._stopped:
+                return
             self._track_recording_started(
                 robot_id=robot_id,
                 instance=instance,
@@ -275,7 +321,7 @@ class RecordingStateManager(BaseSSEConsumer):
         recording_id: str,
     ) -> None:
         """Schedule local warning and expiry timers for a recording."""
-        # clear any previous timers for this recording ID just in case
+        # Clear any previous timers for this recording ID just in case.
         self._cancel_recording_timers(recording_id)
 
         def warn_if_still_active() -> None:
@@ -300,15 +346,21 @@ class RecordingStateManager(BaseSSEConsumer):
         loop = get_running_loop()
 
         def _schedule() -> None:
-            warn_handle = loop.call_later(
-                self.RECORDING_EXPIRY_WARNING,
-                warn_if_still_active,
-            )
-            expiry_handle = loop.call_later(
-                self.MAX_RECORDING_DURATION_S,
-                expire_if_still_active,
-            )
-            self._recording_timers[recording_id] = [warn_handle, expiry_handle]
+            with self._state_lock:
+                if self._stopped:
+                    return
+                warn_handle = loop.call_later(
+                    self.RECORDING_EXPIRY_WARNING,
+                    warn_if_still_active,
+                )
+                expiry_handle = loop.call_later(
+                    self.MAX_RECORDING_DURATION_S,
+                    expire_if_still_active,
+                )
+                self._recording_timers[recording_id] = [
+                    warn_handle,
+                    expiry_handle,
+                ]
 
         loop.call_soon_threadsafe(_schedule)
 
@@ -317,14 +369,19 @@ class RecordingStateManager(BaseSSEConsumer):
         loop = get_running_loop()
 
         def _cancel() -> None:
-            handles = self._recording_timers.pop(recording_id, [])
+            with self._state_lock:
+                handles = self._recording_timers.pop(recording_id, [])
             for handle in handles:
                 handle.cancel()
 
         loop.call_soon_threadsafe(_cancel)
 
     def recording_stopped(
-        self, robot_id: str, instance: int, recording_id: str | None
+        self,
+        robot_id: str,
+        instance: int,
+        recording_id: str | None,
+        stop_time: float | None = None,
     ) -> None:
         """Handle recording stop for a robot instance.
 
@@ -335,6 +392,8 @@ class RecordingStateManager(BaseSSEConsumer):
             robot_id: Robot ID
             instance: Instance number of the robot
             recording_id: Unique identifier for the recording session
+            stop_time: Recording window upper bound, on the same clock as its
+                start time. Defaults to wall-clock now.
         """
         instance_key = RobotInstanceIdentifier(
             robot_id=robot_id, robot_instance=instance
@@ -344,6 +403,11 @@ class RecordingStateManager(BaseSSEConsumer):
             if current is None or current.recording_id != recording_id:
                 return
             self.recording_robot_instances.pop(instance_key, None)
+            stopped_at = stop_time if stop_time is not None else time.time()
+            previous_stop = self._latest_stopped_times.get(instance_key)
+            if previous_stop is None or stopped_at > previous_stop:
+                self._latest_stopped_times[instance_key] = stopped_at
+
         # Data-bridge stop is driven by the recording context or expiry timer —
         # not here — so the daemon gets exactly one StopRecording with the
         # correct data-clock boundary.
@@ -359,17 +423,28 @@ class RecordingStateManager(BaseSSEConsumer):
         appropriate start/stop methods if the state actually changed.
 
         Runs under :attr:`_state_lock` so each decision and the state change it
-        implies are atomic against a concurrent local start or stop. Blocking
-        work is done before the lock is taken.
+        implies are atomic against a concurrent local start or stop. Daemon
+        startup happens after an accepted transition releases the lock.
 
         Args:
             is_recording: Whether the robot should be recording
             details: Recording details including robot ID, instance, and recording ID
         """
-        if is_recording and details.robot_id == self._connected_robot_id:
-            self._ensure_daemon_for_recording()
         with self._state_lock:
+            if self._stopped:
+                return
             self._apply_recording_notification(is_recording, details)
+            if not is_recording:
+                return
+            instance_key = RobotInstanceIdentifier(
+                robot_id=details.robot_id, robot_instance=details.instance
+            )
+            current = self.recording_robot_instances.get(instance_key)
+            if current is None or current.recording_id != details.recording_id:
+                return
+
+        # Stale STARTs have been rejected and accepted state is now visible.
+        self._ensure_daemon_for_recording()
 
     def _apply_recording_notification(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
@@ -379,10 +454,10 @@ class RecordingStateManager(BaseSSEConsumer):
         instance = details.instance
         recording_id = details.recording_id
 
-        previous = self.recording_robot_instances.get(
-            RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance),
-            None,
+        instance_key = RobotInstanceIdentifier(
+            robot_id=robot_id, robot_instance=instance
         )
+        previous = self.recording_robot_instances.get(instance_key, None)
         previous_recording_id = previous.recording_id if previous is not None else None
         was_recording = previous_recording_id is not None
 
@@ -397,6 +472,17 @@ class RecordingStateManager(BaseSSEConsumer):
             # Only react to the robot this client connected to, not other
             # robots in the org that may be recording concurrently.
             if robot_id != self._connected_robot_id:
+                return
+
+            latest_stopped_at = self._latest_stopped_times.get(instance_key)
+            if latest_stopped_at is not None and details.start_time < latest_stopped_at:
+                logger.debug(
+                    "ignoring recording start notification older than the latest "
+                    "local stop: recording_id=%s start_time=%s stopped_at=%s",
+                    recording_id,
+                    details.start_time,
+                    latest_stopped_at,
+                )
                 return
 
             # A START describing a recording that began before the tracked one
@@ -423,16 +509,12 @@ class RecordingStateManager(BaseSSEConsumer):
                 len(details.dataset_ids) == 1
             ), "Recording can only be started in one dataset"
             dataset_id = details.dataset_ids[0]
-            instance_key = RobotInstanceIdentifier(
-                robot_id=robot_id, robot_instance=instance
-            )
             self.active_dataset_ids[instance_key] = dataset_id
             logger.info(
                 "active_dataset_received_from_sse: dataset_id=%s recording_id=%s",
                 dataset_id,
                 recording_id,
             )
-            # Daemon already ensured above; this is the state transition only.
             self._track_recording_started(
                 robot_id=robot_id,
                 instance=instance,
@@ -440,9 +522,6 @@ class RecordingStateManager(BaseSSEConsumer):
                 start_time=details.start_time,
             )
         else:
-            instance_key = RobotInstanceIdentifier(
-                robot_id=robot_id, robot_instance=instance
-            )
             if previous_recording_id != recording_id:
                 return
             callback = self._drain_callbacks.get(instance_key)
@@ -519,6 +598,18 @@ class RecordingStateManager(BaseSSEConsumer):
 _recording_manager: Future[RecordingStateManager] | None = None
 
 
+def shutdown_recording_state_manager() -> None:
+    """Shut down and forget the global manager so later login starts fresh."""
+    global _recording_manager
+
+    manager_future = _recording_manager
+    _recording_manager = None
+    if manager_future is None:
+        return
+
+    manager_future.result().shutdown()
+
+
 async def create_recording_state_manager() -> RecordingStateManager:
     """Create a new recording state manager instance.
 
@@ -527,6 +618,17 @@ async def create_recording_state_manager() -> RecordingStateManager:
             manager with persistent connection
     """
     return RecordingStateManager(loop=get_running_loop())
+
+
+def get_initialized_recording_state_manager() -> RecordingStateManager | None:
+    """Return the existing global manager without creating one.
+
+    Cleanup paths use this after logout so destruction of a late ``Robot``
+    cannot restart authenticated SSE resources.
+    """
+    if _recording_manager is None:
+        return None
+    return _recording_manager.result()
 
 
 def get_recording_state_manager() -> "RecordingStateManager":

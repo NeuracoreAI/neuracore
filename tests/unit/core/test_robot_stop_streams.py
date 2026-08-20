@@ -59,6 +59,24 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     fake_daemon.stop_recording.assert_called_once_with(timestamp=None)
 
 
+def test_close_does_not_create_recording_manager_after_logout() -> None:
+    """Late object cleanup must not recreate authenticated streaming state."""
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    with (
+        patch(
+            "neuracore.core.robot.get_initialized_recording_state_manager",
+            return_value=None,
+        ),
+        patch("neuracore.core.robot.get_recording_state_manager") as create_manager,
+    ):
+        robot.close()
+
+    create_manager.assert_not_called()
+    robot.id = None
+
+
 def test_stop_all_streams_logs_stop_failure_and_continues() -> None:
     """One stream failing to stop must not prevent the others from stopping."""
     robot = Robot("robot", instance=0, org_id="org-1")
