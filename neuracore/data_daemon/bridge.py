@@ -102,9 +102,10 @@ class RecordingContext:
         source ``(robot_id, robot_instance)``. No recording id is on the wire —
         the daemon allocates and owns recording identity.
 
-        ``timestamp`` optionally pins the recording window's lower bound (Unix
-        seconds), matching the ``log_*`` methods; when ``None`` the producer
-        stamps the publish clock now.
+        ``timestamp`` is the recording's *capture* start time (Unix seconds),
+        stored and reported as such, and returned as the marker that resolves the
+        cloud id (:meth:`get_recording_id`). It does **not** bound the recording
+        window, which the daemon takes from a publish stamp inside this call.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
@@ -240,9 +241,12 @@ class RecordingContext:
         """Publish one ``StopRecording`` tagged with the source.
 
         The daemon uses the publish-clock stop boundary to close the recording
-        window. ``timestamp`` optionally pins that boundary (Unix seconds),
-        matching the ``log_*`` methods; when ``None`` the producer stamps
-        wall-clock now.
+        window. ``timestamp`` is the recording's *capture* stop time and is
+        separate from that boundary, never used for window membership.
+
+        This publishes the stop only; :meth:`flush_source` seals the writer's
+        tail chunks and must be called straight after, so the caller can close
+        its own logging gate in between.
         """
         if not self._robot_id:
             return
@@ -250,6 +254,16 @@ class RecordingContext:
         _load_native().stop_recording(
             self._robot_id, self._robot_instance, timestamp_ns
         )
+
+    def flush_source(self) -> None:
+        """Run the writer's deferred tail-chunk barrier for the bound source.
+
+        Mandatory after :meth:`stop_recording` — tail chunks are sealed nowhere
+        else. No-op before a source is bound.
+        """
+        if not self._robot_id:
+            return
+        _load_native().flush_source(self._robot_id, self._robot_instance)
 
     def get_recording_id(
         self,

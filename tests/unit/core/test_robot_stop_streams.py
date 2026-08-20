@@ -57,6 +57,7 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
 
     assert active.stop_calls == 1
     fake_daemon.stop_recording.assert_called_once_with(timestamp=None)
+    fake_daemon.flush_source.assert_called_once_with()
 
 
 def test_stop_all_streams_logs_stop_failure_and_continues() -> None:
