@@ -27,9 +27,14 @@
 //! publishing `CancelRecording`, so no tail chunk is ever announced after the
 //! daemon tears the window down. Chunk-before-stop ordering is not a same-port
 //! guarantee here but is safe anyway: the daemon holds every `VideoChunkReady`
-//! back (`NCD_HOLDBACK_MS`, default 500 ms) and retains a just-closed window,
-//! so a tail chunk announced just after the stop still routes into the
-//! (closing) window by its in-window open timestamp.
+//! back (`NCD_HOLDBACK_MS`, default 500 ms), so a tail chunk announced just
+//! after the stop still routes into the (closing) window by its in-window open
+//! timestamp — but how long the daemon must then keep that closing window
+//! around is not something it can work out: the barrier lasts as long as this
+//! writer's backlog, which under burst logging runs well past any fixed
+//! retention. So it says so outright — after the last tail chunk it announces
+//! an [`Envelope::SourceFlushed`] marker on the same publisher port, and the
+//! daemon retires the window on that rather than on a timer.
 //!
 //! ## Fork safety
 //!
@@ -177,6 +182,12 @@ struct VideoChunkState {
     /// path. Re-stamped on every chunk open, so each chunk is named uniquely
     /// and no two recordings collide on a filename. `0` between chunks.
     chunk_publish_ns: i64,
+    /// Previous chunk's `chunk_publish_ns`, so the next open can be forced
+    /// strictly above it. `0` before the first chunk.
+    last_chunk_publish_ns: i64,
+    /// A recording-window boundary this stream has yet to cross: the first
+    /// frame to reach it seals the open chunk, so none spans the boundary.
+    pending_split_ns: Option<i64>,
     /// OS thread id (`gettid`) of the thread that opened the in-progress chunk.
     chunk_thread_id: i64,
     /// Frames already written into the in-progress chunk.
@@ -212,30 +223,39 @@ type VideoChunkSlot = Arc<Mutex<VideoChunkState>>;
 struct VideoChunkRegistry {
     owner_pid: u32,
     streams: HashMap<String, VideoChunkSlot>,
+    /// Latest recording-window boundary seen per source prefix.
+    boundaries: HashMap<String, i64>,
 }
 
 static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
     Mutex::new(VideoChunkRegistry {
         owner_pid: 0,
         streams: HashMap::new(),
+        boundaries: HashMap::new(),
     })
 });
 
-/// Lock the video chunk registry and run `operation` against its streams map.
+/// Lock the video chunk registry and run `operation` against it.
 ///
 /// Heals on fork: when the stored `owner_pid` no longer matches the current
-/// process the map was inherited from a pre-fork parent, so it is cleared
+/// process the state was inherited from a pre-fork parent, so it is cleared
 /// before use.
-fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSlot>) -> R) -> R {
+fn with_video_registry<R>(operation: impl FnOnce(&mut VideoChunkRegistry) -> R) -> R {
     let mut registry = VIDEO_CHUNKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let pid = std::process::id();
     if registry.owner_pid != pid {
         registry.streams.clear();
+        registry.boundaries.clear();
         registry.owner_pid = pid;
     }
-    operation(&mut registry.streams)
+    operation(&mut registry)
+}
+
+/// Lock the video chunk registry and run `operation` against its streams map.
+fn with_video_chunks<R>(operation: impl FnOnce(&mut HashMap<String, VideoChunkSlot>) -> R) -> R {
+    with_video_registry(|registry| operation(&mut registry.streams))
 }
 
 /// One frame handed to the background writer. Owns its raw sample bytes
@@ -252,6 +272,8 @@ pub(crate) struct FrameJob {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) dtype: FrameDtype,
+    /// Stamped on the *calling* thread when `log_frame` accepted the frame.
+    pub(crate) publish_ns: i64,
     pub(crate) timestamp_ns: i64,
     pub(crate) timestamp_s: f64,
     pub(crate) data: Vec<u8>,
@@ -277,6 +299,12 @@ pub(crate) enum WriterMsg {
         robot_id: String,
         robot_instance: i64,
         ack: Sender<()>,
+    },
+    /// A window opened at `publish_ns`; no chunk may straddle it.
+    Boundary {
+        robot_id: String,
+        robot_instance: i64,
+        publish_ns: i64,
     },
 }
 
@@ -800,6 +828,7 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
         pending.job.height,
         pending.job.dtype,
         &png,
+        pending.job.publish_ns,
         pending.job.timestamp_ns,
         pending.job.timestamp_s,
     ) {
@@ -878,6 +907,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 if let Err(error) = flush_source_chunks(&robot_id, robot_instance) {
                     tracing::warn!(%error, "failed to flush tail video chunks on stop");
                 }
+                announce_source_flushed(&robot_id, robot_instance);
                 let _ = ack.send(());
             }
             Some(WriterMsg::DropSource {
@@ -897,6 +927,13 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 });
                 let _ = ack.send(());
             }
+            Some(WriterMsg::Boundary {
+                robot_id,
+                robot_instance,
+                publish_ns,
+            }) => {
+                arm_boundary_split(&robot_id, robot_instance, publish_ns);
+            }
             // pop_timeout elapsed with no message: fall through to the rescan.
             None => {}
         }
@@ -912,31 +949,10 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
     }
 }
 
-/// A chunk-open timestamp that is strictly increasing within this process.
-///
-/// The spool filename is `chunk_{publish_ns}_{thread_id}.nut`. All video chunks
-/// are now opened by the single background writer thread, so they share one
-/// `thread_id` and uniqueness rests entirely on `publish_ns`. `now_ns()` reads
-/// `CLOCK_REALTIME`, whose granularity can repeat across two opens issued back
-/// to back, which would collide two cameras' chunk files. Bumping past the last
-/// value returned keeps every chunk's name distinct while staying within the
-/// recording window (the window spans seconds; a few ns of skew is irrelevant
-/// to membership). Only the writer thread calls this, but the atomic keeps it
-/// correct regardless.
-fn next_chunk_open_ns() -> i64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static LAST: AtomicI64 = AtomicI64::new(0);
-    let mut candidate = now_ns();
-    loop {
-        let last = LAST.load(Ordering::Relaxed);
-        if candidate <= last {
-            candidate = last + 1;
-        }
-        match LAST.compare_exchange_weak(last, candidate, Ordering::Relaxed, Ordering::Relaxed) {
-            Ok(_) => return candidate,
-            Err(_) => candidate = now_ns(),
-        }
-    }
+/// The chunk-open timestamp for a chunk whose first frame published at
+/// `frame_publish_ns`, kept strictly increasing within its stream.
+fn next_chunk_open_ns(last_chunk_publish_ns: i64, frame_publish_ns: i64) -> i64 {
+    frame_publish_ns.max(last_chunk_publish_ns.saturating_add(1))
 }
 
 /// OS thread id of the calling thread. Used to disambiguate a video chunk's
@@ -996,6 +1012,7 @@ fn record_video_frame(
     height: u32,
     dtype: FrameDtype,
     png_payload: &[u8],
+    publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Result<(), ProducerError> {
@@ -1007,11 +1024,16 @@ fn record_video_frame(
     // at high frame rates. The recordings root is pre-validated on the GIL in
     // `log_frame`, so `spool_dir` only returns `None` on a genuine
     // misconfiguration — drop the frame (never panic on the writer thread).
-    let slot: VideoChunkSlot = match with_video_chunks(|streams| {
-        if let Some(slot) = streams.get(&key) {
+    let slot: VideoChunkSlot = match with_video_registry(|registry| {
+        if let Some(slot) = registry.streams.get(&key) {
             return Some(slot.clone());
         }
         let spool = spool_dir(robot_id, robot_instance, data_type, sensor_name)?;
+        // This stream is new, but its first frames may predate the window.
+        let pending_split_ns = registry
+            .boundaries
+            .get(&source_prefix(robot_id, robot_instance))
+            .copied();
         let slot = Arc::new(Mutex::new(VideoChunkState {
             width,
             height,
@@ -1019,6 +1041,8 @@ fn record_video_frame(
             spool_dir: spool,
             nut_writer: None,
             chunk_publish_ns: 0,
+            last_chunk_publish_ns: 0,
+            pending_split_ns,
             chunk_thread_id: 0,
             frame_count: 0,
             pts_origin_us: None,
@@ -1028,7 +1052,7 @@ fn record_video_frame(
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
         }));
-        streams.insert(key.clone(), slot.clone());
+        registry.streams.insert(key.clone(), slot.clone());
         Some(slot)
     }) {
         Some(slot) => slot,
@@ -1057,6 +1081,7 @@ fn record_video_frame(
             height,
             dtype,
             png_payload,
+            publish_ns,
             timestamp_ns,
             timestamp_s,
         )
@@ -1091,10 +1116,30 @@ fn append_frame_locked(
     height: u32,
     dtype: FrameDtype,
     png_payload: &[u8],
+    publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
 ) -> Vec<Envelope> {
     let mut announcements: Vec<Envelope> = Vec::new();
+
+    // A recording window opened partway through the frames queued ahead of this
+    // one. Seal here, so the chunk carrying the pre-window frames is announced
+    // on its own and this frame opens a fresh chunk stamped inside the window.
+    // Without the split one chunk spans the boundary, and since the daemon
+    // routes a chunk whole by its open stamp, the pre-window stamp orphans the
+    // entire chunk — silently discarding every in-window frame in it.
+    if let Some(split_ns) = state.pending_split_ns {
+        if publish_ns >= split_ns {
+            state.pending_split_ns = None;
+            if state.nut_writer.is_some() {
+                if let Some(envelope) =
+                    flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
+                {
+                    announcements.push(envelope);
+                }
+            }
+        }
+    }
 
     // A mid-stream resolution *or dtype* change can't share a chunk with the
     // prior state: the NUT header advertises the opening frame's size, and a
@@ -1187,11 +1232,14 @@ fn append_frame_locked(
     }
 
     if state.nut_writer.is_none() {
-        // Stamp the chunk's identity at open: its `publish_timestamp_ns`
-        // (this instant — inside the active recording window) plus the
-        // opening thread's id. These name the spool file and ride the
+        // The chunk's identity: publish stamp plus opening thread id, which
+        // name the spool file and ride the
         // announcement so the daemon can both route and locate the chunk.
-        state.chunk_publish_ns = next_chunk_open_ns();
+        //
+        // The stamp is the OPENING FRAME's publish time, taken back on the
+        // caller's thread (see `FrameJob::publish_ns`) — not this instant.
+        state.chunk_publish_ns = next_chunk_open_ns(state.last_chunk_publish_ns, publish_ns);
+        state.last_chunk_publish_ns = state.chunk_publish_ns;
         state.chunk_thread_id = current_thread_id();
         let chunk_path = state.spool_dir.join(spool_chunk_filename(
             state.chunk_publish_ns,
@@ -1297,6 +1345,25 @@ fn flush_chunk_locked(
     })
 }
 
+/// Arm a pending window-boundary split on every stream of a source.
+fn arm_boundary_split(robot_id: &str, robot_instance: i64, publish_ns: i64) {
+    let prefix = source_prefix(robot_id, robot_instance);
+    let slots: Vec<VideoChunkSlot> = with_video_registry(|registry| {
+        // Recorded per source, so a not-yet-created stream still picks it up.
+        registry.boundaries.insert(prefix.clone(), publish_ns);
+        registry
+            .streams
+            .iter()
+            .filter(|(key, _)| key.starts_with(&prefix))
+            .map(|(_, slot)| slot.clone())
+            .collect()
+    });
+    for slot in slots {
+        let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending_split_ns = Some(publish_ns);
+    }
+}
+
 /// Flush and remove every open video chunk for a source. Each flushed chunk is
 /// announced so the daemon can route it before the `StopRecording` lands.
 fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), ProducerError> {
@@ -1332,9 +1399,21 @@ fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), Produc
     Ok(())
 }
 
+/// Announce that the source's flush barrier is complete — no further tail
+/// chunks are coming for its just-stopped recording.
+fn announce_source_flushed(robot_id: &str, robot_instance: i64) {
+    let _ = publisher_tx().send(PublishMsg::Announce(Envelope::SourceFlushed {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+        publish_timestamp_ns: now_ns(),
+    }));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_PUBLISH_NS: i64 = 1_700_000_000_000_000_000;
 
     #[test]
     fn flushes_when_byte_threshold_reached() {
@@ -1410,6 +1489,8 @@ mod tests {
             spool_dir,
             nut_writer: None,
             chunk_publish_ns: 0,
+            last_chunk_publish_ns: 0,
+            pending_split_ns: None,
             chunk_thread_id: 0,
             frame_count: 0,
             pts_origin_us: None,
@@ -1419,6 +1500,171 @@ mod tests {
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
         }
+    }
+
+    #[test]
+    fn chunk_is_stamped_from_its_opening_frame_not_the_writer_clock() {
+        // `publish_ns` is stamped on the caller's thread while the recording is
+        // open. Taking the writer's "now" instead would stamp the chunk outside
+        // the window and orphan every frame in it.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        // The writer is far behind, so `now_ns()` is necessarily much larger.
+        let logged_at = now_ns() - 1_000_000_000;
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            logged_at,
+            1_000,
+            0.0,
+        );
+
+        assert_eq!(
+            state.chunk_publish_ns, logged_at,
+            "the chunk carries its opening frame's publish time verbatim"
+        );
+        match flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal") {
+            Envelope::VideoChunkReady {
+                publish_timestamp_ns,
+                ..
+            } => assert_eq!(
+                publish_timestamp_ns, logged_at,
+                "and announces it, so the daemon routes by when the frame was logged"
+            ),
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_window_boundary_splits_the_chunk_it_would_have_spanned() {
+        // Frames logged either side of `start_recording` can sit in the queue
+        // together, and a chunk spanning the boundary is orphaned whole.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+        let boundary = TEST_PUBLISH_NS;
+
+        // A frame logged before the window opened.
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            boundary - 1_000_000,
+            1_000,
+            0.0,
+        );
+        let pre_window_stamp = state.chunk_publish_ns;
+        state.pending_split_ns = Some(boundary);
+
+        // The first frame at/after the boundary must seal that chunk first.
+        let sealed = append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            boundary,
+            2_000,
+            0.001,
+        );
+
+        assert_eq!(
+            sealed.len(),
+            1,
+            "crossing the boundary seals the open chunk"
+        );
+        match &sealed[0] {
+            Envelope::VideoChunkReady {
+                publish_timestamp_ns,
+                frame_count,
+                ..
+            } => {
+                assert_eq!(
+                    *publish_timestamp_ns, pre_window_stamp,
+                    "the sealed chunk keeps its pre-window stamp, so the daemon \
+                     orphans only the frames that really are pre-window"
+                );
+                assert_eq!(*frame_count, 1);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
+        assert_eq!(
+            state.chunk_publish_ns, boundary,
+            "and the replacement chunk opens inside the window"
+        );
+        assert!(
+            state.pending_split_ns.is_none(),
+            "a boundary is applied exactly once"
+        );
+    }
+
+    #[test]
+    fn consecutive_chunks_of_a_stream_never_share_an_open_stamp() {
+        // The spool filename carries the publish stamp and thread id, so two
+        // chunks sharing a stamp would collide under a coarse clock tick.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+        let repeated = TEST_PUBLISH_NS;
+
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            repeated,
+            1_000,
+            0.0,
+        );
+        let first = state.chunk_publish_ns;
+        flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
+
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            repeated,
+            2_000,
+            0.001,
+        );
+        let second = state.chunk_publish_ns;
+
+        assert_eq!(first, repeated, "the first chunk takes the frame's stamp");
+        assert!(
+            second > first,
+            "a repeated publish stamp is bumped past the previous chunk's \
+             ({second} must exceed {first})"
+        );
     }
 
     #[test]
@@ -1441,6 +1687,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame_2x2,
+            TEST_PUBLISH_NS,
             1_000,
             0.0,
         );
@@ -1463,6 +1710,7 @@ mod tests {
             4,
             FrameDtype::Rgb8,
             &frame_4x4,
+            TEST_PUBLISH_NS,
             2_000,
             0.001,
         );
@@ -1517,6 +1765,7 @@ mod tests {
             2,
             FrameDtype::DepthF16,
             &png_payload,
+            TEST_PUBLISH_NS,
             1_000,
             0.0,
         );
@@ -1535,6 +1784,7 @@ mod tests {
             2,
             FrameDtype::DepthF32,
             &png_payload,
+            TEST_PUBLISH_NS,
             2_000,
             0.001,
         );
@@ -1581,6 +1831,7 @@ mod tests {
             2,
             FrameDtype::DepthF32,
             &frame,
+            TEST_PUBLISH_NS,
             1_000,
             0.0,
         );
@@ -1630,6 +1881,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+                TEST_PUBLISH_NS,
                 timestamp_ns,
                 timestamp_s,
             );
@@ -1703,6 +1955,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+                TEST_PUBLISH_NS,
                 timestamp_ns,
                 0.0,
             );
@@ -1728,6 +1981,7 @@ mod tests {
             width: 0,
             height: 0,
             dtype: FrameDtype::Rgb8,
+            publish_ns: TEST_PUBLISH_NS,
             timestamp_ns: 0,
             timestamp_s: 0.0,
             data: vec![0u8; bytes],
@@ -1861,6 +2115,7 @@ mod tests {
             4096,
             FrameDtype::Rgb8,
             &[0u8; 4],
+            TEST_PUBLISH_NS + timestamp_us * 1_000,
             timestamp_us * 1_000,
             timestamp_us as f64 / 1e6,
         )

@@ -48,15 +48,18 @@ use crate::state::{DaemonEvent, NewRecording, SqliteStateStore, StateStore};
 use crate::storage::paths;
 
 /// Default holdback: each data envelope waits this long after daemon receipt
-/// before it is routed. Tunable via `NCD_HOLDBACK_MS`. A generous default is
-/// safe — joint/scalar data is sparse, so even a 1 s holdback retains only a
-/// few thousand small envelopes per source. Completeness (catching a datum
-/// whose publisher was preempted between capture and publish) scales directly
-/// with this value.
+/// before it is routed. Tunable via `NCD_HOLDBACK_MS`.
+///
+/// Lifecycle is applied on arrival while data is held, so a `StartRecording`
+/// racing its own data still opens the window first.
 const DEFAULT_HOLDBACK_MS: u64 = 500;
 
 /// Environment override for the holdback, in milliseconds.
 const HOLDBACK_ENV: &str = "NCD_HOLDBACK_MS";
+
+/// Hard bound on how long a stopped window waits for its producer's
+/// [`Envelope::SourceFlushed`] marker before being evicted anyway.
+const FLUSH_MARKER_WAIT_CAP: Duration = Duration::from_secs(30);
 
 /// A source silent (no data, no lifecycle) for this long has its open window
 /// force-closed as a crash backstop, so a producer that died without a Stop
@@ -180,6 +183,12 @@ struct ActiveWindow {
     stopped_at_ns: Option<i64>,
     /// Daemon clock at which the window closed — drives the eviction deadline.
     stop_recv_at: Option<Instant>,
+    /// Closed by a `StopRecording`, so its producer still owes a
+    /// [`Envelope::SourceFlushed`] marker.
+    awaiting_flush: bool,
+    /// Set when that marker has been released from the holdback queue, i.e.
+    /// every tail chunk it was ordered behind has already routed.
+    flushed: bool,
     /// Per-trace actors spawned within this window.
     traces: HashMap<TraceKey, TraceHandle>,
 }
@@ -188,6 +197,17 @@ impl ActiveWindow {
     /// Does this window's `[started_at_ns, stopped_at_ns)` contain `ts`?
     fn contains(&self, ts: i64) -> bool {
         ts >= self.started_at_ns && self.stopped_at_ns.is_none_or(|stop| ts < stop)
+    }
+
+    /// Time elapsed since stop once this window may be evicted: retention has
+    /// passed *and* either every owed flush marker is in or
+    /// [`FLUSH_MARKER_WAIT_CAP`] has expired. `None` while it must be kept.
+    fn eviction_elapsed(&self, now: Instant, retention: Duration) -> Option<Duration> {
+        let since_stop = self.stop_recv_at.map(|at| now.duration_since(at))?;
+        let retained = since_stop >= retention;
+        let flush_settled =
+            !self.awaiting_flush || self.flushed || since_stop >= FLUSH_MARKER_WAIT_CAP;
+        (retained && flush_settled).then_some(since_stop)
     }
 }
 
@@ -200,6 +220,17 @@ struct WindowsForSource {
     /// Daemon clock of the last envelope seen for this source — drives the
     /// idle reaper.
     last_seen: Option<Instant>,
+}
+
+impl WindowsForSource {
+    /// Nothing live, nothing retained, quiet past `IDLE_REAP`: droppable.
+    fn is_empty(&self, now: Instant) -> bool {
+        self.live.is_none()
+            && self.closing.is_empty()
+            && self
+                .last_seen
+                .is_none_or(|at| now.duration_since(at) >= IDLE_REAP)
+    }
 }
 
 /// One held data envelope awaiting its holdback release.
@@ -238,6 +269,8 @@ enum HeldPayload {
         frame_timestamps_s: Vec<f64>,
         dtype: FrameDtype,
     },
+    /// End-of-tail marker for a source's stopped window.
+    SourceFlushed,
 }
 
 /// The dispatcher's task-local state.
@@ -455,6 +488,20 @@ impl Dispatcher {
                     },
                 });
             }
+            Envelope::SourceFlushed {
+                robot_id,
+                robot_instance,
+                publish_timestamp_ns,
+            } => {
+                let source = (robot_id, robot_instance);
+                self.touch_source(&source, recv_at);
+                self.held.push_back(Held {
+                    source,
+                    release_at: recv_at + self.holdback,
+                    publish_timestamp_ns,
+                    payload: HeldPayload::SourceFlushed,
+                });
+            }
             Envelope::RefreshConfig {} => self.handle_refresh_config().await,
         }
     }
@@ -484,10 +531,7 @@ impl Dispatcher {
     }
 
     fn touch_source(&mut self, source: &Source, recv_at: Instant) {
-        // Hot path: every inbound `Data` / `BatchedData` / `VideoChunkReady`
-        // envelope touches its source. The common case is an existing window, so
-        // probe with `get_mut` (no allocation) and only clone the `(String, i64)`
-        // key on the rare first-insert.
+        // Hot path: probe with `get_mut` and only clone the key on insert.
         if let Some(window) = self.windows.get_mut(source) {
             window.last_seen = Some(recv_at);
         } else {
@@ -566,6 +610,8 @@ impl Dispatcher {
             started_at_ns: publish_timestamp_ns,
             stopped_at_ns: None,
             stop_recv_at: None,
+            awaiting_flush: false,
+            flushed: false,
             traces: HashMap::new(),
         });
 
@@ -624,6 +670,7 @@ impl Dispatcher {
             // time.
             window.stopped_at_ns = Some(publish_timestamp_ns);
             window.stop_recv_at = Some(recv_at);
+            window.awaiting_flush = true;
             let recording_index = window.recording_index;
             entry.closing.push(window);
             // Persist `stopped_at` before publishing the event: the cloud
@@ -657,8 +704,11 @@ impl Dispatcher {
             // keeping the boundary at the successor start mis-routes nothing.
             //
             // Refresh the closing-retention deadline so the extra late tail data
-            // this delayed stop implies still has a window to land in.
+            // this delayed stop implies still has a window to land in, and wait
+            // on this stop's flush marker for the same reason.
             window.stop_recv_at = Some(recv_at);
+            window.awaiting_flush = true;
+            window.flushed = false;
             tracing::warn!(
                 robot_id = source.0,
                 recording_index,
@@ -778,51 +828,9 @@ impl Dispatcher {
     /// window scans, so throttled to [`HOUSEKEEP_INTERVAL`] by the caller rather
     /// than run per inbound envelope.
     async fn housekeep(&mut self, now: Instant) {
-        // 2. Window evictions: a closing window is retained for 2·HOLDBACK
-        //    after its stop, by which point all in-window data has released.
         let retention = self.holdback * 2;
-        let mut closing_actors: Vec<TraceHandle> = Vec::new();
-        let mut empty_sources: Vec<Source> = Vec::new();
-        for (source, entry) in self.windows.iter_mut() {
-            entry.closing.retain_mut(|window| {
-                let evict = window
-                    .stop_recv_at
-                    .is_some_and(|at| now.duration_since(at) >= retention);
-                if evict {
-                    let elapsed = window
-                        .stop_recv_at
-                        .map(|at| now.duration_since(at))
-                        .unwrap_or_default();
-                    crate::perf_events::emit(
-                        "holdback",
-                        "completed",
-                        Some(window.recording_index),
-                        None,
-                        Some(elapsed),
-                        serde_json::json!({
-                            "trace_actor_count": window.traces.len(),
-                            "configured_retention_ms": retention.as_secs_f64() * 1_000.0,
-                        }),
-                    );
-                    for (_, handle) in window.traces.drain() {
-                        closing_actors.push(handle);
-                    }
-                    false
-                } else {
-                    true
-                }
-            });
-            if entry.live.is_none()
-                && entry.closing.is_empty()
-                && entry
-                    .last_seen
-                    .is_none_or(|at| now.duration_since(at) >= IDLE_REAP)
-            {
-                empty_sources.push(source.clone());
-            }
-        }
-        // Send WindowClosing to every actor of an evicted window. Their senders
-        // drop after, so each actor finalises and exits.
+        let (closing_actors, empty_sources) = self.evict_closing_windows(now, retention);
+
         for handle in closing_actors {
             let _ = handle.sender.send(TraceActorMessage::WindowClosing).await;
         }
@@ -830,9 +838,71 @@ impl Dispatcher {
             self.windows.remove(&source);
         }
 
-        // 3. Idle reaper: force-close a live window whose source has gone
-        //    silent (producer crashed without a Stop).
+        // Idle reaper: force-close a live window whose source has gone
+        // silent (producer crashed without a Stop).
         self.reap_idle(now).await;
+    }
+
+    /// Evict every closing window past retention and collect the sources left
+    /// with nothing to track. Returns the evicted windows' trace actors, still
+    /// owed a `WindowClosing`, and the now-empty source keys.
+    fn evict_closing_windows(
+        &mut self,
+        now: Instant,
+        retention: Duration,
+    ) -> (Vec<TraceHandle>, Vec<Source>) {
+        let mut closing_actors: Vec<TraceHandle> = Vec::new();
+        let mut empty_sources: Vec<Source> = Vec::new();
+        for (source, entry) in self.windows.iter_mut() {
+            entry.closing.retain_mut(|window| {
+                let Some(elapsed) = window.eviction_elapsed(now, retention) else {
+                    return true;
+                };
+                Self::finish_eviction(source, window, elapsed, retention, &mut closing_actors);
+                false
+            });
+            if entry.is_empty(now) {
+                empty_sources.push(source.clone());
+            }
+        }
+        (closing_actors, empty_sources)
+    }
+
+    /// Emit one evicted window's completion event and drain its trace actors
+    /// into `closing_actors`.
+    fn finish_eviction(
+        source: &Source,
+        window: &mut ActiveWindow,
+        elapsed: Duration,
+        retention: Duration,
+        closing_actors: &mut Vec<TraceHandle>,
+    ) {
+        if window.awaiting_flush && !window.flushed {
+            tracing::warn!(
+                recording_index = window.recording_index,
+                robot_id = source.0,
+                elapsed_s = elapsed.as_secs_f64(),
+                "no producer flush marker before the cap; retiring the \
+                 window anyway — any tail video chunk still in flight \
+                 will be dropped as an orphan"
+            );
+        }
+        crate::perf_events::emit(
+            "holdback",
+            "completed",
+            Some(window.recording_index),
+            None,
+            Some(elapsed),
+            serde_json::json!({
+                "trace_actor_count": window.traces.len(),
+                "configured_retention_ms": retention.as_secs_f64() * 1_000.0,
+                "awaited_flush_marker": window.awaiting_flush,
+                "flush_marker_seen": window.flushed,
+            }),
+        );
+        for (_, handle) in window.traces.drain() {
+            closing_actors.push(handle);
+        }
     }
 
     /// Force-close any live window whose source has been silent past
@@ -954,7 +1024,28 @@ impl Dispatcher {
                 )
                 .await;
             }
+            HeldPayload::SourceFlushed => self.mark_source_flushed(&held.source),
         }
+    }
+
+    /// Record that a source's flush barrier has drained, releasing the oldest
+    /// closing window still waiting on one for eviction.
+    fn mark_source_flushed(&mut self, source: &Source) {
+        let Some(entry) = self.windows.get_mut(source) else {
+            return;
+        };
+        let Some(window) = entry
+            .closing
+            .iter_mut()
+            .find(|window| window.awaiting_flush && !window.flushed)
+        else {
+            return;
+        };
+        window.flushed = true;
+        tracing::debug!(
+            recording_index = window.recording_index,
+            "producer flush barrier drained; window may retire"
+        );
     }
 
     /// Find the window for `source` containing `ts`. Closing windows are
@@ -1245,6 +1336,14 @@ mod tests {
             robot_instance: 0,
             publish_timestamp_ns,
             timestamp_ns: publish_timestamp_ns,
+        }
+    }
+
+    fn source_flushed(robot: &str, publish_timestamp_ns: i64) -> Envelope {
+        Envelope::SourceFlushed {
+            robot_id: robot.into(),
+            robot_instance: 0,
+            publish_timestamp_ns,
         }
     }
 
@@ -1886,6 +1985,9 @@ mod tests {
         // A closing window is retained for 2·holdback (so its in-window data has
         // released) and then evicted; without this the window map — and the
         // actor handles it holds — leak for the daemon's lifetime.
+        //
+        // Retention is the floor, not the whole gate: the flush marker is
+        // settled first so the deadline itself is what is tested.
         fast_holdback();
         let (store, dir) = open_store().await;
         let context = test_context(dir.path().join("recordings"), store.clone());
@@ -1905,6 +2007,12 @@ mod tests {
             1,
             "the stopped window is retained as closing"
         );
+        dispatcher
+            .handle_inbound(source_flushed("robot-1", 900), stopped_at)
+            .await;
+        dispatcher
+            .release_due_holdback(stopped_at + dispatcher.holdback + Duration::from_millis(1))
+            .await;
 
         // Just past the 2·holdback retention window.
         let retention = dispatcher.holdback * 2;
@@ -1916,5 +2024,127 @@ mod tests {
             .get(&source)
             .map_or(0, |entry| entry.closing.len());
         assert_eq!(closing, 0, "a closing window past 2·holdback is evicted");
+    }
+
+    #[tokio::test]
+    async fn housekeep_holds_a_stopped_window_until_the_flush_marker() {
+        // The stop is published before the writer's flush barrier, so the tail
+        // chunks it seals arrive after their own stop by an unbounded backlog.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        let stopped_at = opened_at + Duration::from_millis(1);
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .await;
+
+        // Well past the retention deadline.
+        let past_retention = stopped_at + dispatcher.holdback * 2 + Duration::from_millis(1);
+        dispatcher.housekeep(past_retention).await;
+        assert_eq!(
+            dispatcher.windows.get(&source).unwrap().closing.len(),
+            1,
+            "a stopped window still owed a flush marker outlives the retention deadline"
+        );
+
+        // The barrier drains and announces its marker.
+        dispatcher
+            .handle_inbound(source_flushed("robot-1", 900), past_retention)
+            .await;
+        let released_at = past_retention + dispatcher.holdback + Duration::from_millis(1);
+        dispatcher.release_due_holdback(released_at).await;
+        dispatcher.housekeep(released_at).await;
+
+        let closing = dispatcher
+            .windows
+            .get(&source)
+            .map_or(0, |entry| entry.closing.len());
+        assert_eq!(
+            closing, 0,
+            "the window retires once the marker has released"
+        );
+    }
+
+    #[tokio::test]
+    async fn housekeep_evicts_a_stopped_window_when_the_flush_marker_never_comes() {
+        // The marker is best-effort: a producer that never sends one must not
+        // pin the window open forever.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let opened_at = Instant::now();
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .await;
+        let stopped_at = opened_at + Duration::from_millis(1);
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .await;
+
+        let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
+        dispatcher.housekeep(at_cap).await;
+
+        let closing = dispatcher
+            .windows
+            .get(&source)
+            .map_or(0, |entry| entry.closing.len());
+        assert_eq!(
+            closing, 0,
+            "a marker that never arrives is capped, not waited on forever"
+        );
+    }
+
+    #[tokio::test]
+    async fn tail_video_chunk_announced_past_the_retention_deadline_still_routes() {
+        // A burst producer is still draining when `stop_recording` returns, so
+        // its in-window tail chunk is announced past the retention deadline;
+        // without the marker gating eviction it is orphan-dropped.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let recordings_root = dir.path().join("recordings");
+        let context = test_context(recordings_root.clone(), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        let (publish_ts, thread_id) = (150, 7); // opened inside window [100, 200)
+        spool_placeholder_nut(&recordings_root, publish_ts, thread_id);
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(stop("robot-1", 200)).await.unwrap();
+
+        // Stand in for a slow flush barrier, well past the retention.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        tx.send(video_chunk("robot-1", publish_ts, thread_id))
+            .await
+            .unwrap();
+        tx.send(source_flushed("robot-1", 500)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(10), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let traces = store
+            .list_traces_for_recording(recordings[0].recording_index)
+            .await
+            .unwrap();
+        assert!(
+            traces
+                .iter()
+                .any(|trace| trace.data_type.as_deref() == Some("RGB_IMAGES")),
+            "a tail chunk announced after the retention deadline must still route"
+        );
     }
 }
