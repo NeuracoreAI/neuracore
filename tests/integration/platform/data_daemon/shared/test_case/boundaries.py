@@ -6,8 +6,13 @@ frames a recording owns.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import NamedTuple
+
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONDEMNED_PROVENANCE_MARGIN_S,
+)
 
 
 class EmittedFrame(NamedTuple):
@@ -39,22 +44,18 @@ class EmittedFrame(NamedTuple):
 class TraceClassification:
     """What one recording requires of one trace's frames.
 
-    The single verdict every classification rule reports in, so every consumer
-    reads one object rather than unpacking a tuple, and a rule that grows a
-    third answer grows a field here instead of a return position.
-
-    The lists partition the frames the rule was given: a frame appears in
-    exactly one.
+    The shared verdict both classification rules report in (see
+    :func:`_classify_boundary_frames`): ``owed`` must reach disk, ``condemned``
+    must not, and ``unknowable`` frames count on neither side.
 
     Attributes:
-        owed: Frames the recording provably owns. Every one must reach disk.
-        unknowable: Frames logged while a boundary was passing. The daemon's
-            answer is correct either way, so they are dropped from *both* sides
-            of the comparison rather than tolerated on one.
+        condemned: Reasons kept only near this recording's own control calls
+            (see :func:`describe_condemnation`), read only if one reaches disk.
     """
 
     owed: list[EmittedFrame]
     unknowable: list[EmittedFrame] = field(default_factory=list)
+    condemned: list[tuple[EmittedFrame, str]] = field(default_factory=list)
 
     @property
     def owed_timestamps(self) -> list[float]:
@@ -66,6 +67,11 @@ class TraceClassification:
         """Capture timestamps allowed to be present or absent."""
         return {frame.timestamp for frame in self.unknowable}
 
+    @property
+    def condemned_reasons(self) -> dict[float, str]:
+        """Why each ruled-out capture timestamp was ruled out."""
+        return {frame.timestamp: reason for frame, reason in self.condemned}
+
 
 @dataclass(frozen=True, slots=True)
 class ObservedFrameCodes:
@@ -75,6 +81,8 @@ class ObservedFrameCodes:
     session-wide, so codes can't be reconstructed from the recording ordinal.
     """
 
+    recording_index: int
+    """Producer recording ordinal used to encode this recording's frames."""
     inside: dict[str, list[int]]
     unknowable: dict[str, set[int]]
 
@@ -83,29 +91,43 @@ class ObservedFrameCodes:
 class RecordingControlBounds:
     """Wall-clock brackets around the two control calls that bound a recording.
 
-    The daemon's window is ``[started_at_ns, stopped_at_ns)``, and both bounds
-    are stamped on the publish clock *inside* the producer-side
-    ``start_recording`` / ``stop_recording`` calls — never from the capture
-    timestamp the caller passes. Neither instant is visible from here, but each
-    is known to fall within the call that carries it, and the control thread can
-    stamp both edges of that call on the same clock the producer threads use.
+    Both bounds are stamped on the publish clock inside the control calls
+    themselves, never from a capture timestamp.
 
     Attributes:
-        handle: The SDK recording handle for this recording, as the producer
-            threads see it while it is current.
-        start_called_at: Wall clock immediately before ``nc.start_recording``.
-        start_returned_at: Wall clock immediately after it returned. The
-            window's lower bound is somewhere in between.
-        stop_called_at: Wall clock immediately before ``nc.stop_recording``.
-        stop_returned_at: Wall clock immediately after it returned. The window's
-            upper bound is somewhere in between.
+        handles: Every SDK handle this recording held — a set, not one value,
+            because a recording holds a client-generated UUID before the
+            backend swaps in its own id.
+        stop_settled_at: When the window's upper bound is known to have
+            passed — the producer-side gate closing, not the call's return
+            (which lags behind on an unrelated flush).
     """
 
-    handle: str | None
+    handles: frozenset[str]
     start_called_at: float
     start_returned_at: float
     stop_called_at: float
-    stop_returned_at: float
+    stop_settled_at: float
+
+
+def _classification(
+    owed: list[EmittedFrame],
+    unknowable: list[EmittedFrame],
+    condemned: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> TraceClassification:
+    """Assemble a verdict, attributing and trimming the condemned frames."""
+    near_start = bounds.start_called_at - CONDEMNED_PROVENANCE_MARGIN_S
+    near_stop = bounds.stop_settled_at + CONDEMNED_PROVENANCE_MARGIN_S
+    return TraceClassification(
+        owed=owed,
+        unknowable=unknowable,
+        condemned=[
+            (frame, describe_condemnation(frame, bounds))
+            for frame in condemned
+            if near_start <= frame.emitted_at <= near_stop
+        ],
+    )
 
 
 def _classify_boundary_frames(
@@ -128,18 +150,42 @@ def _classify_boundary_frames(
         The recording's verdict on these frames, as whole frames rather than
         bare timestamps, since the cloud assertion also needs frame indexes.
     """
-    inside: list[EmittedFrame] = []
+    owed: list[EmittedFrame] = []
     unknowable: list[EmittedFrame] = []
+    condemned: list[EmittedFrame] = []
     for frame in frames:
         is_inside = (
             frame.emitted_at >= bounds.start_returned_at
             and frame.completed_at <= bounds.stop_called_at
         )
         is_outside = frame.completed_at <= bounds.start_called_at or (
-            frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
+            frame.emitted_at >= bounds.stop_settled_at
+            and frame.handle not in bounds.handles
         )
         if is_inside:
-            inside.append(frame)
-        elif not is_outside:
+            owed.append(frame)
+        elif is_outside:
+            condemned.append(frame)
+        else:
             unknowable.append(frame)
-    return TraceClassification(owed=inside, unknowable=unknowable)
+    return _classification(owed, unknowable, condemned, bounds)
+
+
+def describe_condemnation(frame: EmittedFrame, bounds: RecordingControlBounds) -> str:
+    """Say why the classification ruled *frame* out of this recording."""
+    if frame.completed_at <= bounds.start_called_at:
+        return "log call finished before start_recording was entered"
+    if frame.emitted_at >= bounds.stop_settled_at:
+        timing = "log call began after the local gate had closed"
+    elif frame.emitted_at >= bounds.stop_called_at:
+        timing = "log call began after stop_recording was entered"
+    else:
+        timing = "log call ran wholly inside the control calls"
+    if frame.handle is None:
+        gate = "gate held no recording"
+    elif frame.handle in bounds.handles:
+        gate = "gate held this recording"
+    else:
+        gate = "gate held another recording"
+    # Interned: one string per category, not per condemned frame.
+    return sys.intern(f"{timing}, {gate}")
