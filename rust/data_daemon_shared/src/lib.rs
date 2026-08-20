@@ -13,7 +13,9 @@
 //! the same inputs: the daemon configuration model ([`config`]) and the
 //! filesystem layout ([`paths`]). Keeping these here is what stops the daemon
 //! and producer from drifting on, say, the spool-backlog cap or the recordings
-//! root.
+//! root. [`ffmpeg`] lives here for a weaker reason: both crates shell out to
+//! ffmpeg (the daemon to transcode, the producer only in its tests) and must
+//! spell its options the same way.
 //!
 //! Envelopes are encoded with [`postcard`], a compact length-prefixed binary
 //! format. Payload bytes travel raw (length-prefix + bytes — no base64 or
@@ -46,6 +48,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub mod config;
+pub mod ffmpeg;
 pub mod paths;
 
 /// iceoryx2 service-name conventions shared by daemon and producer.

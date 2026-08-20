@@ -1040,6 +1040,7 @@ fn png_crc32(bytes: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
     use std::path::PathBuf;
     use std::process::Command;
     use tempfile::TempDir;
@@ -1339,9 +1340,15 @@ mod tests {
         // Decode the whole NUT back to packed RGB24 and assert it is bit-exact
         // to what we wrote — PNG is lossless, so the round-trip must be exact.
         let decoded = Command::new(&ffmpeg)
-            .args(["-v", "error", "-vsync", "passthrough"])
+            .args(["-v", "error"])
             .arg("-i")
             .arg(&path)
+            // Without passthrough the NUT's microsecond time base yields a
+            // duplicate frame per tick. Output-only from 5.1, so after `-i`.
+            .args([
+                passthrough_frame_sync_arg(ffmpeg.as_os_str()),
+                "passthrough",
+            ])
             .args(["-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
             .output()
             .expect("spawn ffmpeg");

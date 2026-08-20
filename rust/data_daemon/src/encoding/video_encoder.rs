@@ -32,6 +32,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
+use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
 
 use tokio::process::Command;
@@ -250,13 +251,13 @@ pub enum FfmpegPreflightError {
         source: std::io::Error,
     },
     /// ffmpeg ran but rejected a capability the encoder depends on: the
-    /// `-vsync passthrough` frame-timing mode or the libx264 encoder.
+    /// passthrough frame-timing mode or the libx264 encoder.
     #[error(
         "ffmpeg at `{}` (version {version}) is incompatible: a required capability was \
-         rejected. The daemon needs `-vsync passthrough` (drop-free, frame-accurate \
-         encoding — note `-fps_mode passthrough` is ffmpeg >= 5.1 only) and the libx264 / \
-         libx264rgb encoders. Install a compatible ffmpeg (>= 4.0 with libx264). ffmpeg \
-         reported:\n{stderr_tail}",
+         rejected. The daemon needs passthrough frame timing (drop-free, frame-accurate \
+         encoding; spelled `{frame_sync_arg}` on this build) and the libx264 / libx264rgb \
+         encoders. Install a compatible ffmpeg (>= 4.0 with libx264). ffmpeg reported:\
+         \n{stderr_tail}",
         binary.to_string_lossy()
     )]
     Incompatible {
@@ -264,6 +265,8 @@ pub enum FfmpegPreflightError {
         binary: OsString,
         /// Detected ffmpeg version, or `"unknown"`.
         version: String,
+        /// Passthrough frame-timing option the probe used on this build.
+        frame_sync_arg: &'static str,
         /// Tail of ffmpeg's stderr from the failed probe.
         stderr_tail: String,
     },
@@ -297,6 +300,12 @@ impl VideoEncoder {
         self
     }
 
+    /// Option name this ffmpeg accepts for passthrough frame timing; the two
+    /// spellings do not overlap across the supported version range.
+    fn frame_sync_arg(&self) -> &'static str {
+        passthrough_frame_sync_arg(&self.binary)
+    }
+
     /// Verify the configured ffmpeg is present and supports the capabilities
     /// [`encode_chunk`](Self::encode_chunk) depends on, returning the detected
     /// version string on success.
@@ -305,9 +314,8 @@ impl VideoEncoder {
     /// clear message instead of silently marking every video trace `failed` at
     /// recording time. Two steps: `ffmpeg -version` confirms the binary runs
     /// (and yields a version for diagnostics), then a one-frame synthetic
-    /// encode to the null muxer exercises the exact `-vsync passthrough` knob —
-    /// the option ffmpeg < 5.1 rejects when spelled `-fps_mode` — together with
-    /// the libx264 encoder.
+    /// encode to the null muxer exercises the passthrough frame-timing mode
+    /// together with the libx264 encoder.
     pub fn preflight(&self) -> Result<String, FfmpegPreflightError> {
         let version = self.detect_ffmpeg_version()?;
         self.probe_passthrough_encode(&version)?;
@@ -334,17 +342,18 @@ impl VideoEncoder {
     /// Encode one synthetic frame to the null muxer through **both** output
     /// configurations the real [`encode_chunk`](Self::encode_chunk) uses — the
     /// `yuv420p libx264` lossy pass *and* the `rgb24 libx264rgb -qp 0` lossless
-    /// pass. A non-zero exit means the local ffmpeg lacks a capability the
-    /// encoder needs. The lossless `libx264rgb` path is the one that actually
-    /// varies between builds, so probing only the lossy pass (as before) let the
-    /// "fail fast at startup" check pass while every real lossless encode failed
-    /// at recording time.
+    /// pass, with the passthrough spelling this build accepts. A non-zero exit
+    /// means the local ffmpeg lacks a capability the encoder needs. The
+    /// lossless `libx264rgb` path is the one that actually varies between
+    /// builds, so probing only the lossy pass (as before) let the "fail fast at
+    /// startup" check pass while every real lossless encode failed at recording
+    /// time.
     fn probe_passthrough_encode(&self, version: &str) -> Result<(), FfmpegPreflightError> {
         // One 16x16 yuv420p frame (a 16x16 plane plus two 8x8 planes = 384
         // bytes) fed via the rawvideo demuxer on stdin — no lavfi/input-file
         // dependency, so the probe works even on a minimal build. ffmpeg parses
         // (and would reject) the options before reading stdin, so an unsupported
-        // `-vsync passthrough`, `-enc_time_base` or `libx264rgb` encode fails
+        // passthrough mode, `-enc_time_base` or `libx264rgb` encode fails
         // immediately rather than on a healthy input. The two `-map 0:v -c:v …`
         // blocks exercise the same codec, pixel formats and timestamp pinning
         // as `encode_chunk` (the build-dependent parts); the real lossy encode
@@ -361,6 +370,7 @@ impl VideoEncoder {
         let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
         let mp4_probe_out =
             std::env::temp_dir().join(format!("ncd_ffmpeg_preflight_{}.mp4", std::process::id()));
+        let frame_sync_arg = self.frame_sync_arg();
 
         let child = std::process::Command::new(&self.binary)
             .arg("-y")
@@ -380,7 +390,7 @@ impl VideoEncoder {
             // validated.
             .arg("-map")
             .arg("0:v")
-            .arg("-vsync")
+            .arg(frame_sync_arg)
             .arg("passthrough")
             .arg("-enc_time_base")
             .arg(&enc_time_base)
@@ -397,7 +407,7 @@ impl VideoEncoder {
             // build-dependent `libx264rgb` rgb24 capability the encoder relies on.
             .arg("-map")
             .arg("0:v")
-            .arg("-vsync")
+            .arg(frame_sync_arg)
             .arg("passthrough")
             .arg("-enc_time_base")
             .arg(&enc_time_base)
@@ -447,6 +457,7 @@ impl VideoEncoder {
             Err(FfmpegPreflightError::Incompatible {
                 binary: self.binary.clone(),
                 version: version.to_string(),
+                frame_sync_arg,
                 stderr_tail: tail_stderr(&output.stderr),
             })
         }
@@ -480,7 +491,7 @@ impl VideoEncoder {
         // `-y` overwrites existing outputs (resume safety: a previous failed
         // run may have left a partial mp4). `-fflags +genpts` rebuilds the
         // presentation timestamps from the NUT timing when the spool was
-        // truncated mid-frame. `-vsync passthrough` (applied per output) is
+        // truncated mid-frame. Passthrough frame timing (applied per output) is
         // the critical knob here: the NUT chunk uses `time_base = 1/1_000_000`
         // so ffmpeg's demuxer reports `r_frame_rate = 1_000_000/1` (one
         // million fps). With the default `cfr` policy the encoder would then
@@ -498,14 +509,10 @@ impl VideoEncoder {
         // emits every input frame exactly once at its original PTS and never
         // drops, which is what real-time camera capture actually is.
         //
-        // We spell this `-vsync passthrough` rather than the newer
-        // `-fps_mode passthrough`: the two select the identical passthrough
-        // mode, but `-fps_mode` is unrecognised by ffmpeg < 5.1 (e.g. the 4.4
-        // build shipped on Ubuntu 22.04 / the integration host), where it aborts
-        // the encode with "Unrecognized option 'fps_mode'". `-vsync` is accepted
-        // on both (only deprecated, not removed, on 5.1+). The default branch
-        // emits two `-map 0:v -c:v ...` output blocks from a single demux pass;
-        // lossy-only emits a single block (no preview/archive split).
+        // `frame_sync_arg` resolves the spelling this build accepts; the two
+        // do not overlap across the supported ffmpeg versions. The default
+        // branch emits two `-map 0:v -c:v ...` output blocks from a single demux
+        // pass; lossy-only emits a single block (no preview/archive split).
         //
         // Every output also pins its timing to the NUT's microsecond clock
         // ([`VIDEO_SPOOL_TICKS_PER_SECOND`], shared with the producer's NUT
@@ -525,6 +532,7 @@ impl VideoEncoder {
         // (see `adaptive_encode_threads`) so the transcode fleet fills idle
         // cores at low concurrency without oversubscribing at high concurrency.
         let encode_threads = encode_threads.to_string();
+        let frame_sync_arg = self.frame_sync_arg();
         let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
         let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
         let lossy_only = request.codec.is_lossy_only();
@@ -541,7 +549,7 @@ impl VideoEncoder {
             .arg(&request.raw_nut)
             .arg("-map")
             .arg("0:v")
-            .arg("-vsync")
+            .arg(frame_sync_arg)
             .arg("passthrough");
         if lossy_only {
             // Single full-resolution training-quality video: libx264 CRF 23 at
@@ -569,9 +577,9 @@ impl VideoEncoder {
             let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
             command
                 // Lossy preview proxy only: cap to preview resolution (see
-                // `preview_scale_filter`). vsync passthrough still emits every
-                // input frame, so the lossy frame count matches the lossless
-                // output and the per-frame timestamp sidecar.
+                // `preview_scale_filter`). Passthrough still emits every input
+                // frame, so the lossy frame count matches the lossless output
+                // and the per-frame timestamp sidecar.
                 .arg("-vf")
                 .arg(&preview_filter)
                 .arg("-enc_time_base")
@@ -591,7 +599,7 @@ impl VideoEncoder {
                 .arg(&request.lossy_out)
                 .arg("-map")
                 .arg("0:v")
-                .arg("-vsync")
+                .arg(frame_sync_arg)
                 .arg("passthrough")
                 .arg("-enc_time_base")
                 .arg(&enc_time_base)

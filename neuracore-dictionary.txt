@@ -275,6 +275,7 @@ loglevel
 loglik
 logsigmoid
 logvar
+luma
 makereport
 manylinux
 matplotlib

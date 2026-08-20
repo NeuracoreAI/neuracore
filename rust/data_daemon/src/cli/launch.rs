@@ -192,10 +192,11 @@ fn run_daemon(
 
     // Verify ffmpeg is present and supports the options the encoder depends on
     // *before* standing up the runtime — an incompatible build (e.g. one that
-    // lacks `-vsync passthrough`, or is missing libx264) otherwise fails every
-    // video encode silently at recording time, marking traces `failed`. Mirrors
-    // the fail-fast PID-file acquisition above. Reused as the pipeline's encoder
-    // so the probe and the real encodes share one configured binary.
+    // lacks a passthrough frame-timing mode, or is missing libx264) otherwise
+    // fails every video encode silently at recording time, marking traces
+    // `failed`. Mirrors the fail-fast PID-file acquisition above. Reused as the
+    // pipeline's encoder so the probe and the real encodes share one configured
+    // binary.
     let video_encoder = VideoEncoder::new();
     match video_encoder.preflight() {
         Ok(version) => tracing::info!(ffmpeg_version = %version, "ffmpeg preflight passed"),
