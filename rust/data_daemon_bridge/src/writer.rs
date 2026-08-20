@@ -36,6 +36,11 @@
 //! an [`Envelope::SourceFlushed`] marker on the same publisher port, and the
 //! daemon retires the window on that rather than on a timer.
 //!
+//! The marker speaks only for *this* process, and a source can be logged from
+//! several at once, so the daemon has to hear this process owes one before the
+//! first chunk seals — which is as late as the backlog is deep. Hence the claim
+//! comes off the logging thread, not the writer: see [`note_video_activity`].
+//!
 //! ## Fork safety
 //!
 //! The process-wide [`VIDEO_CHUNKS`] registry stores the owning PID and wipes
@@ -124,6 +129,14 @@ const SYNTH_PTS_STEP_MAX_US: u64 = 100_000;
 /// longer than any healthy transcode stall, yet short enough that the caller
 /// learns promptly instead of silently losing frames.
 const FRAME_ADMISSION_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Minimum publish-clock gap between two [`Envelope::VideoProducerActive`]
+/// claims for one source (see [`note_video_activity`]).
+///
+/// Bounded above by the daemon's window retention, so a claim always reaches
+/// its window before eviction, and below by IPC cost: one extra `commands`
+/// sample per source per interval.
+const VIDEO_CLAIM_INTERVAL_NS: i64 = 100_000_000;
 
 /// Resolve the producer's spool-backlog cap (bytes) from the daemon profile
 /// config (`spool_limit`: `NCD_SPOOL_LIMIT` → active profile → default).
@@ -225,6 +238,8 @@ struct VideoChunkRegistry {
     streams: HashMap<String, VideoChunkSlot>,
     /// Latest recording-window boundary seen per source prefix.
     boundaries: HashMap<String, i64>,
+    /// Last claim published per source prefix — the rate limiter's only state.
+    claims: HashMap<String, i64>,
 }
 
 static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
@@ -232,6 +247,7 @@ static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
         owner_pid: 0,
         streams: HashMap::new(),
         boundaries: HashMap::new(),
+        claims: HashMap::new(),
     })
 });
 
@@ -248,6 +264,8 @@ fn with_video_registry<R>(operation: impl FnOnce(&mut VideoChunkRegistry) -> R) 
     if registry.owner_pid != pid {
         registry.streams.clear();
         registry.boundaries.clear();
+        // A forked child is a different pid, so it owes its own claim.
+        registry.claims.clear();
         registry.owner_pid = pid;
     }
     operation(&mut registry)
@@ -1335,6 +1353,7 @@ fn flush_chunk_locked(
         sensor_name: Some(sensor_name.to_string()),
         publish_timestamp_ns,
         thread_id,
+        producer_pid: std::process::id(),
         width: state.width,
         height: state.height,
         byte_count,
@@ -1406,6 +1425,50 @@ fn announce_source_flushed(robot_id: &str, robot_instance: i64) {
         robot_id: robot_id.to_string(),
         robot_instance,
         publish_timestamp_ns: now_ns(),
+        producer_pid: std::process::id(),
+    }));
+}
+
+/// Should a source whose last claim was published at `last_claim_ns` claim
+/// again for a frame published at `publish_ns`?
+///
+/// The first frame always claims; after that the gap must reach
+/// [`VIDEO_CLAIM_INTERVAL_NS`] on the *publish* clock. A frame stamped behind
+/// the last claim (a regressed producer clock) claims again.
+fn should_claim_video(last_claim_ns: Option<i64>, publish_ns: i64) -> bool {
+    match last_claim_ns {
+        None => true,
+        Some(last) => publish_ns < last || publish_ns - last >= VIDEO_CLAIM_INTERVAL_NS,
+    }
+}
+
+/// Announce that this process is logging video for a source, rate-limited to
+/// one claim per [`VIDEO_CLAIM_INTERVAL_NS`].
+///
+/// Called from `log_frame` on the **logging** thread — deliberately not from
+/// the writer thread or the chunk seal, both of which are as late as the
+/// backlog is deep. The logging thread is inside the recording by construction,
+/// which is what makes the daemon's per-producer marker matching sound.
+///
+/// Best-effort: a dropped claim leaves the daemon with the chunk-driven
+/// attribution it had before.
+pub(crate) fn note_video_activity(robot_id: &str, robot_instance: i64, publish_ns: i64) {
+    let prefix = source_prefix(robot_id, robot_instance);
+    let claim = with_video_registry(|registry| {
+        if !should_claim_video(registry.claims.get(&prefix).copied(), publish_ns) {
+            return false;
+        }
+        registry.claims.insert(prefix, publish_ns);
+        true
+    });
+    if !claim {
+        return;
+    }
+    let _ = publisher_tx().send(PublishMsg::Announce(Envelope::VideoProducerActive {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+        publish_timestamp_ns: publish_ns,
+        producer_pid: std::process::id(),
     }));
 }
 
@@ -1438,6 +1501,36 @@ mod tests {
         assert!(!should_flush_chunk(
             CHUNK_FLUSH_BYTES - 1,
             MAX_VIDEO_CHUNK_FRAMES - 1
+        ));
+    }
+
+    #[test]
+    fn first_frame_of_a_source_always_claims_it() {
+        // A short recording may have no second interval, so the first frame
+        // must not be rate limited.
+        assert!(should_claim_video(None, TEST_PUBLISH_NS));
+    }
+
+    #[test]
+    fn claims_are_rate_limited_to_one_per_interval() {
+        let last = TEST_PUBLISH_NS;
+        assert!(!should_claim_video(Some(last), last));
+        assert!(!should_claim_video(
+            Some(last),
+            last + VIDEO_CLAIM_INTERVAL_NS - 1
+        ));
+        assert!(should_claim_video(
+            Some(last),
+            last + VIDEO_CLAIM_INTERVAL_NS
+        ));
+    }
+
+    #[test]
+    fn a_regressed_publish_clock_claims_again() {
+        // Silence until the clock catches up leaves windows unclaimed.
+        assert!(should_claim_video(
+            Some(TEST_PUBLISH_NS),
+            TEST_PUBLISH_NS - 1
         ));
     }
 

@@ -403,6 +403,10 @@ pub enum Envelope {
         /// chunk. Disambiguates the spool filename across threads and is a
         /// useful breadcrumb when inspecting the spool directory.
         thread_id: i64,
+        /// OS process id of the producer that sealed this chunk, matched
+        /// against [`Envelope::SourceFlushed`]'s `producer_pid` so one process's
+        /// marker never vouches for another's pending video.
+        producer_pid: u32,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels (constant across a trace).
@@ -444,6 +448,20 @@ pub enum Envelope {
         /// Publish time at the marker's send. Diagnostic only: deliberately
         /// not used for window membership.
         publish_timestamp_ns: i64,
+        /// OS process id of the producer whose barrier this reports on.
+        producer_pid: u32,
+    },
+    /// Producer asserts that it is currently logging video for a source —
+    /// published *before* any of that video has been sealed into a chunk.
+    VideoProducerActive {
+        robot_id: String,
+        robot_instance: i64,
+        /// Publish time of the frame that triggered the claim, stamped on the
+        /// logging thread, so it is the window-membership key here too.
+        publish_timestamp_ns: i64,
+        /// OS process id of the claiming producer, the same identity
+        /// [`Envelope::SourceFlushed`] reports under.
+        producer_pid: u32,
     },
 }
 
@@ -531,6 +549,7 @@ impl Envelope {
             Envelope::VideoChunkReady { .. } => "video_chunk_ready",
             Envelope::RefreshConfig {} => "refresh_config",
             Envelope::SourceFlushed { .. } => "source_flushed",
+            Envelope::VideoProducerActive { .. } => "video_producer_active",
         }
     }
 
@@ -921,6 +940,19 @@ mod tests {
     }
 
     #[test]
+    fn video_producer_active_round_trips() {
+        let claim = Envelope::VideoProducerActive {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            producer_pid: 4242,
+        };
+        let bytes = claim.encode().expect("encode");
+        assert_eq!(claim, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(claim.kind(), "video_producer_active");
+    }
+
+    #[test]
     fn video_chunk_ready_round_trips() {
         let original = Envelope::VideoChunkReady {
             robot_id: "robot-1".into(),
@@ -929,6 +961,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 4242,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -970,6 +1003,7 @@ mod tests {
                 sensor_name: Some("depth_camera".into()),
                 publish_timestamp_ns: 1_700_000_000_000_000_000,
                 thread_id: 7,
+                producer_pid: 99,
                 width: 128,
                 height: 128,
                 byte_count: 4096,
@@ -1028,6 +1062,7 @@ mod tests {
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             thread_id: 42,
+            producer_pid: 99,
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
@@ -1063,6 +1098,7 @@ mod tests {
             sensor_name: Some("camera_with_a_deliberately_long_sensor_label".into()),
             publish_timestamp_ns: i64::MAX,
             thread_id: i64::MAX,
+            producer_pid: u32::MAX,
             width: u32::MAX,
             height: u32::MAX,
             byte_count: u64::MAX,
