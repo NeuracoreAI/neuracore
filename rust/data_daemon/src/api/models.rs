@@ -31,6 +31,13 @@ pub struct RegisterTraceRequest {
     pub trace_id: String,
     /// Files to register for this trace.
     pub cloud_files: Vec<CloudFile>,
+    /// Codec this trace's video was encoded with.
+    ///
+    /// Only video-family traces carry one; `None` for scalar/JSON traces, which
+    /// have no video to encode. Skipped on the wire when absent so an older
+    /// backend sees the previous body shape unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<String>,
 }
 
 /// Backend response payload for `POST /traces/batch-register`.
@@ -127,6 +134,7 @@ mod tests {
                 filepath: "rgb/cam_0/lossy.mp4".to_string(),
                 content_type: "video/mp4".to_string(),
             }],
+            codec: Some("h264_medium".to_string()),
         };
         let body = serde_json::to_value(serde_json::json!({"traces": [request]})).unwrap();
         assert_eq!(
@@ -139,9 +147,32 @@ mod tests {
                     "cloud_files": [{
                         "filepath": "rgb/cam_0/lossy.mp4",
                         "content_type": "video/mp4"
-                    }]
+                    }],
+                    "codec": "h264_medium"
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn batch_register_body_omits_absent_codec() {
+        // A scalar trace has no video and so no codec. The field must vanish from
+        // the body rather than serialising as null, leaving the pre-codec wire
+        // shape byte-identical for traces that never had one.
+        let request = RegisterTraceRequest {
+            recording_id: "rec-1".to_string(),
+            data_type: "JOINT_POSITIONS".to_string(),
+            trace_id: "trace-2".to_string(),
+            cloud_files: vec![CloudFile {
+                filepath: "JOINT_POSITIONS/arm0/trace.json".to_string(),
+                content_type: "application/json".to_string(),
+            }],
+            codec: None,
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(
+            body.get("codec").is_none(),
+            "codec must be omitted entirely when absent, got {body}"
         );
     }
 

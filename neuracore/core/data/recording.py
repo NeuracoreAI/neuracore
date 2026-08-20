@@ -3,7 +3,7 @@
 import sys
 from typing import TYPE_CHECKING
 
-from neuracore_types import CrossEmbodimentUnion, DataType
+from neuracore_types import Codec, CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
 
@@ -37,6 +37,7 @@ class Recording:
         end_time: float,
         metadata: RecordingMetadata,
         data_types: set[DataType] | None = None,
+        encoding: Codec | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -50,6 +51,8 @@ class Recording:
             end_time: Unix timestamp when recording ended.
             metadata: Metadata associated with the recording.
             data_types: Set of DataTypes present in this recording.
+            encoding: Codec used for this recording's camera video.
+                None for recordings finalized before the field existed.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -62,6 +65,7 @@ class Recording:
         self.name = getattr(metadata, "name", None) or recording_id
         self.metadata = metadata
         self.data_types: set[DataType] = data_types or set()
+        self.encoding = encoding
         self._raw = {
             "id": recording_id,
             "total_bytes": total_bytes,

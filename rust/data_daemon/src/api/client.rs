@@ -615,6 +615,7 @@ mod tests {
             data_type: "RGB_IMAGES".to_string(),
             trace_id: "trace-1".to_string(),
             cloud_files: vec![],
+            codec: Some("h264_lossless".to_string()),
         }];
         let outcome = client.batch_register("org-1", &traces).await.unwrap();
         assert_eq!(outcome.registered_traces.len(), 1);
