@@ -16,13 +16,6 @@
 </div>
 
 <p align="center">
-  Join our community!
-</p>
-<p align="center">
-  <a target="_blank" href="https://discord.gg/DF5m8V6nbD"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord" alt="Discord" /></a>
-</p>
-
-<p align="center">
   Getting started
 </p>
 <p align="center">
