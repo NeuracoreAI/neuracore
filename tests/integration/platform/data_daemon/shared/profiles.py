@@ -72,6 +72,26 @@ def scoped_offline_profile() -> Generator[None]:
 
 
 @contextmanager
+def scoped_holdback_ms(milliseconds: int = 50) -> Generator[None]:
+    """Pin the dispatcher's routing holdback for the block.
+
+    Args:
+        milliseconds: Holdback in milliseconds; the daemon's own default is 500.
+    Yields:
+        ``None`` — the holdback override is in place while the body runs.
+    """
+    previous = os.environ.get("NCD_HOLDBACK_MS")
+    os.environ["NCD_HOLDBACK_MS"] = str(milliseconds)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("NCD_HOLDBACK_MS", None)
+        else:
+            os.environ["NCD_HOLDBACK_MS"] = previous
+
+
+@contextmanager
 def scoped_online_mode() -> Generator[None]:
     """Force online daemon config for the block.
 
