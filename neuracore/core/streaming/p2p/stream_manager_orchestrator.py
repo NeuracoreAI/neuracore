@@ -12,6 +12,7 @@ from neuracore_types import RobotInstanceIdentifier
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.const import AUTH_LOGOUT_EVENT
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.base_p2p_connection_manager import (
     BaseP2PStreamManager,
@@ -52,7 +53,6 @@ class StreamManagerOrchestrator(
         self,
         org_id: str | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
     ):
         """Initialize the stream manager factory.
@@ -62,8 +62,6 @@ class StreamManagerOrchestrator(
                 defaults to the current org.
             loop: the event loop to run on. Defaults to the running loop if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
         """
@@ -77,7 +75,7 @@ class StreamManagerOrchestrator(
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
         self.loop = loop or get_running_loop()
-        self.client_session = client_session or ClientSession(
+        self.client_session = ClientSession(
             timeout=ClientTimeout(sock_read=None, total=None),
             loop=self.loop,
             middlewares=(retry_connection_failures,),
@@ -94,6 +92,37 @@ class StreamManagerOrchestrator(
                 get_consume_live_data_enabled_manager(),
             ),
         )
+        self._closed = False
+        self._logout_listener = self._on_logout
+        self.auth.add_listener(AUTH_LOGOUT_EVENT, self._logout_listener)
+
+    def _on_logout(self) -> None:
+        """Schedule teardown on the streaming event loop."""
+        StreamManagerOrchestrator.discard_instance(self)
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.close)
+
+    def close(self) -> None:
+        """Close all streaming resources owned by this orchestrator."""
+        if self._closed:
+            return
+        self._closed = True
+        self.auth.remove_listener(AUTH_LOGOUT_EVENT, self._logout_listener)
+
+        self.signalling_consumer.close()
+
+        provider_managers = list(self.provider_managers.values())
+        consumer_managers = list(self.consumer_managers.values())
+        self.provider_managers.clear()
+        self.consumer_managers.clear()
+
+        for provider_manager in provider_managers:
+            provider_manager.close()
+        for consumer_manager in consumer_managers:
+            consumer_manager.close()
+
+        self.loop.create_task(self.client_session.close())
+        StreamManagerOrchestrator.discard_instance(self)
 
     def get_manager(
         self, type: ManagerType, robot_id: str, robot_instance: int
