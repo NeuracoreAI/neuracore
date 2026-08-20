@@ -6,9 +6,8 @@ used for training) plus a small lossy preview (``lossy.mp4``). Selecting a
 is also used for training -- trading a little image fidelity for much smaller
 uploads, which matters for long recordings.
 
-This module is the single source of truth for the codec identifiers the SDK
-exposes. The data daemon mirrors the same ``h264_medium`` ->
-``libx264 -crf 23 -preset medium`` mapping.
+Codec is re-exported here so nc.Codec keeps working. The data daemon mirrors
+the same h264_medium -> libx264 -crf 23 -preset medium mapping.
 
 Depth cameras always keep their lossless storage: their lossy proxy is a
 visualisation, not precise depth, so it is never a valid training source.
@@ -17,29 +16,14 @@ visualisation, not precise depth, so it is never a valid training source.
 from __future__ import annotations
 
 import copy
-import enum
 import logging
 from typing import TypedDict
 
+from neuracore_types import Codec
+
+__all__ = ["Codec", "Libx264Options", "codec_option_overrides", "resolve_codec"]
+
 logger = logging.getLogger(__name__)
-
-
-class Codec(str, enum.Enum):
-    """Codecs available for recorded camera video.
-
-    Members are string values so they round-trip cleanly through the daemon
-    profile and the ``NCD_VIDEO_CODEC`` environment variable.
-
-    Attributes:
-        H264_LOSSLESS: The default — keep the lossless archive (used for
-            training) plus a small lossy preview. Select this to switch back
-            from a lossy mode.
-        H264_MEDIUM: Lossy-only — a single full-resolution libx264 CRF 23 video
-            (no lossless archive), used for both preview and training.
-    """
-
-    H264_LOSSLESS = "h264_lossless"
-    H264_MEDIUM = "h264_medium"
 
 
 class Libx264Options(TypedDict, total=False):

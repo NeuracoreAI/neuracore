@@ -167,6 +167,18 @@ impl LossyVideoCodec {
     pub fn is_lossy_only(self) -> bool {
         matches!(self, Self::H264MediumLossyOnly)
     }
+
+    /// The wire identifier for this codec — the inverse of [`Self::from_config_str`].
+    ///
+    /// The backend stores these strings verbatim on the trace, so they are the
+    /// same identifiers the config and `NCD_VIDEO_CODEC` accept. The round trip
+    /// is pinned by a unit test.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::LosslessPlusPreview => "h264_lossless",
+            Self::H264MediumLossyOnly => "h264_medium",
+        }
+    }
 }
 
 /// Inputs to one single-entry transcode invocation.
@@ -2009,6 +2021,30 @@ mod tests {
                 LossyVideoCodec::LosslessPlusPreview
             );
         }
+    }
+
+    #[test]
+    fn wire_str_round_trips_through_from_config_str() {
+        // The backend persists these strings verbatim, so a drift here silently
+        // mislabels every recording.
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            assert_eq!(
+                LossyVideoCodec::from_config_str(Some(codec.as_wire_str())),
+                codec,
+                "{codec:?} must survive a wire round trip"
+            );
+        }
+        assert_eq!(
+            LossyVideoCodec::LosslessPlusPreview.as_wire_str(),
+            "h264_lossless"
+        );
+        assert_eq!(
+            LossyVideoCodec::H264MediumLossyOnly.as_wire_str(),
+            "h264_medium"
+        );
     }
 
     #[tokio::test]
