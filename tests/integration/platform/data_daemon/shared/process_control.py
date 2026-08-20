@@ -20,7 +20,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Generator
+from collections.abc import Container, Generator, MutableMapping
 from contextlib import contextmanager
 
 from neuracore.core.utils.http_session import http_time_snapshot
@@ -320,8 +320,18 @@ def surface_worker_errors(fn):
     return wrapper
 
 
-def init_worker_logging(log_queue: multiprocessing.Queue, level: int) -> None:
-    """Route a pool worker's log records to the parent process.
+WorkerTimerStats = MutableMapping[int, dict[str, dict[str, float]]]
+"""Latest timer stats each pool worker has published, keyed by context index."""
+_worker_stats_sink: WorkerTimerStats | None = None
+"""Where this pool worker publishes its timer stats; ``None`` in the parent."""
+
+
+def init_worker_reporting(
+    log_queue: multiprocessing.Queue,
+    level: int,
+    stats_sink: WorkerTimerStats | None = None,
+) -> None:
+    """Route a pool worker's log records, and its timer stats, to the parent.
 
     Pool initializer. Spawned workers (macOS) start with no logging
     configuration, so their INFO records — Timer lines included — are
@@ -330,11 +340,14 @@ def init_worker_logging(log_queue: multiprocessing.Queue, level: int) -> None:
     root handlers with a ``QueueHandler`` ships every record to the parent
     instead, where :func:`relayed_worker_logs` replays them through the
     parent's handlers so worker Timer lines appear in the live log exactly
-    like single-context runs.
+    like single-context runs.  *stats_sink* is where
+    :func:`publish_timer_stats` reports this worker's accumulated stats.
     """
+    global _worker_stats_sink
     root = logging.getLogger()
     root.handlers[:] = [logging.handlers.QueueHandler(log_queue)]
     root.setLevel(level)
+    _worker_stats_sink = stats_sink
 
 
 @contextmanager
@@ -356,6 +369,35 @@ def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
     finally:
         log_queue.put(None)
         thread.join(timeout=5.0)
+
+
+def publish_timer_stats(key: int) -> None:
+    """Publish this worker's stats to the parent, replacing its last publication."""
+    if _worker_stats_sink is None:
+        return
+    with Timer._stats_lock:
+        snapshot = {label: dict(stats) for label, stats in Timer._stats.items()}
+    try:
+        _worker_stats_sink[key] = snapshot
+    except (OSError, EOFError):
+        # The parent's manager is already gone; diagnostics never break a run.
+        pass
+
+
+@contextmanager
+def worker_timer_stats_sink() -> Generator[WorkerTimerStats]:
+    """A sink pool workers publish their timer stats into while they run."""
+    with multiprocessing.Manager() as manager:
+        yield manager.dict()
+
+
+def merge_unreturned_worker_stats(
+    sink: WorkerTimerStats, returned_keys: Container[int]
+) -> None:
+    """Merge the published stats of every worker that returned no result."""
+    for key, snapshot in dict(sink).items():
+        if key not in returned_keys:
+            Timer.merge_stats(snapshot)
 
 
 # ---------------------------------------------------------------------------
