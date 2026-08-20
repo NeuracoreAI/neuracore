@@ -529,3 +529,82 @@ class TestSynchronizedRecording:
         assert not any(final_dir.parent.rglob("*recording.lock"))
         leftovers = [p for p in final_dir.parent.iterdir() if p != final_dir]
         assert leftovers == []
+
+    def test_decode_video_uses_resolved_frame_sync_arg(
+        self, synced_recording, tmp_path
+    ):
+        """The ffmpeg decode command must use the probed flag, not a hard-coded
+        `-vsync`: that spelling was removed in ffmpeg 8, so hard-coding it
+        breaks decoding on any ffmpeg 8+ install.
+        """
+        video_location = tmp_path / "video.mp4"
+        video_location.touch()
+        frames_dir = tmp_path / "frames"
+        frames_dir.mkdir()
+
+        with (
+            patch(f"{MODULE}._FFMPEG_AVAILABLE", True),
+            patch(f"{MODULE}._resolve_frame_sync_arg", return_value="-fps_mode"),
+            patch(f"{MODULE}.subprocess.run") as mock_run,
+        ):
+            synced_recording._decode_video(video_location, frames_dir)
+
+        ffmpeg_args = mock_run.call_args[0][0]
+        assert "-fps_mode" in ffmpeg_args
+        flag_index = ffmpeg_args.index("-fps_mode")
+        assert ffmpeg_args[flag_index + 1] == "passthrough"
+        assert "-vsync" not in ffmpeg_args
+
+
+class TestResolveFrameSyncArg:
+    """Tests for _resolve_frame_sync_arg's ffmpeg passthrough flag probe."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_cache(self):
+        """Clear the module-level memo so each test probes fresh."""
+        import neuracore.core.data.synced_recording as synced_recording_module
+
+        synced_recording_module._FFMPEG_FRAME_SYNC_ARG = None
+        yield
+        synced_recording_module._FFMPEG_FRAME_SYNC_ARG = None
+
+    def test_returns_fps_mode_when_ffmpeg_accepts_it(self):
+        """ffmpeg >= 5.1 accepts -fps_mode, so it should be preferred."""
+        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
+
+        with patch(f"{MODULE}.subprocess.run") as mock_run:
+            mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+            assert _resolve_frame_sync_arg() == "-fps_mode"
+
+    def test_returns_vsync_when_ffmpeg_rejects_fps_mode(self):
+        """ffmpeg < 5.1 rejects -fps_mode as unrecognised, so fall back to -vsync."""
+        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
+
+        with patch(f"{MODULE}.subprocess.run") as mock_run:
+            mock_run.return_value = SimpleNamespace(
+                returncode=1, stderr=b"Unrecognized option 'fps_mode'."
+            )
+
+            assert _resolve_frame_sync_arg() == "-vsync"
+
+    def test_returns_vsync_when_ffmpeg_binary_is_missing(self):
+        """No ffmpeg on PATH resolves to the legacy spelling, matching the
+        pre-existing _FFMPEG_AVAILABLE probe's fall-back behaviour.
+        """
+        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
+
+        with patch(f"{MODULE}.subprocess.run", side_effect=FileNotFoundError):
+            assert _resolve_frame_sync_arg() == "-vsync"
+
+    def test_probes_ffmpeg_only_once(self):
+        """The result is memoized: a second call must not spawn ffmpeg again."""
+        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
+
+        with patch(f"{MODULE}.subprocess.run") as mock_run:
+            mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+            assert _resolve_frame_sync_arg() == "-fps_mode"
+            assert _resolve_frame_sync_arg() == "-fps_mode"
+
+        mock_run.assert_called_once()
