@@ -1,5 +1,6 @@
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     PerThread,
+    SeparateProcessPerCamera,
     Synchronous,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -10,6 +11,40 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PACING_BURST_VIDEO,
     PACING_SATURATE,
 )
+
+
+def _separate_process_performance_cases(*, skip: bool = False) -> tuple:
+    """Cross-process workloads shared by offline and network suites."""
+    return (
+        SeparateProcessPerCamera(
+            duration_sec=20,
+            joint_count=7,
+            video_count=2,
+            image_width=256,
+            image_height=256,
+            recording_count=8,
+            joint_fps=80,
+            video_fps=30,
+            context_duration_mode=DURATION_MODE_VARIABLE,
+            producer_pacing=PACING_BURST_VIDEO,
+            video_detail=DETAIL_FLAT,
+            skip=skip,
+        ),
+        SeparateProcessPerCamera(
+            duration_sec=20,
+            joint_count=10,
+            video_count=1,
+            image_width=1920,
+            image_height=1080,
+            recording_count=8,
+            joint_fps=15,
+            video_fps=15,
+            producer_pacing=PACING_BURST_VIDEO,
+            video_detail=DETAIL_FLAT,
+            skip=skip,
+        ),
+    )
+
 
 PRE_NETWORK_INTEGRITY_CASES = (
     Synchronous(
@@ -107,6 +142,46 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
+    # A camera child that outlives many recording windows. Early windows must
+    # retire before the child exits without losing its chunks.
+    SeparateProcessPerCamera(
+        duration_sec=6,
+        recording_count=15,
+        joint_count=7,
+        video_count=1,
+        image_width=640,
+        image_height=480,
+        video_fps=30,
+        producer_pacing=PACING_BURST_VIDEO,
+        video_detail=DETAIL_FLAT,
+    ),
+    # Two camera children: frames, chunks, and windows must remain isolated,
+    # while the recording owner logs joints locally.
+    SeparateProcessPerCamera(
+        duration_sec=6,
+        recording_count=8,
+        joint_count=7,
+        video_count=2,
+        image_width=256,
+        image_height=256,
+        video_fps=30,
+        producer_pacing=PACING_BURST_VIDEO,
+        video_detail=DETAIL_FLAT,
+    ),
+    # RGB and depth from one device share a child process.
+    SeparateProcessPerCamera(
+        duration_sec=6,
+        recording_count=8,
+        joint_count=7,
+        video_count=1,
+        image_width=64,
+        image_height=64,
+        video_fps=30,
+        depth_count=1,
+        depth_mode="float16",
+        producer_pacing=PACING_BURST_VIDEO,
+        video_detail=DETAIL_FLAT,
+    ),
 )
 
 PRE_NETWORK_PERFORMANCE_CASES = (
@@ -197,6 +272,9 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
+    # Offline child processes do not receive a recording-start notification in
+    # this harness yet, so retain these workloads as discoverable skips.
+    *_separate_process_performance_cases(skip=True),
 )
 
 NETWORK_PERFORMANCE_CASES = (
@@ -375,4 +453,6 @@ NETWORK_PERFORMANCE_CASES = (
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
+    # Exercise camera transport and encode backlog across process boundaries.
+    *_separate_process_performance_cases(),
 )
