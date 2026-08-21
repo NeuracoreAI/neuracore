@@ -10,6 +10,7 @@ import os
 from typing import Any
 
 import requests
+from pyee import EventEmitter
 
 from neuracore.api.orgs_fetch import fetch_org_ids
 from neuracore.core.config.config_manager import get_config_manager
@@ -18,7 +19,7 @@ from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
-from .const import API_URL
+from .const import API_URL, AUTH_LOGOUT_EVENT
 from .exceptions import AuthenticationError, VersionMismatchError
 
 
@@ -55,7 +56,7 @@ def _format_version_validation_error(response: requests.Response) -> str:
     )
 
 
-class Auth(metaclass=SingletonMetaclass):
+class Auth(EventEmitter, metaclass=SingletonMetaclass):
     """Singleton class for managing Neuracore authentication state.
 
     This class handles API key management, access token retrieval, configuration
@@ -66,6 +67,7 @@ class Auth(metaclass=SingletonMetaclass):
 
     def __init__(self) -> None:
         """Initialize the Auth instance and load saved configuration."""
+        super().__init__()
         self._access_token = None
 
     def login(self, api_key: str | None = None) -> None:
@@ -156,6 +158,7 @@ class Auth(metaclass=SingletonMetaclass):
         config_manager.config.api_key = None
         config_manager.config.current_org_id = None
         config_manager.save_config()
+        self.emit(AUTH_LOGOUT_EVENT)
 
     def validate_version(self) -> None:
         """Validate client version compatibility with the Neuracore server.

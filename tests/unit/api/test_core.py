@@ -9,7 +9,7 @@ import neuracore as nc
 from neuracore.api import core as api_core
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import get_auth
-from neuracore.core.const import API_URL
+from neuracore.core.const import API_URL, AUTH_LOGOUT_EVENT
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
 
 
@@ -52,8 +52,17 @@ def test_logout(temp_config_dir, monkeypatch):
     with open(config_file, "w") as f:
         json.dump({"api_key": "test_key", "current_org_id": "test-org-id"}, f)
 
-    # Perform logout
-    nc.logout()
+    logout_listener = Mock()
+    auth = get_auth()
+    auth.add_listener(AUTH_LOGOUT_EVENT, logout_listener)
+
+    try:
+        # Perform logout
+        nc.logout()
+    finally:
+        auth.remove_listener(AUTH_LOGOUT_EVENT, logout_listener)
+
+    logout_listener.assert_called_once_with()
 
     # Verify config contents
     with open(config_file) as f:

@@ -35,6 +35,7 @@ from .exceptions import RobotError, ValidationError
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
+    from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 
 logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
@@ -121,6 +122,7 @@ class Robot:
         )
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
+        self._recording_state_manager: "RecordingStateManager | None" = None
 
         self.org_id = org_id or get_current_org()
 
@@ -384,11 +386,13 @@ class Robot:
     def _register_remote_stop_handler(self) -> None:
         """Register a callback to drain streams when a remote stop arrives."""
         assert self.id is not None
-        get_recording_state_manager().register_remote_stop_handler(
+        manager = get_recording_state_manager()
+        manager.register_remote_stop_handler(
             robot_id=self.id,
             instance=self.instance,
             callback=self._drain_streams_and_notify_daemon,
         )
+        self._recording_state_manager = manager
 
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
@@ -789,10 +793,10 @@ class Robot:
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()
-        if self.id is not None:
-            get_recording_state_manager().deregister_remote_stop_handler(
-                self.id, self.instance
-            )
+        manager = self._recording_state_manager
+        self._recording_state_manager = None
+        if self.id is not None and manager is not None:
+            manager.deregister_remote_stop_handler(self.id, self.instance)
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None

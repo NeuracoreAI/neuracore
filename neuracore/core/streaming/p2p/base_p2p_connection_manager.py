@@ -88,6 +88,11 @@ class BaseStreamManagerOrchestrator(ABC):
     """Base class for a object that creates and manages stream managers."""
 
     @abstractmethod
+    def close(self) -> None:
+        """Close every streaming resource owned by this orchestrator."""
+        raise NotImplementedError("close not implemented")
+
+    @abstractmethod
     def get_manager(
         self, type: ManagerType, robot_id: str, robot_instance: int
     ) -> BaseP2PStreamManager:
