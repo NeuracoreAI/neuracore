@@ -62,8 +62,14 @@ dataset_sample_cache: true
 num_train_workers: 4
 num_val_workers: 2
 
-# Maximum number of workers to use for prefetching recordings
+# Threads the prefetch uses to decode videos with ffmpeg. Downloading does not
+# use these threads.
 max_prefetch_workers: 4
+
+# Network requests the prefetch keeps outstanding at once, all from a single
+# thread. Raise this, rather than max_prefetch_workers, to make the prefetch
+# faster; throughput flattens out beyond ~16.
+prefetch_inflight_requests: 16
 
 max_delay_s: null
 trim_start_end: true
