@@ -52,12 +52,15 @@ def get_dataset(name: str | None = None, id: str | None = None) -> Dataset:
     return _active_dataset
 
 
-def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
+def merge_datasets(
+    name: str, dataset_names: list[str], *, wait: bool = True
+) -> Dataset:
     """Merge multiple datasets into a new combined dataset.
 
     Args:
         name: Name for the new merged dataset
         dataset_names: List of dataset names to merge
+        wait: Whether to wait for the merging operation to complete before returning.
 
     Returns:
         Dataset: The newly created merged dataset
@@ -69,18 +72,18 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
     auth = get_auth()
     org_id = get_current_org()
 
-    source_ids = []
+    source_datasets = []
     for dataset_name in dataset_names:
         ds = Dataset.get_by_name(dataset_name, non_exist_ok=True)
         if ds is None:
             raise DatasetError(f"Dataset '{dataset_name}' not found.")
-        source_ids.append(ds.id)
+        source_datasets.append(ds)
 
     session = thread_local_session()
     response = session.post(
         f"{API_URL}/org/{org_id}/datasets/merge",
         headers=auth.get_headers(),
-        json={"name": name, "sourceDatasetIds": source_ids},
+        json={"name": name, "sourceDatasetIds": [ds.id for ds in source_datasets]},
     )
     if not response.ok:
         detail = extract_error_detail(response)
@@ -95,9 +98,48 @@ def merge_datasets(name: str, dataset_names: list[str]) -> Dataset:
         is_shared=dataset_model.is_shared,
         data_types=list(dataset_model.all_data_types.keys()),
     )
+    if not wait:
+        logger.warning(
+            "Dataset merging is running in the background; recordings may not be "
+            "available immediately."
+        )
+        GlobalSingleton()._active_dataset_id = merged.id
+        GlobalSingleton()._active_dataset = merged
+        return merged
+
+    source_recording_ids = {
+        recording.id for dataset in source_datasets for recording in dataset
+    }
+    _wait_for_dataset_recordings(
+        merged, len(source_recording_ids), desc="Merging datasets"
+    )
+
     GlobalSingleton()._active_dataset_id = merged.id
     GlobalSingleton()._active_dataset = merged
     return merged
+
+
+def _wait_for_dataset_recordings(
+    dataset: Dataset, total_recordings: int, *, desc: str
+) -> None:
+    """Wait for a background dataset operation and display its progress."""
+    completed_recordings = min(len(dataset), total_recordings)
+    if completed_recordings >= total_recordings:
+        return
+
+    pbar = tqdm(total=total_recordings, desc=desc, unit="recording")
+    pbar.n = completed_recordings
+    pbar.refresh()
+    try:
+        while completed_recordings < total_recordings:
+            time.sleep(CLONE_PROGRESS_POLL_INTERVAL_S)
+            dataset._num_recordings = None
+            new_completed_recordings = min(len(dataset), total_recordings)
+            if new_completed_recordings > completed_recordings:
+                pbar.update(new_completed_recordings - completed_recordings)
+                completed_recordings = new_completed_recordings
+    finally:
+        pbar.close()
 
 
 def clone_dataset(
@@ -135,11 +177,21 @@ def clone_dataset(
     # If dataset_name is provided, resolve it to a dataset object
     if dataset_name is not None:
         source_dataset = Dataset.get_by_name(dataset_name)
+    elif dataset_id is not None:
+        source_dataset = Dataset.get_by_id(dataset_id)
 
     # Avoid Dataset truthiness here because it delegates to __len__ and may
     # fetch recordings from the API.
     if source_dataset is not None:
         dataset_id = source_dataset.id
+
+    description = getattr(source_dataset, "description", None)
+    payload = {
+        "name": new_dataset_name,
+        "sourceDatasetId": dataset_id,
+    }
+    if description is not None:
+        payload["description"] = description
 
     auth = get_auth()
     org_id = get_current_org()
@@ -147,7 +199,7 @@ def clone_dataset(
     response = session.post(
         f"{API_URL}/org/{org_id}/datasets/clone",
         headers=auth.get_headers(),
-        json={"name": new_dataset_name, "sourceDatasetId": dataset_id},
+        json=payload,
     )
     if not response.ok:
         detail = extract_error_detail(response)
@@ -174,30 +226,11 @@ def clone_dataset(
         GlobalSingleton()._active_dataset = cloned
         return cloned
 
-    # resolve for source_dataset if not provided, to get the total number of recordings
-    if source_dataset is None:
-        if dataset_id is None:
-            raise DatasetError("Source dataset ID is required to wait for cloning.")
-        source_dataset = Dataset.get_by_id(dataset_id)
     if source_dataset is None:
         raise DatasetError("Source dataset could not be found.")
 
     total_recordings = len(source_dataset)
-    cloned_recordings = min(len(cloned), total_recordings)
-    if cloned_recordings < total_recordings:
-        pbar = tqdm(total=total_recordings, desc="Cloning dataset", unit="recording")
-        pbar.n = cloned_recordings
-        pbar.refresh()
-        try:
-            while cloned_recordings < total_recordings:
-                time.sleep(CLONE_PROGRESS_POLL_INTERVAL_S)
-                cloned._num_recordings = None
-                new_cloned_recordings = min(len(cloned), total_recordings)
-                if new_cloned_recordings > cloned_recordings:
-                    pbar.update(new_cloned_recordings - cloned_recordings)
-                    cloned_recordings = new_cloned_recordings
-        finally:
-            pbar.close()
+    _wait_for_dataset_recordings(cloned, total_recordings, desc="Cloning dataset")
 
     GlobalSingleton()._active_dataset_id = cloned.id
     GlobalSingleton()._active_dataset = cloned

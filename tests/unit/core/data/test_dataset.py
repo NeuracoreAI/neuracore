@@ -282,6 +282,12 @@ def test_nc_clone_dataset_from_dataset_id(
 ):
     """Test cloning when the source is provided by ID."""
     nc.login("test_api_key")
+    source_response = dataset_response.model_copy(update={"id": "source_dataset"})
+    mock_data_requests.get(
+        f"{API_URL}/org/{mocked_org_id}/datasets/source_dataset",
+        json=source_response.model_dump(mode="json"),
+        status_code=200,
+    )
     dataset_response.id = "cloned_dataset"
     dataset_response.name = "clone"
     mock_data_requests.post(
