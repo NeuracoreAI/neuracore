@@ -124,7 +124,7 @@ def test_merge_datasets_success_returns_dataset(monkeypatch):
     monkeypatch.setattr(api_datasets, "Dataset", _FakeDataset)
 
     # Act
-    result = api_datasets.merge_datasets("merged", ["a", "b"])
+    result = api_datasets.merge_datasets("merged", ["a", "b"], wait=False)
 
     # Assert
     assert result.id == "new-id"
@@ -132,6 +132,66 @@ def test_merge_datasets_success_returns_dataset(monkeypatch):
         "name": "merged",
         "sourceDatasetIds": ["id-a", "id-b"],
     }
+
+
+def test_merge_datasets_waits_for_unique_source_recordings(monkeypatch):
+    """A merge waits for the deduplicated source recording count."""
+    session = _wire(monkeypatch, _FakeResponse(200, {"id": "new-id"}))
+
+    class _FakeModel:
+        id = "new-id"
+        name = "merged"
+        size_bytes = 10
+        tags: list[str] = []
+        is_shared = False
+        all_data_types: dict = {}
+
+    class _Recording:
+        def __init__(self, recording_id):
+            self.id = recording_id
+
+    class _SourceDataset(_DummyDataset):
+        def __init__(self, name, recording_ids):
+            super().__init__(name)
+            self.recordings = [
+                _Recording(recording_id) for recording_id in recording_ids
+            ]
+
+        def __iter__(self):
+            return iter(self.recordings)
+
+    sources = {
+        "a": _SourceDataset("a", ["one", "shared"]),
+        "b": _SourceDataset("b", ["shared", "two"]),
+    }
+
+    class _FakeDataset:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        @classmethod
+        def get_by_name(cls, name, non_exist_ok=False):
+            return sources[name]
+
+    monkeypatch.setattr(
+        api_datasets.DatasetModel,
+        "model_validate",
+        staticmethod(lambda payload: _FakeModel()),
+    )
+    monkeypatch.setattr(api_datasets, "Dataset", _FakeDataset)
+    waited = {}
+    monkeypatch.setattr(
+        api_datasets,
+        "_wait_for_dataset_recordings",
+        lambda dataset, total, *, desc: waited.update(
+            dataset=dataset, total=total, desc=desc
+        ),
+    )
+
+    result = api_datasets.merge_datasets("merged", ["a", "b"])
+
+    assert session.last_kwargs["json"]["sourceDatasetIds"] == ["id-a", "id-b"]
+    assert waited == {"dataset": result, "total": 3, "desc": "Merging datasets"}
 
 
 def test_clone_dataset_surfaces_backend_error(monkeypatch):
@@ -200,4 +260,42 @@ def test_clone_dataset_success_returns_dataset(monkeypatch):
     assert session.last_kwargs["json"] == {
         "name": "clone",
         "sourceDatasetId": "id-src",
+    }
+
+
+def test_clone_dataset_by_id_carries_over_description(monkeypatch):
+    """Cloning by ID resolves the source dataset and copies its description."""
+    session = _wire(monkeypatch, _FakeResponse(200, {"id": "clone-id"}))
+
+    class _FakeModel:
+        id = "clone-id"
+        name = "clone"
+        size_bytes = 10
+        tags: list[str] = []
+        is_shared = False
+        description = "source description"
+        all_data_types: dict = {}
+
+    class _FakeDataset:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+        @classmethod
+        def get_by_id(cls, dataset_id, non_exist_ok=False):
+            return cls(id=dataset_id, description="source description")
+
+    monkeypatch.setattr(
+        api_datasets.DatasetModel,
+        "model_validate",
+        staticmethod(lambda payload: _FakeModel()),
+    )
+    monkeypatch.setattr(api_datasets, "Dataset", _FakeDataset)
+
+    result = api_datasets.clone_dataset("clone", dataset_id="source-id", wait=False)
+
+    assert result.id == "clone-id"
+    assert session.last_kwargs["json"] == {
+        "name": "clone",
+        "sourceDatasetId": "source-id",
+        "description": "source description",
     }
