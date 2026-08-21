@@ -46,7 +46,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case import build_test_case
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
         ContextSpec,
     )
