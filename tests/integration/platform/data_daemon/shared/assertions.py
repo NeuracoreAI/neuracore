@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -70,6 +71,9 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
     encode_depth_frame,
     frame_code_base,
 )
+from tests.integration.platform.data_daemon.shared.test_case.streams import (
+    late_starting_trace_keys,
+)
 
 if TYPE_CHECKING:
     from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
@@ -80,12 +84,17 @@ if TYPE_CHECKING:
     )
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DATA_TYPE_BY_STREAM,
     DEPTH_ROUND_TRIP_ATOL_M,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
     FRAME_BYTE_LENGTH,
     FRAME_GRID_SIZE,
+    LATE_START_SYNC_POINT_TOLERANCE,
+    STREAM_JOINT_POSITIONS,
+    STREAM_JOINT_TORQUES,
+    STREAM_JOINT_VELOCITIES,
     DepthMode,
 )
 
@@ -542,6 +551,39 @@ def _assert_synced_depth_values_round_trip(
     )
 
 
+def _assert_channel_counts(
+    *,
+    label: str,
+    data_type: str,
+    counts: dict[str, int],
+    expected_names: Sequence[str],
+    sync_points: int,
+    late_trace_keys: frozenset[str],
+) -> None:
+    """Assert each expected channel appears in each one of the episode's sync points."""
+    from neuracore_types.utils import validate_safe_name
+
+    for name in expected_names:
+        got = counts.get(name)
+        if f"{data_type}/{validate_safe_name(name)}" in late_trace_keys:
+            assert got is not None and 0 < got <= sync_points, (
+                f"{label} for {name!r} is logged by a late-starting producer, so "
+                f"1..{sync_points} frame(s) were expected: got {got}"
+            )
+            assert sync_points - got <= LATE_START_SYNC_POINT_TOLERANCE, (
+                f"{label} for {name!r} missed {sync_points - got} leading sync "
+                f"point(s), more than the {LATE_START_SYNC_POINT_TOLERANCE} a "
+                "start notification in flight explains"
+            )
+        else:
+            assert got == sync_points, (
+                f"{label} missing for {name!r}: "
+                f"got {got} frame(s), expected {sync_points}"
+            )
+    unexpected = set(counts) - set(expected_names)
+    assert not unexpected, f"Unexpected {label} channel(s) in episode: {unexpected}"
+
+
 def _verify_synched_episode_summary(
     *,
     summary: dict[str, object],
@@ -577,23 +619,23 @@ def _verify_synched_episode_summary(
     # --- Timestamps ---
     _assert_synced_episode_timestamps_are_sane(timestamps=timestamps, result=result)
 
+    late_trace_keys = late_starting_trace_keys(case)
+
     # --- Joint data: counts then values ---
     joint_names = result.joint_names
-    for label, count_key in (
-        ("position", "joint_position_counts"),
-        ("velocity", "joint_velocity_counts"),
-        ("torque", "joint_torque_counts"),
+    for label, kind, count_key in (
+        ("Joint position", STREAM_JOINT_POSITIONS, "joint_position_counts"),
+        ("Joint velocity", STREAM_JOINT_VELOCITIES, "joint_velocity_counts"),
+        ("Joint torque", STREAM_JOINT_TORQUES, "joint_torque_counts"),
     ):
-        counts = dict(summary[count_key])
-        for joint_name in joint_names:
-            assert counts.get(joint_name) == sync_points, (
-                f"Joint {label} missing for joint {joint_name!r}: "
-                f"got {counts.get(joint_name)} frame(s), expected {sync_points}"
-            )
-        unexpected_joints = set(counts) - set(joint_names)
-        assert (
-            not unexpected_joints
-        ), f"Unexpected joint(s) in {label} counts: {unexpected_joints}"
+        _assert_channel_counts(
+            label=label,
+            data_type=DATA_TYPE_BY_STREAM[kind],
+            counts=dict(summary[count_key]),
+            expected_names=joint_names,
+            sync_points=sync_points,
+            late_trace_keys=late_trace_keys,
+        )
 
     for frame_index, joint_name, actual_value in summary["joint_position_values"]:
         assert (
@@ -609,16 +651,14 @@ def _verify_synched_episode_summary(
         )
 
     # --- Custom markers ---
-    custom_counts = dict(summary["custom_counts"])
-    for marker_name in result.marker_names:
-        assert custom_counts.get(marker_name) == sync_points, (
-            f"Custom marker {marker_name!r}: "
-            f"got {custom_counts.get(marker_name)}, expected {sync_points}"
-        )
-    unexpected_markers = set(custom_counts) - set(result.marker_names)
-    assert (
-        not unexpected_markers
-    ), f"Unexpected custom marker(s) in episode: {unexpected_markers}"
+    _assert_channel_counts(
+        label="Custom marker",
+        data_type="CUSTOM_1D",
+        counts=dict(summary["custom_counts"]),
+        expected_names=result.marker_names,
+        sync_points=sync_points,
+        late_trace_keys=late_trace_keys,
+    )
 
     # --- Depth cameras: presence, counts, and value round-trip ---
     # Runs independently of the RGB-only gates below — depth is never
@@ -627,16 +667,14 @@ def _verify_synched_episode_summary(
     # (no RGB) must still be checked. Gated on `has_depth` so a depth-count=0
     # case executes no depth-specific assertion or lookup at all.
     if result.has_depth:
-        depth_counts = dict(summary["depth_counts"])
-        for depth_camera_name in result.depth_camera_names:
-            assert depth_counts.get(depth_camera_name) == sync_points, (
-                f"Depth frames missing for camera {depth_camera_name!r}: "
-                f"got {depth_counts.get(depth_camera_name)}, expected {sync_points}"
-            )
-        unexpected_depth_cameras = set(depth_counts) - set(result.depth_camera_names)
-        assert (
-            not unexpected_depth_cameras
-        ), f"Unexpected camera(s) in depth counts: {unexpected_depth_cameras}"
+        _assert_channel_counts(
+            label="Depth frames",
+            data_type="DEPTH_IMAGES",
+            counts=dict(summary["depth_counts"]),
+            expected_names=result.depth_camera_names,
+            sync_points=sync_points,
+            late_trace_keys=late_trace_keys,
+        )
 
         depth_frames_by_camera = dict(summary["depth_frames"])
         for depth_camera_index, depth_camera_name in enumerate(
@@ -668,16 +706,14 @@ def _verify_synched_episode_summary(
         return
 
     # --- Camera frame counts ---
-    rgb_counts = dict(summary["rgb_counts"])
-    for camera_name in result.camera_names:
-        assert rgb_counts.get(camera_name) == sync_points, (
-            f"RGB frames missing for camera {camera_name!r}: "
-            f"got {rgb_counts.get(camera_name)}, expected {sync_points}"
-        )
-    unexpected_cameras = set(rgb_counts) - set(result.camera_names)
-    assert (
-        not unexpected_cameras
-    ), f"Unexpected camera(s) in RGB counts: {unexpected_cameras}"
+    _assert_channel_counts(
+        label="RGB frames",
+        data_type="RGB_IMAGES",
+        counts=dict(summary["rgb_counts"]),
+        expected_names=result.camera_names,
+        sync_points=sync_points,
+        late_trace_keys=late_trace_keys,
+    )
 
     # --- Camera frame codes ---
     # Frame codes are integers painted into each frame's pixels so the decoded

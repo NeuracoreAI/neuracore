@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONDEMNED_PROVENANCE_MARGIN_S,
     DETAIL_FLAT,
     DETAIL_REALISTIC,
     FRAME_BYTE_LENGTH,
@@ -203,17 +204,19 @@ def _assert_timestamps_match(
     failures: list[TraceFailure],
     durations: dict[str, float],
     unknowable_timestamps: frozenset[float] = frozenset(),
+    condemned_timestamps: dict[float, str] | None = None,
 ) -> None:
     """Assert all timestamps exactly match the expected list (no tolerance).
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
 
-    *unknowable_timestamps* are frames emitted while one of the recording's
-    boundaries was passing, so neither side can say whether the daemon took them
-    (see ``test_case.boundaries._classify_boundary_frames``). They are removed
-    from **both** lists up front — never permitted on one — and what remains is
-    compared exactly. Empty for every other case.
+    *unknowable_timestamps* are frames logged while a recording boundary was
+    passing; they are removed from **both** lists before comparison, never
+    permitted on one side only.
+
+    *condemned_timestamps* names why the classifier ruled out a timestamp,
+    read only to explain a surplus.
 
     Appends :class:`TraceFailure` instances to *failures* so the caller can
     aggregate traces that share the same failure body (e.g. all joints failing
@@ -226,12 +229,15 @@ def _assert_timestamps_match(
         ]
 
     if len(timestamps) != len(expected_timestamps):
+        located = _locate_count_mismatch(
+            timestamps, expected_timestamps, condemned_timestamps or {}
+        )
         failures.append(
             TraceFailure(
                 trace_key=trace_key,
                 body=(
                     f"timestamp count mismatch: expected"
-                    f" {len(expected_timestamps)}, got {len(timestamps)}"
+                    f" {len(expected_timestamps)}, got {len(timestamps)} — {located}"
                 ),
             )
         )
@@ -256,6 +262,71 @@ def _assert_timestamps_match(
 
     if timestamps:
         durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
+
+
+def _render_timestamps(values: list[float], limit: int = 3) -> str:
+    """Render the first *limit* timestamps, noting how many were withheld."""
+    shown = ", ".join(f"{value:.6f}" for value in values[:limit])
+    remainder = len(values) - limit
+    return shown + (f" (+{remainder} more)" if remainder > 0 else "")
+
+
+def _explain_surplus(values: list[float], condemned: dict[float, str]) -> str:
+    """Render *values* with the distinct reasons they were ruled out."""
+    rendered = _render_timestamps(values)
+    reasons = sorted({condemned[ts] for ts in values if ts in condemned})
+    unexplained = sum(1 for ts in values if ts not in condemned)
+    if unexplained:
+        reasons.append(
+            f"{unexplained} with no recorded reason — logged over"
+            f" {CONDEMNED_PROVENANCE_MARGIN_S:g}s from this recording's control"
+            f" calls, or never logged at all"
+        )
+    return rendered + (f" [{'; '.join(reasons)}]" if reasons else "")
+
+
+def _locate_count_mismatch(
+    timestamps: list[float],
+    expected_timestamps: list[float],
+    condemned: dict[float, str],
+) -> str:
+    """Say where a count mismatch's surplus and shortfall sit, and why."""
+    surplus = sorted((Counter(timestamps) - Counter(expected_timestamps)).elements())
+    shortfall = sorted((Counter(expected_timestamps) - Counter(timestamps)).elements())
+    duplicated = sorted(ts for ts, n in Counter(timestamps).items() if n > 1)
+
+    parts: list[str] = []
+    if duplicated:
+        parts.append(
+            f"{len(duplicated)} duplicated on disk: {_render_timestamps(duplicated)}"
+        )
+    if not expected_timestamps:
+        if surplus:
+            parts.append(
+                f"{len(surplus)} surplus: {_explain_surplus(surplus, condemned)}"
+            )
+        return "; ".join(parts) if parts else "nothing expected and nothing on disk"
+
+    first, last = expected_timestamps[0], expected_timestamps[-1]
+    for label, values, edge in (
+        ("before the first expected", [ts for ts in surplus if ts < first], first),
+        ("past the last expected", [ts for ts in surplus if ts > last], last),
+    ):
+        if values:
+            distances = [abs(edge - ts) for ts in values]
+            parts.append(
+                f"{len(values)} surplus {min(distances):.3f}s-{max(distances):.3f}s"
+                f" {label}: {_explain_surplus(values, condemned)}"
+            )
+    interior = [ts for ts in surplus if first <= ts <= last]
+    if interior:
+        parts.append(
+            f"{len(interior)} surplus inside the expected span:"
+            f" {_explain_surplus(interior, condemned)}"
+        )
+    if shortfall:
+        parts.append(f"{len(shortfall)} missing: {_render_timestamps(shortfall)}")
+    return "; ".join(parts) if parts else "same values in a different order"
 
 
 def _assert_no_trailing_rgb_gap(
@@ -443,6 +514,7 @@ def assert_disk_recording_properties(
                     unknowable_timestamps=frozenset(
                         classification.unknowable_timestamps
                     ),
+                    condemned_timestamps=classification.condemned_reasons,
                 )
                 _assert_no_trailing_rgb_gap(
                     trace_key=trace_key,
@@ -455,6 +527,20 @@ def assert_disk_recording_properties(
                     video_fps=result.video_fps,
                     failures=trace_failures,
                 )
+
+            for trace_key, classification in expected.items():
+                owed = classification.owed_timestamps
+                if owed and trace_key not in mapped_trace_timestamps:
+                    trace_failures.append(
+                        TraceFailure(
+                            trace_key=trace_key,
+                            body=(
+                                f"owed {len(owed)} timestamp(s) but"
+                                f" is absent from disk — traces found:"
+                                f" {sorted(mapped_trace_timestamps)}"
+                            ),
+                        )
+                    )
 
             if trace_failures:
                 all_failures.append(
