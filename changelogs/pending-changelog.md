@@ -20,3 +20,5 @@ The data daemon now works with ffmpeg 8 and later. It selects the frame timing o
 Dataset video decoding now works with ffmpeg 8 and later too. It selects the frame timing option the installed ffmpeg accepts, instead of falling back to the slower PyAV decoder.
 
 The data daemon batches video chunk encodes under backlog, so a machine that falls behind recovers with fewer ffmpeg invocations.
+
+Final videos now carry the exact capture timing of every frame, so chunk boundaries no longer drift and real capture gaps are preserved.
