@@ -701,6 +701,7 @@ def _main(cfg: DictConfig) -> None:
             cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=True,
             max_prefetch_workers=cfg.max_prefetch_workers,
+            prefetch_inflight_requests=cfg.prefetch_inflight_requests,
             max_delay_s=(
                 sys.float_info.max
                 if getattr(cfg, "max_delay_s", None) is None

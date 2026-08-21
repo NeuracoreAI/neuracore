@@ -21,6 +21,7 @@ from neuracore_types import SynchronizedDataset as SynchronizedDatasetModel
 from tqdm import tqdm
 
 from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.data.prefetch import DEFAULT_INFLIGHT_REQUESTS
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 
@@ -539,6 +540,7 @@ class Dataset:
         frequency: int = 0,
         prefetch_videos: bool = False,
         max_prefetch_workers: int = 4,
+        prefetch_inflight_requests: int = DEFAULT_INFLIGHT_REQUESTS,
         max_delay_s: float = sys.float_info.max,
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
@@ -552,7 +554,9 @@ class Dataset:
             cross_embodiment_union: Dict specifying robot IDs to data types and
                 their names to include in synchronization.
             prefetch_videos: Whether to prefetch video data for the synchronized data.
-            max_prefetch_workers: Number of threads to use for prefetching videos.
+            max_prefetch_workers: Threads used to decode prefetched videos.
+            prefetch_inflight_requests: Network requests the prefetch keeps
+                outstanding at once, from a single thread.
             max_delay_s: Maximum allowed delay for synchronization.
             allow_duplicates: Whether duplicate points are allowed when syncing.
             trim_start_end: Whether to trim start/end during synchronization.
@@ -604,6 +608,7 @@ class Dataset:
             cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=prefetch_videos,
             max_prefetch_workers=max_prefetch_workers,
+            prefetch_inflight_requests=prefetch_inflight_requests,
             max_delay_s=max_delay_s,
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
