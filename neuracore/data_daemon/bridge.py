@@ -252,6 +252,11 @@ class RecordingContext:
         window. ``timestamp`` is the recording's *capture* stop time and is
         separate from that boundary, never used for window membership.
 
+        Any producer may stop a recording, whether or not it opened the window.
+        The stop names the window it means, so several processes stopping the same
+        recording — which one web-initiated stop causes — cannot end up closing a
+        later one.
+
         This publishes the stop only; :meth:`flush_source` seals the writer's
         tail chunks and must be called straight after, so the caller can close
         its own logging gate in between.
