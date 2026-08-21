@@ -31,6 +31,7 @@
 //! This file is a thin PyO3 façade: the `#[pyfunction]` wrappers do argument
 //! validation, release the GIL, and delegate into the submodules.
 //!
+//! - [`gate`] — whether a source's data is worth forwarding right now.
 //! - [`paths`] — filesystem layout shared with the daemon (recordings root,
 //!   spool paths, `(source, sensor)` stream keys).
 //! - [`publisher`] — per-thread iceoryx2 publisher state, fork safety, the
@@ -43,6 +44,8 @@
 pub mod nut_writer;
 
 mod depth;
+mod gate;
+mod logging;
 mod paths;
 mod publisher;
 mod query;
@@ -103,6 +106,10 @@ fn start_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // This process opened the window, so its own gate needs no round trip
+        // and must not lag: frames logged between here and the daemon's row
+        // write would otherwise be dropped.
+        gate::note_window_opened_locally(&robot_id, robot_instance);
         // Tell the writer where the window opened, so no chunk spans it.
         let _ = writer_queue().push(WriterMsg::Boundary {
             robot_id,
@@ -142,6 +149,12 @@ fn log_joints(
         ));
     }
     if values.is_empty() {
+        return Ok(());
+    }
+    // The same gate video goes through. A process that cannot discover a window
+    // cannot log joints into one either, so refusing only the expensive path
+    // would leave a non-owner half-recorded.
+    if !gate::admits_data(robot_id, robot_instance) {
         return Ok(());
     }
     let robot_id = robot_id.to_string();
@@ -218,6 +231,14 @@ fn log_frame(
         return Err(PyValueError::new_err(
             "video frame buffer must be C-contiguous",
         ));
+    }
+    // Ask before copying: an idle camera process would otherwise pay a full
+    // frame copy, encode and spool write per frame against the same budget a
+    // real recording draws on. Argument validation still runs above, so a caller
+    // learns about a malformed frame whether or not a window is open. A map read,
+    // so it holds the GIL rather than paying a detach/reattach per frame.
+    if !gate::admits_data(robot_id, robot_instance) {
+        return Ok(());
     }
     // Resolve the recordings root *here*, on the GIL, before copying the frame
     // or handing it to the writer thread. Video is the only path that needs the
@@ -297,6 +318,12 @@ fn log_json(
         return Err(PyValueError::new_err(
             "robot_id, data_type and name must not be empty",
         ));
+    }
+    // As for joints and video: refuse before copying the payload, and refuse for
+    // the same reason — one gate for every data type, or a non-owner records
+    // only the half that was cheap to fix.
+    if !gate::admits_data(robot_id, robot_instance) {
+        return Ok(());
     }
     let robot_id = robot_id.to_string();
     let data_type = data_type.to_string();
@@ -382,6 +409,10 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // Shut our own gate with the window. Deliberately after the publish, so
+        // the boundary the daemon records and the last frame we admit are on the
+        // same side of the same instant.
+        gate::note_window_closed_locally(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -455,6 +486,7 @@ fn cancel_recording(
         let _ = ack_rx.recv();
         // Publish `CancelRecording` from THIS (the calling) thread's publisher,
         // ordered with Start/Stop on the same port (see the writer module note).
+        gate::note_window_closed_locally(&robot_id, robot_instance);
         publish(&Envelope::CancelRecording {
             robot_id,
             robot_instance,
@@ -526,6 +558,21 @@ fn get_recording_id(
     })
 }
 
+/// Whether data logged for this source would currently be recorded.
+///
+/// A map read, no IPC — safe to call per sample. Lets the SDK skip work it would
+/// only do to have the sample refused: serialising a JSON payload, materialising
+/// a joint value list, making a frame buffer contiguous. Every `log_*` entry
+/// point re-checks itself, so this is an optimisation and never the guarantee.
+#[pyfunction]
+#[pyo3(signature = (robot_id, robot_instance))]
+fn admits_data(robot_id: &str, robot_instance: i64) -> PyResult<bool> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    Ok(gate::admits_data(robot_id, robot_instance))
+}
+
 /// Wait until the Rust daemon answers a side-effect-free IPC health probe.
 #[pyfunction]
 #[pyo3(signature = (timeout_s))]
@@ -562,6 +609,9 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Before anything else can want to report a problem: several failures in
+    // here are otherwise indistinguishable from an idle sensor.
+    logging::init();
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
@@ -570,6 +620,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
+    module.add_function(wrap_pyfunction!(admits_data, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;

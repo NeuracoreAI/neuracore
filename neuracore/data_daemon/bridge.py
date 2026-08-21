@@ -301,6 +301,19 @@ class RecordingContext:
             self._robot_id, self._robot_instance, marker_ns, timeout_s
         )
 
+    def admits_data(self) -> bool:
+        """Whether data logged for this source right now would be recorded.
+
+        A map read, no IPC — safe to call per sample. Lets a caller skip work it
+        would only do to have the sample refused: serialising a JSON payload,
+        materialising a joint value list, making a frame buffer contiguous. Every
+        ``log_*`` re-checks itself, so this is an optimisation and never the
+        guarantee.
+        """
+        if not self._robot_id:
+            return False
+        return _load_native().admits_data(self._robot_id, self._robot_instance)
+
     def close(self) -> None:
         """Release resources owned by this instance.
 
