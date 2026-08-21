@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
@@ -14,7 +15,10 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
-from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
+    reclaim_leftover_daemons,
+)
 from tests.integration.platform.data_daemon.shared.profiles import (
     cleanup_test_profiles,
     profile_path,
@@ -60,6 +64,8 @@ if _REPO_ROOT not in sys.path:
 
 
 _BATCH_START_CLEANED_NODEIDS: set[str] = set()
+
+logger = logging.getLogger(__name__)
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -329,6 +335,15 @@ def performance_report(
         )
 
     return create
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    """Stop any daemon still running when the session ends."""
+    del session, exitstatus
+    try:
+        reclaim_leftover_daemons()
+    except Exception as error:
+        logger.warning("could not stop leftover daemons at session end: %s", error)
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):

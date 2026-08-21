@@ -454,6 +454,7 @@ sencode
 seqlen
 serde
 sess
+sessionfinish
 setpriority
 setsid
 setuptools
