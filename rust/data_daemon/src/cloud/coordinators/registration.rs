@@ -23,7 +23,7 @@ use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::models::RegisterTraceRequest;
 use crate::api::ApiClient;
-use crate::cloud::cloud_files::cloud_file_list;
+use crate::cloud::cloud_files::{cloud_file_list, is_video_family};
 use crate::cloud::{ConfigRx, OrgIdRx};
 use crate::encoding::video_encoder::LossyVideoCodec;
 use crate::lifecycle::shutdown::ShutdownSignal;
@@ -225,8 +225,7 @@ async fn submit_batch(
             .iter()
             .map(|trace| {
                 let data_type = trace.data_type.as_deref().unwrap_or("");
-                let lossy_only =
-                    LossyVideoCodec::for_trace(data_type, codec_value.as_deref()).is_lossy_only();
+                let codec = LossyVideoCodec::for_trace(data_type, codec_value.as_deref());
                 RegisterTraceRequest {
                     recording_id: cloud_id.clone(),
                     data_type: trace.data_type.clone().unwrap_or_default(),
@@ -234,8 +233,13 @@ async fn submit_batch(
                     cloud_files: cloud_file_list(
                         data_type,
                         trace.data_type_name.as_deref(),
-                        lossy_only,
+                        codec.is_lossy_only(),
                     ),
+                    // Report the codec only where there is video to encode. A
+                    // scalar trace resolves to the default via `for_trace`'s
+                    // fallthrough, which is a placeholder rather than a claim
+                    // about how it was stored, so it must not reach the backend.
+                    codec: is_video_family(data_type).then(|| codec.as_wire_str().to_string()),
                 }
             })
             .collect();
