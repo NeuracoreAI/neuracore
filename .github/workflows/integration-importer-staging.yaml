@@ -101,11 +101,16 @@ jobs:
           extras: dev,import
           pytorch-cpu: "true"
 
-      # torchcodec (lerobot importer path) only supports FFmpeg up to 8, not the shared action's 9.0.
-      - name: Downgrade FFmpeg to 8.1 for torchcodec compatibility
-        uses: AnimMouse/setup-ffmpeg@178e0b4a408f06ce40d896c3cd79f50fa6f8b0c3 # v1.2.5
-        with:
-          version: "8.1"
+      # torchcodec dlopens libavutil etc. directly (never the ffmpeg CLI, left at 9.0), so only these shared libs need to be an older version.
+      - name: Install FFmpeg 8.1 shared libraries for torchcodec
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ffmpeg-shared-libs"
+          curl -sL "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz" \
+            | tar -xJ -C "$RUNNER_TEMP/ffmpeg-shared-libs" --strip-components 2 --wildcards '*/lib/*.so*'
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/ffmpeg-shared-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          LD_LIBRARY_PATH="$RUNNER_TEMP/ffmpeg-shared-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+            python3 -c "import ctypes; ctypes.CDLL('libavutil.so.60')"
 
       - name: Run Importer Integration Tests
         env:
