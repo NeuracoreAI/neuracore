@@ -557,8 +557,12 @@ def _producer_process(
             "report": report,
             "timer_stats": {label: dict(v) for label, v in Timer._stats.items()},
         })
-    except BaseException:  # noqa: BLE001 - propagate full child traceback
-        result_queue.put({"ok": False, "traceback": traceback.format_exc()})
+    except BaseException:  # noqa: BLE001
+        result_queue.put({
+            "ok": False,
+            "traceback": traceback.format_exc(),
+            "timer_stats": {label: dict(v) for label, v in Timer._stats.items()},
+        })
     finally:
         if robot is not None:
             robot.close()
@@ -703,6 +707,8 @@ class MultiProcessProducerSession(ProducerSession):
             outcome = child.result_queue.get(timeout=PRODUCER_PROCESS_REPORT_TIMEOUT_S)
         except queue.Empty:
             outcome = None
+        if outcome is not None:
+            Timer.merge_stats(outcome.get("timer_stats", {}))
         child.process.join(timeout=PRODUCER_PROCESS_JOIN_TIMEOUT_S)
         if child.process.is_alive():
             child.process.terminate()
@@ -719,7 +725,6 @@ class MultiProcessProducerSession(ProducerSession):
             )
         # Trace keys are disjoint across producers, so no trace is interleaved.
         self._child_frames.update(outcome["report"])
-        Timer.merge_stats(outcome.get("timer_stats", {}))
         return ""
 
     def report(self) -> dict[str, list[EmittedFrame]]:
