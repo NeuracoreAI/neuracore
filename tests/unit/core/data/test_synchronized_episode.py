@@ -149,9 +149,7 @@ class TestSynchronizedRecording:
         assert result is synced_recording
         assert synced_recording._iter_idx == 0
 
-    def test_getitem_single_index(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_getitem_single_index(self, synced_recording: SynchronizedRecording):
         """Test accessing a single frame by index."""
         sync_point = synced_recording[0]
 
@@ -163,9 +161,7 @@ class TestSynchronizedRecording:
         )
         assert joint_data.value == 0.5
 
-    def test_getitem_negative_index(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_getitem_negative_index(self, synced_recording: SynchronizedRecording):
         """Test accessing frames with negative indices."""
         sync_point = synced_recording[-1]
 
@@ -182,9 +178,7 @@ class TestSynchronizedRecording:
         with pytest.raises(IndexError, match="Index out of range"):
             _ = synced_recording[-10]
 
-    def test_getitem_slice(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_getitem_slice(self, synced_recording: SynchronizedRecording):
         """Test slicing synchronized recording."""
         frames = synced_recording[0:2]
 
@@ -196,7 +190,6 @@ class TestSynchronizedRecording:
         self,
         dataset_mock,
         mock_data_requests,
-        mock_wget_download,
         synced_data_multiple_frames,
     ):
         """Test slicing with step parameter."""
@@ -228,9 +221,7 @@ class TestSynchronizedRecording:
         assert frames[1].timestamp == 2.0
         assert frames[2].timestamp == 4.0
 
-    def test_iteration(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_iteration(self, synced_recording: SynchronizedRecording):
         """Test iterating through synchronized recording."""
         frames = list(synced_recording)
 
@@ -239,9 +230,7 @@ class TestSynchronizedRecording:
         assert frames[0].timestamp == 0.0
         assert frames[1].timestamp == 1.0
 
-    def test_iteration_multiple_times(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_iteration_multiple_times(self, synced_recording: SynchronizedRecording):
         """Test that the recording can be iterated multiple times."""
         frames1 = list(synced_recording)
         frames2 = list(synced_recording)
@@ -259,9 +248,7 @@ class TestSynchronizedRecording:
         with pytest.raises(StopIteration):
             next(synced_recording)
 
-    def test_video_caching(
-        self, synced_recording: SynchronizedRecording, mock_wget_download, tmp_path
-    ):
+    def test_video_caching(self, synced_recording: SynchronizedRecording, tmp_path):
         """Test that videos are cached correctly."""
         # First access should download and cache
         synced_recording[0]
@@ -270,9 +257,7 @@ class TestSynchronizedRecording:
         cache_path = synced_recording.cache_dir / f"{synced_recording.id}"
         assert cache_path.exists()
 
-    def test_video_cache_reuse(
-        self, dataset_mock, mock_data_requests, mock_wget_download, tmp_path
-    ):
+    def test_video_cache_reuse(self, dataset_mock, mock_data_requests, tmp_path):
         """Test that cached videos are reused on subsequent access."""
         # Create cache directory and add a fake cached frame
         cache_path = (
@@ -302,9 +287,7 @@ class TestSynchronizedRecording:
         assert DataType.RGB_IMAGES in sync_point.data
         assert "cam1" in sync_point.data[DataType.RGB_IMAGES]
 
-    def test_prefetch_videos_skip_if_cached(
-        self, dataset_mock, mock_data_requests, mock_wget_download
-    ):
+    def test_prefetch_videos_skip_if_cached(self, dataset_mock, mock_data_requests):
         """Test that prefetch_videos parameter triggers video download on init."""
         synced = SynchronizedRecording(
             dataset=dataset_mock,
@@ -323,8 +306,10 @@ class TestSynchronizedRecording:
         cache_path = synced.cache_dir / f"{synced.id}"
         assert cache_path.exists()
 
-        # Mock wget to track if it's called
-        with patch("wget.download") as mock_download:
+        # Track whether a transfer is attempted at all
+        with patch(
+            "neuracore.core.data.synced_recording.stream_to_file"
+        ) as mock_download:
             SynchronizedRecording(
                 dataset=dataset_mock,
                 recording_id="rec1",
@@ -338,12 +323,10 @@ class TestSynchronizedRecording:
                 prefetch_videos=True,
             )
 
-            # wget.download should not be called since cache exists
+            # No download should be attempted since the cache exists
             mock_download.assert_not_called()
 
-    def test_depth_image_processing(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
-    ):
+    def test_depth_image_processing(self, synced_recording: SynchronizedRecording):
         """Test that depth images are processed correctly."""
         sync_point = cast(SynchronizedPoint, synced_recording[0])
 
@@ -356,7 +339,6 @@ class TestSynchronizedRecording:
         self,
         dataset_mock,
         mock_data_requests,
-        mock_wget_download,
         tmp_path,
     ):
         """Test that rgb_to_depth_storage is called when retrieving a frame
@@ -393,7 +375,7 @@ class TestSynchronizedRecording:
             mock_rgb_to_depth_storage.assert_called()
 
     def test_camera_data_copy_independence(
-        self, synced_recording: SynchronizedRecording, mock_wget_download
+        self, synced_recording: SynchronizedRecording
     ):
         """Test that returned sync points are independent copies."""
         sync_point1 = cast(SynchronizedPoint, synced_recording[0])
@@ -419,12 +401,8 @@ class TestSynchronizedRecording:
         assert synced_recording.cache_manager is not None
         assert hasattr(synced_recording.cache_manager, "ensure_space_available")
 
-    def test_suppress_wget_progress(self, synced_recording):
-        """Test that wget progress is suppressed by default."""
-        assert synced_recording._suppress_wget_progress is True
-
     def test_different_frequencies_are_stored_on_instances(
-        self, dataset_mock, mock_data_requests, mock_wget_download
+        self, dataset_mock, mock_data_requests
     ):
         """Test that different instances can retain different frequencies."""
         synced_30 = SynchronizedRecording(
@@ -455,35 +433,8 @@ class TestSynchronizedRecording:
         assert synced_60.frequency == 60
         assert synced_30.frequency != synced_60.frequency
 
-    def test_create_decoding_lock_creates_file(self, synced_recording, tmp_path):
-        """_create_decoding_lock should create lock file when none exists."""
-        lock_file = tmp_path / ".decoding.lock"
-        synced_recording._create_decoding_lock(lock_file, "cam1")
-
-        assert lock_file.exists()
-
-    def test_create_decoding_lock_raises_when_exists(self, synced_recording, tmp_path):
-        """_create_decoding_lock should raise when lock file already exists."""
-        lock_file = tmp_path / ".decoding.lock"
-        lock_file.touch()
-
-        with pytest.raises(
-            RuntimeError,
-            match="Another process is already decoding video for camera cam1",
-        ):
-            synced_recording._create_decoding_lock(lock_file, "cam1")
-
-    def test_delete_decoding_lock_removes_file(self, synced_recording, tmp_path):
-        """_delete_decoding_lock should remove lock file if present."""
-        lock_file = tmp_path / ".decoding.lock"
-        lock_file.touch()
-
-        synced_recording._delete_decoding_lock(lock_file)
-
-        assert not lock_file.exists()
-
     def test_decode_failure_does_not_publish_partial_cache(
-        self, synced_recording, mock_wget_download, dataset_mock
+        self, synced_recording, dataset_mock
     ):
         """A decode that fails mid-way must not leave a partial frames dir.
 
@@ -500,8 +451,9 @@ class TestSynchronizedRecording:
             )
             raise RuntimeError("decode crashed")
 
-        with patch.object(
-            synced_recording, "_decode_video", side_effect=partial_then_fail
+        with patch(
+            "neuracore.core.data.frame_cache.decode_video",
+            side_effect=partial_then_fail,
         ):
             with pytest.raises(RuntimeError, match="decode crashed"):
                 synced_recording._download_video_and_cache_frames_to_disk(
@@ -511,7 +463,7 @@ class TestSynchronizedRecording:
         assert not final_dir.exists()  # nothing published on failure
 
     def test_successful_decode_publishes_complete_dir_without_leftovers(
-        self, synced_recording, mock_wget_download, dataset_mock
+        self, synced_recording, dataset_mock
     ):
         """A successful decode publishes the complete frames dir and cleans up.
 
@@ -529,82 +481,3 @@ class TestSynchronizedRecording:
         assert not any(final_dir.parent.rglob("*recording.lock"))
         leftovers = [p for p in final_dir.parent.iterdir() if p != final_dir]
         assert leftovers == []
-
-    def test_decode_video_uses_resolved_frame_sync_arg(
-        self, synced_recording, tmp_path
-    ):
-        """The ffmpeg decode command must use the probed flag, not a hard-coded
-        `-vsync`: that spelling was removed in ffmpeg 8, so hard-coding it
-        breaks decoding on any ffmpeg 8+ install.
-        """
-        video_location = tmp_path / "video.mp4"
-        video_location.touch()
-        frames_dir = tmp_path / "frames"
-        frames_dir.mkdir()
-
-        with (
-            patch(f"{MODULE}._FFMPEG_AVAILABLE", True),
-            patch(f"{MODULE}._resolve_frame_sync_arg", return_value="-fps_mode"),
-            patch(f"{MODULE}.subprocess.run") as mock_run,
-        ):
-            synced_recording._decode_video(video_location, frames_dir)
-
-        ffmpeg_args = mock_run.call_args[0][0]
-        assert "-fps_mode" in ffmpeg_args
-        flag_index = ffmpeg_args.index("-fps_mode")
-        assert ffmpeg_args[flag_index + 1] == "passthrough"
-        assert "-vsync" not in ffmpeg_args
-
-
-class TestResolveFrameSyncArg:
-    """Tests for _resolve_frame_sync_arg's ffmpeg passthrough flag probe."""
-
-    @pytest.fixture(autouse=True)
-    def _reset_cache(self):
-        """Clear the module-level memo so each test probes fresh."""
-        import neuracore.core.data.synced_recording as synced_recording_module
-
-        synced_recording_module._FFMPEG_FRAME_SYNC_ARG = None
-        yield
-        synced_recording_module._FFMPEG_FRAME_SYNC_ARG = None
-
-    def test_returns_fps_mode_when_ffmpeg_accepts_it(self):
-        """ffmpeg >= 5.1 accepts -fps_mode, so it should be preferred."""
-        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
-
-        with patch(f"{MODULE}.subprocess.run") as mock_run:
-            mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-            assert _resolve_frame_sync_arg() == "-fps_mode"
-
-    def test_returns_vsync_when_ffmpeg_rejects_fps_mode(self):
-        """ffmpeg < 5.1 rejects -fps_mode as unrecognised, so fall back to -vsync."""
-        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
-
-        with patch(f"{MODULE}.subprocess.run") as mock_run:
-            mock_run.return_value = SimpleNamespace(
-                returncode=1, stderr=b"Unrecognized option 'fps_mode'."
-            )
-
-            assert _resolve_frame_sync_arg() == "-vsync"
-
-    def test_returns_vsync_when_ffmpeg_binary_is_missing(self):
-        """No ffmpeg on PATH resolves to the legacy spelling, matching the
-        pre-existing _FFMPEG_AVAILABLE probe's fall-back behaviour.
-        """
-        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
-
-        with patch(f"{MODULE}.subprocess.run", side_effect=FileNotFoundError):
-            assert _resolve_frame_sync_arg() == "-vsync"
-
-    def test_probes_ffmpeg_only_once(self):
-        """The result is memoized: a second call must not spawn ffmpeg again."""
-        from neuracore.core.data.synced_recording import _resolve_frame_sync_arg
-
-        with patch(f"{MODULE}.subprocess.run") as mock_run:
-            mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
-
-            assert _resolve_frame_sync_arg() == "-fps_mode"
-            assert _resolve_frame_sync_arg() == "-fps_mode"
-
-        mock_run.assert_called_once()

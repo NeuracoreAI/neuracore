@@ -3,7 +3,6 @@
 import logging
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Union, cast
 
 import requests
@@ -20,6 +19,10 @@ from tqdm import tqdm
 
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
+from neuracore.core.data.prefetch import (
+    DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
+    VideoPrefetcher,
+)
 from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_recording import SynchronizedRecording
 from neuracore.core.exceptions import DatasetError
@@ -48,7 +51,8 @@ class SynchronizedDataset:
         frequency: int,
         cross_embodiment_union: CrossEmbodimentUnion | None = None,
         prefetch_videos: bool = False,
-        max_prefetch_workers: int = 1,
+        max_prefetch_decode_workers: int = 1,
+        num_concurrent_prefetch_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         max_delay_s: float = sys.float_info.max,
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
@@ -63,7 +67,10 @@ class SynchronizedDataset:
             frequency: Frequency of the dataset in Hz.
             cross_embodiment_union: Cross-embodiment union for synchronization.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
-            max_prefetch_workers: Number of threads to use for prefetching videos.
+            max_prefetch_decode_workers: Threads used to decode prefetched videos.
+                Downloading does not use these threads.
+            num_concurrent_prefetch_requests: Network requests the prefetch keeps
+                outstanding at once, from a single thread.
             max_delay_s: Maximum allowed delay the dataset was synchronized with.
             allow_duplicates: Whether the dataset was synchronized allowing
                 duplicate points.
@@ -89,30 +96,15 @@ class SynchronizedDataset:
             trim_no_movement_at_start_threshold=(trim_no_movement_at_start_threshold),
         )
         self._prefetch_videos = prefetch_videos
-        self._max_prefetch_workers = max_prefetch_workers
+        self._max_prefetch_decode_workers = max_prefetch_decode_workers
+        self._num_concurrent_prefetch_requests = num_concurrent_prefetch_requests
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = (
             dict(synced_recording_cache) if synced_recording_cache else {}
         )
 
-        self._prefetch_videos_needed = False
-        if prefetch_videos:
-            for rec in self.dataset:
-                cache_dir = self.dataset.cache_dir / rec.id
-
-                lock_file = cache_dir / ".recording.lock"
-
-                # Check if cache directory exists
-                if not cache_dir.exists() or lock_file.exists():
-                    # NOTE: we check if the directly exists to avoid re downloading
-                    #  if the lock file exists it keeps a worker waiting in case the
-                    #  other download is in progress fails, we can retry
-                    self._prefetch_videos_needed = True
-                    break
         if not self._is_synced_recording_cache_complete():
-            self._perform_synced_data_prefetch(
-                max_prefetch_workers=max_prefetch_workers
-            )
+            self._perform_synced_data_prefetch()
 
     def _is_synced_recording_cache_complete(self) -> bool:
         """Check whether every recording is already in the synced cache."""
@@ -120,33 +112,47 @@ class SynchronizedDataset:
             idx in self._synced_recording_cache for idx in range(len(self.dataset))
         )
 
-    def _perform_synced_data_prefetch(self, max_prefetch_workers: int) -> None:
-        """Prefetch synced data for all recordings using multiple threads.
+    def _perform_synced_data_prefetch(self) -> None:
+        """Fetch synced metadata, and optionally videos, for every recording.
 
-        Args:
-            max_prefetch_workers: Number of threads to use for prefetching synced data.
+        ``VideoPrefetcher`` issues the requests concurrently from one thread and
+        decodes videos in a thread pool. The metadata it returns is handed to
+        each ``SynchronizedRecording`` so none of them requests it again.
         """
         # Indexing the last recording pages in all metadata up front, so the
-        # threaded prefetch below just reads cache instead of paging concurrently.
+        # prefetch below reads cache instead of paging concurrently.
         num_recordings = len(self.dataset)
-        if num_recordings > 0:
-            self.dataset[num_recordings - 1]
+        if num_recordings == 0:
+            return
+        self.dataset[num_recordings - 1]
 
-        desc = "Prefetching synced data"
-        if self._prefetch_videos_needed:
-            desc += " and videos"
-        desc += (
-            f" with {max_prefetch_workers}"
-            f"{' workers' if max_prefetch_workers > 1 else ' worker'}"
+        recordings = [
+            cast(Recording, self.dataset[idx]) for idx in range(num_recordings)
+        ]
+        prefetcher = VideoPrefetcher(
+            dataset=self.dataset,
+            recordings=recordings,
+            synchronization_details=self.synchronization_details,
+            inflight_requests=self._num_concurrent_prefetch_requests,
+            decode_workers=self._max_prefetch_decode_workers,
+            download_videos=self._prefetch_videos,
         )
-        with ThreadPoolExecutor(max_workers=max_prefetch_workers) as executor:
-            list(
-                tqdm(
-                    executor.map(lambda idx: self[idx], range(len(self.dataset))),
-                    total=len(self.dataset),
-                    desc=desc,
-                    unit="Recording",
-                )
+        episodes = prefetcher.run()
+
+        # Videos are cached by now, so this only picks up what the prefetch
+        # does not cover: point clouds, and any camera it failed on.
+        for idx, recording in enumerate(recordings):
+            if idx in self._synced_recording_cache:
+                continue
+            self._synced_recording_cache[idx] = SynchronizedRecording(
+                recording_id=recording.id,
+                recording_name=recording.name,
+                dataset=self.dataset,
+                robot_id=recording.robot_id,
+                instance=recording.instance,
+                synchronization_details=self.synchronization_details,
+                prefetch_videos=self._prefetch_videos,
+                episode_synced=episodes.get(idx),
             )
 
     def __iter__(self) -> "SynchronizedDataset":
@@ -199,7 +205,8 @@ class SynchronizedDataset:
                 frequency=self.frequency,
                 cross_embodiment_union=self.cross_embodiment_union,
                 prefetch_videos=False,  # Avoid prefetching again
-                max_prefetch_workers=self._max_prefetch_workers,
+                max_prefetch_decode_workers=self._max_prefetch_decode_workers,
+                num_concurrent_prefetch_requests=self._num_concurrent_prefetch_requests,
                 max_delay_s=self.synchronization_details.max_delay_s,
                 allow_duplicates=self.synchronization_details.allow_duplicates,
                 trim_start_end=self.synchronization_details.trim_start_end,
