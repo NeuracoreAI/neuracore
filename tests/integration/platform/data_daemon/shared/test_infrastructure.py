@@ -37,8 +37,11 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_DAEMON_TEST_ARTIFACTS_DIR,
+    DATA_DAEMON_TEST_STATE_ROOT,
+    LOG_DELETE,
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
+    STORAGE_STATE_PRESERVE,
 )
 
 if TYPE_CHECKING:
@@ -106,45 +109,71 @@ def setup_per_test_artifact_dirs(
 
 
 @contextmanager
-def scoped_storage_state(case: DataDaemonTestCase) -> Generator[None]:
-    """Apply local storage cleanup before and after the block.
+def scoped_storage_state(
+    case: DataDaemonTestCase,
+    specs: Sequence[ContextSpec] = (),
+) -> Generator[None]:
+    """Apply local storage, daemon-log, and cloud cleanup around the block.
 
-    ``"delete"`` removes the DB file and recordings folder.  ``"empty"`` clears
-    DB tables and deletes recordings folder contents.  ``"preserve"`` leaves all
-    local storage untouched.
-
-    Does **not** start, stop, or signal any daemon process, and does not touch
-    cloud resources. Wrap it in cloud_resource_deleter to delete the cloud
-    dataset and robots.
+    ``"delete"`` removes the DB file and recordings folder, ``"empty"`` clears
+    DB tables and recordings folder contents, and ``"preserve"`` leaves both
+    plus the cloud dataset and robots intact for inspection. Cleanup runs
+    whether the body succeeds or raises.
 
     Args:
-        case: Test case whose ``storage_state_action`` controls local cleanup.
+        case: Test case whose ``storage_state_action`` and ``daemon_log_action``
+            decide what is cleaned.
+        specs: Context specs naming the cloud dataset and robots to delete.
+            Empty skips cloud cleanup entirely.
 
     Yields:
         ``None``.
     """
-    with report_step("Prepare local daemon storage"):
-        with Timer(
-            30.0,
-            label="storage.prepare",
-            always_log=True,
-            assert_deadline=False,
-        ):
-            apply_storage_state_action(case.storage_state_action)
-    try:
-        yield
-    finally:
-        with report_step("Clean local daemon storage"):
+    dataset_name, robot_names = cloud_resource_names(specs)
+    if case.storage_state_action == STORAGE_STATE_PRESERVE and (
+        dataset_name is not None or robot_names
+    ):
+        logger.info(
+            "Preserving cloud dataset %r and robots %s",
+            dataset_name,
+            list(robot_names),
+        )
+        dataset_name, robot_names = None, []
+
+    with cloud_resource_deleter(dataset_name, robot_names):
+        with report_step("Prepare local daemon storage"):
             with Timer(
                 30.0,
-                label="storage.local_cleanup",
+                label="storage.prepare",
                 always_log=True,
                 assert_deadline=False,
             ):
                 apply_storage_state_action(case.storage_state_action)
-        assert_post_test_storage_state(
-            storage_state_action=case.storage_state_action,
-        )
+        try:
+            with scoped_daemon_log_action(case):
+                yield
+        finally:
+            with report_step("Clean local daemon storage"):
+                with Timer(
+                    30.0,
+                    label="storage.local_cleanup",
+                    always_log=True,
+                    assert_deadline=False,
+                ):
+                    apply_storage_state_action(case.storage_state_action)
+            assert_post_test_storage_state(
+                storage_state_action=case.storage_state_action,
+            )
+
+
+@contextmanager
+def scoped_daemon_log_action(case: DataDaemonTestCase) -> Generator[None]:
+    """Delete the shared ``daemon.log`` after the block, when the case asks."""
+    try:
+        yield
+    finally:
+        if case.daemon_log_action == LOG_DELETE:
+            (DATA_DAEMON_TEST_STATE_ROOT / "daemon.log").unlink(missing_ok=True)
 
 
 def apply_storage_state_action(storage_state_action: str) -> None:
