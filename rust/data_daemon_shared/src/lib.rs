@@ -51,6 +51,118 @@ pub mod config;
 pub mod ffmpeg;
 pub mod paths;
 
+/// Recording-window membership for the frames *inside* one video chunk.
+///
+/// A chunk is a NUT file appended to until something seals it, so frames logged
+/// either side of a boundary can share one and its open stamp speaks only for
+/// the first. Both sides of the wire divide the work by what each knows in time:
+///
+/// - The **producer** seals the open chunk before the first frame at or past a
+///   boundary, which only works at a recording's start and only in the process
+///   that called `start_recording`.
+/// - The **daemon** cuts a chunk it already holds, from the per-frame offsets
+///   this module encodes. Only this works at a stop, where a video-only process
+///   logs on until its notification arrives and the frames are already written.
+pub mod video_boundary {
+    /// Nanoseconds per millisecond, the wire resolution of a frame offset.
+    const NS_PER_MS: i64 = 1_000_000;
+
+    /// Is `frame_publish_ns` at or past the recording boundary `bound_ns`?
+    ///
+    /// Argument order is boundary first, frame second.
+    pub fn at_or_past_boundary(bound_ns: i64, frame_publish_ns: i64) -> bool {
+        frame_publish_ns >= bound_ns
+    }
+
+    /// One frame's publish time as ms after its chunk's open stamp.
+    pub fn publish_offset_ms(chunk_open_ns: i64, frame_publish_ns: i64) -> u32 {
+        let offset_ns = frame_publish_ns.saturating_sub(chunk_open_ns).max(0);
+        (offset_ns / NS_PER_MS).try_into().unwrap_or(u32::MAX)
+    }
+
+    /// The inverse of [`publish_offset_ms`], paired with it so neither can
+    /// change alone.
+    pub fn frame_publish_ns(chunk_open_ns: i64, offset_ms: u32) -> i64 {
+        chunk_open_ns.saturating_add(i64::from(offset_ms) * NS_PER_MS)
+    }
+
+    /// Leading frames published before `bound_ns`, i.e. the index of the first
+    /// that is [`at_or_past_boundary`].
+    pub fn frames_before_boundary(offsets_ms: &[u32], chunk_open_ns: i64, bound_ns: i64) -> usize {
+        offsets_ms
+            .iter()
+            .position(|offset| {
+                at_or_past_boundary(bound_ns, frame_publish_ns(chunk_open_ns, *offset))
+            })
+            .unwrap_or(offsets_ms.len())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const CHUNK_OPEN_NS: i64 = 1_700_000_000_000_000_000;
+
+        #[test]
+        fn a_frame_on_the_bound_is_already_past_it() {
+            // The half-open convention both sides must agree on.
+            assert!(!at_or_past_boundary(CHUNK_OPEN_NS, CHUNK_OPEN_NS - 1));
+            assert!(at_or_past_boundary(CHUNK_OPEN_NS, CHUNK_OPEN_NS));
+            assert!(at_or_past_boundary(CHUNK_OPEN_NS, CHUNK_OPEN_NS + 1));
+        }
+
+        #[test]
+        fn offsets_round_trip_at_millisecond_resolution() {
+            assert_eq!(publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS), 0);
+            assert_eq!(
+                publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS + 1_500_000),
+                1
+            );
+            assert_eq!(
+                frame_publish_ns(CHUNK_OPEN_NS, 33),
+                CHUNK_OPEN_NS + 33_000_000
+            );
+        }
+
+        #[test]
+        fn publish_offset_saturates_at_the_chunk_open() {
+            // A backwards caller clock reads as 0 rather than wrapping.
+            assert_eq!(publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS - 5), 0);
+        }
+
+        #[test]
+        fn frames_before_boundary_cuts_on_the_bound() {
+            // The frames before the boundary are kept; the rest are cut.
+            let offsets = [0, 10, 20, 30, 40];
+            let bound = frame_publish_ns(CHUNK_OPEN_NS, 25);
+            assert_eq!(frames_before_boundary(&offsets, CHUNK_OPEN_NS, bound), 3);
+
+            // And the bound itself is exclusive.
+            let on_boundary = frame_publish_ns(CHUNK_OPEN_NS, 20);
+            assert_eq!(
+                frames_before_boundary(&offsets, CHUNK_OPEN_NS, on_boundary),
+                2
+            );
+        }
+
+        #[test]
+        fn frames_entirely_before_the_boundary_are_all_kept() {
+            let offsets = [0, 10, 20];
+            let bound = frame_publish_ns(CHUNK_OPEN_NS, 60);
+            assert_eq!(frames_before_boundary(&offsets, CHUNK_OPEN_NS, bound), 3);
+        }
+
+        #[test]
+        fn the_cut_is_a_prefix_under_disordered_stamps() {
+            // One file feeds one encode, so the first frame at or past the
+            // boundary takes its successors with it.
+            let offsets = [0, 30, 10, 20];
+            let bound = frame_publish_ns(CHUNK_OPEN_NS, 25);
+            assert_eq!(frames_before_boundary(&offsets, CHUNK_OPEN_NS, bound), 1);
+        }
+    }
+}
+
 /// iceoryx2 service-name conventions shared by daemon and producer.
 pub mod service_name {
     /// Pub/sub service carrying every IPC envelope: lifecycle
@@ -76,8 +188,9 @@ pub mod service_name {
     /// Worst-case postcard size of one frame's contribution to a
     /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
     /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value) and a `frame_timestamps_s` element is a fixed 8-byte `f64`.
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8;
+    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
+    /// `frame_publish_offsets_ms` element is a `u32` varint (≤5 bytes).
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -90,7 +203,8 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` vectors are the only unbounded part
+    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_ms`
+    /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
     /// enough frames in a single chunk to overflow the slice. The announcement
@@ -428,6 +542,10 @@ pub enum Envelope {
         /// geometry change). The daemon never decodes pixels; it threads this
         /// straight into the trace's `trace.json` sidecar for depth frames.
         dtype: FrameDtype,
+        /// Per-frame publish time as ms after this chunk's own
+        /// `publish_timestamp_ns`, in arrival order. What makes chunk membership
+        /// per-frame rather than atomic; see [`video_boundary`].
+        frame_publish_offsets_ms: Vec<u32>,
     },
     /// Force the daemon to re-read its profile config immediately, rather than
     /// waiting for the config watcher's next poll. Sent by the SDK's
@@ -979,6 +1097,7 @@ mod tests {
                 7.0_f64 / 60.0_f64,
             ],
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms: vec![0, 16, 33, 50],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -1011,6 +1130,7 @@ mod tests {
                 frame_timestamps_ns: vec![1_700_000_000_000_000_000],
                 frame_timestamps_s: vec![1_700_000_000.0],
                 dtype,
+                frame_publish_offsets_ms: vec![0],
             };
             let bytes = original.encode().expect("encode");
             let decoded = Envelope::decode(&bytes).expect("decode");
@@ -1050,11 +1170,11 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // A 128 MiB 1080p chunk holds ~3800 frames; carry two timestamps per
-        // frame (ns + s). Even at 10_000 frames the envelope is comfortably
-        // under COMMANDS_MAX_PAYLOAD_BYTES.
+        // Two timestamps plus a publish offset per frame stays well under
+        // COMMANDS_MAX_PAYLOAD_BYTES even at an implausible frame count.
         let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
         let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
@@ -1070,6 +1190,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -1085,12 +1206,14 @@ mod tests {
         // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
         // announcement always fits one commands sample. Prove the cap holds at
         // the absolute worst case: every per-frame ns timestamp a full-range
-        // i64 (10-byte postcard zigzag varint) and every fixed field maxed out.
+        // i64 (10-byte postcard zigzag varint), every publish offset a
+        // full-range u32 (5-byte varint), and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
         let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let frame_publish_offsets_ms: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: i64::MAX,
@@ -1106,6 +1229,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
+            frame_publish_offsets_ms,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(

@@ -57,6 +57,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
+use data_daemon_shared::video_boundary::{at_or_past_boundary, publish_offset_ms};
 use data_daemon_shared::{Envelope, FrameDtype};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
@@ -226,6 +227,9 @@ struct VideoChunkState {
     frame_timestamps_ns: Vec<i64>,
     /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
     frame_timestamps_s: Vec<f64>,
+    /// Per-frame publish time as ms after `chunk_publish_ns`, which is what
+    /// lets the daemon cut this chunk at a boundary inside it.
+    frame_publish_offsets_ms: Vec<u32>,
 }
 
 /// Process-wide registry of in-progress per-`(source, sensor)` video chunk
@@ -1069,6 +1073,7 @@ fn record_video_frame(
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_publish_offsets_ms: Vec::new(),
         }));
         registry.streams.insert(key.clone(), slot.clone());
         Some(slot)
@@ -1115,8 +1120,9 @@ fn record_video_frame(
 }
 
 /// Append one frame to the locked per-stream chunk `state`, returning every
-/// chunk announcement produced this call: a geometry-change seal and/or a
-/// size/frame-cap flush (so a single call can yield two). Pure with respect to
+/// chunk announcement produced this call: a window-boundary or geometry-change
+/// seal before the append, and/or a size/frame-cap flush after it (so a single
+/// call can yield two). Pure with respect to
 /// IPC — the caller publishes the returned envelopes outside the lock — which
 /// also makes the open/seal/roll logic unit-testable without a live daemon.
 /// Best-effort: a NUT open/write error logs and drops the frame.
@@ -1139,23 +1145,26 @@ fn append_frame_locked(
     timestamp_s: f64,
 ) -> Vec<Envelope> {
     let mut announcements: Vec<Envelope> = Vec::new();
+    // The caller publishes the collected envelopes outside the lock.
+    let seal = |state: &mut VideoChunkState, announcements: &mut Vec<Envelope>| {
+        if let Some(envelope) =
+            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
+        {
+            announcements.push(envelope);
+        }
+    };
 
-    // A recording window opened partway through the frames queued ahead of this
-    // one. Seal here, so the chunk carrying the pre-window frames is announced
-    // on its own and this frame opens a fresh chunk stamped inside the window.
-    // Without the split one chunk spans the boundary, and since the daemon
-    // routes a chunk whole by its open stamp, the pre-window stamp orphans the
-    // entire chunk — silently discarding every in-window frame in it.
-    if let Some(split_ns) = state.pending_split_ns {
-        if publish_ns >= split_ns {
-            state.pending_split_ns = None;
-            if state.nut_writer.is_some() {
-                if let Some(envelope) =
-                    flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
-                {
-                    announcements.push(envelope);
-                }
-            }
+    // A window opened partway through the queued frames. Without this seal one
+    // chunk spans the boundary and its pre-window open stamp orphans every
+    // in-window frame in it. The boundary is one-shot, so the first frame to
+    // reach it consumes it whether or not a chunk was open to seal.
+    if state
+        .pending_split_ns
+        .is_some_and(|split_ns| at_or_past_boundary(split_ns, publish_ns))
+    {
+        state.pending_split_ns = None;
+        if state.nut_writer.is_some() {
+            seal(state, &mut announcements);
         }
     }
 
@@ -1181,11 +1190,7 @@ fn append_frame_locked(
             new_dtype = ?dtype,
             "video frame geometry or dtype changed mid-stream; sealing chunk and reopening"
         );
-        if let Some(envelope) =
-            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
-        {
-            announcements.push(envelope);
-        }
+        seal(state, &mut announcements);
     }
     state.width = width;
     state.dtype = dtype;
@@ -1301,13 +1306,12 @@ fn append_frame_locked(
     state.frame_count = state.frame_count.saturating_add(1);
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
+    state
+        .frame_publish_offsets_ms
+        .push(publish_offset_ms(state.chunk_publish_ns, publish_ns));
 
     if should_flush_chunk(logical_bytes_after_write, state.frame_count) {
-        if let Some(envelope) =
-            flush_chunk_locked(robot_id, robot_instance, data_type, sensor_name, state)
-        {
-            announcements.push(envelope);
-        }
+        seal(state, &mut announcements);
     }
     announcements
 }
@@ -1334,6 +1338,7 @@ fn flush_chunk_locked(
             state.frame_count = 0;
             state.frame_timestamps_ns.clear();
             state.frame_timestamps_s.clear();
+            state.frame_publish_offsets_ms.clear();
             return None;
         }
     };
@@ -1343,6 +1348,7 @@ fn flush_chunk_locked(
     let frame_count = state.frame_count;
     let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
     let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
+    let frame_publish_offsets_ms = std::mem::take(&mut state.frame_publish_offsets_ms);
 
     state.frame_count = 0;
 
@@ -1361,6 +1367,7 @@ fn flush_chunk_locked(
         frame_timestamps_ns,
         frame_timestamps_s,
         dtype: state.dtype,
+        frame_publish_offsets_ms,
     })
 }
 
@@ -1592,6 +1599,7 @@ mod tests {
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
+            frame_publish_offsets_ms: Vec::new(),
         }
     }
 
@@ -2014,6 +2022,50 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         assert!(state.frame_timestamps_ns.is_empty());
         assert!(state.frame_timestamps_s.is_empty());
+        assert!(state.frame_publish_offsets_ms.is_empty());
+    }
+
+    #[test]
+    fn announcement_carries_each_frame_publish_offset_from_the_chunk_open() {
+        // The offsets carry each frame's caller-thread publish stamp, measured
+        // from the chunk's open, not the capture clock beside them.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        // Publish stamps, with capture stamps on an unrelated clock.
+        for (index, capture_ns) in [10_000, 20_000, 30_000].into_iter().enumerate() {
+            append_frame_locked(
+                &mut state,
+                "r",
+                0,
+                "RGB",
+                "cam",
+                2,
+                2,
+                FrameDtype::Rgb8,
+                &frame,
+                TEST_PUBLISH_NS + index as i64 * 33_333_333,
+                capture_ns,
+                capture_ns as f64 / 1e9,
+            );
+        }
+
+        let envelope = flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
+        match envelope {
+            Envelope::VideoChunkReady {
+                publish_timestamp_ns,
+                frame_publish_offsets_ms,
+                ..
+            } => {
+                assert_eq!(
+                    publish_timestamp_ns, TEST_PUBLISH_NS,
+                    "the chunk's open stamp is its first frame's publish stamp"
+                );
+                assert_eq!(frame_publish_offsets_ms, vec![0, 33, 66]);
+            }
+            other => panic!("expected VideoChunkReady, got {other:?}"),
+        }
     }
 
     #[test]

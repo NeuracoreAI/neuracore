@@ -290,9 +290,6 @@ class Robot:
         # wall-clock now, which is at or after this value, so notifications stay
         # orderable against it.
         start_time = timestamp if timestamp is not None else time.time()
-        # Open the local gate BEFORE announcing the window: opening it second
-        # would have the SDK silently discard in-window data. The gate is a
-        # deliberate superset, leaving the daemon to reject the early samples.
         get_recording_state_manager().recording_started(
             robot_id=self.id,
             instance=self.instance,

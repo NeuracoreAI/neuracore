@@ -694,6 +694,7 @@ impl ActorState {
             lossy_out: lossy_segment.clone(),
             lossless_out: lossless_segment.clone(),
             codec,
+            frame_count,
         };
         pending_encodes.spawn(async move {
             // Acquire a permit before relinking + encoding. Gating the relink

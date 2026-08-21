@@ -168,6 +168,9 @@ pub struct ChunkEncodeRequest {
     /// Lossy codec selection for this trace. Controls whether a lossless
     /// archive is produced and how the lossy output is encoded.
     pub codec: LossyVideoCodec,
+    /// Frames to encode from the head of `raw_nut`: the whole file unless the
+    /// dispatcher cut the chunk, and always what the sidecar is built from.
+    pub frame_count: u32,
 }
 
 /// Outcome of a successful per-chunk transcode.
@@ -536,6 +539,9 @@ impl VideoEncoder {
         let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
         let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
         let lossy_only = request.codec.is_lossy_only();
+        // Per-output frame cap (see [`ChunkEncodeRequest::frame_count`]), a
+        // no-op unless the dispatcher cut this chunk at a recording boundary.
+        let frame_limit = (request.frame_count > 0).then(|| request.frame_count.to_string());
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -569,8 +575,11 @@ impl VideoEncoder {
                 .arg("-crf")
                 .arg("23")
                 .arg("-video_track_timescale")
-                .arg(&track_timescale)
-                .arg(&request.lossy_out);
+                .arg(&track_timescale);
+            if let Some(limit) = frame_limit.as_deref() {
+                command.arg("-frames:v").arg(limit);
+            }
+            command.arg(&request.lossy_out);
         } else {
             // Downscale the lossy preview proxy (only) to keep this dominant
             // pass cheap at high resolution; the lossless output stays native.
@@ -595,7 +604,11 @@ impl VideoEncoder {
                 .arg("-qp")
                 .arg("23")
                 .arg("-video_track_timescale")
-                .arg(&track_timescale)
+                .arg(&track_timescale);
+            if let Some(limit) = frame_limit.as_deref() {
+                command.arg("-frames:v").arg(limit);
+            }
+            command
                 .arg(&request.lossy_out)
                 .arg("-map")
                 .arg("0:v")
@@ -616,8 +629,11 @@ impl VideoEncoder {
                 .arg("-qp")
                 .arg("0")
                 .arg("-video_track_timescale")
-                .arg(&track_timescale)
-                .arg(&request.lossless_out);
+                .arg(&track_timescale);
+            if let Some(limit) = frame_limit.as_deref() {
+                command.arg("-frames:v").arg(limit);
+            }
+            command.arg(&request.lossless_out);
         }
         command
             .stdin(Stdio::null())
@@ -1106,6 +1122,7 @@ mod tests {
             lossy_out: lossy.clone(),
             lossless_out: lossless.clone(),
             codec: LossyVideoCodec::LosslessPlusPreview,
+            frame_count: 8,
         };
         let outcome = encoder
             .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
@@ -1172,6 +1189,7 @@ mod tests {
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
+                    frame_count: 6,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1234,6 +1252,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frame_count_encodes_only_the_frames_the_recording_owns() {
+        // The NUT cannot be rewritten, so the cut has to reach ffmpeg — on
+        // both outputs, or an mp4 outruns the sidecar indexing it.
+        let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping frame-cap encode test.");
+            return;
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("chunk_0000.nut");
+        let lossy = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0000_lossless.mp4");
+        write_synthetic_nut(&ffmpeg, &raw, 8);
+
+        VideoEncoder::new()
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw,
+                    lossy_out: lossy.clone(),
+                    lossless_out: lossless.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                    frame_count: 3,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("transcode");
+
+        let frame_count = |path: &Path| -> u64 {
+            let out = StdCommand::new(&ffprobe)
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-count_frames",
+                    "-show_entries",
+                    "stream=nb_read_frames",
+                    "-of",
+                    "default=nokey=1:noprint_wrappers=1",
+                ])
+                .arg(path)
+                .output()
+                .expect("spawn ffprobe");
+            String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+        };
+
+        assert_eq!(frame_count(&lossy), 3, "lossy output must stop at the cut");
+        assert_eq!(
+            frame_count(&lossless),
+            3,
+            "lossless output must stop at the same cut"
+        );
+    }
+
+    #[tokio::test]
     async fn encode_chunk_lossy_only_writes_single_full_res_h264() {
         let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
         else {
@@ -1258,6 +1333,7 @@ mod tests {
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
+                    frame_count: 6,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1344,6 +1420,7 @@ mod tests {
                     lossy_out: split_lossy.clone(),
                     lossless_out: split_lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
+                    frame_count: 8,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1357,6 +1434,7 @@ mod tests {
                     lossy_out: single_lossy.clone(),
                     lossless_out: tempdir.path().join("unused_lossless.mp4"),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
+                    frame_count: 8,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1459,6 +1537,7 @@ mod tests {
                             .path()
                             .join(format!("chunk_{chunk_index:04}_lossless.mp4")),
                         codec: LossyVideoCodec::LosslessPlusPreview,
+                        frame_count: frames_per_chunk as u32,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -1558,6 +1637,7 @@ mod tests {
                         lossy_out: lossy.clone(),
                         lossless_out: lossless,
                         codec: LossyVideoCodec::LosslessPlusPreview,
+                        frame_count: 4,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -1684,6 +1764,7 @@ mod tests {
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
+            frame_count: 1,
         };
         let encoder = VideoEncoder::new();
         let error = encoder
@@ -1706,6 +1787,7 @@ mod tests {
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
+            frame_count: 1,
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");
