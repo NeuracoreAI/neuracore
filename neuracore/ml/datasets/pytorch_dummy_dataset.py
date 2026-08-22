@@ -78,6 +78,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         num_samples: int = 50,
         num_episodes: int = 10,
         output_prediction_horizon: int = 5,
+        input_observation_horizon: int = 1,
     ):
         """Initialize the dummy dataset with specified data types and dimensions.
 
@@ -89,12 +90,15 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
             num_samples: Total number of training samples to generate.
             num_episodes: Number of distinct episodes in the dataset.
             output_prediction_horizon: Length of output action sequences.
+            input_observation_horizon: Number of past timesteps each input
+                spans, ending at the current step.
         """
         super().__init__(
             num_recordings=num_episodes,
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
+            input_observation_horizon=input_observation_horizon,
         )
         self.num_samples = num_samples
         self.robot = Robot(robot_name="dummy_robot", instance=0, org_id="dummy_org_id")
@@ -260,7 +264,7 @@ class PytorchDummyDataset(PytorchNeuracoreDataset):
         inputs, inputs_mask = self._build_data_section(
             robot_id=robot_id,
             cross_embodiment_description=self.input_cross_embodiment_description,
-            time_steps=1,
+            time_steps=self.input_observation_horizon,
         )
         outputs, outputs_mask = self._build_data_section(
             robot_id=robot_id,

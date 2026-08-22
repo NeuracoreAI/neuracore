@@ -42,6 +42,7 @@ class BatchSampleCache:
         output_prediction_horizon: int,
         input_preprocessing_config: PreprocessingConfiguration,
         output_preprocessing_config: PreprocessingConfiguration,
+        input_observation_horizon: int = 1,
         root: Path | None = None,
     ) -> None:
         """Initialize the cache.
@@ -60,6 +61,7 @@ class BatchSampleCache:
                 the worker-side half only; device-side methods run after this
                 cache and cannot change what is stored.
             output_preprocessing_config: The same, for outputs.
+            input_observation_horizon: How many past steps inputs span.
             root: Directory holding every configuration's entries. Defaults to
                 the shared sample cache.
         """
@@ -68,6 +70,7 @@ class BatchSampleCache:
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
+            input_observation_horizon=input_observation_horizon,
             input_preprocessing_config=input_preprocessing_config,
             output_preprocessing_config=output_preprocessing_config,
         )
@@ -80,6 +83,7 @@ class BatchSampleCache:
         input_cross_embodiment_description: CrossEmbodimentDescription,
         output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int,
+        input_observation_horizon: int,
         input_preprocessing_config: PreprocessingConfiguration,
         output_preprocessing_config: PreprocessingConfiguration,
     ) -> str:
@@ -109,6 +113,7 @@ class BatchSampleCache:
                 output_cross_embodiment_description
             ),
             "output_prediction_horizon": output_prediction_horizon,
+            "input_observation_horizon": input_observation_horizon,
             "input_preprocessing": preprocessing_spec(input_preprocessing_config),
             "output_preprocessing": preprocessing_spec(output_preprocessing_config),
         }

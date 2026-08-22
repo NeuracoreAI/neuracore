@@ -443,6 +443,9 @@ def resolve_to_complete_config(
         algorithm_name, supported_input_data_types, supported_output_data_types = (
             _resolve_algorithm_name_and_supported_data_types(cfg, [])
         )
+        # Derived from the target class, so record it: the run metadata and the
+        # CLI both read this field, and it is otherwise left null.
+        cfg.algorithm_name = algorithm_name
     else:
         algorithms_jsons = _get_algorithms()
         algorithm_id = get_algorithm_id(cfg.algorithm_name, algorithms_jsons)

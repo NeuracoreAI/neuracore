@@ -85,6 +85,7 @@ def run_validation(
     skip_endpoint_check: bool = False,
     algorithm_config: dict = {},
     device: torch.device | None = None,
+    input_observation_horizon: int = 1,
 ) -> tuple[AlgorithmCheck, str]:
     """Run comprehensive validation tests on a Neuracore algorithm.
 
@@ -101,6 +102,10 @@ def run_validation(
             Useful for faster validation when deployment testing isn't needed.
         algorithm_config: Custom configuration arguments for the algorithm.
         device: Torch device to run the validation on (e.g., 'cpu' or 'cuda').
+        input_observation_horizon: Consecutive observations each input spans.
+            Algorithms that consume an observation history need this to match
+            what they were configured for, or they see a shorter context than
+            they expect.
 
     Returns:
         A tuple containing:
@@ -181,6 +186,7 @@ def run_validation(
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             num_samples=5,
+            input_observation_horizon=input_observation_horizon,
         )
 
         # Create a minimal dataloader
@@ -195,6 +201,7 @@ def run_validation(
             input_dataset_statistics=dataset._dataset_statistics["input"],
             output_dataset_statistics=dataset._dataset_statistics["output"],
             output_prediction_horizon=dataset.output_prediction_horizon,
+            input_observation_horizon=dataset.input_observation_horizon,
         )
 
         # Check 1: Can initialize the model

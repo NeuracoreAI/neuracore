@@ -43,6 +43,7 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         input_cross_embodiment_description: CrossEmbodimentDescription,
         output_cross_embodiment_description: CrossEmbodimentDescription,
         output_prediction_horizon: int = 5,
+        input_observation_horizon: int = 1,
     ):
         """Initialize the dataset with data type specifications and preprocessing.
 
@@ -53,6 +54,9 @@ class PytorchNeuracoreDataset(Dataset, ABC):
                 as model outputs (e.g., joint target positions, actions).
             output_prediction_horizon: Number of future timesteps to predict
                 for sequential output tasks.
+            input_observation_horizon: Number of consecutive observations ending
+                at the current timestep to include as input. ``1`` supplies only
+                the current observation.
 
         Raises:
             ValueError: If language data is requested but no tokenizer is provided.
@@ -68,6 +72,12 @@ class PytorchNeuracoreDataset(Dataset, ABC):
         self.input_cross_embodiment_description = input_cross_embodiment_description
         self.output_cross_embodiment_description = output_cross_embodiment_description
         self.output_prediction_horizon = output_prediction_horizon
+        if input_observation_horizon < 1:
+            raise ValueError(
+                "input_observation_horizon must be at least 1, got "
+                f"{input_observation_horizon}"
+            )
+        self.input_observation_horizon = input_observation_horizon
         self.merged_cross_embodiment_description: dict[
             str, dict[DataType, list[str]]
         ] = merge_cross_embodiment_description(

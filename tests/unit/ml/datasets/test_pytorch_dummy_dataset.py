@@ -595,6 +595,28 @@ class TestPytorchDummyDataset:
                 if isinstance(attr_value, torch.Tensor) and len(attr_value.shape) > 0:
                     assert attr_value.shape[1] == horizon
 
+    @pytest.mark.parametrize("observation_horizon", [1, 2, 5])
+    def test_different_observation_horizons(self, observation_horizon):
+        """Inputs span the requested observation horizon, outputs are unaffected."""
+        output_horizon = 3
+        dataset = PytorchDummyDataset(
+            input_cross_embodiment_description={
+                "robot_0": {DataType.JOINT_POSITIONS: ["joint_0"]}
+            },
+            output_cross_embodiment_description={
+                "robot_0": {DataType.JOINT_TARGET_POSITIONS: ["joint_0"]}
+            },
+            num_samples=3,
+            output_prediction_horizon=output_horizon,
+            input_observation_horizon=observation_horizon,
+        )
+
+        sample = dataset[0]
+        for joint_data in sample.inputs[DataType.JOINT_POSITIONS]:
+            assert joint_data.value.shape[1] == observation_horizon
+        for joint_data in sample.outputs[DataType.JOINT_TARGET_POSITIONS]:
+            assert joint_data.value.shape[1] == output_horizon
+
 
 class TestDatasetStatistics:
     """Test the dataset statistics generation in PytorchDummyDataset."""

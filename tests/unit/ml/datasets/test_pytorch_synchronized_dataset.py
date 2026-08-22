@@ -1297,6 +1297,153 @@ class TestOutputTimestepAlignment:
         _assert_output_matches_timestep(sample, DataType.JOINT_POSITIONS, timestep + 1)
 
 
+class TestInputObservationHorizon:
+    """Inputs span a window of past observations ending at the current step."""
+
+    @staticmethod
+    def _load_sample(
+        timestep: int,
+        input_observation_horizon: int,
+        num_timesteps: int = NUM_OBSERVATIONS_PER_EPISODE,
+    ):
+        """Load one sample from a recording whose payloads encode their timestep."""
+        alignment = TestOutputTimestepAlignment
+        recording = alignment._recording_with_timestep_values(num_timesteps)
+        synchronized_dataset = alignment._dataset_with_recording(
+            recording,
+            _dataset_statistics_for_output_type(DataType.JOINT_TARGET_POSITIONS),
+        )
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=1,
+            input_observation_horizon=input_observation_horizon,
+            input_preprocessing_config=PreprocessingConfiguration(),
+            output_preprocessing_config=PreprocessingConfiguration(),
+            sample_cache=False,
+        )
+        with patch.object(dataset, "_memory_monitor") as mock_monitor:
+            mock_monitor.check_memory.return_value = None
+            return dataset.load_sample(episode_idx=0, timestep=timestep)
+
+    @staticmethod
+    def _input_timesteps(sample) -> list[int]:
+        """Recover the timestep each input frame came from, oldest first."""
+        batched = sample.inputs[DataType.JOINT_POSITIONS][0]
+        base = _timestep_marker(DataType.JOINT_POSITIONS, 0, 0)
+        return [
+            int(round(float(value) - base)) for value in batched.value[0, :, 0].tolist()
+        ]
+
+    @patch("neuracore.login")
+    def test_default_horizon_supplies_only_the_current_observation(
+        self, mock_login
+    ) -> None:
+        """The default leaves inputs single-step, as every built-in model expects."""
+        sample = self._load_sample(timestep=4, input_observation_horizon=1)
+        assert self._input_timesteps(sample) == [4]
+
+    @patch("neuracore.login")
+    @pytest.mark.parametrize("horizon", [2, 4, 6])
+    def test_history_window_ends_at_the_current_timestep(
+        self, mock_login, horizon: int
+    ) -> None:
+        """A window of N observations ends at the current step, oldest first."""
+        timestep = 7
+        sample = self._load_sample(timestep=timestep, input_observation_horizon=horizon)
+        expected = list(range(timestep - horizon + 1, timestep + 1))
+        assert self._input_timesteps(sample) == expected
+
+    @patch("neuracore.login")
+    def test_start_of_recording_left_pads_by_repeating_the_earliest_step(
+        self, mock_login
+    ) -> None:
+        """Before enough history exists the earliest observation is repeated.
+
+        Truncating instead would produce a shorter time axis for early
+        timesteps, which collation cannot stack against a full-length sample.
+        """
+        sample = self._load_sample(timestep=0, input_observation_horizon=4)
+        assert self._input_timesteps(sample) == [0, 0, 0, 0]
+
+        sample = self._load_sample(timestep=2, input_observation_horizon=4)
+        assert self._input_timesteps(sample) == [0, 0, 1, 2]
+
+    @patch("neuracore.login")
+    def test_history_never_wraps_to_the_end_of_the_recording(self, mock_login) -> None:
+        """A window starting before zero must clamp, not index from the end.
+
+        Slice starts are normalized against the recording length, so an
+        unclamped negative start would silently return late-episode frames.
+        """
+        sample = self._load_sample(timestep=1, input_observation_horizon=5)
+        timesteps = self._input_timesteps(sample)
+        assert timesteps == [0, 0, 0, 0, 1]
+        assert max(timesteps) == 1
+
+    @patch("neuracore.login")
+    def test_padded_slots_match_the_history_length(self, mock_login) -> None:
+        """Zero-padded sensor slots span the same time axis as real ones."""
+        horizon = 3
+        sample = self._load_sample(timestep=5, input_observation_horizon=horizon)
+        for batched in sample.inputs[DataType.JOINT_POSITIONS]:
+            assert batched.value.shape[1] == horizon
+
+    @patch("neuracore.login")
+    def test_samples_at_different_timesteps_collate(self, mock_login) -> None:
+        """Early and mid-episode samples share a time extent, so they batch."""
+        horizon = 4
+        early = self._load_sample(timestep=0, input_observation_horizon=horizon)
+        later = self._load_sample(timestep=6, input_observation_horizon=horizon)
+
+        recording = TestOutputTimestepAlignment._recording_with_timestep_values(
+            NUM_OBSERVATIONS_PER_EPISODE
+        )
+        synchronized_dataset = TestOutputTimestepAlignment._dataset_with_recording(
+            recording,
+            _dataset_statistics_for_output_type(DataType.JOINT_TARGET_POSITIONS),
+        )
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=synchronized_dataset,
+            input_cross_embodiment_description={
+                ROBOT_ID: {
+                    DataType.JOINT_POSITIONS: _indexed_names(
+                        DataType.JOINT_POSITIONS, 3
+                    )
+                }
+            },
+            output_cross_embodiment_description={
+                ROBOT_ID: {
+                    DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                        DataType.JOINT_TARGET_POSITIONS, 3
+                    )
+                }
+            },
+            output_prediction_horizon=1,
+            input_observation_horizon=horizon,
+            input_preprocessing_config=PreprocessingConfiguration(),
+            output_preprocessing_config=PreprocessingConfiguration(),
+            sample_cache=False,
+        )
+
+        batch = dataset.collate_fn([early, later])
+        assert batch.batch_size == 2
+        assert batch.inputs[DataType.JOINT_POSITIONS][0].value.shape[:2] == (2, horizon)
+
+
 class TestDatasetIntegration:
     """Test dataset with PyTorch ecosystem."""
 

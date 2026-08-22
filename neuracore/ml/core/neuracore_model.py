@@ -66,6 +66,9 @@ class NeuracoreModel(nn.Module, ABC):
         self.output_prediction_horizon = (
             model_init_description.output_prediction_horizon
         )
+        self.input_observation_horizon = (
+            model_init_description.input_observation_horizon
+        )
 
     @property
     def device(self) -> torch.device:

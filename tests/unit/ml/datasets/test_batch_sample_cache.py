@@ -33,12 +33,19 @@ def _sample(value: float = 1.0) -> BatchedTrainingSamples:
     )
 
 
-def _cache(tmp_path, horizon: int = 3, resize=(224, 224), slots: int = 2):
+def _cache(
+    tmp_path,
+    horizon: int = 3,
+    resize=(224, 224),
+    slots: int = 2,
+    observation_horizon: int = 1,
+):
     return BatchSampleCache(
         synchronized_dataset_id="sync-1",
         input_cross_embodiment_description=_description(slots),
         output_cross_embodiment_description=_description(slots),
         output_prediction_horizon=horizon,
+        input_observation_horizon=observation_horizon,
         input_preprocessing_config=PreprocessingConfiguration(
             {DataType.RGB_IMAGES: [ResizePad(size=resize)]}
         ),
@@ -105,6 +112,7 @@ def test_key_changes_with_anything_that_shapes_a_sample(tmp_path):
     baseline = _cache(tmp_path).directory
 
     assert _cache(tmp_path, horizon=5).directory != baseline
+    assert _cache(tmp_path, observation_horizon=4).directory != baseline
     assert _cache(tmp_path, resize=(128, 128)).directory != baseline
     assert _cache(tmp_path, slots=3).directory != baseline
     assert _cache(tmp_path).directory == baseline, "identical config must be stable"

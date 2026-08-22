@@ -24,6 +24,10 @@ algorithm_params: null
 seed: 42
 epochs: 100
 output_prediction_horizon: 100
+# Consecutive observations, ending at the current step, that each input spans.
+# 1 supplies only the current observation, which is what every built-in
+# algorithm uses. Raising it costs a frame decode per extra step.
+input_observation_horizon: 1
 validation_split: 0.2
 frequency: 10
 allow_duplicates: true

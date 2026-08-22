@@ -64,6 +64,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         input_preprocessing_config: PreprocessingConfiguration,
         output_preprocessing_config: PreprocessingConfiguration,
         output_prediction_horizon: int,
+        input_observation_horizon: int = 1,
         sample_cache: bool = True,
     ):
         """Initialize the dataset.
@@ -79,6 +80,9 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             output_preprocessing_config: Preprocessing configuration applied
                 to output slots.
             output_prediction_horizon: Number of future timesteps to predict.
+            input_observation_horizon: Number of consecutive observations ending
+                at the current timestep to supply as input. ``1`` supplies only
+                the current observation.
             sample_cache: Reuse fully built samples from an on-disk cache
                 across epochs and runs, rebuilding on a miss.
         """
@@ -92,6 +96,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=output_prediction_horizon,
+            input_observation_horizon=input_observation_horizon,
             num_recordings=len(synchronized_dataset),
         )
         self.synchronized_dataset = synchronized_dataset
@@ -243,6 +248,7 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.output_cross_embodiment_description
             ),
             output_prediction_horizon=self.output_prediction_horizon,
+            input_observation_horizon=self.input_observation_horizon,
             # Worker-side halves only; the dataset already discarded the rest.
             input_preprocessing_config=self.input_preprocessing_config,
             output_preprocessing_config=self.output_preprocessing_config,
@@ -475,6 +481,45 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             for sync_point in output_sync_points
         ]
 
+    def _load_projected_input_sync_points(
+        self,
+        synced_recording: SynchronizedRecording,
+        timestep: int,
+        ordered_items: dict[DataType, list[tuple[int, str]]],
+    ) -> list[SynchronizedPoint]:
+        """Load the observation window ending at ``timestep``.
+
+        Returns exactly ``input_observation_horizon`` points. Near the start of
+        a recording there is less history than asked for, so the earliest
+        available point is repeated to fill the gap — the mirror of the
+        last-point repeat the output side uses at the end of a recording. The
+        length has to be exact either way, because collation concatenates
+        samples along the batch axis and cannot stack ragged time extents.
+
+        Args:
+            synced_recording: Recording to read from.
+            timestep: The current timestep, which ends the window.
+            ordered_items: Index-ordered ``{data_type: [(index, name), ...]}``.
+        """
+        horizon = self.input_observation_horizon
+        # A negative slice start would be normalized against the recording
+        # length and silently return the wrong window, so clamp it here.
+        start = max(0, timestep - horizon + 1)
+        window = cast(
+            list[SynchronizedPoint],
+            synced_recording[start : timestep + 1],
+        )
+        if not window:
+            raise ValueError(
+                f"No input sync points available at timestep {timestep} in "
+                f"recording '{synced_recording.name}'"
+            )
+        padding = [window[0]] * (horizon - len(window))
+        return [
+            self._project_sync_point(sync_point, ordered_items)
+            for sync_point in padding + window
+        ]
+
     @staticmethod
     def _output_sync_points_for_data_type(
         output_sync_points: list[SynchronizedPoint],
@@ -532,14 +577,14 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if timestep is None:
             timestep = self._get_timestep(episode_length)
 
-        input_sync_point = cast(SynchronizedPoint, synced_recording[timestep])
-
         # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
 
         merged_ordered_items = self._merged_ordered_items[robot_id]
-        input_sync_point = self._project_sync_point(
-            input_sync_point, merged_ordered_items
+        input_sync_points = self._load_projected_input_sync_points(
+            synced_recording=synced_recording,
+            timestep=timestep,
+            ordered_items=merged_ordered_items,
         )
 
         output_sync_points = self._load_projected_output_sync_points(
@@ -567,13 +612,17 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 if name is None:
                     # Pad missing data with zeros.
                     batched_nc_data = batched_nc_data_class.sample(
-                        batch_size=1, time_steps=1
+                        batch_size=1, time_steps=self.input_observation_horizon
                     )
                 else:
                     # If the current robot has a name for this index, use it to
                     # get the data.
-                    nc_data = input_sync_point.data[data_type][name]
-                    batched_nc_data = batched_nc_data_class.from_nc_data(nc_data)
+                    nc_data_list = [
+                        input_sp.data[data_type][name] for input_sp in input_sync_points
+                    ]
+                    batched_nc_data = batched_nc_data_class.from_nc_data_list(
+                        nc_data_list
+                    )
                     input_mask_values[index] = 1.0
 
                 batched_nc_data = apply_preprocessing_methods(

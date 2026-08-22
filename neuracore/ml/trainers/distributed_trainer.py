@@ -8,13 +8,14 @@ from typing import cast
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from neuracore_types import DataType
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
-from neuracore.ml.core.ml_types import BatchedTrainingSamples
+from neuracore.ml.core.ml_types import BatchedInferenceInputs, BatchedTrainingSamples
 from neuracore.ml.logging.system_metrics import (
     SYSTEM_METRIC_PREFIX,
     SystemMetricsCollector,
@@ -36,6 +37,10 @@ UPDATE_TRAINING_METADATA_EVERY = 20
 # which is far more often than a slow-moving quantity needs. Matches the
 # interval the dataset uses for the same check.
 CHECK_MEMORY_INTERVAL = 100
+
+# Output data types whose predictions are worth looking at rather than reducing
+# to a scalar.
+IMAGE_DATA_TYPES = frozenset({DataType.RGB_IMAGES, DataType.DEPTH_IMAGES})
 
 
 class NestedModule(nn.Module):
@@ -281,6 +286,83 @@ class DistributedTrainer:
         self._log_scalars(avg_epoch_metrics, epoch, prefix="train/epoch/metrics")
         return avg_epoch_losses
 
+    def _image_output_data_types(self) -> list[DataType]:
+        """Image output data types this model predicts, if any."""
+        model = self.get_model_without_ddp()
+        return [
+            data_type
+            for data_type in model.ordered_output_data_types
+            if data_type in IMAGE_DATA_TYPES
+        ]
+
+    @torch.no_grad()
+    def _log_output_images(self, batch: BatchedTrainingSamples, step: int) -> None:
+        """Log predicted and ground-truth frames for image output types.
+
+        ``training_step`` returns losses, not predictions, so this runs the
+        model's inference path on the same batch. That costs an extra forward
+        pass, hence once per validation epoch on a single batch.
+
+        Args:
+            batch: A validation batch, already on the device.
+            step: Step to log against.
+        """
+        image_data_types = self._image_output_data_types()
+        if not image_data_types:
+            return
+
+        model = self.get_model_without_ddp()
+        inference_inputs = BatchedInferenceInputs(
+            inputs=batch.inputs,
+            inputs_mask=batch.inputs_mask,
+            batch_size=batch.batch_size,
+        )
+        try:
+            predictions = model(inference_inputs)
+        except Exception as exc:
+            # A diagnostic must not end a training run.
+            logger.warning("Could not render output images: %s", exc)
+            return
+
+        for data_type in image_data_types:
+            predicted_items = predictions.get(data_type) or []
+            target_items = batch.outputs.get(data_type) or []
+            for index, predicted in enumerate(predicted_items):
+                frames = getattr(predicted, "frame", None)
+                if frames is None:
+                    continue
+                # First sample only; the time axis becomes the grid.
+                self.training_logger.log_images(
+                    f"val/predicted/{data_type.value}/{index}",
+                    self._scale_frames_for_logging(frames[0]),
+                    step,
+                )
+                if index < len(target_items):
+                    target_frames = getattr(target_items[index], "frame", None)
+                    if target_frames is not None:
+                        self.training_logger.log_images(
+                            f"val/target/{data_type.value}/{index}",
+                            self._scale_frames_for_logging(target_frames[0]),
+                            step,
+                        )
+
+    @staticmethod
+    def _scale_frames_for_logging(frames: torch.Tensor) -> torch.Tensor:
+        """Scale a (T, C, H, W) frame stack into the 0-1 range loggers expect.
+
+        Frames carry a 0-255 range, but a model is free to emit anything, so
+        this rescales from whatever range is present rather than assuming.
+
+        Args:
+            frames: (T, C, H, W) predicted or target frames.
+        """
+        images = frames.detach().float().cpu()
+        low = images.min()
+        high = images.max()
+        if high > low:
+            return (images - low) / (high - low)
+        return images.clamp(0.0, 1.0)
+
     def validate(self, epoch: int) -> dict[str, float]:
         """Run validation.
 
@@ -318,6 +400,9 @@ class DistributedTrainer:
                     self.global_val_step,
                     prefix="val/step/metrics",
                 )
+            if batch_idx == 0 and self.rank == 0:
+                self._log_output_images(batch, epoch)
+
             accumulator.update(batch_output)
             self.global_val_step += 1
 

@@ -1,0 +1,1 @@
+"""Packaged algorithm config group."""

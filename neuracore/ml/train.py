@@ -140,6 +140,7 @@ def _save_local_training_metadata(
         ),
         "frequency": getattr(cfg, "frequency", None),
         "output_prediction_horizon": getattr(cfg, "output_prediction_horizon", None),
+        "input_observation_horizon": getattr(cfg, "input_observation_horizon", None),
         # Align with cloud run schema for inspect output
         "epoch": -1,
         "step": -1,
@@ -273,6 +274,7 @@ def assert_valid_batch_size(
         input_data_types=extract_data_types(input_cross_embodiment_description),
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
+        input_observation_horizon=cfg.get("input_observation_horizon", 1),
     )
     model_factory = partial(
         _create_model_for_batch_validation, cfg, model_init_description
@@ -334,6 +336,7 @@ def determine_optimal_batch_size(
         input_data_types=extract_data_types(input_cross_embodiment_description),
         output_data_types=extract_data_types(output_cross_embodiment_description),
         output_prediction_horizon=cfg.output_prediction_horizon,
+        input_observation_horizon=cfg.get("input_observation_horizon", 1),
     )
     model_factory = partial(
         _create_model_for_batch_validation, cfg, model_init_description
@@ -509,6 +512,7 @@ def run_training(
             input_data_types=input_data_types,
             output_data_types=output_data_types,
             output_prediction_horizon=cfg.output_prediction_horizon,
+            input_observation_horizon=cfg.get("input_observation_horizon", 1),
         )
 
         model, algorithm_config = get_model_and_algorithm_config(
@@ -754,6 +758,7 @@ def _main(cfg: DictConfig) -> None:
             input_cross_embodiment_description=input_cross_embodiment_description,
             output_cross_embodiment_description=output_cross_embodiment_description,
             output_prediction_horizon=cfg.output_prediction_horizon,
+            input_observation_horizon=cfg.get("input_observation_horizon", 1),
             input_preprocessing_config=train_input_preprocessing_config,
             output_preprocessing_config=train_output_preprocessing_config,
             sample_cache=cfg.get("dataset_sample_cache", True),
