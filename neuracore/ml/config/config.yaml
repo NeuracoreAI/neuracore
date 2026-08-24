@@ -44,6 +44,19 @@ system_logging_frequency: 200
 keep_last_n_checkpoints: 2
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
+# Autocast dtype for forward passes. "bf16" runs matmuls and convolutions in
+# bfloat16, which is markedly faster on tensor-core GPUs and frees the
+# activation memory a larger batch needs. Master weights, optimizer state and
+# the loss reduction stay float32, so no gradient scaler is involved. null
+# trains in float32. Unsupported on this GPU falls back to float32.
+mixed_precision: null
+
+# Steps between weight and gradient histograms. 0 disables them. Each histogram
+# sorts one parameter tensor on the CPU, so the pass scales with parameter
+# count and for a large model can cost as much as the training step it
+# accompanies.
+histogram_frequency: 0
+
 input_data_types:
 output_data_types:
 

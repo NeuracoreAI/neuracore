@@ -2,6 +2,7 @@
 
 import logging
 import os
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from typing import cast
 
@@ -23,15 +24,32 @@ from neuracore.ml.logging.system_metrics import (
 from neuracore.ml.logging.training_logger import TrainingLogger
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.trainers.metric_accumulator import MetricAccumulator
-from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.device_utils import (
+    get_default_device,
+    resolve_autocast_dtype,
+)
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import apply_device_preprocessing
 from neuracore.ml.utils.training_storage_handler import TrainingStorageHandler
 
 logger = logging.getLogger(__name__)
 
+
 # Only update the training metadata every N steps to avoid excessive API calls
 UPDATE_TRAINING_METADATA_EVERY = 20
+
+
+def _format_losses(train_losses: dict[str, float], val_losses: dict[str, float]) -> str:
+    """Render epoch losses as 'name train/val' pairs for the run log."""
+    return " | ".join(
+        (
+            f"{name} {train_losses[name]:.4f}/{val_losses[name]:.4f}"
+            if name in val_losses
+            else f"{name} {train_losses[name]:.4f}"
+        )
+        for name in train_losses
+    )
+
 
 # Checking RAM and VRAM headroom reads /proc/meminfo and the CUDA allocator,
 # which is far more often than a slow-moving quantity needs. Matches the
@@ -91,6 +109,8 @@ class DistributedTrainer:
         rank: int = 0,
         world_size: int = 1,
         device: torch.device | None = None,
+        mixed_precision: str | None = None,
+        histogram_freq: int = 0,
     ):
         """Initialize the distributed trainer.
 
@@ -120,9 +140,27 @@ class DistributedTrainer:
             rank: Rank of this process
             world_size: Total number of processes/GPUs
             device: Optional device to use for training
+            mixed_precision: Autocast dtype for forward passes. "bf16" runs
+                matmuls and convolutions in bfloat16; master weights, optimizer
+                state and the loss reduction stay float32. None trains in
+                float32. Falls back to float32 where bfloat16 is unavailable.
+            histogram_freq: Steps between weight and gradient histograms. 0
+                disables them. Each histogram sorts one parameter tensor on the
+                CPU, so for a large model the pass can cost as much as the
+                training step it accompanies.
+
+        Raises:
+            ValueError: If keep_last_n_checkpoints is not positive,
+                mixed_precision is unsupported, or histogram_freq is negative.
         """
         if keep_last_n_checkpoints <= 0:
             raise ValueError("keep_last_n_checkpoints must be greater than 0")
+        if mixed_precision not in (None, "bf16"):
+            raise ValueError(
+                f"mixed_precision must be 'bf16' or None, got {mixed_precision!r}"
+            )
+        if histogram_freq < 0:
+            raise ValueError(f"histogram_freq must be >= 0, got {histogram_freq}")
 
         self.device = device or get_default_device(gpu_index=rank)
 
@@ -145,6 +183,8 @@ class DistributedTrainer:
         self.num_epochs = num_epochs
         self.log_freq = log_freq
         self.system_log_freq = system_log_freq
+        self.histogram_freq = histogram_freq
+        self.autocast_dtype = resolve_autocast_dtype(mixed_precision, self.device)
         self._pbar_enabled = rank == 0 and not storage_handler.log_to_cloud
         self._histograms_enabled = rank == 0 and training_logger.supports_histograms
         # Only rank 0 logs, matching _log_scalars, so only rank 0 samples.
@@ -213,12 +253,14 @@ class DistributedTrainer:
             apply_device_preprocessing(batch, *self.train_device_preprocessing)
 
             # Forward pass
-            if self.world_size > 1:
-                batch_output = self.model(batch)
-            else:
-                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
+            with self._autocast():
+                batch_output = self._forward(batch)
+            # Reduced outside autocast so the backward root stays float32.
             loss = (
-                torch.stack(list(batch_output.losses.values()), dim=0).sum(dim=0).mean()
+                torch.stack(list(batch_output.losses.values()), dim=0)
+                .sum(dim=0)
+                .mean()
+                .float()
             )
 
             # Backward pass
@@ -249,6 +291,9 @@ class DistributedTrainer:
                     self.global_train_step,
                     prefix="train/step/metrics",
                 )
+            if self.histogram_freq and (
+                self.global_train_step % self.histogram_freq == 0
+            ):
                 self._log_gradients(self.global_train_step)
                 self._log_weights(self.global_train_step)
 
@@ -295,6 +340,18 @@ class DistributedTrainer:
             if data_type in IMAGE_DATA_TYPES
         ]
 
+    def _forward(self, batch: BatchedTrainingSamples) -> BatchedTrainingOutputs:
+        """Run one forward pass, through DDP when it is wrapping the model."""
+        if self.world_size > 1:
+            return self.model(batch)
+        return cast(NeuracoreModel, self.model).training_step(batch)
+
+    def _autocast(self) -> AbstractContextManager:
+        """Return the autocast context for forward passes."""
+        if self.autocast_dtype is None:
+            return nullcontext()
+        return torch.autocast(device_type=self.device.type, dtype=self.autocast_dtype)
+
     @torch.no_grad()
     def _log_output_images(self, batch: BatchedTrainingSamples, step: int) -> None:
         """Log predicted and ground-truth frames for image output types.
@@ -318,7 +375,8 @@ class DistributedTrainer:
             batch_size=batch.batch_size,
         )
         try:
-            predictions = model(inference_inputs)
+            with self._autocast():
+                predictions = model(inference_inputs)
         except Exception as exc:
             # A diagnostic must not end a training run.
             logger.warning("Could not render output images: %s", exc)
@@ -386,10 +444,8 @@ class DistributedTrainer:
             apply_device_preprocessing(batch, *self.inference_device_preprocessing)
 
             # Forward pass
-            if self.world_size > 1:
-                batch_output = self.model(batch)
-            else:
-                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
+            with self._autocast():
+                batch_output = self._forward(batch)
 
             if self.log_freq > 0 and self.global_val_step % self.log_freq == 0:
                 self._log_scalars(
@@ -443,7 +499,15 @@ class DistributedTrainer:
                     )
 
                 with torch.no_grad():
-                    self.validate(epoch)
+                    val_loss_metrics = self.validate(epoch)
+
+                if self.rank == 0:
+                    logger.info(
+                        "Epoch %d/%d | %s",
+                        epoch,
+                        self.num_epochs,
+                        _format_losses(train_loss_metrics, val_loss_metrics),
+                    )
 
                 # Save metadata
                 if self.rank == 0:
@@ -579,15 +643,19 @@ class DistributedTrainer:
             return
         model = self.get_model_without_ddp()
         for name, param in model.named_parameters():
-            self.training_logger.log_histogram(f"weights/{name}", param, step)
+            if param.requires_grad:
+                self.training_logger.log_histogram(f"weights/{name}", param, step)
 
     def _log_scalars(
-        self, scalars: dict[str, float], step: int, prefix: str = "train/"
+        self,
+        scalars: dict[str, float] | dict[str, torch.Tensor],
+        step: int,
+        prefix: str = "train/",
     ) -> None:
         """Log batch outputs to TensorBoard.
 
         Args:
-            scalars: Dictionary of scalar values to log
+            scalars: Scalar values to log, as floats or zero-dim tensors
             step: Training step
             prefix: Prefix for the log names (e.g., "train/step" or "val/batch")
         """

@@ -6,6 +6,7 @@ import multiprocessing
 import queue as queue_module
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +19,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
-from neuracore.ml.utils.device_utils import cpu_count
+from neuracore.ml.utils.device_utils import cpu_count, resolve_autocast_dtype
 from neuracore.ml.utils.memory_monitor import MemoryMonitor, OutOfMemoryError
 from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
 
@@ -80,9 +81,21 @@ class BatchSizeValidator:
         train_dataset: Dataset,
         train_dataloader_kwargs: dict[str, Any],
         num_iterations: int = 2,
+        mixed_precision: str | None = None,
     ):
-        """Initialize a batch-size validator."""
+        """Initialize a batch-size validator.
+
+        Args:
+            model_factory: Builds a fresh model inside the probe subprocess.
+            device: CUDA device to probe on.
+            train_dataset: Dataset the probe draws batches from.
+            train_dataloader_kwargs: Loader settings shared with training.
+            num_iterations: Training steps per probe.
+            mixed_precision: Precision the real run will use. The probe must
+                match it, or it measures the wrong activation memory.
+        """
         self.device = device
+        self.mixed_precision = mixed_precision
 
         if not torch.cuda.is_available() or "cuda" not in self.device.type:
             raise ValueError("Batch size testing is only supported on GPUs.")
@@ -140,6 +153,7 @@ class BatchSizeValidator:
                 self.num_iterations,
                 batch_size,
                 str(self.device),
+                self.mixed_precision,
             ),
         )
 
@@ -199,6 +213,7 @@ def _run_batch_size_probe_worker(
     num_iterations: int,
     batch_size: int,
     device_str: str,
+    mixed_precision: str | None,
 ) -> None:
     """Subprocess entrypoint that probes a single batch size."""
     logging.basicConfig(level=logging.INFO)
@@ -215,6 +230,7 @@ def _run_batch_size_probe_worker(
             num_iterations=num_iterations,
             batch_size=batch_size,
             device=device,
+            mixed_precision=mixed_precision,
         )
         result_queue.put((_WORKER_RESULT_SUCCESS, result))
     except BaseException as exc:  # noqa: BLE001 - forward anything to parent
@@ -237,6 +253,7 @@ def _probe_batch_size(
     num_iterations: int,
     batch_size: int,
     device: torch.device,
+    mixed_precision: str | None = None,
 ) -> BatchProbeResult:
     """Run the batch-size probe inside the subprocess and measure peak memory.
 
@@ -278,6 +295,7 @@ def _probe_batch_size(
                 memory_monitor,
                 _NUM_WARMUP_ITERATIONS,
                 device,
+                mixed_precision,
             )
 
         # Reset AFTER warmup so the peak reflects steady-state training memory.
@@ -287,7 +305,13 @@ def _probe_batch_size(
         # no backward and no optimizer step, so its peak memory is strictly below
         # the training-step peak that sets the OOM point.
         _train_probe(
-            model, train_loader, optimizers, memory_monitor, num_iterations, device
+            model,
+            train_loader,
+            optimizers,
+            memory_monitor,
+            num_iterations,
+            device,
+            mixed_precision,
         )
 
         # Reserved (not allocated) is what the caching allocator holds and what
@@ -369,9 +393,16 @@ def _train_probe(
     memory_monitor: MemoryMonitor,
     num_iterations: int,
     device: torch.device,
+    mixed_precision: str | None = None,
 ) -> None:
     """Run a short training loop for memory profiling."""
     model.train()
+    autocast_dtype = resolve_autocast_dtype(mixed_precision, device)
+    autocast = (
+        torch.autocast(device_type=device.type, dtype=autocast_dtype)
+        if autocast_dtype is not None
+        else nullcontext()
+    )
 
     for optimizer in optimizers:
         optimizer.zero_grad()
@@ -383,8 +414,9 @@ def _train_probe(
 
             batch = batch.to(device)
 
-            outputs: BatchedTrainingOutputs = model.training_step(batch)
-            loss = sum(outputs.losses.values()).mean()
+            with autocast:
+                outputs: BatchedTrainingOutputs = model.training_step(batch)
+            loss = sum(outputs.losses.values()).mean().float()
 
             loss.backward()
 
@@ -418,6 +450,7 @@ class BatchSizeAutotuner:
         max_batch_size: int = 512,
         num_iterations: int = 2,
         safety_factor: float = 0.7,
+        mixed_precision: str | None = None,
     ):
         """Initialize the batch size auto-tuner.
 
@@ -430,6 +463,8 @@ class BatchSizeAutotuner:
             max_batch_size: Maximum batch size to try
             num_iterations: Number of iterations to run for each batch size
             safety_factor: Reduce optimal batch size by a factor to be conservative.
+            mixed_precision: Precision the real run will use, forwarded to the
+                probe so it measures the same arithmetic.
         """
         assert num_iterations >= 2, "At least two consecutive batches must be loaded"
 
@@ -467,6 +502,7 @@ class BatchSizeAutotuner:
             train_dataset=self.train_dataset,
             train_dataloader_kwargs=self.train_dataloader_kwargs,
             num_iterations=self.num_iterations,
+            mixed_precision=mixed_precision,
         )
 
     def _downscale_to_fit(self, start: int, floor_fit: int) -> int:
@@ -820,6 +856,7 @@ def find_optimal_batch_size(
         },
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
+        mixed_precision=cfg.get("mixed_precision"),
     )
 
     # Find the batch size from the affine memory model (self-sufficient: it
@@ -870,6 +907,7 @@ def is_valid_batch_size(
             "persistent_workers": num_train_workers > 0,
             "pin_memory": True,
         },
+        mixed_precision=cfg.get("mixed_precision"),
     )
 
     valid = validator.test_batch_size(batch_size)

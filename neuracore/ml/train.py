@@ -555,6 +555,8 @@ def run_training(
             num_epochs=cfg.epochs,
             log_freq=cfg.logging_frequency,
             system_log_freq=cfg.get("system_logging_frequency", 200),
+            mixed_precision=cfg.get("mixed_precision"),
+            histogram_freq=cfg.get("histogram_frequency", 0),
             train_device_preprocessing=(
                 train_input_preprocessing_config.split_by_stage()[1],
                 train_output_preprocessing_config.split_by_stage()[1],
