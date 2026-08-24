@@ -52,7 +52,6 @@ class StreamManagerOrchestrator(
         self,
         org_id: str | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
     ):
         """Initialize the stream manager factory.
@@ -62,8 +61,6 @@ class StreamManagerOrchestrator(
                 defaults to the current org.
             loop: the event loop to run on. Defaults to the running loop if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
         """
@@ -77,7 +74,7 @@ class StreamManagerOrchestrator(
         self.org_id = org_id or get_current_org()
         self.auth = auth or get_auth()
         self.loop = loop or get_running_loop()
-        self.client_session = client_session or ClientSession(
+        self.client_session = ClientSession(
             timeout=ClientTimeout(sock_read=None, total=None),
             loop=self.loop,
             middlewares=(retry_connection_failures,),
@@ -94,6 +91,42 @@ class StreamManagerOrchestrator(
                 get_consume_live_data_enabled_manager(),
             ),
         )
+        self._closed = False
+        self._logout_listener = self._on_logout
+        self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
+
+    def _on_logout(self) -> None:
+        """Schedule teardown on the streaming event loop."""
+        StreamManagerOrchestrator.discard_instance(self)
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.close)
+
+    def close(self) -> None:
+        """Close all streaming resources owned by this orchestrator."""
+        if self._closed:
+            return
+        self._closed = True
+        self._remove_logout_listener()
+
+        self.signalling_consumer.close()
+
+        provider_managers = list(self.provider_managers.values())
+        consumer_managers = list(self.consumer_managers.values())
+        self.provider_managers.clear()
+        self.consumer_managers.clear()
+
+        for provider_manager in provider_managers:
+            provider_manager.close()
+        for consumer_manager in consumer_managers:
+            consumer_manager.close()
+
+        self.loop.create_task(self.client_session.close())
+        StreamManagerOrchestrator.discard_instance(self)
+
+    def _remove_logout_listener(self) -> None:
+        """Remove the logout listener when it has not already fired."""
+        if self._logout_listener in self.auth.listeners(Auth.LOGOUT_EVENT):
+            self.auth.remove_listener(Auth.LOGOUT_EVENT, self._logout_listener)
 
     def get_manager(
         self, type: ManagerType, robot_id: str, robot_instance: int

@@ -1027,12 +1027,8 @@ def _bind_worker_dataset(spec: ContextSpec) -> None:
 def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     """Subprocess wrapper for context_worker used by multiprocessing.Pool.
 
-    On Linux, Pool uses fork so workers inherit a copy of the parent's
-    Timer._stats. Clearing it here ensures workers only capture their own
-    timers and the parent's pre-fork timers (e.g. nc.login) are not
-    double-counted when stats are merged back. Spawned workers (macOS)
-    additionally re-authenticate, as they do not inherit the parent's
-    in-process auth state.
+    Workers use a fresh interpreter, so clear timing state and authenticate
+    before running the context workload.
     """
     multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
@@ -1256,8 +1252,9 @@ def run_case_contexts(
     if case.parallel_contexts == 1:
         results = [context_worker(specs[0])]
     else:
-        with relayed_worker_logs() as log_queue:
-            with multiprocessing.Pool(
+        process_context = multiprocessing.get_context("spawn")
+        with relayed_worker_logs(process_context) as log_queue:
+            with process_context.Pool(
                 case.parallel_contexts,
                 initializer=init_worker_logging,
                 initargs=(log_queue, logging.getLogger().getEffectiveLevel()),

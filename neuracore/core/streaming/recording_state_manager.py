@@ -14,7 +14,6 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import NamedTuple
 
-from aiohttp import ClientSession
 from neuracore_types import (
     BaseRecodingUpdatePayload,
     RecordingNotification,
@@ -98,7 +97,6 @@ class RecordingStateManager(BaseSSEConsumer):
         loop: asyncio.AbstractEventLoop | None = None,
         enabled_manager: EnabledManager | None = None,
         background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
     ):
         """Initialize the recording state manager.
@@ -113,8 +111,6 @@ class RecordingStateManager(BaseSSEConsumer):
             background_coroutine_tracker: The storage for background tasks
                 scheduled on receiving events. Defaults to a new tracker if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
         """
@@ -122,7 +118,6 @@ class RecordingStateManager(BaseSSEConsumer):
             loop=loop,
             enabled_manager=enabled_manager,
             background_coroutine_tracker=background_coroutine_tracker,
-            client_session=client_session,
         )
         self.org_id = org_id or get_current_org()
         self.auth = auth if auth is not None else get_auth()
@@ -144,6 +139,56 @@ class RecordingStateManager(BaseSSEConsumer):
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
         self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
+
+        self._logout_listener = self._on_logout
+        self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
+
+    def _on_logout(self) -> None:
+        """Schedule teardown on the streaming event loop."""
+        self._discard_cached_manager()
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.close)
+
+    def _discard_cached_manager(self) -> None:
+        """Remove this manager from the existing global cache."""
+        global _recording_manager
+
+        if _recording_manager is None or not _recording_manager.done():
+            return
+        try:
+            cached_manager = _recording_manager.result()
+        except Exception:
+            return
+        if cached_manager is self:
+            _recording_manager = None
+
+    def _on_close(self) -> None:
+        """Close the SSE stream and clear locally owned recording state."""
+        super()._on_close()
+        self._remove_logout_listener()
+
+        with self._state_lock:
+            for handles in self._recording_timers.values():
+                for handle in handles:
+                    handle.cancel()
+            self._recording_timers.clear()
+            self.recording_robot_instances.clear()
+            self._expired_recording_ids.clear()
+            self.active_dataset_ids.clear()
+            self._drain_callbacks.clear()
+            self._connected_robot_id = None
+
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(
+                self.loop.create_task, self.client_session.close()
+            )
+
+        self._discard_cached_manager()
+
+    def _remove_logout_listener(self) -> None:
+        """Remove the logout listener when it has not already fired."""
+        if self._logout_listener in self.auth.listeners(Auth.LOGOUT_EVENT):
+            self.auth.remove_listener(Auth.LOGOUT_EVENT, self._logout_listener)
 
     def get_current_recording_id(self, robot_id: str, instance: int) -> str | None:
         """Get the current recording ID for a robot instance.
