@@ -164,8 +164,8 @@ jobs:
     # the runner pool and the shared staging backend, which makes those
     # deadlines flaky.
     needs: [pre-commit, functional]
-    # `!cancelled()` keeps this running when `functional` fails or is skipped
-    if: ${{ !cancelled() && contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'performance') }}
+    # `!cancelled()` keeps this running when `functional` fails or is skipped.
+    if: ${{ !cancelled() && contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'performance') && contains(fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]'), 'ubuntu-24.04') }}
     env:
       NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging/performance
       NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-performance-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
@@ -173,16 +173,13 @@ jobs:
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
       NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
-    # Shares the `os` input with `functional`, but upsizes the mac row
-    runs-on: >-
-      ${{ startsWith(matrix.os, 'macos') && !endsWith(matrix.os, '-large')
-      && format('{0}-large', matrix.os) || matrix.os }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         python-version: ["3.14"]
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
+        os: ["ubuntu-24.04"]
 
     steps:
     - name: Show disk space
