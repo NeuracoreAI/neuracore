@@ -104,18 +104,15 @@ jobs:
     # suite asserts wall-clock deadlines, and overlapping rows contend for both
     # the runner pool and the shared backend, which makes those deadlines flaky.
     needs: [pre-commit, functional]
-    # `!cancelled()` keeps this running when `functional` fails or is skipped
-    if: ${{ !cancelled() && contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'performance') }}
-    # Shares the `os` input with `functional`, but upsizes the mac row
-    runs-on: >-
-      ${{ startsWith(matrix.os, 'macos') && !endsWith(matrix.os, '-large')
-      && format('{0}-large', matrix.os) || matrix.os }}
+    # `!cancelled()` keeps this running when `functional` fails or is skipped.
+    if: ${{ !cancelled() && contains(fromJSON(inputs.suites || '["functional", "performance"]'), 'performance') && contains(fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]'), 'ubuntu-24.04') }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
         python-version: ["3.14"]
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
+        os: ["ubuntu-24.04"]
 
     steps:
     - name: Show disk space
