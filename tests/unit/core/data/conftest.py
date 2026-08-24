@@ -90,31 +90,63 @@ def create_test_video_fn():
     return _create_video
 
 
-@pytest.fixture
-def mock_wget_download(monkeypatch, create_test_video_fn):
-    """Mock wget.download calls to return fake video file."""
-    import wget
+@pytest.fixture(autouse=True)
+def mock_prefetch_transport(monkeypatch):
+    """Route the prefetch's aiohttp calls through the mocked requests layer.
 
-    def mock_download(url, out=None, bar=None):
-        """Mock wget.download to create a fake video file."""
-        # Create fake video data
-        video_data = create_test_video_fn(num_frames=10)
+    `requests_mock` cannot intercept aiohttp, and no aiohttp mocking library
+    supports the aiohttp version this package requires. Swapping the three
+    transport coroutines for `requests` equivalents keeps the pipeline itself --
+    its concurrency, locking, staging and atomic publish -- under test.
+    """
+    from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
+    from neuracore_types import SynchronizeRecordingRequest
 
-        # Determine output filename
-        if out:
-            filename = out
-        else:
-            # Extract filename from URL or use default
-            filename = url.split("/")[-1] if "/" in url else "downloaded_video.mp4"
+    from neuracore.core.auth import get_auth
+    from neuracore.core.data.frame_cache import video_filename_preference
+    from neuracore.core.data.prefetch import VideoPrefetcher
+    from neuracore.core.utils.download import stream_to_file
+    from neuracore.core.utils.http_session import thread_local_session
 
-        # Write fake video data to file
-        with open(filename, "wb") as f:
-            f.write(video_data)
+    async def fake_get_synced_data(self, session, recording_id):
+        response = thread_local_session().post(
+            f"{API_URL}/org/{self.dataset.org_id}" "/synchronize/synchronize-recording",
+            json=SynchronizeRecordingRequest(
+                recording_id=recording_id,
+                synchronization_details=self.synchronization_details,
+            ).model_dump(mode="json"),
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        return SynchronizedEpisodeModel.model_validate(response.json())
 
-        return filename
+    async def fake_get_video_url(self, session, target):
+        preference = video_filename_preference(target.data_type)
+        for filename in preference:
+            response = thread_local_session().get(
+                f"{API_URL}/org/{self.dataset.org_id}"
+                f"/recording/{target.recording_id}/download_url",
+                params={
+                    "filepath": (
+                        f"{target.data_type.value}/{target.camera_id}/{filename}"
+                    )
+                },
+                headers=get_auth().get_headers(),
+            )
+            if response.status_code == 404:
+                continue
+            response.raise_for_status()
+            return response.json()["url"]
+        raise FileNotFoundError(
+            f"No candidate filename found for recording {target.recording_id}"
+        )
 
-    monkeypatch.setattr(wget, "download", mock_download)
-    yield
+    async def fake_stream_video(self, session, url, destination):
+        stream_to_file(url, destination)
+
+    monkeypatch.setattr(VideoPrefetcher, "_get_synced_data", fake_get_synced_data)
+    monkeypatch.setattr(VideoPrefetcher, "_get_video_url", fake_get_video_url)
+    monkeypatch.setattr(VideoPrefetcher, "_stream_video", fake_stream_video)
 
 
 @pytest.fixture
