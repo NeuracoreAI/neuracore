@@ -225,7 +225,7 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
-        assert synced_dataset._prefetch_videos_needed is False
+        assert synced_dataset._prefetch_videos is False
 
     def test_prefetch_videos_enabled_no_cache(self, dataset_mock, mock_data_requests):
         """Test that prefetch_videos=True triggers prefetch when no cache exists."""
@@ -241,7 +241,7 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
-        assert synced_dataset._prefetch_videos_needed is True
+        assert synced_dataset._prefetch_videos is True
 
     def test_prefetch_videos_enabled_with_cache(
         self, dataset_mock, mock_data_requests, tmp_path
@@ -267,7 +267,7 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
-        assert synced_dataset._prefetch_videos_needed is False
+        assert synced_dataset._prefetch_videos is True
 
     def test_prefetch_videos_partial_cache(
         self, dataset_mock, mock_data_requests, tmp_path
@@ -291,7 +291,7 @@ class TestSynchronizedDataset:
             )
 
             mock_prefetch.assert_called_once()
-        assert synced_dataset._prefetch_videos_needed is True
+        assert synced_dataset._prefetch_videos is True
 
     def test_max_workers_parameter(self, dataset_mock):
         """Test that max_workers parameter is used in prefetch."""
@@ -304,18 +304,19 @@ class TestSynchronizedDataset:
                 frequency=30,
                 cross_embodiment_union=None,
                 prefetch_videos=True,
-                max_prefetch_workers=8,
+                max_prefetch_decode_workers=8,
             )
 
-            mock_prefetch.assert_called_once_with(max_prefetch_workers=8)
-        assert synced_dataset._prefetch_videos_needed is True
+            mock_prefetch.assert_called_once_with()
+        assert synced_dataset._max_prefetch_decode_workers == 8
+        assert synced_dataset._prefetch_videos is True
 
     def test_slice_does_not_prefetch(self, synced_dataset, mock_data_requests):
         """Test that slicing creates a new dataset without prefetching."""
         sliced = synced_dataset[0:1]
 
         # The sliced dataset should not have prefetch_videos enabled
-        assert sliced._prefetch_videos_needed is False
+        assert sliced._prefetch_videos is False
 
     def test_slice_reuses_parent_cache(self, synced_dataset, mock_data_requests):
         """Slicing must hand already-fetched recordings to the new instance."""
@@ -364,7 +365,7 @@ class TestSynchronizedDataset:
         # The cached entry is still inherited rather than re-fetched
         assert sliced._synced_recording_cache[0] is rec0
 
-    def test_slice_forwards_max_prefetch_workers(self, dataset_mock):
+    def test_slice_forwards_max_prefetch_decode_workers(self, dataset_mock):
         """Slicing must preserve the parent's prefetch worker count."""
         with patch.object(SynchronizedDataset, "_perform_synced_data_prefetch"):
             parent = SynchronizedDataset(
@@ -373,11 +374,11 @@ class TestSynchronizedDataset:
                 frequency=30,
                 cross_embodiment_union=None,
                 prefetch_videos=False,
-                max_prefetch_workers=8,
+                max_prefetch_decode_workers=8,
             )
             sliced = parent[0:1]
 
-        assert sliced._max_prefetch_workers == 8
+        assert sliced._max_prefetch_decode_workers == 8
 
     def test_getitem_with_instance_info(self, synced_dataset, mock_data_requests):
         """Test that getitem preserves instance information."""
@@ -386,9 +387,7 @@ class TestSynchronizedDataset:
         assert recording.instance == 1
         assert recording.robot_id == TEST_ROBOT_ID_1
 
-    def test_nested_iteration(
-        self, synced_dataset, mock_data_requests, mock_wget_download
-    ):
+    def test_nested_iteration(self, synced_dataset, mock_data_requests):
         """Test nested iteration through dataset and recordings."""
         total_frames = 0
 

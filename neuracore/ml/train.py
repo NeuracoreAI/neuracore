@@ -700,7 +700,8 @@ def _main(cfg: DictConfig) -> None:
             frequency=cfg.frequency,
             cross_embodiment_union=cross_embodiment_union,
             prefetch_videos=True,
-            max_prefetch_workers=cfg.max_prefetch_workers,
+            max_prefetch_decode_workers=cfg.max_prefetch_decode_workers,
+            num_concurrent_prefetch_requests=cfg.num_concurrent_prefetch_requests,
             max_delay_s=(
                 sys.float_info.max
                 if getattr(cfg, "max_delay_s", None) is None

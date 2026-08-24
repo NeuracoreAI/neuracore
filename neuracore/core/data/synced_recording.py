@@ -2,18 +2,13 @@
 
 import json
 import logging
-import os
-import shutil
-import subprocess
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import requests
-import wget
 from neuracore_types import (
     CameraData,
     CrossEmbodimentUnion,
@@ -27,7 +22,17 @@ from neuracore_types.nc_data.point_cloud_data import decode_point_cloud_frame
 from PIL import Image
 
 from neuracore.core.data.cache_manager import CacheManager
+from neuracore.core.data.frame_cache import (
+    acquire_decoding_lock,
+    delete_decoding_lock,
+    lock_file_for,
+    point_cloud_lock_file_for,
+    publish_decoded_frames,
+    video_filename_preference,
+    wait_for_lock_release,
+)
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
+from neuracore.core.utils.download import download_bytes, stream_to_file
 from neuracore.core.utils.http_session import thread_local_session
 
 from ..auth import get_auth
@@ -40,66 +45,6 @@ POINT_CLOUD_TRACE_INDEX_FILE = "trace.json"
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
-
-MAX_DECODING_ATTEMPTS = 3
-_FFMPEG_AVAILABLE: bool | None = None
-
-# `-fps_mode` is accepted from ffmpeg 5.1 onwards and is the only spelling
-# accepted from 8.0, where the legacy `-vsync` name was removed. Resolved
-# once per process and cached, like _FFMPEG_AVAILABLE above.
-_FPS_MODE_ARG = "-fps_mode"
-_VSYNC_ARG = "-vsync"
-_FFMPEG_FRAME_SYNC_ARG: str | None = None
-
-_RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
-_DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
-
-
-def _resolve_frame_sync_arg() -> str:
-    """Return the flag the local ffmpeg accepts for passthrough frame timing.
-
-    Probes with one synthetic frame piped to the null muxer: `-fps_mode` fails
-    with "Unrecognized option" on ffmpeg < 5.1, so any other outcome (success,
-    or a failure unrelated to the flag) is treated as accepted.
-
-    Returns:
-        "-fps_mode" if the local ffmpeg accepts it, otherwise "-vsync".
-    """
-    global _FFMPEG_FRAME_SYNC_ARG
-    if _FFMPEG_FRAME_SYNC_ARG is not None:
-        return _FFMPEG_FRAME_SYNC_ARG
-
-    frame = bytes([128]) * (16 * 16 * 3 // 2)  # one 16x16 yuv420p frame
-    try:
-        probe = subprocess.run(
-            [
-                "ffmpeg",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "yuv420p",
-                "-video_size",
-                "16x16",
-                "-i",
-                "-",
-                _FPS_MODE_ARG,
-                "passthrough",
-                "-f",
-                "null",
-                "-",
-            ],
-            input=frame,
-            capture_output=True,
-        )
-        rejected = b"Unrecognized option" in probe.stderr
-    except FileNotFoundError:
-        rejected = True
-
-    _FFMPEG_FRAME_SYNC_ARG = _VSYNC_ARG if rejected else _FPS_MODE_ARG
-    return _FFMPEG_FRAME_SYNC_ARG
 
 
 class SynchronizedRecording:
@@ -114,6 +59,7 @@ class SynchronizedRecording:
         instance: int,
         synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
+        episode_synced: SynchronizedEpisodeModel | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -128,6 +74,8 @@ class SynchronizedRecording:
                 must match the parameters the data was synchronized with or the
                 recording is synchronized again under a different key.
             prefetch_videos: Whether to prefetch video data to cache on initialization.
+            episode_synced: Already-fetched synchronized metadata for this
+                recording. When omitted, it is requested here.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -137,7 +85,9 @@ class SynchronizedRecording:
         self.robot_id = robot_id
         self.instance = instance
 
-        self._episode_synced = self._get_synced_data()
+        self._episode_synced = (
+            episode_synced if episode_synced is not None else self._get_synced_data()
+        )
         self._episode_length = len(self._episode_synced.observations)
 
         # Use start_time and end_time from the synchronized episode,
@@ -148,12 +98,11 @@ class SynchronizedRecording:
             self.cache_dir,
         )
         self._iter_idx = 0
-        self._suppress_wget_progress = True
 
         if prefetch_videos:
             cache = self.dataset.cache_dir / self.id
             # Check if cache directory exists and contains any files
-            self._wait_for_lock_release(cache / ".recording.lock", cache)
+            wait_for_lock_release(cache / ".recording.lock", cache)
             # NOTE: this is to start video prefetching frames into cache
             self._get_sync_point(0)
 
@@ -223,11 +172,7 @@ class SynchronizedRecording:
             requests.HTTPError: If every candidate is absent (404), or for any
                 non-404 HTTP error.
         """
-        filename_preference = (
-            _DEPTH_VIDEO_FILENAME_PREFERENCE
-            if camera_type == DataType.DEPTH_IMAGES
-            else _RGB_VIDEO_FILENAME_PREFERENCE
-        )
+        filename_preference = video_filename_preference(camera_type)
 
         for video_filename in filename_preference:
             try:
@@ -258,71 +203,6 @@ class SynchronizedRecording:
             f"{DataType.POINT_CLOUDS.value}/{sensor_id}/{filename}"
         )
 
-    def _decode_video(self, video_location: Path, video_frame_cache_path: Path) -> None:
-        """Extract frames from video and cache them to disk.
-
-        Args:
-            video_location: Path to the video file.
-            video_frame_cache_path: Path to the directory where video frames are cached.
-        """
-        global _FFMPEG_AVAILABLE
-
-        # Lazily determine ffmpeg availability once
-        if _FFMPEG_AVAILABLE is None:
-            try:
-                subprocess.run(
-                    ["ffmpeg", "-version"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=True,
-                )
-                _FFMPEG_AVAILABLE = True
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                _FFMPEG_AVAILABLE = False
-                logger.warning(
-                    "ffmpeg not found. Falling back to PyAV for video decoding. "
-                    "Install ffmpeg for significantly faster decoding."
-                )
-
-        if _FFMPEG_AVAILABLE:
-            output_pattern = str(video_frame_cache_path / "%d.png")
-            frame_sync_arg = _resolve_frame_sync_arg()
-            try:
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-i",
-                        str(video_location),
-                        frame_sync_arg,
-                        "passthrough",
-                        "-pix_fmt",
-                        "rgb24",
-                        "-q:v",
-                        "1",
-                        "-start_number",
-                        "0",
-                        output_pattern,
-                        "-y",
-                        "-loglevel",
-                        "error",
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-                return
-            except subprocess.CalledProcessError:
-                logger.error("ffmpeg failed during decoding, falling back to PyAV")
-                _FFMPEG_AVAILABLE = False  # Permanently disable ffmpeg for this run
-
-        # PyAV fallback (executed only once ffmpeg is known unavailable)
-        import av
-
-        with av.open(str(video_location)) as container:
-            for i, frame in enumerate(container.decode(video=0)):
-                frame_image = Image.fromarray(frame.to_rgb().to_ndarray())
-                frame_file = video_frame_cache_path / f"{i}.png"
-                frame_image.save(frame_file)
-
     def _download_video_and_cache_frames_to_disk(
         self, camera_type: DataType, camera_id: str, video_frame_cache_path: Path
     ) -> None:
@@ -333,16 +213,9 @@ class SynchronizedRecording:
             camera_id: Unique identifier for the camera.
             video_frame_cache_path: Path to the directory where video frames are cached.
         """
-        # The lock lives beside the frames directory (not inside it) so that the
-        # frames directory can be published atomically with os.replace.
         video_frame_cache_path.parent.mkdir(parents=True, exist_ok=True)
-        # The lock is a sibling of the frames directory (not inside it) so the
-        # frames directory can be published atomically once decoding completes.
-        lock_file = (
-            video_frame_cache_path.parent
-            / f"{video_frame_cache_path.name}.recording.lock"
-        )
-        lock_acquired = self._create_decoding_lock(lock_file, camera_id)
+        lock_file = lock_file_for(video_frame_cache_path)
+        acquire_decoding_lock(lock_file, camera_id)
 
         try:
             # Another process may have published this cache while we waited for
@@ -361,75 +234,14 @@ class SynchronizedRecording:
                 staging_dir = Path(temp_dir) / "frames"
                 staging_dir.mkdir()
                 video_location = Path(temp_dir) / f"{camera_id}{camera_type.value}.mp4"
-                wget.download(
-                    self._get_video_url(camera_type, camera_id),
-                    str(video_location),
-                    bar=None if self._suppress_wget_progress else wget.bar_thermometer,
+                stream_to_file(
+                    self._get_video_url(camera_type, camera_id), video_location
                 )
-                # Decode into staging, then atomically move into place.
-                self._decode_video(video_location, staging_dir)
-                os.replace(staging_dir, video_frame_cache_path)
+                publish_decoded_frames(
+                    video_location, staging_dir, video_frame_cache_path
+                )
         finally:
-            if lock_acquired:
-                self._delete_decoding_lock(lock_file)
-
-    def _create_decoding_lock(self, lock_file: Path, camera_id: str) -> bool:
-        """Create an exclusive lock file for decoding."""
-        try:
-            # Create the lock file exclusively
-            lock_file.parent.mkdir(parents=True, exist_ok=True)
-            lock_file.touch(exist_ok=False)
-        except FileExistsError as exc:
-            raise RuntimeError(
-                f"Another process is already decoding video for camera {camera_id}"
-            ) from exc
-        return True
-
-    def _delete_decoding_lock(self, lock_file: Path) -> None:
-        """Remove the decoding lock file if present."""
-        lock_file.unlink(missing_ok=True)
-
-    def _check_stale_lock_file(self, lock_file: Path, timeout: int = 300) -> bool:
-        """Check if a lock file is stale based on a timeout.
-
-        Args:
-            lock_file: Path to the lock file.
-            timeout: Time in seconds after which the lock is considered stale.
-                    (default: 300s/5min)
-
-        Returns:
-            True if the lock file is stale, False otherwise.
-        """
-        if not lock_file.exists():
-            return False
-        lock_mtime = lock_file.stat().st_mtime
-        if (time.time() - lock_mtime) > timeout:
-            return True
-        return False
-
-    def _wait_for_lock_release(
-        self, lock_file: Path, parent_folder_path: Path, check_interval: int = 1
-    ) -> None:
-        """Wait for a lock file to be released.
-
-        Args:
-            lock_file: Path to the lock file.
-            parent_folder_path: Path to the parent folder containing the lock file.
-            check_interval: Time in seconds between checks.
-        """
-        # Check if the lock is stale
-        while lock_file.exists():
-            if self._check_stale_lock_file(lock_file):
-                logger.warning(
-                    f"Stale lock file detected at {lock_file}. Removing lock."
-                )
-                self._delete_decoding_lock(lock_file)
-                shutil.rmtree(parent_folder_path, ignore_errors=True)
-                logger.info(
-                    f"Removed stale lock and cleared cache at {parent_folder_path}."
-                )
-                break
-            time.sleep(check_interval)
+            delete_decoding_lock(lock_file)
 
     def _get_frame_from_disk_cache(
         self,
@@ -452,13 +264,8 @@ class SynchronizedRecording:
         result = {}
         for cam_id, cam_data in camera_data.items():
             cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
-            # The lock is a sibling of the frames directory (not inside it) so
-            # the frames directory can be published atomically once decoding
-            # completes.
-            lock_file = (
-                cam_id_rgb_root.parent / f"{cam_id_rgb_root.name}.recording.lock"
-            )
-            self._wait_for_lock_release(lock_file, cam_id_rgb_root)
+            lock_file = lock_file_for(cam_id_rgb_root)
+            wait_for_lock_release(lock_file, cam_id_rgb_root)
 
             if not cam_id_rgb_root.exists():
                 # Not in cache: download and decode. The frames directory is
@@ -477,23 +284,12 @@ class SynchronizedRecording:
 
         return result
 
-    def _download_bytes(self, url: str) -> bytes:
-        """Download a remote file and return its contents."""
-        with tempfile.TemporaryDirectory() as temp_dir:
-            destination = Path(temp_dir) / "download.bin"
-            wget.download(
-                url,
-                str(destination),
-                bar=None if self._suppress_wget_progress else wget.bar_thermometer,
-            )
-            return destination.read_bytes()
-
     def _cache_point_cloud_frames_to_disk(
         self, sensor_id: str, sensor_root: Path
     ) -> None:
         """Download trace files and cache decoded point cloud frames to disk."""
         trace_json = json.loads(
-            self._download_bytes(
+            download_bytes(
                 self._get_point_cloud_url(sensor_id, POINT_CLOUD_TRACE_INDEX_FILE)
             ).decode("utf-8")
         )
@@ -504,7 +300,7 @@ class SynchronizedRecording:
         if trace_bin_path.exists():
             trace_bin = trace_bin_path.read_bytes()
         else:
-            trace_bin = self._download_bytes(
+            trace_bin = download_bytes(
                 self._get_point_cloud_url(sensor_id, POINT_CLOUD_TRACE_BIN_FILE)
             )
 
@@ -539,8 +335,8 @@ class SynchronizedRecording:
             sensor_root = (
                 self.cache_dir / f"{self.id}" / DataType.POINT_CLOUDS.value / sensor_id
             )
-            lock_file = sensor_root / ".recording.lock"
-            self._wait_for_lock_release(lock_file, sensor_root)
+            lock_file = point_cloud_lock_file_for(sensor_root)
+            wait_for_lock_release(lock_file, sensor_root)
 
             frame_file = sensor_root / f"{pc_data.frame_idx}.npz"
             if not sensor_root.exists() or not frame_file.exists():
@@ -563,15 +359,14 @@ class SynchronizedRecording:
         self, sensor_id: str, point_cloud_cache_path: Path
     ) -> None:
         """Download point cloud trace files and cache frames to disk."""
-        lock_file = point_cloud_cache_path / ".recording.lock"
-        lock_acquired = self._create_decoding_lock(lock_file, sensor_id)
+        lock_file = point_cloud_lock_file_for(point_cloud_cache_path)
+        acquire_decoding_lock(lock_file, sensor_id)
 
         try:
             self.cache_manager.ensure_space_available()
             self._cache_point_cloud_frames_to_disk(sensor_id, point_cloud_cache_path)
         finally:
-            if lock_acquired:
-                self._delete_decoding_lock(lock_file)
+            delete_decoding_lock(lock_file)
 
     def _load_sync_point_payloads(
         self, sync_point: SynchronizedPoint
