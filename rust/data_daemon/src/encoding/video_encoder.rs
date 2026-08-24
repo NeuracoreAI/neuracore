@@ -170,9 +170,9 @@ impl LossyVideoCodec {
 
     /// The wire identifier for this codec — the inverse of [`Self::from_config_str`].
     ///
-    /// The backend stores these strings verbatim on the trace, so they are the
-    /// same identifiers the config and `NCD_VIDEO_CODEC` accept. The round trip
-    /// is pinned by a unit test.
+    /// These are the same identifiers the profile and `NCD_VIDEO_CODEC` accept,
+    /// and they are persisted as-is against the recording, so the round trip is
+    /// pinned by a unit test.
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::LosslessPlusPreview => "h264_lossless",
@@ -2025,8 +2025,8 @@ mod tests {
 
     #[test]
     fn wire_str_round_trips_through_from_config_str() {
-        // The backend persists these strings verbatim, so a drift here silently
-        // mislabels every recording.
+        // These strings are persisted as-is against the recording, so a drift
+        // here silently mislabels every one.
         for codec in [
             LossyVideoCodec::LosslessPlusPreview,
             LossyVideoCodec::H264MediumLossyOnly,

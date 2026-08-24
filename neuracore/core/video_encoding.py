@@ -6,9 +6,6 @@ used for training) plus a small lossy preview (``lossy.mp4``). Selecting a
 is also used for training -- trading a little image fidelity for much smaller
 uploads, which matters for long recordings.
 
-Codec is re-exported here so nc.Codec keeps working. The data daemon mirrors
-the same h264_medium -> libx264 -crf 23 -preset medium mapping.
-
 Depth cameras always keep their lossless storage: their lossy proxy is a
 visualisation, not precise depth, so it is never a valid training source.
 """

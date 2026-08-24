@@ -51,8 +51,9 @@ class Recording:
             end_time: Unix timestamp when recording ended.
             metadata: Metadata associated with the recording.
             data_types: Set of DataTypes present in this recording.
-            encoding: Codec used for this recording's camera video.
-                None for recordings finalized before the field existed.
+            encoding: Codec used for this recording's RGB camera video. None
+                when there is nothing to report -- no RGB cameras, cameras
+                that disagreed on a codec, or a recording predating the field.
         """
         self.dataset = dataset
         self.id = recording_id

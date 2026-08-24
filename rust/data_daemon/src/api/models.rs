@@ -34,8 +34,8 @@ pub struct RegisterTraceRequest {
     /// Codec this trace's video was encoded with.
     ///
     /// Only video-family traces carry one; `None` for scalar/JSON traces, which
-    /// have no video to encode. Skipped on the wire when absent so an older
-    /// backend sees the previous body shape unchanged.
+    /// have no video to encode. Omitted rather than sent as null, so the body
+    /// is unchanged for traces that never had a codec.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub codec: Option<String>,
 }

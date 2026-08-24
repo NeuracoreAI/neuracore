@@ -49,11 +49,9 @@ fn content_type_for(data_type: &str) -> ContentKind {
 
 /// Whether a data type produces video artefacts at all.
 ///
-/// The public face of [`content_type_for`], so callers outside this module can
-/// gate on the video family without re-listing the data types (and drifting from
-/// the artefact layout this module owns). Used by the registration coordinator to
-/// decide whether a trace has a codec worth reporting: a scalar trace has no
-/// video, so reporting a codec for it would be meaningless.
+/// The public face of [`content_type_for`], so callers can gate on the video
+/// family without re-listing the data types and drifting from the artefact
+/// layout this module owns.
 pub fn is_video_family(data_type: &str) -> bool {
     matches!(content_type_for(data_type), ContentKind::Rgb)
 }
