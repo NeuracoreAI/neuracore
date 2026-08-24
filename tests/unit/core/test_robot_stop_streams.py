@@ -73,3 +73,24 @@ def test_stop_all_streams_logs_stop_failure_and_continues() -> None:
 
     assert failing.stop_calls == 1
     assert active.stop_calls == 1
+
+
+def test_close_uses_registered_manager_without_creating_another() -> None:
+    """Post-logout cleanup must not recreate the global recording manager."""
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+    manager = MagicMock()
+
+    with patch(
+        "neuracore.core.robot.get_recording_state_manager", return_value=manager
+    ):
+        robot._register_remote_stop_handler()
+
+    with patch(
+        "neuracore.core.robot.get_recording_state_manager",
+        side_effect=AssertionError("must not create a manager during close"),
+    ):
+        robot.close()
+
+    manager.deregister_remote_stop_handler.assert_called_once_with("robot-id-1", 0)
+    assert robot._recording_state_manager is None

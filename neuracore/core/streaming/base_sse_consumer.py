@@ -14,6 +14,7 @@ from neuracore.core.const import (
     STREAMING_MAXIMUM_BACKOFF_TIME_S,
     STREAMING_MINIMUM_BACKOFF_TIME_S,
 )
+from neuracore.core.exceptions import AuthenticationError
 from neuracore.core.streaming.event_loop_utils import get_running_loop
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.utils.background_coroutine_tracker import BackgroundCoroutineTracker
@@ -122,6 +123,10 @@ class BaseSSEConsumer(ABC):
         """Disables the current enable manger, therefore cleaning up resources."""
         self.enabled_manager.disable()
 
+    def on_authentication_error(self) -> None:
+        """Close the owner of this consumer after terminal authentication failure."""
+        self.close()
+
     async def _message_received_loop(self) -> None:
         backoff_time = STREAMING_MINIMUM_BACKOFF_TIME_S
 
@@ -168,5 +173,8 @@ class BaseSSEConsumer(ABC):
                         logger.warning(
                             f'Unsupported SSE event type "{event.type}" received'
                         )
+            except (AuthenticationError, ConnectionRefusedError):
+                self.on_authentication_error()
+                return
             except Exception as e:
                 logger.warning(f"Streaming signalling error: {e}")

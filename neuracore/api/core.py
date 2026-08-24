@@ -103,11 +103,13 @@ def logout() -> None:
     Logs out from the Neuracore server and resets all global state including
     active robots, recording IDs, dataset IDs, and version validation status.
     """
-    get_auth().logout()
-    GlobalSingleton()._active_robot = None
-    GlobalSingleton()._active_dataset_id = None
-    GlobalSingleton()._active_dataset = None
-    GlobalSingleton()._has_validated_version = False
+    try:
+        get_auth().logout()
+    finally:
+        GlobalSingleton()._active_robot = None
+        GlobalSingleton()._active_dataset_id = None
+        GlobalSingleton()._active_dataset = None
+        GlobalSingleton()._has_validated_version = False
 
 
 def set_organization(id_or_name: str) -> None:

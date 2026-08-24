@@ -275,9 +275,13 @@ def init_worker_logging(log_queue: multiprocessing.Queue, level: int) -> None:
 
 
 @contextmanager
-def relayed_worker_logs() -> Generator[multiprocessing.Queue]:
+def relayed_worker_logs(
+    process_context: multiprocessing.context.BaseContext | None = None,
+) -> Generator[multiprocessing.Queue]:
     """Replay pool-worker log records through this process's handlers."""
-    log_queue: multiprocessing.Queue = multiprocessing.Queue()
+    if process_context is None:
+        process_context = multiprocessing.get_context()
+    log_queue: multiprocessing.Queue = process_context.Queue()
 
     def _relay() -> None:
         while True:

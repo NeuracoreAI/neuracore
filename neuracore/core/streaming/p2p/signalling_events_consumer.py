@@ -82,6 +82,10 @@ class SignallingEventsConsumer(BaseSSEConsumer):
         self.message_queue: list[HandshakeMessage] = []
         self.auth = auth or get_auth()
 
+    def on_authentication_error(self) -> None:
+        """Propagate terminal authentication failure to the root owner."""
+        self.manager_factory.close()
+
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
 

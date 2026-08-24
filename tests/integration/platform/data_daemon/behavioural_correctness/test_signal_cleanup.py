@@ -390,7 +390,8 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
 
             # Run the producer workload in a child process so a SIGKILL at any point
             # cannot leave an uninterruptible background thread in this test process.
-            worker = multiprocessing.Process(
+            process_context = multiprocessing.get_context("spawn")
+            worker = process_context.Process(
                 target=run_case_contexts,
                 args=(case,),
                 kwargs={"specs": specs},

@@ -12,7 +12,6 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import TypeAlias
 
-from aiohttp import ClientSession
 from neuracore_types import (
     AvailableRobot,
     AvailableRobotCapacityInit,
@@ -68,7 +67,6 @@ class OrgNodesManager(BaseSSEConsumer):
         loop: asyncio.AbstractEventLoop | None = None,
         enabled_manager: EnabledManager | None = None,
         background_coroutine_tracker: BackgroundCoroutineTracker | None = None,
-        client_session: ClientSession | None = None,
         auth: Auth | None = None,
         stream_manager_orchestrator: StreamManagerOrchestrator | None = None,
     ) -> None:
@@ -84,8 +82,6 @@ class OrgNodesManager(BaseSSEConsumer):
             background_coroutine_tracker: The storage for background tasks
                 scheduled on receiving events. Defaults to a new tracker if not
                 provided.
-            client_session: The http session to use. Defaults to a new session
-                if not provided.
             auth: The auth instance used to connect to the signalling server or
                 defaults to the global auth provider if not provided.
             stream_manager_orchestrator: the factory used to create stream managers
@@ -95,7 +91,6 @@ class OrgNodesManager(BaseSSEConsumer):
             loop=loop,
             enabled_manager=enabled_manager,
             background_coroutine_tracker=background_coroutine_tracker,
-            client_session=client_session,
         )
         self.stream_manager_orchestrator = (
             stream_manager_orchestrator or StreamManagerOrchestrator()
@@ -111,6 +106,27 @@ class OrgNodesManager(BaseSSEConsumer):
         self.last_nodes: InstanceStreamMap = defaultdict(dict)
 
         self.last_update: AvailableRobotCapacityInit | None = None
+
+        self._logout_listener = self._on_logout
+        self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
+
+    def _on_logout(self) -> None:
+        """Schedule teardown on the streaming event loop."""
+        self._discard_cached_manager()
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(self.close)
+
+    def _discard_cached_manager(self) -> None:
+        """Remove this manager from the existing per-organization cache."""
+        manager_future = _org_node_managers.get(self.org_id)
+        if manager_future is None or not manager_future.done():
+            return
+        try:
+            cached_manager = manager_future.result()
+        except Exception:
+            return
+        if cached_manager is self:
+            _org_node_managers.pop(self.org_id, None)
 
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
@@ -502,6 +518,21 @@ class OrgNodesManager(BaseSSEConsumer):
             robot_consumer.close()
 
         self.consumers.clear()
+        self.connections.clear()
+        self.last_nodes.clear()
+        self.last_update = None
+        self._remove_logout_listener()
+        if not self.loop.is_closed():
+            self.loop.call_soon_threadsafe(
+                self.loop.create_task, self.client_session.close()
+            )
+
+        self._discard_cached_manager()
+
+    def _remove_logout_listener(self) -> None:
+        """Remove the logout listener when it has not already fired."""
+        if self._logout_listener in self.auth.listeners(Auth.LOGOUT_EVENT):
+            self.auth.remove_listener(Auth.LOGOUT_EVENT, self._logout_listener)
 
 
 _org_node_managers: dict[str, Future[OrgNodesManager]] = {}

@@ -34,3 +34,8 @@ class SingletonMetaclass(ABCMeta, Generic[T]):
             instance = super().__call__(*args, **kwargs)
             cls._instances[cls] = instance
         return cls._instances[cls]
+
+    def discard_instance(cls, instance: Any) -> None:
+        """Discard ``instance`` if it is still the cached singleton."""
+        if cls._instances.get(cls) is instance:
+            del cls._instances[cls]

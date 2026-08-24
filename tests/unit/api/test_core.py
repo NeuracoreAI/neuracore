@@ -8,7 +8,7 @@ import requests_mock
 import neuracore as nc
 from neuracore.api import core as api_core
 from neuracore.core import robot as core_robot
-from neuracore.core.auth import get_auth
+from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
 
@@ -52,14 +52,47 @@ def test_logout(temp_config_dir, monkeypatch):
     with open(config_file, "w") as f:
         json.dump({"api_key": "test_key", "current_org_id": "test-org-id"}, f)
 
-    # Perform logout
-    nc.logout()
+    logout_listener = Mock()
+    auth = get_auth()
+    auth.add_listener(Auth.LOGOUT_EVENT, logout_listener)
+
+    try:
+        # Perform logout
+        nc.logout()
+    finally:
+        auth.remove_listener(Auth.LOGOUT_EVENT, logout_listener)
+
+    logout_listener.assert_called_once_with()
 
     # Verify config contents
     with open(config_file) as f:
         config = json.load(f)
         assert config["api_key"] is None
         assert config["current_org_id"] is None
+
+
+def test_logout_resets_global_state_when_listener_raises(temp_config_dir):
+    """A failing teardown listener must not leave stale public API state."""
+    global_state = api_core.GlobalSingleton()
+    global_state._active_robot = Mock()
+    global_state._active_dataset_id = "dataset-id"
+    global_state._active_dataset = Mock()
+    global_state._has_validated_version = True
+
+    auth = get_auth()
+    failing_listener = Mock(side_effect=RuntimeError("teardown failed"))
+    auth.add_listener(Auth.LOGOUT_EVENT, failing_listener)
+
+    try:
+        with pytest.raises(RuntimeError, match="teardown failed"):
+            nc.logout()
+    finally:
+        auth.remove_listener(Auth.LOGOUT_EVENT, failing_listener)
+
+    assert global_state._active_robot is None
+    assert global_state._active_dataset_id is None
+    assert global_state._active_dataset is None
+    assert global_state._has_validated_version is False
 
 
 def test_auth_instance_singleton():
