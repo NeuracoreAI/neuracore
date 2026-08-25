@@ -38,6 +38,12 @@ _NUM_WARMUP_ITERATIONS = 1
 # this factor and re-probed until it fits -- a cheap alternative to bisection.
 _DOWNSCALE_FACTOR = 0.9
 
+# Validation reuses the autotuner's own headroom (budget * safety) so a manually
+# set batch size is accepted only if it leaves the same margin an auto-selected
+# one would.
+_VALIDATION_MAX_GPU_UTILIZATION = 0.9
+_VALIDATION_SAFETY_FACTOR = 0.6
+
 
 @dataclass
 class BatchProbeResult:
@@ -417,7 +423,7 @@ class BatchSizeAutotuner:
         min_batch_size: int = 2,
         max_batch_size: int = 512,
         num_iterations: int = 2,
-        safety_factor: float = 0.7,
+        safety_factor: float = 0.6,
     ):
         """Initialize the batch size auto-tuner.
 
@@ -836,6 +842,35 @@ def find_optimal_batch_size(
     return optimal_batch_size
 
 
+def _fits_within_budget(
+    result: BatchProbeResult,
+    max_gpu_utilization: float,
+    safety_factor: float,
+) -> bool:
+    """Return True if the probe fitted within budget * safety.
+
+    A probe that merely avoided OOM is not enough to call a batch size valid:
+    real training allocates memory a short, single-process probe never does (DDP
+    gradient buckets / NCCL buffers, allocator fragmentation over a full epoch,
+    grad-clipping and scheduler temporaries). Apply the same budget * safety
+    threshold the autotuner uses so a manually set batch is accepted only if it
+    would survive as an auto-selected one.
+
+    Args:
+        result: The probe result to judge.
+        max_gpu_utilization: Fraction of VRAM treated as the usable budget.
+        safety_factor: Extra headroom multiplier applied on top of the budget.
+
+    Returns:
+        True if the probe fitted and its peak reserved memory is within
+        total * max_gpu_utilization * safety_factor.
+    """
+    if not result.fitted:
+        return False
+    budget_bytes = result.total_bytes * max_gpu_utilization * safety_factor
+    return result.peak_reserved_bytes <= budget_bytes
+
+
 def is_valid_batch_size(
     cfg: DictConfig,
     model_factory: Callable[[], NeuracoreModel],
@@ -843,7 +878,12 @@ def is_valid_batch_size(
     batch_size: int,
     device: torch.device,
 ) -> bool:
-    """Check whether a specific batch size fits in RAM and GPU memory."""
+    """Check whether a specific batch size fits in RAM and GPU memory.
+
+    A batch is valid only if the probe both fits and leaves headroom (budget *
+    safety); a batch that fits at the razor's edge is rejected, because real
+    training adds overhead the probe does not measure and would then OOM.
+    """
     train_dataset, _ = _split_train_val_dataset(cfg, dataset)
 
     if batch_size > len(train_dataset):
@@ -872,9 +912,12 @@ def is_valid_batch_size(
         },
     )
 
-    valid = validator.test_batch_size(batch_size)
-
-    return valid
+    result = validator.probe_batch_size(batch_size)
+    return _fits_within_budget(
+        result,
+        max_gpu_utilization=_VALIDATION_MAX_GPU_UTILIZATION,
+        safety_factor=_VALIDATION_SAFETY_FACTOR,
+    )
 
 
 def _split_train_val_dataset(
