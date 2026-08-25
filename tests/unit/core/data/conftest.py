@@ -32,6 +32,13 @@ FREQ = 30
 PTS_FRACT = 90000  # Common timebase for h264
 
 MOCKED_ORG_ID = "test-org-id"
+SYNCED_RECORDING_ID = "synced-rec1"
+"""Artifact ID the mocked synchronization reports for recording rec1."""
+
+SYNCED_EPISODE_DOWNLOAD_URL = (
+    "https://storage.example/synced-episodes/rec1.json?signature=test-signature"
+)
+"""Stand-in for the signed object-storage URL a READY synchronization reports."""
 TEST_ROBOT_ID_1 = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
 TEST_ROBOT_ID_2 = "30b731c8-3f9c-5799-b19e-8d190599b6b4"
 
@@ -39,6 +46,29 @@ TEST_ROBOT_ID_2 = "30b731c8-3f9c-5799-b19e-8d190599b6b4"
 @pytest.fixture
 def mocked_org_id():
     return MOCKED_ORG_ID
+
+
+@pytest.fixture
+def synced_episode_download_url():
+    """URL a READY synchronization hands back for the episode download."""
+    return SYNCED_EPISODE_DOWNLOAD_URL
+
+
+@pytest.fixture
+def synced_recording_id():
+    """Artifact ID the mocked synchronization reports."""
+    return SYNCED_RECORDING_ID
+
+
+@pytest.fixture
+def dataset_mock(dataset_dict, recordings_list, tmp_path):
+    """Create a dataset whose cache lives under the test's tmp_path."""
+    from neuracore.core.data.dataset import Dataset
+
+    dataset = Dataset(**dataset_dict, recordings=recordings_list)
+    dataset.cache_dir = tmp_path / "cache"
+    dataset.cache_dir.mkdir(parents=True, exist_ok=True)
+    return dataset
 
 
 @pytest.fixture
@@ -100,7 +130,11 @@ def mock_prefetch_transport(monkeypatch):
     its concurrency, locking, staging and atomic publish -- under test.
     """
     from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
-    from neuracore_types import SynchronizeRecordingRequest
+    from neuracore_types import (
+        SynchronizeRecordingProgress,
+        SynchronizeRecordingRequest,
+        SynchronizeRecordingStartResponse,
+    )
 
     from neuracore.core.auth import get_auth
     from neuracore.core.data.frame_cache import video_filename_preference
@@ -110,7 +144,8 @@ def mock_prefetch_transport(monkeypatch):
 
     async def fake_get_synced_data(self, session, recording_id):
         response = thread_local_session().post(
-            f"{API_URL}/org/{self.dataset.org_id}" "/synchronize/synchronize-recording",
+            f"{API_URL}/org/{self.dataset.org_id}"
+            "/synchronize/trigger-synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=recording_id,
                 synchronization_details=self.synchronization_details,
@@ -118,7 +153,18 @@ def mock_prefetch_transport(monkeypatch):
             headers=get_auth().get_headers(),
         )
         response.raise_for_status()
-        return SynchronizedEpisodeModel.model_validate(response.json())
+        job = SynchronizeRecordingStartResponse.model_validate(response.json())
+        response = thread_local_session().get(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronize"
+            f"/synchronize-recording-progress/{job.synchronized_recording_id}",
+            params={"recording_id": recording_id},
+            headers=get_auth().get_headers(),
+        )
+        response.raise_for_status()
+        progress = SynchronizeRecordingProgress.model_validate(response.json())
+        response = thread_local_session().get(progress.download_url)
+        response.raise_for_status()
+        return SynchronizedEpisodeModel.model_validate_json(response.content)
 
     async def fake_get_video_url(self, session, target):
         preference = video_filename_preference(target.data_type)
@@ -342,9 +388,36 @@ def mock_data_requests(
         status_code=200,
     )
 
-    # Mock sync endpoint
+    # Mock sync endpoint. Starting only ever reports PENDING; the terminal state
+    # and the signed URL come from the progress endpoint, and the episode JSON is
+    # downloaded straight from object storage.
     mock_auth_requests.post(
-        re.compile(f"{API_URL}/org/{mocked_org_id}/synchronize/synchronize-recording"),
+        re.compile(
+            f"{API_URL}/org/{mocked_org_id}/synchronize/trigger-synchronize-recording"
+        ),
+        json={
+            "recording_id": "rec1",
+            "synchronized_recording_id": SYNCED_RECORDING_ID,
+            "status": "PENDING",
+        },
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        re.compile(
+            f"{API_URL}/org/{mocked_org_id}/synchronize"
+            f"/synchronize-recording-progress/{SYNCED_RECORDING_ID}"
+        ),
+        json={
+            "recording_id": "rec1",
+            "synchronize_recording_id": SYNCED_RECORDING_ID,
+            "status": "READY",
+            "download_url": SYNCED_EPISODE_DOWNLOAD_URL,
+            "error": None,
+        },
+        status_code=200,
+    )
+    mock_auth_requests.get(
+        SYNCED_EPISODE_DOWNLOAD_URL,
         json=synced_data.model_dump(mode="json"),
         status_code=200,
     )
