@@ -14,7 +14,10 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
-from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
+    stop_daemon,
+)
 from tests.integration.platform.data_daemon.shared.profiles import (
     cleanup_test_profiles,
     profile_path,
@@ -167,7 +170,10 @@ def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
 
     A batch is defined as one parametrized test function over ``case``.  The
     fixture keys by the unparameterized node id, so cleanup runs once before
-    the first case and is skipped for the remaining cases in that batch.
+    the first case and is skipped for the remaining cases in that batch. Stop
+    any daemon left by an interrupted or SIGKILL test before deleting its
+    storage; the storage helper intentionally refuses to mutate live daemon
+    files.
     """
     if "case" not in request.fixturenames:
         return
@@ -177,6 +183,7 @@ def apply_batch_start_storage_state(request: pytest.FixtureRequest) -> None:
         return
 
     request.getfixturevalue("case")
+    stop_daemon()
     apply_storage_state_action(STORAGE_STATE_DELETE)
     _BATCH_START_CLEANED_NODEIDS.add(nodeid_without_param)
 

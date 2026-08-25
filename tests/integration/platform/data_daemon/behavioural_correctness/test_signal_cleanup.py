@@ -5,9 +5,8 @@ Verifies that stopping the daemon via SIGTERM, SIGINT, SIGKILL, or the CLI
 and no lingering runner subprocess.
 
 Each test starts a fresh daemon in online mode, isolated by the
-``daemon_setup_teardown`` autouse fixture and ``online_daemon_running``,
-calls :func:`stop_daemon` with the method under test, then asserts cleanup
-invariants.
+batch-start storage fixture and ``online_daemon_running``, calls
+:func:`stop_daemon` with the method under test, then asserts cleanup invariants.
 
 Graceful methods (CLI, SIGTERM, SIGINT) let the daemon run its own shutdown
 path, releasing the PID file and IPC artefacts. SIGKILL bypasses that entirely;
@@ -186,8 +185,8 @@ def test_sigkill_terminates_daemon_process() -> None:
     SIGKILL cannot be caught or ignored; the daemon's cleanup handler never
     runs.  The test only asserts that the process is dead — it does NOT assert
     that IPC artefacts were cleaned up, since that is not guaranteed.
-    Teardown (``daemon_setup_teardown`` + ``online_daemon_running``) is
-    responsible for removing stale artefacts after an unclean kill.
+    ``online_daemon_running`` teardown is responsible for removing stale
+    artefacts after an unclean kill.
     """
 
     with online_daemon_running():
@@ -328,9 +327,9 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
       5. Assert the new PID differs from the killed one and is alive.
       6. Verify full cleanup after the second block exits.
 
-    This exercises the restart path that the ``daemon_setup_teardown`` autouse
-    fixture relies on between tests: stale IPC artefacts from the SIGKILL must
-    not prevent ``ensure_daemon_running`` from succeeding.
+    This exercises the restart path that test isolation relies on between
+    tests: stale IPC artefacts from the SIGKILL must not prevent
+    ``ensure_daemon_running`` from succeeding.
     """
 
     specs = build_context_specs(case=case)
@@ -349,8 +348,8 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
                 pid_first
             ), f"pid_is_running still True for killed daemon pid={pid_first}"
 
-        # IPC artefacts may be stale here — daemon_setup_teardown cleans them up.
-        # A second online_daemon_running block must succeed from scratch.
+        # IPC artefacts may be stale here. A second online_daemon_running block
+        # must clean them up and succeed from scratch.
         with online_daemon_running():
             pid_second = assert_exactly_one_daemon_pid()
             assert pid_second != pid_first, (

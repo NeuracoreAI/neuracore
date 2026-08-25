@@ -3,6 +3,7 @@
 import json
 import logging
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -17,9 +18,16 @@ from neuracore_types import (
     SynchronizationDetails,
 )
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
-from neuracore_types import SynchronizedPoint, SynchronizeRecordingRequest
+from neuracore_types import (
+    SynchronizedPoint,
+    SynchronizeRecordingProgress,
+    SynchronizeRecordingRequest,
+    SynchronizeRecordingStartResponse,
+    SynchronizeRecordingStatus,
+)
 from neuracore_types.nc_data.point_cloud_data import decode_point_cloud_frame
 from PIL import Image
+from pydantic import ValidationError as PydanticValidationError
 
 from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.data.frame_cache import (
@@ -31,6 +39,7 @@ from neuracore.core.data.frame_cache import (
     video_filename_preference,
     wait_for_lock_release,
 )
+from neuracore.core.exceptions import SynchronizationError
 from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.core.utils.download import download_bytes, stream_to_file
 from neuracore.core.utils.http_session import thread_local_session
@@ -45,6 +54,40 @@ POINT_CLOUD_TRACE_INDEX_FILE = "trace.json"
 
 if TYPE_CHECKING:
     from neuracore.core.data.dataset import Dataset
+
+SYNCED_RECORDING_POLL_INTERVAL_S = 2.0
+"""Seconds between polls of an in-progress recording synchronization."""
+
+SYNCED_RECORDING_TIMEOUT_S = 1800.0
+"""Seconds to wait for a recording to synchronize before giving up."""
+
+SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S: tuple[float, float] = (15.0, 120.0)
+"""``(connect, read)`` seconds for the synchronized-episode object download.
+
+The read budget bounds the wait for each chunk of the body rather than the whole
+transfer. Object storage streaming a multi-megabyte episode can stall for far
+longer than an API metadata call ever should, so this download does not inherit
+``http_session.DEFAULT_TIMEOUT``. Matches the budget the equally large dataset
+statistics result is fetched with.
+"""
+
+
+def _describe_download_failure(error: requests.RequestException) -> str:
+    """Summarize a download failure without disclosing the signed URL.
+
+    ``requests`` puts the full URL, signing credentials included, in its own
+    error messages, so none of them can be surfaced to the caller.
+
+    Args:
+        error: The failure raised by ``requests``.
+
+    Returns:
+        The HTTP status code where the server answered, otherwise the name of
+        the error class.
+    """
+    if error.response is not None:
+        return f"HTTP {error.response.status_code}"
+    return type(error).__name__
 
 
 class SynchronizedRecording:
@@ -119,16 +162,38 @@ class SynchronizedRecording:
     def _get_synced_data(self) -> SynchronizedEpisodeModel:
         """Retrieve synchronized metadata for the recording.
 
+        Synchronization is asynchronous: the API starts it and then reports its
+        progress, and the finished episode is downloaded straight from object
+        storage rather than served back through the API.
+
         Returns:
             SynchronizedEpisode object containing synchronized frames and metadata.
 
         Raises:
+            requests.HTTPError: If a synchronization API request fails.
+            SynchronizationError: If the synchronization fails or exceeds its
+                deadline, if the API reports a state the caller cannot act on,
+                if the download fails, or if the downloaded episode is not a
+                valid synchronized episode.
+        """
+        job = self._start_synchronization()
+        return self._download_synced_data(self._await_synced_data_url(job))
+
+    def _start_synchronization(self) -> SynchronizeRecordingStartResponse:
+        """Ask the API to synchronize this recording.
+
+        Returns:
+            The synchronization's initial state, identifying the artifact to
+            poll for.
+
+        Raises:
             requests.HTTPError: If the API request fails.
+            SynchronizationError: If the response is not tracking metadata.
         """
         auth = get_auth()
         session = thread_local_session(retry_transient=True)
         response = session.post(
-            f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording",
+            f"{API_URL}/org/{self.dataset.org_id}/synchronize/trigger-synchronize-recording",
             json=SynchronizeRecordingRequest(
                 recording_id=self.id,
                 synchronization_details=self.synchronization_details,
@@ -136,7 +201,133 @@ class SynchronizedRecording:
             headers=auth.get_headers(),
         )
         response.raise_for_status()
-        return SynchronizedEpisodeModel.model_validate(response.json())
+        try:
+            return SynchronizeRecordingStartResponse.model_validate_json(
+                response.content
+            )
+        except PydanticValidationError as exc:
+            raise SynchronizationError(
+                f"Synchronization start response for recording {self.id} is not"
+                f" tracking metadata ({exc.error_count()} validation errors)"
+            ) from exc
+
+    def _poll_synchronization(
+        self,
+        job: SynchronizeRecordingStartResponse | SynchronizeRecordingProgress,
+    ) -> SynchronizeRecordingProgress:
+        """Read the current state of a started synchronization.
+
+        Args:
+            job: The state the synchronization was started with.
+
+        Returns:
+            The synchronization's latest state.
+
+        Raises:
+            requests.HTTPError: If the API request fails.
+            SynchronizationError: If the response is not tracking metadata.
+        """
+        auth = get_auth()
+        session = thread_local_session(retry_transient=True)
+        synchronize_recording_id = (
+            job.synchronized_recording_id
+            if isinstance(job, SynchronizeRecordingStartResponse)
+            else job.synchronize_recording_id
+        )
+        response = session.get(
+            f"{API_URL}/org/{self.dataset.org_id}/synchronize"
+            f"/synchronize-recording-progress/{synchronize_recording_id}",
+            params={"recording_id": job.recording_id},
+            headers=auth.get_headers(),
+        )
+        response.raise_for_status()
+        try:
+            return SynchronizeRecordingProgress.model_validate_json(response.content)
+        except PydanticValidationError as exc:
+            raise SynchronizationError(
+                f"Synchronization progress response for recording {self.id} is not"
+                f" tracking metadata ({exc.error_count()} validation errors)"
+            ) from exc
+
+    def _await_synced_data_url(self, job: SynchronizeRecordingStartResponse) -> str:
+        """Poll a synchronization until its episode can be downloaded.
+
+        An artifact the server has already cached reports READY on the first
+        poll, so nothing sleeps in the common case.
+
+        Args:
+            job: The state the synchronization was started with.
+
+        Returns:
+            Signed object-storage URL for the synchronized episode. Its query
+            string carries temporary credentials, so it must never be logged.
+
+        Raises:
+            requests.HTTPError: If a poll fails.
+            SynchronizationError: If the synchronization fails, exceeds its
+                deadline, or reports READY without a download URL.
+        """
+        deadline = time.monotonic() + SYNCED_RECORDING_TIMEOUT_S
+        while True:
+            job = self._poll_synchronization(job)
+
+            if job.status is SynchronizeRecordingStatus.READY:
+                if not job.download_url:
+                    raise SynchronizationError(
+                        f"Synchronizing recording {self.id} reported READY without"
+                        " a download URL"
+                    )
+                return job.download_url
+
+            if job.status is SynchronizeRecordingStatus.FAILED:
+                raise SynchronizationError(
+                    f"Synchronizing recording {self.id} failed:"
+                    f" {job.error or 'no reason given'}"
+                )
+
+            if time.monotonic() >= deadline:
+                raise SynchronizationError(
+                    f"Timed out after {SYNCED_RECORDING_TIMEOUT_S:.0f}s waiting for"
+                    f" recording {self.id} to synchronize (status"
+                    f" {job.status.value}). The synchronization is still running;"
+                    " reading the recording again resumes waiting rather than"
+                    " starting over."
+                )
+
+            time.sleep(SYNCED_RECORDING_POLL_INTERVAL_S)
+
+    def _download_synced_data(self, download_url: str) -> SynchronizedEpisodeModel:
+        """Download and validate the synchronized episode behind a signed URL.
+
+        Args:
+            download_url: Signed object-storage URL for the episode JSON.
+
+        Returns:
+            The validated synchronized episode.
+
+        Raises:
+            SynchronizationError: If the download fails, or the downloaded body
+                is not a valid synchronized episode.
+        """
+        session = thread_local_session(retry_transient=True, retry_read_timeout=True)
+        try:
+            response = session.get(
+                download_url, timeout=SYNCED_EPISODE_DOWNLOAD_TIMEOUT_S
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise SynchronizationError(
+                f"Failed to download synchronized episode for recording {self.id}"
+                f" ({_describe_download_failure(exc)})"
+            ) from None
+
+        try:
+            return SynchronizedEpisodeModel.model_validate_json(response.content)
+        except PydanticValidationError as exc:
+            raise SynchronizationError(
+                f"Downloaded synchronized episode for recording {self.id} is not a"
+                f" valid synchronized episode ({exc.error_count()} validation errors)"
+            ) from exc
 
     def _get_recording_file_url(self, filepath: str) -> str:
         """Get a signed download URL for a file in this recording.

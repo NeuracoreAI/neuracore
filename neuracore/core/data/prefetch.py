@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING
 import aiohttp
 from neuracore_types import DataType, SynchronizationDetails
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
-from neuracore_types import SynchronizeRecordingRequest
+from neuracore_types import (
+    SynchronizeRecordingProgress,
+    SynchronizeRecordingRequest,
+    SynchronizeRecordingStartResponse,
+    SynchronizeRecordingStatus,
+)
 from tqdm import tqdm
 
 from neuracore.core.auth import get_auth
@@ -37,6 +42,11 @@ from neuracore.core.data.frame_cache import (
     publish_decoded_frames,
     video_filename_preference,
 )
+from neuracore.core.data.synced_recording import (
+    SYNCED_RECORDING_POLL_INTERVAL_S,
+    SYNCED_RECORDING_TIMEOUT_S,
+)
+from neuracore.core.exceptions import SynchronizationError
 from neuracore.core.utils.download import DOWNLOAD_CHUNK_SIZE
 from neuracore.core.utils.http_session import retry_connection_failures
 
@@ -188,7 +198,7 @@ class VideoPrefetcher:
     async def _get_synced_data(
         self, session: aiohttp.ClientSession, recording_id: str
     ) -> SynchronizedEpisodeModel:
-        """Fetch one recording's synchronized metadata.
+        """Synchronize one recording and download its episode metadata.
 
         Args:
             session: Shared client session.
@@ -197,18 +207,67 @@ class VideoPrefetcher:
         Returns:
             The synchronized episode for the recording.
         """
-        request = SynchronizeRecordingRequest(
-            recording_id=recording_id,
-            synchronization_details=self.synchronization_details,
-        )
-        url = f"{API_URL}/org/{self.dataset.org_id}/synchronize/synchronize-recording"
+        base_url = f"{API_URL}/org/{self.dataset.org_id}/synchronize"
         async with session.post(
-            url,
-            json=request.model_dump(mode="json"),
+            f"{base_url}/trigger-synchronize-recording",
+            json=SynchronizeRecordingRequest(
+                recording_id=recording_id,
+                synchronization_details=self.synchronization_details,
+            ).model_dump(mode="json"),
             headers=get_auth().get_headers(),
         ) as response:
             response.raise_for_status()
-            payload = await response.json()
+            job = SynchronizeRecordingStartResponse.model_validate(
+                await response.json()
+            )
+
+        deadline = asyncio.get_running_loop().time() + SYNCED_RECORDING_TIMEOUT_S
+        while True:
+            async with session.get(
+                f"{base_url}/synchronize-recording-progress/"
+                f"{job.synchronized_recording_id}",
+                params={"recording_id": recording_id},
+                headers=get_auth().get_headers(),
+            ) as response:
+                response.raise_for_status()
+                progress = SynchronizeRecordingProgress.model_validate(
+                    await response.json()
+                )
+
+            if progress.status is SynchronizeRecordingStatus.READY:
+                if not progress.download_url:
+                    raise SynchronizationError(
+                        f"Synchronizing recording {recording_id} reported READY "
+                        "without a download URL"
+                    )
+                break
+            if progress.status is SynchronizeRecordingStatus.FAILED:
+                raise SynchronizationError(
+                    f"Synchronizing recording {recording_id} failed: "
+                    f"{progress.error or 'no reason given'}"
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                raise SynchronizationError(
+                    f"Timed out after {SYNCED_RECORDING_TIMEOUT_S:.0f}s waiting "
+                    f"for recording {recording_id} to synchronize"
+                )
+            await asyncio.sleep(SYNCED_RECORDING_POLL_INTERVAL_S)
+
+        try:
+            async with session.get(progress.download_url) as response:
+                response.raise_for_status()
+                payload = await response.json()
+        except aiohttp.ClientError as exc:
+            # aiohttp includes the signed URL (and its credentials) in request
+            # errors, so only expose the response status or exception class.
+            status = (
+                exc.status if isinstance(exc, aiohttp.ClientResponseError) else None
+            )
+            detail = f"HTTP {status}" if status is not None else type(exc).__name__
+            raise SynchronizationError(
+                f"Failed to download synchronized episode for recording "
+                f"{recording_id} ({detail})"
+            ) from None
         return SynchronizedEpisodeModel.model_validate(payload)
 
     async def _fetch_and_download(self, session: aiohttp.ClientSession) -> None:
