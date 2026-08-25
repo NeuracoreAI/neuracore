@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::encoding::video_encoder::LossyVideoCodec;
+
 /// One file the backend should expect for a trace registration request.
 ///
 /// Matches the body of `POST /org/{org}/recording/traces/batch-register`,
@@ -35,9 +37,11 @@ pub struct RegisterTraceRequest {
     ///
     /// Only video-family traces carry one; `None` for scalar/JSON traces, which
     /// have no video to encode. Omitted rather than sent as null, so the body
-    /// is unchanged for traces that never had a codec.
+    /// is unchanged for traces that never had a codec. Held as the enum and
+    /// rendered to its wire identifier by `Serialize`, so no codec string is
+    /// constructed before the request is encoded.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub codec: Option<String>,
+    pub codec: Option<LossyVideoCodec>,
 }
 
 /// Backend response payload for `POST /traces/batch-register`.
@@ -134,7 +138,7 @@ mod tests {
                 filepath: "rgb/cam_0/lossy.mp4".to_string(),
                 content_type: "video/mp4".to_string(),
             }],
-            codec: Some("h264_medium".to_string()),
+            codec: Some(LossyVideoCodec::H264MediumLossyOnly),
         };
         let body = serde_json::to_value(serde_json::json!({"traces": [request]})).unwrap();
         assert_eq!(

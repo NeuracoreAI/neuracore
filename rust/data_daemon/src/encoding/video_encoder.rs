@@ -48,6 +48,7 @@ use std::process::Stdio;
 
 use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
+use serde::{Serialize, Serializer};
 
 use tokio::process::Command;
 
@@ -178,6 +179,14 @@ impl LossyVideoCodec {
             Self::LosslessPlusPreview => "h264_lossless",
             Self::H264MediumLossyOnly => "h264_medium",
         }
+    }
+}
+
+/// Serialise as the wire identifier, so callers hold the enum right up to the
+/// point a request is encoded and no codec string exists anywhere else.
+impl Serialize for LossyVideoCodec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire_str())
     }
 }
 

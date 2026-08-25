@@ -239,7 +239,7 @@ async fn submit_batch(
                     // scalar trace resolves to the default via `for_trace`'s
                     // fallthrough, which is a placeholder rather than a claim
                     // about how it was stored, so it is left unreported.
-                    codec: is_video_family(data_type).then(|| codec.as_wire_str().to_string()),
+                    codec: is_video_family(data_type).then_some(codec),
                 }
             })
             .collect();
