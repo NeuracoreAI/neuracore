@@ -137,6 +137,9 @@ class RecordingStateManager(BaseSSEConsumer):
         self.recording_robot_instances: dict[
             RobotInstanceIdentifier, TrackedRecording
         ] = dict()
+        # Newest completed recording start time for each source. This lets us
+        # recognize its delayed SSE START after the active entry has been removed.
+        self._completed_start_time_watermarks: dict[RobotInstanceIdentifier, float] = {}
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
@@ -178,6 +181,7 @@ class RecordingStateManager(BaseSSEConsumer):
                     handle.cancel()
             self._recording_timers.clear()
             self.recording_robot_instances.clear()
+            self._completed_start_time_watermarks.clear()
             self._expired_recording_ids.clear()
             self.active_dataset_ids.clear()
             self._drain_callbacks.clear()
@@ -417,6 +421,11 @@ class RecordingStateManager(BaseSSEConsumer):
             if current is None or current.recording_id != recording_id:
                 return
             self.recording_robot_instances.pop(instance_key, None)
+            # Never move the completed-recording boundary backward if stops
+            # arrive out of order.
+            watermark = self._completed_start_time_watermarks.get(instance_key)
+            if watermark is None or current.start_time > watermark:
+                self._completed_start_time_watermarks[instance_key] = current.start_time
         # Data-bridge stop is driven by the recording context or expiry timer —
         # not here — so the daemon gets exactly one StopRecording with the
         # correct data-clock boundary.
@@ -432,17 +441,29 @@ class RecordingStateManager(BaseSSEConsumer):
         appropriate start/stop methods if the state actually changed.
 
         Runs under :attr:`_state_lock` so each decision and the state change it
-        implies are atomic against a concurrent local start or stop. Blocking
-        work is done before the lock is taken.
+        implies are atomic against a concurrent local start or stop. Daemon
+        startup is performed after the lock is released.
 
         Args:
             is_recording: Whether the robot should be recording
             details: Recording details including robot ID, instance, and recording ID
         """
-        if is_recording and details.robot_id == self._connected_robot_id:
-            self._ensure_daemon_for_recording()
+        instance_key = RobotInstanceIdentifier(
+            robot_id=details.robot_id, robot_instance=details.instance
+        )
         with self._state_lock:
             self._apply_recording_notification(is_recording, details)
+            active = self.recording_robot_instances.get(instance_key)
+            # Rejected stale or foreign STARTs do not become the active recording
+            # and therefore must not auto-start a replacement daemon.
+            should_ensure_daemon = (
+                is_recording
+                and details.robot_id == self._connected_robot_id
+                and active is not None
+                and active.recording_id == details.recording_id
+            )
+        if should_ensure_daemon:
+            self._ensure_daemon_for_recording()
 
     def _apply_recording_notification(
         self, is_recording: bool, details: BaseRecodingUpdatePayload
@@ -470,6 +491,26 @@ class RecordingStateManager(BaseSSEConsumer):
             # Only react to the robot this client connected to, not other
             # robots in the org that may be recording concurrently.
             if robot_id != self._connected_robot_id:
+                return
+
+            completed_start_watermark = self._completed_start_time_watermarks.get(
+                instance_key
+            )
+            # A local stop may beat its matching SSE START; timestamps identify
+            # it even when the local and cloud recording IDs differ.
+            if (
+                completed_start_watermark is not None
+                and details.start_time
+                <= completed_start_watermark + STALE_START_TOLERANCE_S
+            ):
+                logger.debug(
+                    "ignoring delayed recording start notification: "
+                    "recording_id=%s start_time=%s is not newer than completed "
+                    "start_time=%s",
+                    recording_id,
+                    details.start_time,
+                    completed_start_watermark,
+                )
                 return
 
             # A START describing a recording that began before the tracked one
@@ -502,7 +543,6 @@ class RecordingStateManager(BaseSSEConsumer):
                 dataset_id,
                 recording_id,
             )
-
             # Only open the window if no one else has already.
             opened_locally = previous is not None and previous.opened_locally
             if not opened_locally:
