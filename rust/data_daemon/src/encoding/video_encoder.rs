@@ -203,9 +203,14 @@ pub struct ChunkEncodeRequest {
     /// Lossy codec selection for this trace. Controls whether a lossless
     /// archive is produced and how the lossy output is encoded.
     pub codec: LossyVideoCodec,
-    /// Frames to encode from the head of `raw_nut`: the whole file unless the
-    /// dispatcher cut the chunk, and always what the sidecar is built from.
+    /// Frames to encode once `skip_frames` are discarded: the rest of the file
+    /// unless the dispatcher cut the chunk, and always what the sidecar is
+    /// built from.
     pub frame_count: u32,
+    /// Leading frames of `raw_nut` to discard before encoding: the ones the
+    /// dispatcher resolved as published before this recording's window opened.
+    /// Zero for a chunk whose first frame the window already owns.
+    pub skip_frames: u32,
 }
 
 /// One NUT entry of a batched chunk encode.
@@ -220,6 +225,11 @@ pub struct BatchNutInput {
     /// Frames this entry contributes to the batch: the whole NUT unless the
     /// dispatcher cut the chunk (see [`ChunkEncodeRequest::frame_count`]).
     pub frame_count: u32,
+    /// Leading frames to discard (see [`ChunkEncodeRequest::skip_frames`]).
+    /// Always zero unless this entry is its batch's only one — the head cut
+    /// is a whole-stream filter, so a batch never mixes it with a second
+    /// entry (see `drain_encode_batch`).
+    pub skip_frames: u32,
 }
 
 /// Inputs to one batched transcode invocation covering a contiguous run of
@@ -625,6 +635,7 @@ impl VideoEncoder {
             encode_threads,
             self.frame_sync_arg(),
             request.frame_count,
+            request.skip_frames,
             &request.lossy_out,
             &request.lossless_out,
         );
@@ -653,6 +664,7 @@ impl VideoEncoder {
                         lossless_out: request.lossless_out.clone(),
                         codec: request.codec,
                         frame_count: single.frame_count,
+                        skip_frames: single.skip_frames,
                     },
                     encode_threads,
                 )
@@ -697,6 +709,11 @@ impl VideoEncoder {
             encode_threads,
             self.frame_sync_arg(),
             batch_frame_count(&request.inputs),
+            // No head cut on a multi-entry batch: the filter would trim the
+            // concatenated stream, and the trimmed frames still occupy the
+            // first entry's declared span, so the caller keeps a cut entry in
+            // a batch of its own (see `drain_encode_batch`).
+            0,
             &request.lossy_out,
             &request.lossless_out,
         );
@@ -846,12 +863,14 @@ impl VideoEncoder {
 /// [`VideoEncoder::encode_chunk`] and [`VideoEncoder::encode_chunk_batch`] so
 /// both invocations keep the same output shape (see `encode_chunk` for the
 /// rationale behind each knob).
+#[allow(clippy::too_many_arguments)]
 fn append_encode_output_args(
     command: &mut Command,
     codec: LossyVideoCodec,
     encode_threads: usize,
     frame_sync_arg: &'static str,
     frame_count: u32,
+    skip_frames: u32,
     lossy_out: &Path,
     lossless_out: &Path,
 ) {
@@ -861,6 +880,9 @@ fn append_encode_output_args(
     // Per-output frame cap (see [`ChunkEncodeRequest::frame_count`]), a no-op
     // unless the dispatcher cut a chunk of this encode at a recording boundary.
     let frame_limit = (frame_count > 0).then(|| frame_count.to_string());
+    // Head cut (see [`ChunkEncodeRequest::skip_frames`]). `-frames:v` counts
+    // frames *after* the graph, so the cap above still bounds the tail.
+    let head_skip = (skip_frames > 0).then(|| head_skip_filter(skip_frames));
     command
         .arg("-map")
         .arg("0:v")
@@ -885,6 +907,9 @@ fn append_encode_output_args(
             .arg("23")
             .arg("-video_track_timescale")
             .arg(&track_timescale);
+        if let Some(skip) = head_skip.as_deref() {
+            command.arg("-vf").arg(skip);
+        }
         if let Some(limit) = frame_limit.as_deref() {
             command.arg("-frames:v").arg(limit);
         }
@@ -892,7 +917,12 @@ fn append_encode_output_args(
     } else {
         // Downscale the lossy preview proxy (only) to keep this dominant
         // pass cheap at high resolution; the lossless output stays native.
-        let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
+        let preview_filter = match head_skip.as_deref() {
+            // Trim first, then scale: scaling frames that are about to be
+            // discarded is the expensive half of this pass.
+            Some(skip) => format!("{skip},{}", preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT)),
+            None => preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT),
+        };
         command
             // Lossy preview proxy only: cap to preview resolution (see
             // `preview_scale_filter`). Passthrough frame timing still emits
@@ -939,6 +969,9 @@ fn append_encode_output_args(
             .arg("0")
             .arg("-video_track_timescale")
             .arg(&track_timescale);
+        if let Some(skip) = head_skip.as_deref() {
+            command.arg("-vf").arg(skip);
+        }
         if let Some(limit) = frame_limit.as_deref() {
             command.arg("-frames:v").arg(limit);
         }
@@ -949,9 +982,11 @@ fn append_encode_output_args(
 /// Frames a batch's outputs may hold: the sum of what every entry owns.
 ///
 /// The cap drops frames from the tail of the concatenated stream, which is
-/// only correct because a cut entry is always the batch's last: the dispatcher
-/// cuts a chunk at the window's stop, and every chunk that opens after that
-/// stop is dropped whole, so no chunk of the trace follows a cut one.
+/// only correct because a tail-cut entry is always the batch's last: the
+/// dispatcher cuts a chunk at the window's stop, and every chunk that opens
+/// after that stop is dropped whole, so no chunk of the trace follows a cut
+/// one. A head-cut entry (see [`BatchNutInput::skip_frames`]) never shares a
+/// batch at all, so its discarded frames are outside every sum here.
 fn batch_frame_count(inputs: &[BatchNutInput]) -> u32 {
     inputs
         .iter()
@@ -1098,6 +1133,12 @@ fn verify_nut_header(raw_nut: &Path) -> Result<(), VideoEncodeError> {
         });
     }
     Ok(())
+}
+
+/// Filter that discards the first `skip_frames` frames and rebases the PTS of
+/// what remains to zero, so the segment's extent is the kept frames' extent.
+fn head_skip_filter(skip_frames: u32) -> String {
+    format!("trim=start_frame={skip_frames},setpts=PTS-STARTPTS")
 }
 
 /// Build the ffmpeg `-vf` value that downscales the lossy preview proxy to at
@@ -1546,6 +1587,7 @@ mod tests {
             lossless_out: lossless.clone(),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 8,
+            skip_frames: 0,
         };
         let outcome = encoder
             .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
@@ -1613,6 +1655,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 6,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1698,6 +1741,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 3,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1732,6 +1776,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skip_frames_drops_the_head_and_rebases_the_kept_frames() {
+        // The head cut has to reach ffmpeg for the same reason the tail cut
+        // does, and the kept frames must start at PTS 0 so the segment's
+        // extent is the extent the finalise concat floors on.
+        let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping head-cut encode test.");
+            return;
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let raw = tempdir.path().join("chunk_0000.nut");
+        write_synthetic_nut(&ffmpeg, &raw, 8);
+
+        let probe = |path: &Path, entries: &str, intervals: Option<&str>| -> String {
+            let mut command = StdCommand::new(&ffprobe);
+            command.args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                entries,
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+            ]);
+            if let Some(intervals) = intervals {
+                command.args(["-read_intervals", intervals]);
+            }
+            let out = command.arg(path).output().expect("spawn ffprobe");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let frame_count =
+            |path: &Path| -> u64 { probe(path, "stream=nb_read_frames", None).parse().unwrap() };
+
+        // Head cut only: the 5 frames past the cut survive on both outputs.
+        let lossy = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0000_lossless.mp4");
+        VideoEncoder::new()
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw.clone(),
+                    lossy_out: lossy.clone(),
+                    lossless_out: lossless.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                    frame_count: 5,
+                    skip_frames: 3,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("transcode");
+        assert_eq!(frame_count(&lossy), 5, "lossy output must drop the head");
+        assert_eq!(
+            frame_count(&lossless),
+            5,
+            "lossless output must drop the same head"
+        );
+        // The synthetic NUT is 1 fps, so the kept run starts at 3 s in the
+        // source; `setpts` has to bring it back to zero.
+        for output in [&lossy, &lossless] {
+            assert_eq!(
+                probe(output, "frame=pts_time", Some("%+#1")),
+                "0.000000",
+                "the first kept frame must be rebased to PTS 0"
+            );
+        }
+
+        // Cut at both ends: `-frames:v` counts frames *after* the filter
+        // graph, so the cap bounds the tail of what the head cut left.
+        let lossy = tempdir.path().join("chunk_0001_lossy.mp4");
+        let lossless = tempdir.path().join("chunk_0001_lossless.mp4");
+        VideoEncoder::new()
+            .encode_chunk(
+                &ChunkEncodeRequest {
+                    raw_nut: raw,
+                    lossy_out: lossy.clone(),
+                    lossless_out: lossless.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                    frame_count: 2,
+                    skip_frames: 3,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("transcode");
+        assert_eq!(frame_count(&lossy), 2, "the cap applies past the head cut");
+        assert_eq!(
+            frame_count(&lossless),
+            2,
+            "the cap applies past the head cut on the lossless output too"
+        );
+    }
+
+    #[tokio::test]
     async fn encode_chunk_lossy_only_writes_single_full_res_h264() {
         let (Some(ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
         else {
@@ -1757,6 +1897,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 6,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1844,6 +1985,7 @@ mod tests {
                     lossless_out: split_lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 8,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1858,6 +2000,7 @@ mod tests {
                     lossless_out: tempdir.path().join("unused_lossless.mp4"),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 8,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1965,6 +2108,7 @@ mod tests {
                             .join(format!("chunk_{chunk_index:04}_lossless.mp4")),
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: frames_per_chunk as u32,
+                        skip_frames: 0,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -2095,6 +2239,7 @@ mod tests {
                         lossless_out: lossless,
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: 4,
+                        skip_frames: 0,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -2230,6 +2375,7 @@ mod tests {
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
+            skip_frames: 0,
         };
         let encoder = VideoEncoder::new();
         let error = encoder
@@ -2253,6 +2399,7 @@ mod tests {
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
+            skip_frames: 0,
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");
@@ -2461,16 +2608,19 @@ mod tests {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0000.nut"),
                 span_to_next_us: Some(16_683),
                 frame_count: 2,
+                skip_frames: 0,
             },
             BatchNutInput {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0001.nut"),
                 span_to_next_us: Some(MAX_BOUNDARY_DELTA_US),
                 frame_count: 2,
+                skip_frames: 0,
             },
             BatchNutInput {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0002.nut"),
                 span_to_next_us: None,
                 frame_count: 2,
+                skip_frames: 0,
             },
         ];
         write_batch_concat_list(&list, &inputs).expect("write list");
@@ -2518,6 +2668,7 @@ mod tests {
                         declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0]))
                     }),
                     frame_count: chunk.len() as u32,
+                    skip_frames: 0,
                 });
             }
             let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
@@ -2628,6 +2779,7 @@ mod tests {
                         lossless_out: single_lossless.clone(),
                         codec,
                         frame_count: 4,
+                        skip_frames: 0,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -2643,6 +2795,7 @@ mod tests {
                             raw_nut: raw.clone(),
                             span_to_next_us: None,
                             frame_count: 4,
+                            skip_frames: 0,
                         }],
                         lossy_out: batch_lossy.clone(),
                         lossless_out: batch_lossless.clone(),
@@ -2693,6 +2846,7 @@ mod tests {
                 raw_nut,
                 span_to_next_us: (index < 2).then_some(33_366),
                 frame_count: 2,
+                skip_frames: 0,
             });
         }
         let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
@@ -2750,6 +2904,7 @@ mod tests {
                             raw_nut: chunk_a,
                             span_to_next_us: Some(33_366),
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                         // Cut at the recording boundary: only its first frame
                         // belongs to this recording.
@@ -2757,6 +2912,7 @@ mod tests {
                             raw_nut: chunk_b,
                             span_to_next_us: None,
                             frame_count: 1,
+                            skip_frames: 0,
                         },
                     ],
                     lossy_out: lossy_out.clone(),
@@ -2804,11 +2960,13 @@ mod tests {
                             raw_nut: good_nut,
                             span_to_next_us: Some(33_366),
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: corrupt_nut.clone(),
                             span_to_next_us: None,
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                     ],
                     lossy_out: lossy_out.clone(),
@@ -2863,11 +3021,13 @@ mod tests {
                             raw_nut: chunk_a,
                             span_to_next_us: Some(span_us),
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: chunk_b,
                             span_to_next_us: None,
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                     ],
                     lossy_out: lossy_out.clone(),
@@ -2925,11 +3085,13 @@ mod tests {
                                 raw_nut: chunk_a,
                                 span_to_next_us: Some(span_us),
                                 frame_count: 3,
+                                skip_frames: 0,
                             },
                             BatchNutInput {
                                 raw_nut: chunk_b,
                                 span_to_next_us: None,
                                 frame_count: 2,
+                                skip_frames: 0,
                             },
                         ],
                         lossy_out: lossy_out.clone(),
@@ -2994,11 +3156,13 @@ mod tests {
                             raw_nut: chunk_a,
                             span_to_next_us: Some(span_us),
                             frame_count: 3,
+                            skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: chunk_b,
                             span_to_next_us: None,
                             frame_count: 2,
+                            skip_frames: 0,
                         },
                     ],
                     lossy_out: lossy_out.clone(),
@@ -3074,6 +3238,7 @@ mod tests {
                     raw_nut,
                     span_to_next_us,
                     frame_count: chunk.len() as u32,
+                    skip_frames: 0,
                 });
             }
             let lossy_out = tempdir

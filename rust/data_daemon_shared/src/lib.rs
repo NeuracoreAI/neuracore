@@ -57,17 +57,34 @@ pub mod paths;
 ///
 /// A chunk is a NUT file appended to until something seals it, so frames logged
 /// either side of a boundary can share one and its open stamp speaks only for
-/// the first. Both sides of the wire divide the work by what each knows in time:
+/// the first. Membership is therefore resolved per frame, at both bounds, and
+/// the **daemon** resolves it: from the per-frame offsets this module encodes it
+/// keeps the run of frames each window owns, and one chunk can be claimed by
+/// several windows.
 ///
-/// - The **producer** seals the open chunk before the first frame at or past a
-///   boundary, which only works at a recording's start and only in the process
-///   that called `start_recording`.
-/// - The **daemon** cuts a chunk it already holds, from the per-frame offsets
-///   this module encodes. Only this works at a stop, where a video-only process
-///   logs on until its notification arrives and the frames are already written.
+/// The **producer** seals on nothing but its own caps — size and frame count —
+/// and is never told where a window opened, so a chunk spanning one (or several)
+/// is the normal case rather than the exception. Nothing aligns a chunk to a
+/// window: that is what lets a camera process which opens no window of its own
+/// still keep every frame it logged inside someone else's recording.
 pub mod video_boundary {
-    /// Nanoseconds per millisecond, the wire resolution of a frame offset.
-    const NS_PER_MS: i64 = 1_000_000;
+    /// Nanoseconds per microsecond, the wire resolution of a frame offset.
+    ///
+    /// Microseconds, not milliseconds, because the offset is **floored**: a
+    /// frame's reconstructed publish time is up to one unit earlier than its
+    /// true one, which can push a frame published just inside a window back
+    /// across its start bound. Adjacent windows do not abut — a recording stops
+    /// before the next starts — so a frame pushed into that gap is claimed by
+    /// neither and its pixels are dropped. At millisecond resolution and a fast
+    /// camera that is a frame lost at a boundary crossing; a microsecond is far
+    /// finer than any frame interval, which closes it.
+    ///
+    /// `u32` microseconds saturates at ~71 minutes of chunk span, far beyond any
+    /// chunk a producer holds open, and [`publish_offset_us`] clamps rather than
+    /// wrapping. It also matches the NUT spool time base
+    /// ([`crate::service_name::VIDEO_SPOOL_TICKS_PER_SECOND`]), so every stage of
+    /// the video path measures in the same unit.
+    const NS_PER_US: i64 = 1_000;
 
     /// Is `frame_publish_ns` at or past the recording boundary `bound_ns`?
     ///
@@ -76,27 +93,27 @@ pub mod video_boundary {
         frame_publish_ns >= bound_ns
     }
 
-    /// One frame's publish time as ms after its chunk's open stamp.
-    pub fn publish_offset_ms(chunk_open_ns: i64, frame_publish_ns: i64) -> u32 {
+    /// One frame's publish time as µs after its chunk's open stamp, floored.
+    pub fn publish_offset_us(chunk_open_ns: i64, frame_publish_ns: i64) -> u32 {
         let offset_ns = frame_publish_ns.saturating_sub(chunk_open_ns).max(0);
-        (offset_ns / NS_PER_MS).try_into().unwrap_or(u32::MAX)
+        (offset_ns / NS_PER_US).try_into().unwrap_or(u32::MAX)
     }
 
-    /// The inverse of [`publish_offset_ms`], paired with it so neither can
+    /// The inverse of [`publish_offset_us`], paired with it so neither can
     /// change alone.
-    pub fn frame_publish_ns(chunk_open_ns: i64, offset_ms: u32) -> i64 {
-        chunk_open_ns.saturating_add(i64::from(offset_ms) * NS_PER_MS)
+    pub fn frame_publish_ns(chunk_open_ns: i64, offset_us: u32) -> i64 {
+        chunk_open_ns.saturating_add(i64::from(offset_us) * NS_PER_US)
     }
 
     /// Leading frames published before `bound_ns`, i.e. the index of the first
     /// that is [`at_or_past_boundary`].
-    pub fn frames_before_boundary(offsets_ms: &[u32], chunk_open_ns: i64, bound_ns: i64) -> usize {
-        offsets_ms
+    pub fn frames_before_boundary(offsets_us: &[u32], chunk_open_ns: i64, bound_ns: i64) -> usize {
+        offsets_us
             .iter()
             .position(|offset| {
                 at_or_past_boundary(bound_ns, frame_publish_ns(chunk_open_ns, *offset))
             })
-            .unwrap_or(offsets_ms.len())
+            .unwrap_or(offsets_us.len())
     }
 
     #[cfg(test)]
@@ -114,22 +131,47 @@ pub mod video_boundary {
         }
 
         #[test]
-        fn offsets_round_trip_at_millisecond_resolution() {
-            assert_eq!(publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS), 0);
+        fn offsets_round_trip_at_microsecond_resolution() {
+            assert_eq!(publish_offset_us(CHUNK_OPEN_NS, CHUNK_OPEN_NS), 0);
             assert_eq!(
-                publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS + 1_500_000),
-                1
+                publish_offset_us(CHUNK_OPEN_NS, CHUNK_OPEN_NS + 1_500),
+                1,
+                "a sub-microsecond remainder floors away"
             );
             assert_eq!(
-                frame_publish_ns(CHUNK_OPEN_NS, 33),
-                CHUNK_OPEN_NS + 33_000_000
+                frame_publish_ns(CHUNK_OPEN_NS, 33_333),
+                CHUNK_OPEN_NS + 33_333_000
+            );
+        }
+
+        #[test]
+        fn a_frame_just_inside_a_window_is_not_floored_out_of_it() {
+            // The hole microsecond resolution closes. A recording stops, the
+            // next starts a millisecond later, and a frame lands just inside the
+            // new window. Floored to the millisecond it would reconstruct
+            // *before* that start — into the gap between the two recordings,
+            // owned by neither — and its pixels would be dropped.
+            let stop_ns = CHUNK_OPEN_NS + 4_000_000;
+            let start_ns = stop_ns + 1_000_000;
+            let frame_ns = start_ns + 400_000; // 0.4 ms into the new recording
+
+            let offset = publish_offset_us(CHUNK_OPEN_NS, frame_ns);
+            let reconstructed = frame_publish_ns(CHUNK_OPEN_NS, offset);
+
+            assert!(
+                reconstructed >= start_ns,
+                "the frame must still read as inside the window it was logged in"
+            );
+            assert!(
+                reconstructed > stop_ns,
+                "and must not fall back into the gap before it"
             );
         }
 
         #[test]
         fn publish_offset_saturates_at_the_chunk_open() {
             // A backwards caller clock reads as 0 rather than wrapping.
-            assert_eq!(publish_offset_ms(CHUNK_OPEN_NS, CHUNK_OPEN_NS - 5), 0);
+            assert_eq!(publish_offset_us(CHUNK_OPEN_NS, CHUNK_OPEN_NS - 5), 0);
         }
 
         #[test]
@@ -191,7 +233,7 @@ pub mod service_name {
     /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
     /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
     /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
-    /// `frame_publish_offsets_ms` element is a `u32` varint (≤5 bytes).
+    /// `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes).
     pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
@@ -205,7 +247,7 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_ms`
+    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_us`
     /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
@@ -535,7 +577,7 @@ pub enum Envelope {
         frame_count: u32,
         /// Per-frame capture time in nanoseconds since the Unix epoch, in
         /// arrival order. Length equals `frame_count`. Capture-clock content for
-        /// the trace sidecar; routing uses `frame_publish_offsets_ms`.
+        /// the trace sidecar; routing uses `frame_publish_offsets_us`.
         frame_timestamps_ns: Vec<i64>,
         /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
         /// Length equals `frame_count`; values round-trip bit-exact through
@@ -546,10 +588,10 @@ pub enum Envelope {
         /// geometry change). The daemon never decodes pixels; it threads this
         /// straight into the trace's `trace.json` sidecar for depth frames.
         dtype: FrameDtype,
-        /// Per-frame publish time as ms after this chunk's own
+        /// Per-frame publish time as µs after this chunk's own
         /// `publish_timestamp_ns`, in arrival order. What makes chunk membership
         /// per-frame rather than atomic; see [`video_boundary`].
-        frame_publish_offsets_ms: Vec<u32>,
+        frame_publish_offsets_us: Vec<u32>,
     },
     /// Force the daemon to re-read its profile config immediately, rather than
     /// waiting for the config watcher's next poll. Sent by the SDK's
@@ -1102,7 +1144,7 @@ mod tests {
                 7.0_f64 / 60.0_f64,
             ],
             dtype: FrameDtype::Rgb8,
-            frame_publish_offsets_ms: vec![0, 16, 33, 50],
+            frame_publish_offsets_us: vec![0, 16, 33, 50],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
@@ -1135,7 +1177,7 @@ mod tests {
                 frame_timestamps_ns: vec![1_700_000_000_000_000_000],
                 frame_timestamps_s: vec![1_700_000_000.0],
                 dtype,
-                frame_publish_offsets_ms: vec![0],
+                frame_publish_offsets_us: vec![0],
             };
             let bytes = original.encode().expect("encode");
             let decoded = Envelope::decode(&bytes).expect("decode");
@@ -1179,7 +1221,7 @@ mod tests {
         // COMMANDS_MAX_PAYLOAD_BYTES even at an implausible frame count.
         let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
         let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
-        let frame_publish_offsets_ms: Vec<u32> = (0..10_000).collect();
+        let frame_publish_offsets_us: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: 0,
@@ -1195,7 +1237,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
-            frame_publish_offsets_ms,
+            frame_publish_offsets_us,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
@@ -1218,7 +1260,7 @@ mod tests {
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
         let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
-        let frame_publish_offsets_ms: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
+        let frame_publish_offsets_us: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
             robot_instance: i64::MAX,
@@ -1234,7 +1276,7 @@ mod tests {
             frame_timestamps_ns,
             frame_timestamps_s,
             dtype: FrameDtype::Rgb8,
-            frame_publish_offsets_ms,
+            frame_publish_offsets_us,
         };
         let bytes = envelope.encode().expect("encode");
         assert!(
