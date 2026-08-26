@@ -18,3 +18,5 @@ The data daemon encodes video chunks faster on slow machines with a lighter prev
 The data daemon now works with ffmpeg 8 and later. It selects the frame timing option that the installed ffmpeg accepts, so new and old ffmpeg builds are both supported.
 
 Dataset video decoding now works with ffmpeg 8 and later too. It selects the frame timing option the installed ffmpeg accepts, instead of falling back to the slower PyAV decoder.
+
+Downloaded model files are now named after the training job instead of always `model.nc.zip`.
