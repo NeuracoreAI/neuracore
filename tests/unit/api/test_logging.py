@@ -100,7 +100,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
     native = MagicMock()
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     robot = _get_robot(None, 0)
-    monkeypatch.setattr(robot, "get_current_recording_id", lambda: "rec-1")
+    monkeypatch.setattr(robot, "get_current_recording_id", lambda: None)
 
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
     nc.log_rgb("front_camera", rgb_uint8)
@@ -481,23 +481,16 @@ def test_log_parallel_gripper_open_amounts(
     )
 
 
-def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None:
-    """A producer that did not publish StartRecording can log after SSE state.
-
-    The active recording id represents state learned from SSE. Creating the
-    robot's daemon context must bind its source without publishing a duplicate
-    native start event.
-    """
+def test_json_logs_with_bound_robot_source_without_local_recording(
+    monkeypatch,
+) -> None:
+    """A producer without local recording state still forwards to the daemon."""
     robot = Robot("test_robot", instance=3, org_id="org-1")
     robot.id = "robot-from-sse"
     native = MagicMock()
 
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
-    monkeypatch.setattr(
-        robot,
-        "get_current_recording_id",
-        lambda: "cloud-recording-id-from-sse",
-    )
+    monkeypatch.setattr(robot, "get_current_recording_id", lambda: None)
 
     sample = ParallelGripperOpenAmountData(timestamp=12.5, open_amount=0.4)
     api_logging._record_json_to_daemon(

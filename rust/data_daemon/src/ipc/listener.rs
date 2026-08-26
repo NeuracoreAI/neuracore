@@ -20,17 +20,18 @@ use std::time::Duration;
 
 use data_daemon_shared::{
     Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, VersionReply,
-    VersionRequest,
+    VersionRequest, WindowStartedAtQuery, WindowStartedAtReply,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
 use tokio::select;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::sleep;
 
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
+use crate::pipeline::dispatcher::WindowQuery;
 use crate::state::{SqliteStateStore, StateStore};
 
 /// Poll cadence while envelopes are actively flowing.
@@ -69,6 +70,7 @@ const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
+    window_query_tx: mpsc::Sender<WindowQuery>,
     store: Arc<SqliteStateStore>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
@@ -77,6 +79,7 @@ pub async fn run(
         recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
+        window_started_at = data_daemon_shared::service_name::WINDOW_STARTED_AT,
         "ipc listener started"
     );
 
@@ -129,6 +132,14 @@ pub async fn run(
         // borrow makes this future `!Send`, which is fine: `run` is awaited
         // inline under `block_on`, never `tokio::spawn`'d.
         serve_recording_id_queries(transport.recording_id_server(), &store).await;
+
+        // -- Answer window-started-at queries ------------------------------------
+        // Only a non-owning producer asks: the opener already knows its own
+        // window's boundary first-hand. Forwarded to the dispatcher (the only
+        // holder of live window state) via a oneshot, since a window's
+        // `started_at_ns` is never persisted.
+        serve_window_started_at_queries(transport.window_started_at_server(), &window_query_tx)
+            .await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -294,6 +305,77 @@ async fn serve_recording_id_queries(
                 Err(error) => tracing::warn!(%error, "failed to loan recording-id reply sample"),
             },
             Err(error) => tracing::warn!(%error, "failed to encode recording-id reply"),
+        }
+    }
+}
+
+/// Drain every pending window-started-at query, answering each from the
+/// dispatcher's live window state.
+///
+/// Unlike [`serve_recording_id_queries`], this cannot answer from the store —
+/// a window's `started_at_ns` (the publish-clock boundary) is never persisted,
+/// only the caller's capture clock is. So each request is forwarded into the
+/// dispatcher's `window_query_tx` with a fresh oneshot reply channel and
+/// awaited before answering the iceoryx2 client. Traffic is low (one ask per
+/// non-owning `stop_recording()` call), so a request that outlives the
+/// dispatcher's inbox capacity or never gets a reply (e.g. the dispatcher is
+/// mid-shutdown) is logged and skipped rather than blocking the listener loop.
+async fn serve_window_started_at_queries(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    window_query_tx: &mpsc::Sender<WindowQuery>,
+) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "window-started-at server receive failed");
+                return;
+            }
+        };
+
+        let query = match WindowStartedAtQuery::decode(active.payload()) {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed window-started-at query");
+                continue;
+            }
+        };
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if window_query_tx
+            .send(WindowQuery {
+                source: (query.robot_id.clone(), query.robot_instance),
+                reply: reply_tx,
+            })
+            .await
+            .is_err()
+        {
+            tracing::warn!("dispatcher window-query inbox closed; dropping request");
+            continue;
+        }
+        let started_at_ns = match reply_rx.await {
+            Ok(started_at_ns) => started_at_ns,
+            Err(error) => {
+                tracing::warn!(%error, "dispatcher dropped window-query reply");
+                None
+            }
+        };
+
+        let reply = WindowStartedAtReply { started_at_ns };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send window-started-at reply");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to loan window-started-at reply sample")
+                }
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode window-started-at reply"),
         }
     }
 }

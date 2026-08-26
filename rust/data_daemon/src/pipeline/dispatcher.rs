@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use data_daemon_shared::{video_boundary, BatchedDataItem, Envelope, FrameDtype};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use uuid::Uuid;
@@ -107,6 +107,19 @@ const DISPATCHER_INBOX_CAPACITY: usize = 1024;
 /// Source identity: `(robot_id, robot_instance)`.
 type Source = (String, i64);
 
+/// A producer's ask for the currently live window's `started_at_ns` boundary
+/// for a source, sent alongside the dispatcher's regular `Envelope` inbox
+/// (not through it: this carries a reply channel, which `Envelope` — postcard
+/// wire-encoded — cannot).
+pub(crate) struct WindowQuery {
+    pub(crate) source: Source,
+    pub(crate) reply: oneshot::Sender<Option<i64>>,
+}
+
+/// Bounded producer → dispatcher window-query channel. Low volume (one ask per
+/// non-owning `stop_recording()` call), so a small buffer is ample.
+const WINDOW_QUERY_INBOX_CAPACITY: usize = 64;
+
 /// Resolve the configured holdback, honouring the `NCD_HOLDBACK_MS` override.
 fn configured_holdback() -> Duration {
     let millis = std::env::var(HOLDBACK_ENV)
@@ -120,6 +133,9 @@ fn configured_holdback() -> Duration {
 /// per-trace actor.
 pub struct DispatcherHandle {
     join: JoinHandle<()>,
+    /// Sender a producer's `window_started_at` query is forwarded through; the
+    /// listener clones this to reach the dispatcher's live window state.
+    pub window_query_tx: mpsc::Sender<WindowQuery>,
 }
 
 impl DispatcherHandle {
@@ -169,11 +185,19 @@ pub fn spawn_with_context(
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
     let (tx, rx) = mpsc::channel::<Envelope>(DISPATCHER_INBOX_CAPACITY);
+    let (window_query_tx, window_query_rx) =
+        mpsc::channel::<WindowQuery>(WINDOW_QUERY_INBOX_CAPACITY);
     let join = tokio::spawn(async move {
         let mut dispatcher = Dispatcher::new(store, actor_context, context);
-        dispatcher.run(rx, shutdown_rx).await;
+        dispatcher.run(rx, window_query_rx, shutdown_rx).await;
     });
-    (tx, DispatcherHandle { join })
+    (
+        tx,
+        DispatcherHandle {
+            join,
+            window_query_tx,
+        },
+    )
 }
 
 /// A per-trace actor's routing handle, stored inside its window.
@@ -352,9 +376,25 @@ impl Dispatcher {
         }
     }
 
+    /// Answer a producer's ask for the currently live window's boundary.
+    ///
+    /// Only a non-owning producer needs this — the opener already knows its
+    /// own window's `started_at_ns` first-hand. Answered straight from
+    /// in-memory state: `started_at_ns` is never persisted (only the caller's
+    /// capture clock is stored on the recording row).
+    fn handle_window_query(&self, query: WindowQuery) {
+        let started_at_ns = self
+            .windows
+            .get(&query.source)
+            .and_then(|entry| entry.live.as_ref())
+            .map(|window| window.started_at_ns);
+        let _ = query.reply.send(started_at_ns);
+    }
+
     async fn run(
         &mut self,
         mut rx: mpsc::Receiver<Envelope>,
+        mut window_query_rx: mpsc::Receiver<WindowQuery>,
         mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
     ) {
         tracing::info!(
@@ -383,6 +423,11 @@ impl Dispatcher {
                         break;
                     };
                     self.handle_inbound(envelope, Instant::now()).await;
+                }
+                query = window_query_rx.recv() => {
+                    if let Some(query) = query {
+                        self.handle_window_query(query);
+                    }
                 }
                 _ = sleep(housekeep_after) => {}
             }
@@ -428,11 +473,13 @@ impl Dispatcher {
                 robot_instance,
                 publish_timestamp_ns,
                 timestamp_ns,
+                window_started_at_ns,
             } => {
                 self.handle_stop(
                     (robot_id, robot_instance),
                     publish_timestamp_ns,
                     timestamp_ns,
+                    window_started_at_ns,
                     recv_at,
                 )
                 .await;
@@ -666,7 +713,7 @@ impl Dispatcher {
         };
         tracing::info!(recording_index, robot_id = source.0, "recording started");
 
-        let entry = self.windows.entry(source).or_default();
+        let entry = self.windows.entry(source.clone()).or_default();
         entry.last_seen = Some(recv_at);
         // An idle-reaped window sits in `closing` with an open upper bound
         // (`i64::MAX`) to catch stragglers; clamp any such window to this new
@@ -761,6 +808,7 @@ impl Dispatcher {
         source: Source,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
+        window_started_at_ns: Option<i64>,
         recv_at: Instant,
     ) {
         let Some(entry) = self.windows.get_mut(&source) else {
@@ -769,17 +817,62 @@ impl Dispatcher {
         };
         entry.last_seen = Some(recv_at);
 
+        // A stop that names its window is matched on that boundary, not on when
+        // it happened to be sent. Any producer may stop a recording, so one
+        // web-initiated stop reaches the daemon once per process that connected
+        // to the robot; without the name, a duplicate delayed behind its own
+        // flush barrier is stamped late enough to look like a stop for whatever
+        // recording is live by then, and ends that one instead.
+        if let Some(named) = window_started_at_ns {
+            let names_live = entry
+                .live
+                .as_ref()
+                .is_some_and(|window| window.started_at_ns == named);
+            if !names_live {
+                let already_stopped = entry
+                    .closing
+                    .iter()
+                    .any(|window| window.started_at_ns == named && window.awaiting_flush);
+                if already_stopped {
+                    // A second stop for a window a producer already stopped. Its
+                    // tail is sealed by its own flush marker, so there is nothing
+                    // left for this to do.
+                    tracing::debug!(
+                        robot_id = source.0,
+                        named,
+                        "duplicate stop for an already-stopped window; ignoring"
+                    );
+                    return;
+                }
+                if !entry
+                    .closing
+                    .iter()
+                    .any(|window| window.started_at_ns == named)
+                {
+                    tracing::debug!(
+                        robot_id = source.0,
+                        named,
+                        "stop names a window that is no longer retained; ignoring"
+                    );
+                    return;
+                }
+                // Falls through to the closing-window path: a genuine late stop
+                // for a window `handle_start` retired without one.
+            }
+        }
+
         // A stop whose publish time falls inside the live window closes the live
         // recording normally. A stop that predates the live window is a delayed
         // stop for a recording `handle_start` already retired (an inverted
         // start/stop pair) — it is matched against the closing windows instead.
         // Both paths converge on the shared post-persist tail below, so a
         // retired recording also becomes notifiable (fires `RecordingStopped`).
-        let recording_index = if entry
-            .live
-            .as_ref()
-            .is_some_and(|window| window.contains(publish_timestamp_ns))
-        {
+        let recording_index = if entry.live.as_ref().is_some_and(
+            |window| match window_started_at_ns {
+                Some(named) => window.started_at_ns == named,
+                None => window.contains(publish_timestamp_ns),
+            },
+        ) {
             let mut window = entry
                 .live
                 .take()
@@ -1532,6 +1625,18 @@ mod tests {
             robot_instance: 0,
             publish_timestamp_ns,
             timestamp_ns: publish_timestamp_ns,
+            window_started_at_ns: None,
+        }
+    }
+
+    /// A stop that names the window it means, as a real producer's does.
+    fn stop_naming(robot: &str, publish_timestamp_ns: i64, window_started_at_ns: i64) -> Envelope {
+        Envelope::StopRecording {
+            robot_id: robot.into(),
+            robot_instance: 0,
+            publish_timestamp_ns,
+            timestamp_ns: publish_timestamp_ns,
+            window_started_at_ns: Some(window_started_at_ns),
         }
     }
 
@@ -1734,6 +1839,110 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
         assert_eq!(a, serde_json::json!([{"i": 1}]));
+    }
+
+    #[tokio::test]
+    async fn a_stop_naming_an_earlier_window_never_closes_the_next_recording() {
+        // Any producer may stop a recording, so one web-initiated stop reaches
+        // the daemon once per process that connected to the robot. The duplicate
+        // is stamped at its own send, after its own flush barrier, so it can
+        // arrive stamped *inside* the next recording's window:
+        //   start(A, 100) -> stop(A, sent 200) -> start(B, 300)
+        //   -> stop(A, sent 400, still naming A) -> data(B, 450) -> stop(B, 500)
+        // Matched by publish time, that fourth envelope ends B. Matched by the
+        // window it names, it is a duplicate of A's stop and does nothing.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(stop_naming("robot-1", 200, 100)).await.unwrap();
+        tx.send(start("robot-1", 300)).await.unwrap();
+        tx.send(stop_naming("robot-1", 400, 100)).await.unwrap();
+        tx.send(datum("robot-1", 450, 1)).await.unwrap();
+        tx.send(stop_naming("robot-1", 500, 300)).await.unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+        let second = &recordings[1];
+        // The datum is the proof B was still live at 450: had the duplicate
+        // closed B at 400, it would have fallen outside every window.
+        let traces = store
+            .list_traces_for_recording(second.recording_index)
+            .await
+            .unwrap();
+        assert_eq!(
+            traces.len(),
+            1,
+            "data published after the duplicate stop must still reach the live recording"
+        );
+        assert_eq!(
+            second.stop_timestamp_ns,
+            Some(500),
+            "B must be stopped by its own stop, not by a duplicate of A's"
+        );
+    }
+
+    #[tokio::test]
+    async fn window_query_answers_from_live_state_only() {
+        // A non-owning producer's stop_recording() asks this to learn what to
+        // name its stop. It must see the live window's boundary while one is
+        // open, and `None` before any window and after it closes — a closing
+        // (not-yet-evicted) window still accepts late data, but is not "live".
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let now = Instant::now();
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        dispatcher.handle_window_query(WindowQuery {
+            source: source.clone(),
+            reply: reply_tx,
+        });
+        assert_eq!(
+            reply_rx.await.unwrap(),
+            None,
+            "no window has ever opened for this source"
+        );
+
+        dispatcher
+            .handle_start(source.clone(), None, 100, 100, now)
+            .await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        dispatcher.handle_window_query(WindowQuery {
+            source: source.clone(),
+            reply: reply_tx,
+        });
+        assert_eq!(
+            reply_rx.await.unwrap(),
+            Some(100),
+            "a live window answers its own started_at_ns"
+        );
+
+        dispatcher
+            .handle_stop(source.clone(), 200, 200, None, now)
+            .await;
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        dispatcher.handle_window_query(WindowQuery {
+            source: source.clone(),
+            reply: reply_tx,
+        });
+        assert_eq!(
+            reply_rx.await.unwrap(),
+            None,
+            "a closed window is no longer live, even while retained for late data"
+        );
     }
 
     #[tokio::test]
@@ -2012,7 +2221,7 @@ mod tests {
             .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, None, opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -2056,7 +2265,7 @@ mod tests {
             .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(source.clone(), stop_ns, stop_ns, None, opened_at)
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -2345,7 +2554,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
         assert_eq!(
             dispatcher.windows.get(&source).unwrap().closing.len(),
@@ -2387,7 +2596,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // Well past the retention deadline.
@@ -2433,7 +2642,7 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
@@ -2487,7 +2696,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // The lifecycle process owns no video, so its marker lands at once.
@@ -2548,7 +2757,7 @@ mod tests {
             .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), 200, 200, opened_at)
+            .handle_stop(source.clone(), 200, 200, None, opened_at)
             .await;
 
         // Published after the stop: past every window's upper bound.
@@ -2597,7 +2806,7 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(source.clone(), 200, 200, None, stopped_at)
             .await;
 
         // Producer B owns no video, so its marker lands immediately.

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
     HealthReply, HealthRequest, RecordingIdReply, VersionReply, VersionRequest,
+    WindowStartedAtQuery, WindowStartedAtReply,
 };
 
 use crate::publisher::{now_ns, with_producer, ProducerError, ProducerState};
@@ -31,6 +32,16 @@ const VERSION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const VERSION_RESPONSE_WAIT: Duration = Duration::from_millis(20);
 /// Poll cadence while waiting for one version reply.
 const VERSION_RECEIVE_POLL: Duration = Duration::from_millis(2);
+/// How long a window-started-at request waits for the daemon's reply.
+///
+/// A single bounded wait, not a retry-until-available loop like
+/// [`resolve_recording_id`]: the dispatcher answers immediately from its own
+/// in-memory state, so there is no "not yet minted" case to wait out — only
+/// "no daemon answering", which this treats the same as "no window" (`None`),
+/// same graceful degradation `stop_recording` already had without a gate.
+const WINDOW_STARTED_AT_RESPONSE_WAIT: Duration = Duration::from_millis(50);
+/// Poll cadence while waiting for one window-started-at reply.
+const WINDOW_STARTED_AT_RECEIVE_POLL: Duration = Duration::from_millis(2);
 
 fn bounded_timeout(timeout_s: f64) -> Duration {
     // Clamp before converting: `Duration::from_secs_f64` panics on a non-finite
@@ -209,5 +220,67 @@ fn resolve_recording_id_once(
             return Ok(None);
         }
         std::thread::sleep(RECORDING_ID_RECEIVE_POLL);
+    }
+}
+
+/// Ask the daemon which window, if any, is currently live for a source.
+///
+/// Only called by a non-owning `stop_recording()` — the opener already knows
+/// its own window's boundary first-hand (see [`crate::window_identity`]). A
+/// single request with one short bounded wait: unlike [`resolve_recording_id`],
+/// there is nothing to retry-until-available, so any failure (no daemon
+/// running, malformed reply, timeout) collapses to `None` — the same "name it
+/// unnamed" fallback `stop_recording` already had.
+pub(crate) fn resolve_window_started_at(robot_id: &str, robot_instance: i64) -> Option<i64> {
+    let query = WindowStartedAtQuery {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+    };
+    let request_bytes = match query.encode() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::debug!(%error, "failed to encode window-started-at query");
+            return None;
+        }
+    };
+    match with_producer(|state| window_started_at_once(state, &request_bytes)) {
+        Ok(started_at_ns) => started_at_ns,
+        Err(error) => {
+            tracing::debug!(%error, "window-started-at request failed");
+            None
+        }
+    }
+}
+
+fn window_started_at_once(
+    state: &ProducerState,
+    request_bytes: &[u8],
+) -> Result<Option<i64>, ProducerError> {
+    let request = state
+        .window_started_at_client
+        .loan_slice_uninit(request_bytes.len())
+        .map_err(|error| ProducerError::Loan(error.to_string()))?;
+    let request = request.write_from_slice(request_bytes);
+    let pending = request
+        .send()
+        .map_err(|error| ProducerError::Send(error.to_string()))?;
+
+    let response_deadline = Instant::now() + WINDOW_STARTED_AT_RESPONSE_WAIT;
+    loop {
+        match pending.receive() {
+            Ok(Some(response)) => {
+                let reply = WindowStartedAtReply::decode(response.payload())?;
+                return Ok(reply.started_at_ns);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, "window-started-at receive failed; treating as no reply");
+                return Ok(None);
+            }
+        }
+        if Instant::now() >= response_deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(WINDOW_STARTED_AT_RECEIVE_POLL);
     }
 }
