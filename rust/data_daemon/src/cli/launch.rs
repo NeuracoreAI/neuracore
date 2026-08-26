@@ -479,6 +479,7 @@ fn run_daemon(
             listener::run(
                 transport,
                 dispatcher_tx.clone(),
+                dispatcher_handle.window_query_tx.clone(),
                 Arc::new(state_store.clone()),
                 shutdown_tx.subscribe(),
             )

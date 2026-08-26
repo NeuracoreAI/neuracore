@@ -46,7 +46,7 @@ use data_daemon_shared::service_name::{
     LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
     MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION,
-    VERSION_MAX_PAYLOAD_BYTES,
+    VERSION_MAX_PAYLOAD_BYTES, WINDOW_STARTED_AT, WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -117,6 +117,12 @@ pub(crate) struct ProducerState {
     _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response client used to read the running daemon's build version.
     pub(crate) version_client: Client<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the window-started-at client so port
+    /// discovery doesn't race the handle going out of scope.
+    _window_started_at_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response client used by a non-owning `stop_recording()` to ask
+    /// the daemon which window is currently live for a source.
+    pub(crate) window_started_at_client: Client<ipc::Service, [u8], (), [u8], ()>,
 }
 
 /// Work item for the publisher thread.
@@ -378,6 +384,11 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         open_query_client(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
     let (version_service, version_client) =
         open_query_client(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
+    let (window_started_at_service, window_started_at_client) = open_query_client(
+        &node,
+        WINDOW_STARTED_AT,
+        WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+    )?;
 
     Ok(ProducerState {
         _node: node,
@@ -389,6 +400,8 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         health_client,
         _version_service: version_service,
         version_client,
+        _window_started_at_service: window_started_at_service,
+        window_started_at_client,
     })
 }
 

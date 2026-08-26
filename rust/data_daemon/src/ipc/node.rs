@@ -14,7 +14,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
     MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS,
-    RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
+    RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES, WINDOW_STARTED_AT,
+    WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::server::Server;
@@ -106,6 +107,12 @@ pub struct IpcTransport {
     version_server: Server<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the version server.
     _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response server on `neuracore/data_daemon/window_started_at`
+    /// that answers a non-owning producer's ask for the live window's
+    /// `started_at_ns`, so its stop can name the window it means.
+    window_started_at_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the window-started-at server.
+    _window_started_at_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
 }
 
 impl IpcTransport {
@@ -135,6 +142,11 @@ impl IpcTransport {
             open_query_server(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
         let (version_service, version_server) =
             open_query_server(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
+        let (window_started_at_service, window_started_at_server) = open_query_server(
+            &node,
+            WINDOW_STARTED_AT,
+            WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+        )?;
 
         Ok(IpcTransport {
             _node: node,
@@ -146,6 +158,8 @@ impl IpcTransport {
             _health_service: health_service,
             version_server,
             _version_service: version_service,
+            window_started_at_server,
+            _window_started_at_service: window_started_at_service,
         })
     }
 
@@ -167,6 +181,11 @@ impl IpcTransport {
     /// Borrow the `version` request-response server port.
     pub fn version_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
         &self.version_server
+    }
+
+    /// Borrow the `window_started_at` request-response server port.
+    pub fn window_started_at_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.window_started_at_server
     }
 }
 

@@ -285,6 +285,7 @@ mcap
 MCAP
 meanpooling
 memfd
+memoryview
 meshgrid
 metadatas
 metafunc

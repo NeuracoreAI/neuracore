@@ -342,6 +342,24 @@ pub mod service_name {
     /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
     pub const RECORDING_ID_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
+    /// Request-response service a producer uses to ask the daemon which
+    /// window, if any, is currently live for a source.
+    ///
+    /// Only needed by a process that did **not** open the window itself: the
+    /// opener already knows its own window's `started_at_ns` first-hand, from
+    /// the very call that opened it. A non-owner asks this once, when it calls
+    /// `stop_recording()`, so its stop can name the window it means instead of
+    /// being matched by publish timestamp alone (which a delayed or duplicate
+    /// stop can get wrong). The daemon answers from its own live in-memory
+    /// window state — `started_at_ns` is never persisted, since only the
+    /// caller's *capture* clock is stored on the recording row. See
+    /// [`crate::WindowStartedAtQuery`] / [`crate::WindowStartedAtReply`].
+    pub const WINDOW_STARTED_AT: &str = "neuracore/data_daemon/window_started_at";
+
+    /// Maximum size of a single `window_started_at` service sample: a robot id
+    /// plus an instance and an optional nanosecond timestamp.
+    pub const WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES: usize = 1024;
+
     /// Maximum number of concurrent request-response clients. Mirrors
     /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
     /// per OS thread (iceoryx2 ports are `!Sync`), so the cap must cover the
@@ -405,6 +423,19 @@ pub enum Envelope {
         /// the row's `stop_timestamp_ns` and POSTed to the backend as
         /// `end_time`; never used for routing.
         timestamp_ns: i64,
+        /// Which window this stop means: the `publish_timestamp_ns` of the
+        /// [`Envelope::StartRecording`] that opened it, as the producer knows it
+        /// — from opening the window itself, or by asking the daemon (see
+        /// [`crate::WindowStartedAtQuery`]).
+        ///
+        /// Not recording identity on the wire: it is a publish-clock boundary,
+        /// the same quantity `StartRecording` already carries, and the daemon
+        /// still decides which recording that window is. It exists because
+        /// `publish_timestamp_ns` above is stamped at the *send*, so a stop
+        /// delayed behind a slow flush arrives looking like a stop for whatever
+        /// recording is live by then. `None` from a producer that never learned
+        /// the boundary, which the daemon falls back to matching by publish time.
+        window_started_at_ns: Option<i64>,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -735,6 +766,51 @@ pub struct RecordingIdReply {
     pub recording_id: Option<String>,
 }
 
+/// Request sent on [`service_name::WINDOW_STARTED_AT`] asking the daemon which
+/// window, if any, is currently live for a source.
+///
+/// Only a process that did not open the window itself needs to ask — the
+/// opener already knows its own window's boundary first-hand.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStartedAtQuery {
+    pub robot_id: String,
+    pub robot_instance: i64,
+}
+
+/// Reply to a [`WindowStartedAtQuery`].
+///
+/// `started_at_ns` is the live window's publish-clock lower bound — the same
+/// quantity [`Envelope::StartRecording`] carries as `publish_timestamp_ns` —
+/// or `None` when no window is currently live for the source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStartedAtReply {
+    pub started_at_ns: Option<i64>,
+}
+
+impl WindowStartedAtQuery {
+    /// Encode as a postcard byte vector for a `window_started_at` request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `window_started_at` request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl WindowStartedAtReply {
+    /// Encode as a postcard byte vector for a `window_started_at` response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `window_started_at` response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthRequest {
@@ -878,6 +954,34 @@ mod tests {
             VersionReply::decode(&reply.encode().unwrap()).unwrap(),
             reply
         );
+    }
+
+    #[test]
+    fn window_started_at_query_and_reply_round_trip() {
+        let query = WindowStartedAtQuery {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+        };
+        let query_bytes = query.encode().unwrap();
+        assert!(
+            query_bytes.len() <= service_name::WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+            "query ({} bytes) must fit the window_started_at slice ({} bytes)",
+            query_bytes.len(),
+            service_name::WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+        );
+        assert_eq!(WindowStartedAtQuery::decode(&query_bytes).unwrap(), query);
+
+        for started_at_ns in [Some(1_700_000_000_000_000_000), None] {
+            let reply = WindowStartedAtReply { started_at_ns };
+            let reply_bytes = reply.encode().unwrap();
+            assert!(
+                reply_bytes.len() <= service_name::WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+                "reply ({} bytes) must fit the window_started_at slice ({} bytes)",
+                reply_bytes.len(),
+                service_name::WINDOW_STARTED_AT_MAX_PAYLOAD_BYTES,
+            );
+            assert_eq!(WindowStartedAtReply::decode(&reply_bytes).unwrap(), reply);
+        }
     }
 
     #[test]
@@ -1034,15 +1138,18 @@ mod tests {
 
     #[test]
     fn stop_and_cancel_round_trip() {
-        let stop = Envelope::StopRecording {
-            robot_id: "robot-1".into(),
-            robot_instance: 2,
-            publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
-        };
-        let bytes = stop.encode().expect("encode");
-        assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
-        assert_eq!(stop.kind(), "stop_recording");
+        for window_started_at_ns in [Some(1_699_999_999_000_000_000), None] {
+            let stop = Envelope::StopRecording {
+                robot_id: "robot-1".into(),
+                robot_instance: 2,
+                publish_timestamp_ns: 1_700_000_000_000_000_000,
+                timestamp_ns: 1_700_000_000_000_000_000,
+                window_started_at_ns,
+            };
+            let bytes = stop.encode().expect("encode");
+            assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
+            assert_eq!(stop.kind(), "stop_recording");
+        }
 
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),

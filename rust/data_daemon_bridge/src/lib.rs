@@ -31,21 +31,26 @@
 //! This file is a thin PyO3 façade: the `#[pyfunction]` wrappers do argument
 //! validation, release the GIL, and delegate into the submodules.
 //!
+//! - [`window_identity`] — which window, if any, this process opened for a
+//!   source, so its own `stop_recording()` can name it.
 //! - [`paths`] — filesystem layout shared with the daemon (recordings root,
 //!   spool paths, `(source, sensor)` stream keys).
 //! - [`publisher`] — per-thread iceoryx2 publisher state, fork safety, the
 //!   synchronous `publish`, and the background data-publisher thread.
 //! - [`writer`] — the background video-writer thread, the in-progress
 //!   video-chunk registry, and chunk seal/announce/flush logic.
-//! - [`query`] — recording-id resolution over the `queries` service.
+//! - [`query`] — recording-id and window-identity resolution over the
+//!   `queries` services.
 //! - [`nut_writer`] — minimal NUT-container muxer for raw RGB video.
 
 pub mod nut_writer;
 
 mod depth;
+mod logging;
 mod paths;
 mod publisher;
 mod query;
+mod window_identity;
 mod writer;
 
 use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery};
@@ -110,6 +115,10 @@ fn start_recording(
             timestamp_ns: capture_timestamp_ns,
             cloud_recording_id,
         })?;
+        // This process opened the window, so it knows the boundary first-hand —
+        // recorded here so a later stop from this process can name it without
+        // asking the daemon.
+        window_identity::note_opened(&robot_id, robot_instance, publish_timestamp_ns);
         // Tell the writer where the window opened, so no chunk spans it.
         let _ = writer_queue().push(WriterMsg::Boundary {
             robot_id,
@@ -329,6 +338,14 @@ fn log_json(
 
 /// Drain the data publisher, then publish one `StopRecording`.
 ///
+/// Any producer may stop a recording, whether or not it opened the window. The
+/// stop names the window it means — from [`window_identity::opened_locally`]
+/// when this process opened it, else by asking the daemon (see
+/// [`query::resolve_window_started_at`]), read before the drain barrier — so
+/// the daemon closes *that* window or drops the stop: several processes
+/// stopping the same recording, which one web-initiated stop causes, cannot
+/// end up closing a later one.
+///
 /// Two barriers, in order: the data publisher's queue is drained first, so the
 /// recording's joint/JSON tail is on the wire before the window's upper bound
 /// is stamped, and only then is the stop published. The writer's tail video
@@ -361,6 +378,13 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
+        // Which window this stop means, read BEFORE the flush barrier below. That
+        // barrier is the slow part — over a second under burst logging — and the
+        // window it was called against is the one the caller means to stop, not
+        // whichever has become live by the time the drain finishes. Local first
+        // (this process's own window, no IPC); only a non-owner asks the daemon.
+        let window_started_at_ns = window_identity::opened_locally(&robot_id, robot_instance)
+            .or_else(|| query::resolve_window_started_at(&robot_id, robot_instance));
         // Drain the data publisher before stamping the window's upper bound.
         // `log_joint_*` / `log_json` only hand their envelope to the background
         // publisher thread's unbounded queue, which nothing drains at process
@@ -388,9 +412,13 @@ fn stop_recording(
             robot_instance,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
+            window_started_at_ns,
         })?;
-        // Split from [`flush_source`] so the caller can close its logging gate
-        // in between, rather than after a backlog-length barrier.
+        // Forget our claim on the window. Deliberately after the publish, so a
+        // concurrent stop from this process can't read a stale boundary.
+        window_identity::note_closed(&robot_id, robot_instance);
+        // Split from [`flush_source`] so the caller can seal the writer's tail
+        // chunks in between, rather than after a backlog-length barrier.
         Ok(())
     })
 }
@@ -462,6 +490,7 @@ fn cancel_recording(
         let _ = ack_rx.recv();
         // Publish `CancelRecording` from THIS (the calling) thread's publisher,
         // ordered with Start/Stop on the same port (see the writer module note).
+        window_identity::note_closed(&robot_id, robot_instance);
         publish(&Envelope::CancelRecording {
             robot_id,
             robot_instance,
@@ -569,6 +598,9 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Before anything else can want to report a problem: several failures in
+    // here are otherwise indistinguishable from an idle sensor.
+    logging::init();
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
