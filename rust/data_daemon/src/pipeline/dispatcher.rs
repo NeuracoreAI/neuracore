@@ -26,10 +26,16 @@
 //! actor (no sequence counting).
 //!
 //! A video chunk is the one envelope carrying more than one datum, and the same
-//! rule decides it *per frame*: the window keeps the frames published before its
-//! stop and cuts off the rest (see [`frames_inside_window`], and
-//! `data_daemon_shared::video_boundary` for where the boundary lands and what
-//! the producer does with the other edge).
+//! rule decides it *per frame*, at both bounds: a chunk is a container, not a
+//! member. The producer seals chunks on its own caps and knows nothing of
+//! windows, so one chunk can hold frames from before a recording, inside it, and
+//! inside the next one — and each window claims exactly the run of frames it
+//! owns (see [`claims_for_chunk`] and [`frame_range_in_window`], with
+//! `data_daemon_shared::video_boundary` for where a boundary lands). Deciding
+//! membership by the chunk's *open stamp* instead would hand a window every
+//! frame or none, and none is what a chunk opened before the window got — taking
+//! its in-window frames with it. That is how a camera process that never calls
+//! `start_recording` lost its whole trace.
 //!
 //! **Tail video chunks** escape the holdback: the producer seals them after it
 //! published the stop, so no retention constant bounds their lateness. A stopped
@@ -1121,24 +1127,35 @@ impl Dispatcher {
         }
     }
 
-    /// Credit one producer's drained flush barrier to the oldest closing window
+    /// Credit one producer's drained flush barrier to *every* closing window
     /// still owed a marker from that `producer_pid`.
+    ///
+    /// Every window, not the oldest one: a barrier drains everything the
+    /// producer holds for the source, so one marker speaks for every window its
+    /// chunks reached. A process that publishes no stop of its own flushes once,
+    /// at its own exit — and one of its chunks can carry several recordings —
+    /// so crediting a single window would leave the others waiting out
+    /// [`FLUSH_MARKER_WAIT_CAP`] for a marker that is never coming.
+    ///
+    /// Safe for the owner-driven case too, where each stop produces its own
+    /// marker: a window already credited is skipped, and a window whose chunks
+    /// this producer never reached is not owed one (it is not in
+    /// `video_producers`, so it is not waiting).
     fn mark_source_flushed(&mut self, source: &Source, producer_pid: u32) {
         let Some(entry) = self.windows.get_mut(source) else {
             return;
         };
-        let Some(window) = entry.closing.iter_mut().find(|window| {
+        for window in entry.closing.iter_mut().filter(|window| {
             window.awaiting_flush && !window.flushed_producers.contains(&producer_pid)
-        }) else {
-            return;
-        };
-        window.flushed_producers.insert(producer_pid);
-        tracing::debug!(
-            recording_index = window.recording_index,
-            producer_pid,
-            "producer flush barrier drained; window may retire once every \
-             video-contributing producer has reported"
-        );
+        }) {
+            window.flushed_producers.insert(producer_pid);
+            tracing::debug!(
+                recording_index = window.recording_index,
+                producer_pid,
+                "producer flush barrier drained; window may retire once every \
+                 video-contributing producer has reported"
+            );
+        }
     }
 
     /// Find the window for `source` containing `ts`. Closing windows are
@@ -1157,6 +1174,14 @@ impl Dispatcher {
             return entry.live.as_mut();
         }
         None
+    }
+
+    /// Borrow the window a [`ChunkClaim`] addresses.
+    fn window_at_mut(entry: &mut WindowsForSource, slot: WindowSlot) -> Option<&mut ActiveWindow> {
+        match slot {
+            WindowSlot::Live => entry.live.as_mut(),
+            WindowSlot::Closing(index) => entry.closing.get_mut(index),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1230,83 +1255,91 @@ impl Dispatcher {
             thread_id,
         );
 
-        // The open stamp picks the window; the per-frame cut is below.
         let Some(entry) = self.windows.get_mut(source) else {
             remove_spool_nut(&spool_nut);
             self.note_orphan();
             return;
         };
-        let Some(window) = Self::window_for_mut(entry, publish_ts) else {
-            remove_spool_nut(&spool_nut);
-            self.note_orphan();
-            return;
-        };
-        window.video_producers.insert(producer_pid);
 
-        // Membership by open stamp, extent by per-frame publish times.
-        let kept_frames = window.stopped_at_ns.map_or(frame_count, |stop| {
-            frames_inside_window(&frame_publish_offsets_ms, publish_ts, stop, frame_count)
-        });
-        let dropped_frames = frame_count.saturating_sub(kept_frames);
-        if kept_frames == 0 {
-            tracing::warn!(
-                recording_index = window.recording_index,
-                frame_count,
-                "video chunk has no frame published inside the window it opened \
-                 in; dropping it"
-            );
-            remove_spool_nut(&spool_nut);
-            self.note_orphan();
-            return;
-        }
-        let mut frame_timestamps_s = frame_timestamps_s;
-        if dropped_frames > 0 {
-            frame_timestamps_s.truncate(kept_frames as usize);
+        // Every window any of this chunk's frames belongs to, and which frames.
+        // A chunk is a container, not a member: the producer seals it on its own
+        // caps and knows nothing of windows, so one chunk can hold frames from
+        // before a recording, inside it, and inside the next one.
+        let claims = claims_for_chunk(entry, publish_ts, &frame_publish_offsets_ms, frame_count);
+        if claims.is_empty() {
             tracing::debug!(
-                recording_index = window.recording_index,
-                kept_frames,
-                dropped_frames,
-                "video chunk straddles the window's stop; keeping the frames \
-                 published before it"
-            );
-        }
-        let frame_count = kept_frames;
-
-        let recording_index = window.recording_index;
-        let handle = Self::ensure_actor(
-            window,
-            &self.actor_context,
-            data_type.clone(),
-            sensor_name.clone(),
-            &mut self.actor_handles,
-        );
-        let chunk_index = handle.next_video_chunk;
-        handle.next_video_chunk = handle.next_video_chunk.saturating_add(1);
-        let sender = handle.sender.clone();
-
-        // The actor relinks the spooled NUT into the recording itself — on a
-        // blocking thread inside its background encode task — so the rename's
-        // possible journal-commit stall never lands on this routing path. The
-        // dispatcher only hands over the source spool path.
-        if sender
-            .send(TraceActorMessage::Video {
-                chunk_index,
-                spool_nut: spool_nut.clone(),
-                width,
-                height,
-                byte_count,
                 frame_count,
-                frame_timestamps_s,
-                dtype,
-            })
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                recording_index,
-                "video trace actor inbox closed; dropping chunk"
+                "video chunk has no frame published inside any window; dropping it"
             );
             remove_spool_nut(&spool_nut);
+            self.note_orphan();
+            return;
+        }
+
+        // One NUT can feed several recordings, so each claim needs its own copy
+        // of the source to relink and unlink. Hard links keep that to a metadata
+        // op and one inode; the last claim consumes the spool file itself.
+        let sources = claim_sources(&spool_nut, claims.len());
+
+        for (claim, source_nut) in claims.iter().zip(sources) {
+            let Some(source_nut) = source_nut else {
+                // Could not give this claim its own name; the others still route.
+                continue;
+            };
+            let Some(window) = Self::window_at_mut(entry, claim.slot) else {
+                remove_spool_nut(&source_nut);
+                continue;
+            };
+            window.video_producers.insert(producer_pid);
+            if claim.skip > 0 || claim.count < frame_count {
+                tracing::debug!(
+                    recording_index = window.recording_index,
+                    skipped = claim.skip,
+                    kept = claim.count,
+                    frame_count,
+                    "video chunk spans this window's boundary; keeping the frames \
+                     published inside it"
+                );
+            }
+            let claimed_timestamps = claim.timestamps(&frame_timestamps_s);
+
+            let recording_index = window.recording_index;
+            let handle = Self::ensure_actor(
+                window,
+                &self.actor_context,
+                data_type.clone(),
+                sensor_name.clone(),
+                &mut self.actor_handles,
+            );
+            let chunk_index = handle.next_video_chunk;
+            handle.next_video_chunk = handle.next_video_chunk.saturating_add(1);
+            let sender = handle.sender.clone();
+
+            // The actor relinks the spooled NUT into the recording itself — on a
+            // blocking thread inside its background encode task — so the
+            // rename's possible journal-commit stall never lands on this routing
+            // path. The dispatcher only hands over the source spool path.
+            if sender
+                .send(TraceActorMessage::Video {
+                    chunk_index,
+                    spool_nut: source_nut.clone(),
+                    width,
+                    height,
+                    byte_count,
+                    frame_count: claim.count,
+                    skip_frames: claim.skip,
+                    frame_timestamps_s: claimed_timestamps,
+                    dtype,
+                })
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    recording_index,
+                    "video trace actor inbox closed; dropping chunk"
+                );
+                remove_spool_nut(&source_nut);
+            }
         }
     }
 
@@ -1387,19 +1420,141 @@ impl Dispatcher {
     }
 }
 
-/// How many of a chunk's leading frames this window keeps, given the window's
-/// `stop_ns` and the chunk's `frame_publish_offsets_ms`.
-fn frames_inside_window(
+/// Addresses one window inside a [`WindowsForSource`] without borrowing it, so
+/// a chunk's claims can be resolved in one immutable pass and acted on in a
+/// second, mutable one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowSlot {
+    Live,
+    Closing(usize),
+}
+
+/// One window's claim on a chunk: which window, and which run of frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ChunkClaim {
+    slot: WindowSlot,
+    /// Leading frames this window does not own (published before it opened).
+    skip: u32,
+    /// Frames it does own, counted from `skip`.
+    count: u32,
+}
+
+impl ChunkClaim {
+    /// This claim's slice of the chunk's per-frame capture timestamps.
+    fn timestamps(&self, frame_timestamps_s: &[f64]) -> Vec<f64> {
+        let start = (self.skip as usize).min(frame_timestamps_s.len());
+        let end = start
+            .saturating_add(self.count as usize)
+            .min(frame_timestamps_s.len());
+        frame_timestamps_s[start..end].to_vec()
+    }
+}
+
+/// The run of a chunk's frames that falls inside `[started_at_ns,
+/// stopped_at_ns)`, as `(skip, count)`.
+///
+/// Both ends are cut, and for the same reason: the producer seals chunks on its
+/// own caps, so a boundary can fall anywhere inside one. Membership by the
+/// chunk's open stamp would give a window either every frame or none of them —
+/// and none is what a chunk opened before the window got, taking its in-window
+/// frames with it.
+fn frame_range_in_window(
     offsets_ms: &[u32],
     chunk_open_ns: i64,
-    stop_ns: i64,
+    started_at_ns: i64,
+    stopped_at_ns: Option<i64>,
     frame_count: u32,
-) -> u32 {
+) -> (u32, u32) {
     if offsets_ms.is_empty() {
-        return frame_count;
+        // No per-frame data to cut on, so the open stamp is all there is: an
+        // all-or-nothing decision for the whole chunk.
+        let inside =
+            chunk_open_ns >= started_at_ns && stopped_at_ns.is_none_or(|stop| chunk_open_ns < stop);
+        return if inside { (0, frame_count) } else { (0, 0) };
     }
-    let cut = video_boundary::frames_before_boundary(offsets_ms, chunk_open_ns, stop_ns);
-    u32::try_from(cut).unwrap_or(u32::MAX).min(frame_count)
+    let bounded = |bound_ns| {
+        let index = video_boundary::frames_before_boundary(offsets_ms, chunk_open_ns, bound_ns);
+        u32::try_from(index).unwrap_or(u32::MAX).min(frame_count)
+    };
+    let skip = bounded(started_at_ns);
+    let end = stopped_at_ns.map_or(frame_count, bounded);
+    (skip, end.saturating_sub(skip))
+}
+
+/// Resolve which of a source's windows own which of a chunk's frames.
+///
+/// Windows never overlap on the publish clock (a new start clamps any window
+/// still closing), so the claims are disjoint, and they come out oldest-first:
+/// closing windows in order, then the live one.
+fn claims_for_chunk(
+    entry: &WindowsForSource,
+    chunk_open_ns: i64,
+    offsets_ms: &[u32],
+    frame_count: u32,
+) -> Vec<ChunkClaim> {
+    let candidates = entry
+        .closing
+        .iter()
+        .enumerate()
+        .map(|(index, window)| (WindowSlot::Closing(index), window))
+        .chain(entry.live.as_ref().map(|window| (WindowSlot::Live, window)));
+    candidates
+        .filter_map(|(slot, window)| {
+            let (skip, count) = frame_range_in_window(
+                offsets_ms,
+                chunk_open_ns,
+                window.started_at_ns,
+                window.stopped_at_ns,
+                frame_count,
+            );
+            (count > 0).then_some(ChunkClaim { slot, skip, count })
+        })
+        .collect()
+}
+
+/// One source path per claim, so each can be relinked and unlinked
+/// independently.
+///
+/// The last claim takes the spool file itself; earlier ones get a hard link to
+/// it, which is a metadata op against one inode rather than a copy of the
+/// pixels. `None` for a claim whose link could not be made — its frames are lost
+/// but the other claims still route.
+fn claim_sources(spool_nut: &std::path::Path, claims: usize) -> Vec<Option<std::path::PathBuf>> {
+    (0..claims)
+        .map(|index| {
+            if index + 1 == claims {
+                return Some(spool_nut.to_path_buf());
+            }
+            let link = claim_link_path(spool_nut, index);
+            match std::fs::hard_link(spool_nut, &link) {
+                Ok(()) => Some(link),
+                Err(error) => {
+                    // Fall back to a copy: a spool on a filesystem without hard
+                    // links still splits, just not for free.
+                    match std::fs::copy(spool_nut, &link) {
+                        Ok(_) => Some(link),
+                        Err(copy_error) => {
+                            tracing::warn!(
+                                %error,
+                                %copy_error,
+                                path = %link.display(),
+                                "could not give a chunk claim its own source NUT; \
+                                 dropping that recording's share of the chunk"
+                            );
+                            None
+                        }
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+/// Sibling path for one claim's hard link to a shared spool NUT.
+fn claim_link_path(spool_nut: &std::path::Path, index: usize) -> std::path::PathBuf {
+    let mut name = spool_nut.as_os_str().to_os_string();
+    name.push(format!(".claim{index}.nut"));
+    std::path::PathBuf::from(name)
 }
 
 fn remove_spool_nut(path: &std::path::Path) {
@@ -1422,6 +1577,20 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{broadcast, mpsc};
     use tokio::time::{timeout, Duration};
+
+    /// A live window for a source, as `handle_start` would have built it.
+    fn test_window(recording_index: i64, started_at_ns: i64) -> ActiveWindow {
+        ActiveWindow {
+            recording_index,
+            started_at_ns,
+            stopped_at_ns: None,
+            stop_recv_at: None,
+            awaiting_flush: false,
+            video_producers: HashSet::new(),
+            flushed_producers: HashSet::new(),
+            traces: HashMap::new(),
+        }
+    }
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -1797,33 +1966,184 @@ mod tests {
     }
 
     #[test]
-    fn frames_inside_window_cuts_at_the_stop_boundary() {
+    fn frame_range_cuts_at_the_stop_boundary() {
         // `video_boundary` tests the cut; this pins the argument order.
         let open_ns = 1_000_000_000;
         let stop_ns = open_ns + 25 * 1_000_000;
         let offsets = [0, 10, 20, 30, 40];
-        assert_eq!(frames_inside_window(&offsets, open_ns, stop_ns, 5), 3);
-    }
-
-    #[test]
-    fn frames_inside_window_without_per_frame_data_takes_the_chunk_whole() {
-        // No offsets, no cut to make: the chunk routes whole.
         assert_eq!(
-            frames_inside_window(&[], 1_000_000_000, 1_000_000_000, 7),
-            7
+            frame_range_in_window(&offsets, open_ns, open_ns, Some(stop_ns), 5),
+            (0, 3)
         );
     }
 
     #[test]
-    fn frames_inside_window_clamps_to_the_announced_frame_count() {
+    fn frame_range_cuts_the_frames_published_before_the_window_opened() {
+        // The case a chunk-open-stamp membership rule could not express: a
+        // camera process that never calls start_recording has a chunk open when
+        // the window arrives, so its first frames predate the recording and the
+        // rest belong to it.
+        let open_ns = 1_000_000_000;
+        let started_at_ns = open_ns + 25 * 1_000_000;
+        let offsets = [0, 10, 20, 30, 40];
+        assert_eq!(
+            frame_range_in_window(&offsets, open_ns, started_at_ns, None, 5),
+            (3, 2)
+        );
+    }
+
+    #[test]
+    fn frame_range_cuts_both_ends_of_a_chunk_that_spans_a_whole_window() {
+        // A producer sealing only on its own caps can hold an entire recording
+        // inside one chunk, with frames either side of it.
+        let open_ns = 1_000_000_000;
+        let offsets = [0, 10, 20, 30, 40, 50];
+        assert_eq!(
+            frame_range_in_window(
+                &offsets,
+                open_ns,
+                open_ns + 15 * 1_000_000,
+                Some(open_ns + 45 * 1_000_000),
+                6
+            ),
+            (2, 3)
+        );
+    }
+
+    #[test]
+    fn frame_range_without_per_frame_data_is_all_or_nothing() {
+        // No offsets to cut on, so the open stamp decides the whole chunk.
+        let open_ns = 1_000_000_000;
+        assert_eq!(
+            frame_range_in_window(&[], open_ns, open_ns, None, 7),
+            (0, 7)
+        );
+        assert_eq!(
+            frame_range_in_window(&[], open_ns, open_ns + 1, None, 7),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn frame_range_clamps_to_the_announced_frame_count() {
         // The pipeline sizes itself from `frame_count`, so the cut cannot
         // exceed it.
         let open_ns = 1_000_000_000;
         let offsets = [0, 10, 20, 30];
         assert_eq!(
-            frames_inside_window(&offsets, open_ns, open_ns + 60 * 1_000_000, 2),
-            2
+            frame_range_in_window(
+                &offsets,
+                open_ns,
+                open_ns,
+                Some(open_ns + 60 * 1_000_000),
+                2
+            ),
+            (0, 2)
         );
+    }
+
+    #[test]
+    fn a_chunk_spanning_two_recordings_is_claimed_by_both() {
+        // The defect this replaced: one chunk held both recordings' frames and
+        // was dropped whole, because its open stamp sat before the first window.
+        let open_ns = 1_000_000_000;
+        let ms = |n: i64| open_ns + n * 1_000_000;
+        let mut entry = WindowsForSource::default();
+        let mut first = test_window(1, ms(10));
+        first.stopped_at_ns = Some(ms(30));
+        entry.closing.push(first);
+        entry.live = Some(test_window(2, ms(40)));
+
+        // Frames at 0..50 ms: before recording 1, inside it, between, inside 2.
+        let claims = claims_for_chunk(&entry, open_ns, &[0, 10, 20, 30, 40, 50], 6);
+
+        assert_eq!(
+            claims,
+            vec![
+                ChunkClaim {
+                    slot: WindowSlot::Closing(0),
+                    skip: 1,
+                    count: 2,
+                },
+                ChunkClaim {
+                    slot: WindowSlot::Live,
+                    skip: 4,
+                    count: 2,
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn one_flush_marker_credits_every_window_that_producer_reached() {
+        // A camera process publishes no stop, so it flushes once — at its own
+        // exit — and one of its chunks can carry several recordings. Crediting
+        // only the oldest window leaves the rest waiting out the flush-marker
+        // cap for a marker that is never coming.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store, context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let entry = dispatcher.windows.entry(source.clone()).or_default();
+        for (recording_index, started_at_ns) in [(1, 100), (2, 200)] {
+            let mut window = test_window(recording_index, started_at_ns);
+            window.stopped_at_ns = Some(started_at_ns + 50);
+            window.awaiting_flush = true;
+            window.video_producers.insert(7);
+            entry.closing.push(window);
+        }
+
+        dispatcher.mark_source_flushed(&source, 7);
+
+        let entry = &dispatcher.windows[&source];
+        assert!(
+            entry
+                .closing
+                .iter()
+                .all(|window| window.flush_markers_settled()),
+            "both windows the producer's chunk reached must be settled by its \
+             single marker"
+        );
+    }
+
+    #[test]
+    fn a_chunk_with_no_in_window_frame_claims_nothing() {
+        let open_ns = 1_000_000_000;
+        let entry = WindowsForSource {
+            live: Some(test_window(1, open_ns + 100 * 1_000_000)),
+            ..Default::default()
+        };
+        assert!(claims_for_chunk(&entry, open_ns, &[0, 10, 20], 3).is_empty());
+    }
+
+    #[test]
+    fn every_claim_but_the_last_gets_its_own_hard_link() {
+        // Each claim is relinked and unlinked by its own trace actor, so they
+        // cannot share one path.
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("chunk_1_2.nut");
+        std::fs::write(&spool, b"nut").unwrap();
+
+        let sources = claim_sources(&spool, 3);
+
+        let paths: Vec<_> = sources.into_iter().map(|s| s.unwrap()).collect();
+        assert_eq!(paths.len(), 3);
+        assert_eq!(paths[2], spool, "the last claim consumes the spool file");
+        for path in &paths {
+            assert_eq!(std::fs::read(path).unwrap(), b"nut");
+        }
+        // Distinct names over one inode: unlinking one leaves the others.
+        std::fs::remove_file(&paths[0]).unwrap();
+        assert!(paths[1].exists() && paths[2].exists());
+    }
+
+    #[test]
+    fn a_single_claim_never_copies_the_spool_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("chunk_9_9.nut");
+        std::fs::write(&spool, b"nut").unwrap();
+        assert_eq!(claim_sources(&spool, 1), vec![Some(spool)]);
     }
 
     /// Announce a finished single-frame chunk opened at `publish_ts`. The

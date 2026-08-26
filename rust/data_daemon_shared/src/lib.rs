@@ -55,14 +55,18 @@ pub mod paths;
 ///
 /// A chunk is a NUT file appended to until something seals it, so frames logged
 /// either side of a boundary can share one and its open stamp speaks only for
-/// the first. Both sides of the wire divide the work by what each knows in time:
+/// the first. Membership is therefore resolved per frame, at both bounds, and
+/// the **daemon** resolves it: from the per-frame offsets this module encodes it
+/// keeps the run of frames each window owns, and one chunk can be claimed by
+/// several windows.
 ///
-/// - The **producer** seals the open chunk before the first frame at or past a
-///   boundary, which only works at a recording's start and only in the process
-///   that called `start_recording`.
-/// - The **daemon** cuts a chunk it already holds, from the per-frame offsets
-///   this module encodes. Only this works at a stop, where a video-only process
-///   logs on until its notification arrives and the frames are already written.
+/// The **producer** also seals its open chunk before the first frame at or past
+/// a boundary, but only at a recording's start and only in the process that
+/// called `start_recording`. That is an optimisation, not the rule: it keeps one
+/// chunk to one window for that process, so the daemon has nothing to cut and no
+/// frame is encoded only to be trimmed. Correctness never rests on it — which is
+/// what lets a camera process that opens no window, and so seals on nothing but
+/// its own caps, still keep every frame it logged inside a recording.
 pub mod video_boundary {
     /// Nanoseconds per millisecond, the wire resolution of a frame offset.
     const NS_PER_MS: i64 = 1_000_000;

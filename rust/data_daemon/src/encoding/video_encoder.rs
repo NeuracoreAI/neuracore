@@ -171,6 +171,10 @@ pub struct ChunkEncodeRequest {
     /// Frames to encode from the head of `raw_nut`: the whole file unless the
     /// dispatcher cut the chunk, and always what the sidecar is built from.
     pub frame_count: u32,
+    /// Leading frames of `raw_nut` to discard before encoding: the ones the
+    /// dispatcher resolved as published before this recording's window opened.
+    /// Zero for a chunk whose first frame the window already owns.
+    pub skip_frames: u32,
 }
 
 /// Outcome of a successful per-chunk transcode.
@@ -542,6 +546,9 @@ impl VideoEncoder {
         // Per-output frame cap (see [`ChunkEncodeRequest::frame_count`]), a
         // no-op unless the dispatcher cut this chunk at a recording boundary.
         let frame_limit = (request.frame_count > 0).then(|| request.frame_count.to_string());
+        // Head cut (see [`ChunkEncodeRequest::skip_frames`]). `-frames:v` counts
+        // frames *after* the graph, so the cap above still bounds the tail.
+        let head_skip = (request.skip_frames > 0).then(|| head_skip_filter(request.skip_frames));
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -576,6 +583,9 @@ impl VideoEncoder {
                 .arg("23")
                 .arg("-video_track_timescale")
                 .arg(&track_timescale);
+            if let Some(skip) = head_skip.as_deref() {
+                command.arg("-vf").arg(skip);
+            }
             if let Some(limit) = frame_limit.as_deref() {
                 command.arg("-frames:v").arg(limit);
             }
@@ -583,7 +593,12 @@ impl VideoEncoder {
         } else {
             // Downscale the lossy preview proxy (only) to keep this dominant
             // pass cheap at high resolution; the lossless output stays native.
-            let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
+            let preview_filter = match head_skip.as_deref() {
+                // Trim first, then scale: scaling frames that are about to be
+                // discarded is the expensive half of this pass.
+                Some(skip) => format!("{skip},{}", preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT)),
+                None => preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT),
+            };
             command
                 // Lossy preview proxy only: cap to preview resolution (see
                 // `preview_scale_filter`). Passthrough still emits every input
@@ -630,6 +645,9 @@ impl VideoEncoder {
                 .arg("0")
                 .arg("-video_track_timescale")
                 .arg(&track_timescale);
+            if let Some(skip) = head_skip.as_deref() {
+                command.arg("-vf").arg(skip);
+            }
             if let Some(limit) = frame_limit.as_deref() {
                 command.arg("-frames:v").arg(limit);
             }
@@ -771,6 +789,12 @@ impl VideoEncoder {
 /// `flags=fast_bilinear` replaces the default swscale bicubic scaler: it uses
 /// fewer taps per output pixel, and the quality cost is acceptable because
 /// this output is only a 480p `-qp 23` proxy.
+/// Filter that discards the first `skip_frames` frames and rebases the PTS of
+/// what remains to zero.
+fn head_skip_filter(skip_frames: u32) -> String {
+    format!("trim=start_frame={skip_frames},setpts=PTS-STARTPTS")
+}
+
 fn preview_scale_filter(max_height: u32) -> String {
     format!(
         "scale=trunc(iw*min(1\\,{max_height}/ih)/2)*2:trunc(ih*min(1\\,{max_height}/ih)/2)*2:flags=fast_bilinear"
@@ -1123,6 +1147,7 @@ mod tests {
             lossless_out: lossless.clone(),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 8,
+            skip_frames: 0,
         };
         let outcome = encoder
             .encode_chunk(&request, ENCODE_THREADS_PER_OUTPUT)
@@ -1190,6 +1215,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 6,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1275,6 +1301,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 3,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1334,6 +1361,7 @@ mod tests {
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 6,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1421,6 +1449,7 @@ mod tests {
                     lossless_out: split_lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
                     frame_count: 8,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1435,6 +1464,7 @@ mod tests {
                     lossless_out: tempdir.path().join("unused_lossless.mp4"),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
                     frame_count: 8,
+                    skip_frames: 0,
                 },
                 ENCODE_THREADS_PER_OUTPUT,
             )
@@ -1538,6 +1568,7 @@ mod tests {
                             .join(format!("chunk_{chunk_index:04}_lossless.mp4")),
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: frames_per_chunk as u32,
+                        skip_frames: 0,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -1638,6 +1669,7 @@ mod tests {
                         lossless_out: lossless,
                         codec: LossyVideoCodec::LosslessPlusPreview,
                         frame_count: 4,
+                        skip_frames: 0,
                     },
                     ENCODE_THREADS_PER_OUTPUT,
                 )
@@ -1765,6 +1797,7 @@ mod tests {
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
+            skip_frames: 0,
         };
         let encoder = VideoEncoder::new();
         let error = encoder
@@ -1788,6 +1821,7 @@ mod tests {
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
             frame_count: 1,
+            skip_frames: 0,
         };
         let encoder =
             VideoEncoder::new().with_binary("this-binary-definitely-does-not-exist-ffmpeg");

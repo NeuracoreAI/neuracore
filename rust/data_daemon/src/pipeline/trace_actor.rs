@@ -276,8 +276,12 @@ pub enum TraceActorMessage {
         height: u32,
         /// Size of the spooled NUT file in bytes.
         byte_count: u64,
-        /// Number of frames in the chunk.
+        /// Number of frames of the chunk this recording owns, counted from
+        /// `skip_frames`.
         frame_count: u32,
+        /// Leading frames of the chunk published before this recording's window
+        /// opened, discarded by the encode.
+        skip_frames: u32,
         /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
         frame_timestamps_s: Vec<f64>,
         /// Original dtype of every frame in this chunk. The daemon never
@@ -384,6 +388,7 @@ pub async fn run(
                 height,
                 byte_count,
                 frame_count,
+                skip_frames,
                 frame_timestamps_s,
                 dtype,
             } => {
@@ -396,6 +401,7 @@ pub async fn run(
                         height,
                         byte_count,
                         frame_count,
+                        skip_frames,
                         frame_timestamps_s,
                         dtype,
                     )
@@ -610,6 +616,7 @@ impl ActorState {
         height: u32,
         byte_count: u64,
         frame_count: u32,
+        skip_frames: u32,
         frame_timestamps_s: Vec<f64>,
         dtype: FrameDtype,
     ) {
@@ -695,6 +702,7 @@ impl ActorState {
             lossless_out: lossless_segment.clone(),
             codec,
             frame_count,
+            skip_frames,
         };
         pending_encodes.spawn(async move {
             // Acquire a permit before relinking + encoding. Gating the relink
@@ -1483,6 +1491,7 @@ mod tests {
                     16,
                     byte_count,
                     4,
+                    0,
                     frame_timestamps_s,
                     FrameDtype::Rgb8,
                 )
@@ -1583,6 +1592,7 @@ mod tests {
                     16,
                     byte_count,
                     2,
+                    0,
                     frame_timestamps_s,
                     dtype,
                 )
