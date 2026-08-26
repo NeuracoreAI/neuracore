@@ -165,6 +165,78 @@ class Dataset:
             logger.error(f"Failed to fetch recording count for Dataset {self.id}: {e}")
             self._num_recordings = 0
 
+    def _request_recordings_page(
+        self, cursor: dict | None, *, direction: str | None = None
+    ) -> dict:
+        """POST a single recordings page request and return the decoded body.
+
+        Shared by forward and backward loading; only backward adds `direction`.
+
+        Args:
+            cursor: Raw recording dict to continue from, or None for the
+                first page in this direction.
+            direction: "backward" to walk newest-to-oldest. Must be omitted
+                for forward requests — the backend treats an explicit value
+                differently from no direction at all.
+
+        Returns:
+            The decoded JSON response body.
+        """
+        params: dict[str, int | bool | str] = {
+            "limit": PAGE_SIZE,
+            "is_shared": self.is_shared,
+        }
+        if direction is not None:
+            params["direction"] = direction
+
+        session = thread_local_session()
+        response = session.post(
+            f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+            headers=get_auth().get_headers(),
+            params=params,
+            json=cursor,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def _check_page_progress(
+        self,
+        *,
+        batch: list[dict],
+        sent_cursor: dict | None,
+        next_cursor: dict,
+        already_seen_ids: set[str],
+    ) -> None:
+        """Raise if a fetched page repeats recordings or its cursor stalled.
+
+        Args:
+            batch: Raw recording dicts from the page just fetched.
+            sent_cursor: The cursor sent with this request, or None for the
+                first page in this direction.
+            next_cursor: The raw recording that would become the next cursor.
+            already_seen_ids: Recording IDs already loaded before this page.
+
+        Raises:
+            DatasetError: If the page duplicates known recordings or the
+                cursor failed to advance.
+        """
+        batch_ids = [item["id"] for item in batch]
+        if len(set(batch_ids)) != len(batch_ids):
+            raise DatasetError(
+                f"Dataset {self.id} pagination returned a page containing "
+                "duplicate recording IDs."
+            )
+        if not already_seen_ids.isdisjoint(batch_ids):
+            raise DatasetError(
+                f"Dataset {self.id} pagination stalled: the server returned "
+                "recordings that were already loaded."
+            )
+        if sent_cursor is not None and next_cursor.get("id") == sent_cursor.get("id"):
+            raise DatasetError(
+                f"Dataset {self.id} pagination stalled: the cursor did not "
+                "advance between requests."
+            )
+
     def _fetch_next_page(self, required_len: int | None = None) -> list[Recording]:
         """Fetch the next page of recordings and append to cache (lazy).
 
@@ -190,24 +262,22 @@ class Dataset:
             ):
                 return []
 
-            params = {"limit": PAGE_SIZE, "is_shared": self.is_shared}
-            payload = self._start_after or None
-
-            session = thread_local_session()
-            response = session.post(
-                f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
-                headers=get_auth().get_headers(),
-                params=params,
-                json=payload,
-            )
-            response.raise_for_status()
-            data = response.json()
+            sent_cursor = self._start_after or None
+            data = self._request_recordings_page(sent_cursor)
 
             batch = data.get("data", [])
             if not batch:
                 return []
 
-            self._start_after = batch[-1]
+            next_cursor = batch[-1]
+            self._check_page_progress(
+                batch=batch,
+                sent_cursor=sent_cursor,
+                next_cursor=next_cursor,
+                already_seen_ids={r.id for r in self._recordings_cache},
+            )
+
+            self._start_after = next_cursor
             self._num_recordings = data.get("total", self._num_recordings)
 
             wrapped = [self._wrap_raw_recording(r) for r in batch]
@@ -265,6 +335,42 @@ class Dataset:
             if not recordings:
                 return
             yield from recordings
+
+    def _reversed_recordings_generator(self) -> Generator[Recording, None, None]:
+        """Yield recordings oldest-to-newest by walking the backend backward.
+
+        Cursor and seen-ID state stay local to this call, so it never touches
+        `_recordings_cache`/`_start_after` and can run interleaved with
+        forward traversal. Each backend page is newest-to-oldest, so pages
+        are reversed before yielding.
+        """
+        total = len(self)
+        if total == 0:
+            return
+
+        cursor: dict | None = None
+        seen_ids: set[str] = set()
+        loaded = 0
+        while loaded < total:
+            data = self._request_recordings_page(cursor, direction="backward")
+            batch = data.get("data", [])
+            if not batch:
+                return
+
+            next_cursor = batch[0]
+            self._check_page_progress(
+                batch=batch,
+                sent_cursor=cursor,
+                next_cursor=next_cursor,
+                already_seen_ids=seen_ids,
+            )
+
+            seen_ids.update(item["id"] for item in batch)
+            cursor = next_cursor
+            loaded += len(batch)
+
+            for raw in reversed(batch):
+                yield self._wrap_raw_recording(raw)
 
     @staticmethod
     def get_by_id(id: str, non_exist_ok: bool = False) -> Optional["Dataset"]:
@@ -674,6 +780,15 @@ class Dataset:
     def __iter__(self) -> Iterator[Recording]:
         """Yield recordings one by one, fetching pages lazily."""
         return self._recordings_generator()
+
+    def __reversed__(self) -> Iterator[Recording]:
+        """Yield recordings oldest-to-newest, paging the backend backward.
+
+        Overrides Python's default reversed() fallback, which would drain
+        __len__/__getitem__ and load every forward page before yielding
+        anything.
+        """
+        return self._reversed_recordings_generator()
 
     def __getitem__(self, index: int | slice) -> Union[Recording, "Dataset"]:
         """Support for indexing and slicing dataset episodes.
