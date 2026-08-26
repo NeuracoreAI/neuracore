@@ -659,7 +659,7 @@ def policy(
     job_id = None
     if train_run_name is not None:
         job_id = _get_job_id(train_run_name, org_id)
-        model_path = _download_model(job_id, org_id)
+        model_path = _download_model(job_id, org_id, model_name=train_run_name)
     elif model_file is not None:
         model_path = Path(model_file)
     else:
@@ -722,7 +722,7 @@ def policy_local_server(
     if train_run_name is not None:
         if job_id is None:
             job_id = _get_job_id(train_run_name, org_id)
-        model_path = _download_model(job_id, org_id)
+        model_path = _download_model(job_id, org_id, model_name=train_run_name)
     elif model_file is not None:
         model_path = Path(model_file)
     else:
@@ -799,10 +799,10 @@ def policy_remote_server(
 
 
 # Helper functions
-def _download_model(job_id: str, org_id: str) -> Path:
+def _download_model(job_id: str, org_id: str, model_name: str | None = None) -> Path:
     """Download model from training run."""
     auth = get_auth()
-    destination = Path(tempfile.gettempdir()) / job_id / "model.nc.zip"
+    destination = Path(tempfile.gettempdir()) / job_id / f"{model_name or job_id}.nc.zip"
     if destination.exists():
         print(f"Model already downloaded at {destination}. Skipping download.")
         return destination
