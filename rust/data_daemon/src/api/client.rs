@@ -545,6 +545,7 @@ fn jitter_below(upper: u64) -> u64 {
 mod tests {
     use super::*;
     use crate::api::auth::StaticAuthProvider;
+    use crate::encoding::video_encoder::LossyVideoCodec;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -615,6 +616,7 @@ mod tests {
             data_type: "RGB_IMAGES".to_string(),
             trace_id: "trace-1".to_string(),
             cloud_files: vec![],
+            codec: Some(LossyVideoCodec::LosslessPlusPreview),
         }];
         let outcome = client.batch_register("org-1", &traces).await.unwrap();
         assert_eq!(outcome.registered_traces.len(), 1);

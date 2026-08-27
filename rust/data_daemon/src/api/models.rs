@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::encoding::video_encoder::LossyVideoCodec;
+
 /// One file the backend should expect for a trace registration request.
 ///
 /// Matches the body of `POST /org/{org}/recording/traces/batch-register`,
@@ -31,6 +33,15 @@ pub struct RegisterTraceRequest {
     pub trace_id: String,
     /// Files to register for this trace.
     pub cloud_files: Vec<CloudFile>,
+    /// Codec this trace's video was encoded with.
+    ///
+    /// Only video-family traces carry one; `None` for scalar/JSON traces, which
+    /// have no video to encode. Omitted rather than sent as null, so the body
+    /// is unchanged for traces that never had a codec. Held as the enum and
+    /// rendered to its wire identifier by `Serialize`, so no codec string is
+    /// constructed before the request is encoded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub codec: Option<LossyVideoCodec>,
 }
 
 /// Backend response payload for `POST /traces/batch-register`.
@@ -127,6 +138,7 @@ mod tests {
                 filepath: "rgb/cam_0/lossy.mp4".to_string(),
                 content_type: "video/mp4".to_string(),
             }],
+            codec: Some(LossyVideoCodec::H264MediumLossyOnly),
         };
         let body = serde_json::to_value(serde_json::json!({"traces": [request]})).unwrap();
         assert_eq!(
@@ -139,9 +151,32 @@ mod tests {
                     "cloud_files": [{
                         "filepath": "rgb/cam_0/lossy.mp4",
                         "content_type": "video/mp4"
-                    }]
+                    }],
+                    "codec": "h264_medium"
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn batch_register_body_omits_absent_codec() {
+        // A scalar trace has no video and so no codec. The field must vanish from
+        // the body rather than serialising as null, leaving the pre-codec wire
+        // shape byte-identical for traces that never had one.
+        let request = RegisterTraceRequest {
+            recording_id: "rec-1".to_string(),
+            data_type: "JOINT_POSITIONS".to_string(),
+            trace_id: "trace-2".to_string(),
+            cloud_files: vec![CloudFile {
+                filepath: "JOINT_POSITIONS/arm0/trace.json".to_string(),
+                content_type: "application/json".to_string(),
+            }],
+            codec: None,
+        };
+        let body = serde_json::to_value(&request).unwrap();
+        assert!(
+            body.get("codec").is_none(),
+            "codec must be omitted entirely when absent, got {body}"
         );
     }
 

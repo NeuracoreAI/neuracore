@@ -48,6 +48,7 @@ use std::process::Stdio;
 
 use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
+use serde::{Serialize, Serializer};
 
 use tokio::process::Command;
 
@@ -166,6 +167,26 @@ impl LossyVideoCodec {
     /// Whether this codec produces only the lossy output (no lossless archive).
     pub fn is_lossy_only(self) -> bool {
         matches!(self, Self::H264MediumLossyOnly)
+    }
+
+    /// The wire identifier for this codec — the inverse of [`Self::from_config_str`].
+    ///
+    /// These are the same identifiers the profile and `NCD_VIDEO_CODEC` accept,
+    /// and they are persisted as-is against the recording, so the round trip is
+    /// pinned by a unit test.
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::LosslessPlusPreview => "h264_lossless",
+            Self::H264MediumLossyOnly => "h264_medium",
+        }
+    }
+}
+
+/// Serialise as the wire identifier, so callers hold the enum right up to the
+/// point a request is encoded and no codec string exists anywhere else.
+impl Serialize for LossyVideoCodec {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_wire_str())
     }
 }
 
@@ -2009,6 +2030,30 @@ mod tests {
                 LossyVideoCodec::LosslessPlusPreview
             );
         }
+    }
+
+    #[test]
+    fn wire_str_round_trips_through_from_config_str() {
+        // These strings are persisted as-is against the recording, so a drift
+        // here silently mislabels every one.
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            assert_eq!(
+                LossyVideoCodec::from_config_str(Some(codec.as_wire_str())),
+                codec,
+                "{codec:?} must survive a wire round trip"
+            );
+        }
+        assert_eq!(
+            LossyVideoCodec::LosslessPlusPreview.as_wire_str(),
+            "h264_lossless"
+        );
+        assert_eq!(
+            LossyVideoCodec::H264MediumLossyOnly.as_wire_str(),
+            "h264_medium"
+        );
     }
 
     #[tokio::test]
