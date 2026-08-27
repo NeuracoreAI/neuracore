@@ -410,11 +410,13 @@ impl Dispatcher {
                 dataset_id,
                 publish_timestamp_ns,
                 timestamp_ns,
+                cloud_recording_id,
                 ..
             } => {
                 self.handle_start(
                     (robot_id, robot_instance),
                     dataset_id,
+                    cloud_recording_id,
                     publish_timestamp_ns,
                     timestamp_ns,
                     recv_at,
@@ -604,10 +606,43 @@ impl Dispatcher {
         &mut self,
         source: Source,
         dataset_id: Option<String>,
+        cloud_recording_id: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
+        // A `StartRecording` carrying a known cloud id can reach this daemon
+        // more than once for the very same recording: every local process
+        // connected to the source learns about a web-started recording
+        // independently, and each may try to open it. Only the first must
+        // create a row and open a window.
+        if let Some(cloud_recording_id) = cloud_recording_id.as_deref() {
+            match self
+                .store
+                .recording_index_for_cloud_id(cloud_recording_id)
+                .await
+            {
+                Ok(Some(existing_index)) => {
+                    tracing::debug!(
+                        recording_index = existing_index,
+                        cloud_recording_id,
+                        robot_id = source.0,
+                        "recording already open for this cloud id; ignoring duplicate start"
+                    );
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        cloud_recording_id,
+                        robot_id = source.0,
+                        "failed to check for an existing recording; proceeding"
+                    );
+                }
+            }
+        }
+
         // Insert the recording row synchronously: cloud notifiers react to the
         // `RecordingStarted` event by reading this row, and `cancel_recording`
         // burns it by index, so the row must exist before either runs. After the
@@ -693,8 +728,31 @@ impl Dispatcher {
             }
         }
 
-        if let Some(bus) = self.context.event_bus.as_ref() {
-            bus.publish(DaemonEvent::RecordingStarted { recording_index });
+        match cloud_recording_id {
+            None => {
+                if let Some(bus) = self.context.event_bus.as_ref() {
+                    bus.publish(DaemonEvent::RecordingStarted { recording_index });
+                }
+            }
+            Some(cloud_recording_id) => {
+                // The backend already created this id — skip the notifier's
+                // POST and wake its waiters directly.
+                if let Err(error) = self
+                    .store
+                    .mark_recording_start_notified(recording_index, &cloud_recording_id)
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        recording_index,
+                        cloud_recording_id,
+                        "failed to persist recording id"
+                    );
+                }
+                if let Some(bus) = self.context.event_bus.as_ref() {
+                    bus.publish(DaemonEvent::RecordingCloudIdAssigned { recording_index });
+                }
+            }
         }
     }
 
@@ -1464,6 +1522,7 @@ mod tests {
             dataset_name: None,
             publish_timestamp_ns,
             timestamp_ns: publish_timestamp_ns,
+            cloud_recording_id: None,
         }
     }
 
@@ -1950,7 +2009,7 @@ mod tests {
         // The chunk opens inside the window and its frames run past the stop.
         let stop_ns = 150 + 25 * 1_000_000;
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
@@ -1994,7 +2053,7 @@ mod tests {
         let opened_at = Instant::now();
         let stop_ns = 150 + 25 * 1_000_000;
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
@@ -2204,7 +2263,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         assert!(dispatcher.windows.get(&source).unwrap().live.is_some());
 
@@ -2252,7 +2311,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
 
         // Only a short time has passed — well within the idle horizon.
@@ -2282,7 +2341,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2324,7 +2383,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2370,7 +2429,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2415,7 +2474,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
 
         // The camera process claims the source as it logs, before any chunk.
@@ -2486,7 +2545,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), 200, 200, opened_at)
@@ -2523,7 +2582,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, 100, 100, opened_at)
+            .handle_start(source.clone(), None, None, 100, 100, opened_at)
             .await;
 
         // Producer A seals a chunk mid-recording, so the window knows of it.

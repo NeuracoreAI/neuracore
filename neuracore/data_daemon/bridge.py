@@ -99,12 +99,15 @@ class RecordingContext:
         dataset_id: str | None = None,
         dataset_name: str | None = None,
         timestamp: float | None = None,
+        cloud_recording_id: str | None = None,
     ) -> None:
         """Announce a recording to the daemon for a source.
 
-        Publishes exactly one ``StartRecording`` envelope tagged with the
-        source ``(robot_id, robot_instance)``. No recording id is on the wire —
-        the daemon allocates and owns recording identity.
+        Publishes one ``StartRecording`` envelope tagged with the source
+        ``(robot_id, robot_instance)``. Normally the daemon mints its own
+        cloud id.
+
+        Cloud recording id is passed only when recording is started from web frontend
 
         ``timestamp`` is the recording's *capture* start time (Unix seconds),
         stored and reported as such, and returned as the marker that resolves the
@@ -122,6 +125,7 @@ class RecordingContext:
             dataset_id,
             dataset_name,
             timestamp_ns,
+            cloud_recording_id,
         )
 
     def log_joints(

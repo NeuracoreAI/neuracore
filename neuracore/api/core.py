@@ -182,6 +182,7 @@ def connect_robot(
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
     get_recording_state_manager().register_connected_robot(robot.id)
     robot._register_remote_stop_handler()
+    robot._register_remote_start_handler()
     return robot
 
 
