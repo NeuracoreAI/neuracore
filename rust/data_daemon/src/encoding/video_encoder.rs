@@ -1,9 +1,10 @@
-//! Per-chunk `ffmpeg` transcoder and segment concatenator.
+//! Batched `ffmpeg` transcoder and segment concatenator.
 //!
 //! The producer spools video frames into a sequence of NUT chunk files
-//! beneath each trace's `chunks/` directory. As each chunk arrives the
-//! per-trace actor calls [`VideoEncoder::encode_chunk`] which shells out to
-//! ffmpeg to produce two MP4 segments:
+//! beneath each trace's `chunks/` directory. The per-trace actor's encode
+//! worker hands a batch of one or more contiguous chunks to
+//! [`VideoEncoder::encode_chunk_batch`], which shells out to ffmpeg to
+//! produce two MP4 segments for the whole batch:
 //!
 //! - `chunk_NNNN_lossy.mp4` — `libx264` `-pix_fmt yuv420p -preset ultrafast
 //!   -qp 23` for fast playback, downscaled to a preview resolution (see
@@ -16,6 +17,19 @@
 //!   faster than a `yuv444p10le` pass.
 //!   `ffv1` would also be lossless but is incompatible with the `.mp4`
 //!   container the on-disk layout contract requires.
+//!
+//! A batch of one delegates to [`VideoEncoder::encode_chunk`], which skips
+//! both the concat demuxer and `verify_nut_header`. A batch of two or more
+//! goes through the ffmpeg concat demuxer with a list file that carries one
+//! `duration` line per non-last entry. `declared_batch_span_us` sets that
+//! duration to the capture span to the next chunk's first frame, floored at
+//! the chunk's replayed PTS extent plus 1 us and capped at that extent plus
+//! `MAX_BOUNDARY_DELTA_US`. `verify_nut_header` checks every entry of such a
+//! batch, because the concat demuxer treats an entry it cannot open as end of
+//! stream. The frame cap `-frames:v` is the sum over the
+//! batch, which is correct because a chunk the dispatcher cut is always the
+//! trace's last. The caller names the outputs by the batch's first chunk
+//! index.
 //!
 //! On `EndTrace` the per-trace actor calls [`VideoEncoder::concat_segments`]
 //! which stream-copies the per-chunk segments into the final `lossy.mp4` /
@@ -155,15 +169,15 @@ impl LossyVideoCodec {
     }
 }
 
-/// Inputs to one per-chunk transcode invocation.
+/// Inputs to one single-entry transcode invocation.
 #[derive(Debug, Clone)]
 pub struct ChunkEncodeRequest {
     /// Source NUT chunk file produced by the producer.
     pub raw_nut: PathBuf,
-    /// Destination for the per-chunk lossy mp4 segment.
+    /// Destination for the lossy mp4 segment of this entry.
     pub lossy_out: PathBuf,
-    /// Destination for the per-chunk lossless mp4 segment. Unused in lossy-only
-    /// mode (no lossless output is produced).
+    /// Destination for the lossless mp4 segment of this entry. Unused in
+    /// lossy-only mode (no lossless output is produced).
     pub lossless_out: PathBuf,
     /// Lossy codec selection for this trace. Controls whether a lossless
     /// archive is produced and how the lossy output is encoded.
@@ -173,7 +187,39 @@ pub struct ChunkEncodeRequest {
     pub frame_count: u32,
 }
 
-/// Outcome of a successful per-chunk transcode.
+/// One NUT entry of a batched chunk encode.
+#[derive(Debug, Clone)]
+pub struct BatchNutInput {
+    /// Source NUT chunk file, already relinked into the trace's chunks dir.
+    pub raw_nut: PathBuf,
+    /// Declared capture span to the next chunk's first frame, in
+    /// microseconds. `None` on the batch's last entry, which gets no
+    /// `duration` line.
+    pub span_to_next_us: Option<i64>,
+    /// Frames this entry contributes to the batch: the whole NUT unless the
+    /// dispatcher cut the chunk (see [`ChunkEncodeRequest::frame_count`]).
+    pub frame_count: u32,
+}
+
+/// Inputs to one batched transcode invocation covering a contiguous run of
+/// NUT chunks. The outputs carry the batch's first chunk index in their
+/// names (the caller builds the paths), so downstream segment handling is
+/// unchanged from the single-chunk case.
+#[derive(Debug, Clone)]
+pub struct BatchEncodeRequest {
+    /// Batch entries in chunk-index order.
+    pub inputs: Vec<BatchNutInput>,
+    /// Destination for the batch's lossy mp4 segment.
+    pub lossy_out: PathBuf,
+    /// Destination for the batch's lossless mp4 segment. Unused in
+    /// lossy-only mode (no lossless output is produced).
+    pub lossless_out: PathBuf,
+    /// Lossy codec selection for this trace.
+    pub codec: LossyVideoCodec,
+}
+
+/// Outcome of a successful transcode: the sizes of the batch's lossy and
+/// lossless output files.
 #[derive(Debug, Clone, Copy)]
 pub struct ChunkEncodeOutcome {
     /// Bytes written to the lossy segment.
@@ -232,6 +278,13 @@ pub enum VideoEncodeError {
     /// `concat_segments` was called with no input segments — caller bug.
     #[error("concat_segments called with empty segment list")]
     EmptySegments,
+    /// A batched NUT input failed the header check before the invocation
+    /// (see [`verify_nut_header`]).
+    #[error("batch input {path} is not a NUT container")]
+    InvalidNutInput {
+        /// The input that failed the header check.
+        path: PathBuf,
+    },
 }
 
 /// Failure modes of [`VideoEncoder::preflight`], surfaced at daemon startup so
@@ -474,9 +527,9 @@ impl VideoEncoder {
     /// idle cores.
     ///
     /// The source `raw.nut` is left in place — the caller is responsible for
-    /// unlinking it after verifying both outputs landed (the per-trace actor
-    /// drops the source as part of its envelope handling so a partial encode
-    /// can be retried via the recovery sweep without needing to re-spool).
+    /// unlinking it after verifying both outputs landed (the encode worker
+    /// unlinks every NUT of the batch once the outputs verify; the NUTs of a
+    /// failed batch stay on disk to be collected by the recovery sweep).
     ///
     /// [`adaptive_encode_threads`]: crate::pipeline::trace_actor::adaptive_encode_threads
     pub async fn encode_chunk(
@@ -534,14 +587,6 @@ impl VideoEncoder {
         // Bound each output's libx264 thread pool to the caller-sized value
         // (see `adaptive_encode_threads`) so the transcode fleet fills idle
         // cores at low concurrency without oversubscribing at high concurrency.
-        let encode_threads = encode_threads.to_string();
-        let frame_sync_arg = self.frame_sync_arg();
-        let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
-        let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
-        let lossy_only = request.codec.is_lossy_only();
-        // Per-output frame cap (see [`ChunkEncodeRequest::frame_count`]), a
-        // no-op unless the dispatcher cut this chunk at a recording boundary.
-        let frame_limit = (request.frame_count > 0).then(|| request.frame_count.to_string());
         let mut command = Command::new(&self.binary);
         command
             .arg("-y")
@@ -552,89 +597,106 @@ impl VideoEncoder {
             .arg("-fflags")
             .arg("+genpts")
             .arg("-i")
-            .arg(&request.raw_nut)
-            .arg("-map")
-            .arg("0:v")
-            .arg(frame_sync_arg)
-            .arg("passthrough");
-        if lossy_only {
-            // Single full-resolution training-quality video: libx264 CRF 23 at
-            // `-preset medium`. No preview downscale and no lossless pass — this
-            // is the canonical (and only) upload for the trace.
-            command
-                .arg("-enc_time_base")
-                .arg(&enc_time_base)
-                .arg("-c:v")
-                .arg("libx264")
-                .arg("-threads")
-                .arg(&encode_threads)
-                .arg("-pix_fmt")
-                .arg("yuv420p")
-                .arg("-preset")
-                .arg("medium")
-                .arg("-crf")
-                .arg("23")
-                .arg("-video_track_timescale")
-                .arg(&track_timescale);
-            if let Some(limit) = frame_limit.as_deref() {
-                command.arg("-frames:v").arg(limit);
-            }
-            command.arg(&request.lossy_out);
-        } else {
-            // Downscale the lossy preview proxy (only) to keep this dominant
-            // pass cheap at high resolution; the lossless output stays native.
-            let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
-            command
-                // Lossy preview proxy only: cap to preview resolution (see
-                // `preview_scale_filter`). Passthrough still emits every input
-                // frame, so the lossy frame count matches the lossless output
-                // and the per-frame timestamp sidecar.
-                .arg("-vf")
-                .arg(&preview_filter)
-                .arg("-enc_time_base")
-                .arg(&enc_time_base)
-                .arg("-c:v")
-                .arg("libx264")
-                .arg("-threads")
-                .arg(&encode_threads)
-                .arg("-pix_fmt")
-                .arg("yuv420p")
-                .arg("-preset")
-                .arg("ultrafast")
-                .arg("-qp")
-                .arg("23")
-                .arg("-video_track_timescale")
-                .arg(&track_timescale);
-            if let Some(limit) = frame_limit.as_deref() {
-                command.arg("-frames:v").arg(limit);
-            }
-            command
-                .arg(&request.lossy_out)
-                .arg("-map")
-                .arg("0:v")
-                .arg(frame_sync_arg)
-                .arg("passthrough")
-                .arg("-enc_time_base")
-                .arg(&enc_time_base)
-                // libx264rgb encodes the rgb24 frames directly: bit-exact to
-                // the captured pixels and ~2.5× faster than a yuv444p10le pass.
-                .arg("-c:v")
-                .arg("libx264rgb")
-                .arg("-threads")
-                .arg(&encode_threads)
-                .arg("-pix_fmt")
-                .arg("rgb24")
-                .arg("-preset")
-                .arg("ultrafast")
-                .arg("-qp")
-                .arg("0")
-                .arg("-video_track_timescale")
-                .arg(&track_timescale);
-            if let Some(limit) = frame_limit.as_deref() {
-                command.arg("-frames:v").arg(limit);
-            }
-            command.arg(&request.lossless_out);
+            .arg(&request.raw_nut);
+        append_encode_output_args(
+            &mut command,
+            request.codec,
+            encode_threads,
+            self.frame_sync_arg(),
+            request.frame_count,
+            &request.lossy_out,
+            &request.lossless_out,
+        );
+        let lossless_out =
+            (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
+        self.run_encode_command(command, &request.lossy_out, lossless_out)
+            .await
+    }
+
+    /// Transcode a contiguous batch of NUT chunks with one ffmpeg
+    /// invocation, fed through the concat demuxer with the per-entry
+    /// `duration` directives that place every frame on its batch-relative
+    /// capture timestamp (see [`write_batch_concat_list`]). A batch of one
+    /// delegates to [`Self::encode_chunk`] for an identical invocation.
+    pub async fn encode_chunk_batch(
+        &self,
+        request: &BatchEncodeRequest,
+        encode_threads: usize,
+    ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
+        if let [single] = request.inputs.as_slice() {
+            return self
+                .encode_chunk(
+                    &ChunkEncodeRequest {
+                        raw_nut: single.raw_nut.clone(),
+                        lossy_out: request.lossy_out.clone(),
+                        lossless_out: request.lossless_out.clone(),
+                        codec: request.codec,
+                        frame_count: single.frame_count,
+                    },
+                    encode_threads,
+                )
+                .await;
         }
+
+        // The concat demuxer treats a list entry it cannot open as end of
+        // stream: ffmpeg exits 0 and the frames of that entry and every later
+        // entry are silently lost. Verify every input is a NUT container up
+        // front so a corrupt chunk fails the batch instead of truncating it.
+        for input in &request.inputs {
+            verify_nut_header(&input.raw_nut)?;
+        }
+
+        ensure_parent_dirs(&request.lossy_out)?;
+        if !request.codec.is_lossy_only() {
+            ensure_parent_dirs(&request.lossless_out)?;
+        }
+
+        let list_path = list_file_for(&request.lossy_out);
+        write_batch_concat_list(&list_path, &request.inputs)?;
+
+        let mut command = Command::new(&self.binary);
+        command
+            .arg("-y")
+            .arg("-hide_banner")
+            .arg("-nostdin")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-fflags")
+            .arg("+genpts")
+            .arg("-f")
+            .arg("concat")
+            // `-safe 0` permits the absolute NUT paths in the list file.
+            .arg("-safe")
+            .arg("0")
+            .arg("-i")
+            .arg(&list_path);
+        append_encode_output_args(
+            &mut command,
+            request.codec,
+            encode_threads,
+            self.frame_sync_arg(),
+            batch_frame_count(&request.inputs),
+            &request.lossy_out,
+            &request.lossless_out,
+        );
+        let lossless_out =
+            (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
+        let result = self
+            .run_encode_command(command, &request.lossy_out, lossless_out)
+            .await;
+        let _ = std::fs::remove_file(&list_path);
+        result
+    }
+
+    /// Configure the encode child's stdio and niceness, run it, and verify
+    /// the expected outputs are non-empty. `lossless_out` is `None` in
+    /// lossy-only mode, where no lossless archive is produced.
+    async fn run_encode_command(
+        &self,
+        mut command: Command,
+        lossy_out: &Path,
+        lossless_out: Option<&Path>,
+    ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -673,13 +735,12 @@ impl VideoEncoder {
             });
         }
 
-        let lossy_bytes = non_empty_file_size(&request.lossy_out)?;
-        // In lossy-only mode no lossless archive is produced, so there is no
-        // file to size — report zero rather than erroring on a missing output.
-        let lossless_bytes = if lossy_only {
-            0
-        } else {
-            non_empty_file_size(&request.lossless_out)?
+        let lossy_bytes = non_empty_file_size(lossy_out)?;
+        // With no lossless archive there is no file to size; report zero
+        // rather than erroring on a missing output.
+        let lossless_bytes = match lossless_out {
+            Some(path) => non_empty_file_size(path)?,
+            None => 0,
         };
 
         Ok(ChunkEncodeOutcome {
@@ -687,7 +748,6 @@ impl VideoEncoder {
             lossless_bytes,
         })
     }
-
     /// Stream-copy concatenate `segments` into `out`.
     ///
     /// Uses ffmpeg's `concat` demuxer with `-c copy`, so no transcode
@@ -758,6 +818,234 @@ impl VideoEncoder {
     }
 }
 
+/// Append the per-output encoder arguments, shared by
+/// [`VideoEncoder::encode_chunk`] and [`VideoEncoder::encode_chunk_batch`] so
+/// both invocations keep the same output shape (see `encode_chunk` for the
+/// rationale behind each knob).
+fn append_encode_output_args(
+    command: &mut Command,
+    codec: LossyVideoCodec,
+    encode_threads: usize,
+    frame_sync_arg: &'static str,
+    frame_count: u32,
+    lossy_out: &Path,
+    lossless_out: &Path,
+) {
+    let encode_threads = encode_threads.to_string();
+    let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
+    let track_timescale = VIDEO_SPOOL_TICKS_PER_SECOND.to_string();
+    // Per-output frame cap (see [`ChunkEncodeRequest::frame_count`]), a no-op
+    // unless the dispatcher cut a chunk of this encode at a recording boundary.
+    let frame_limit = (frame_count > 0).then(|| frame_count.to_string());
+    command
+        .arg("-map")
+        .arg("0:v")
+        .arg(frame_sync_arg)
+        .arg("passthrough");
+    if codec.is_lossy_only() {
+        // Single full-resolution training-quality video: libx264 CRF 23 at
+        // `-preset medium`. No preview downscale and no lossless pass — this
+        // is the canonical (and only) upload for the trace.
+        command
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-threads")
+            .arg(&encode_threads)
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg("medium")
+            .arg("-crf")
+            .arg("23")
+            .arg("-video_track_timescale")
+            .arg(&track_timescale);
+        if let Some(limit) = frame_limit.as_deref() {
+            command.arg("-frames:v").arg(limit);
+        }
+        command.arg(lossy_out);
+    } else {
+        // Downscale the lossy preview proxy (only) to keep this dominant
+        // pass cheap at high resolution; the lossless output stays native.
+        let preview_filter = preview_scale_filter(LOSSY_PREVIEW_MAX_HEIGHT);
+        command
+            // Lossy preview proxy only: cap to preview resolution (see
+            // `preview_scale_filter`). Passthrough frame timing still emits
+            // every input frame, so the lossy frame count matches the
+            // lossless output and the per-frame timestamp sidecar.
+            .arg("-vf")
+            .arg(&preview_filter)
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-threads")
+            .arg(&encode_threads)
+            .arg("-pix_fmt")
+            .arg("yuv420p")
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-qp")
+            .arg("23")
+            .arg("-video_track_timescale")
+            .arg(&track_timescale);
+        if let Some(limit) = frame_limit.as_deref() {
+            command.arg("-frames:v").arg(limit);
+        }
+        command
+            .arg(lossy_out)
+            .arg("-map")
+            .arg("0:v")
+            .arg(frame_sync_arg)
+            .arg("passthrough")
+            .arg("-enc_time_base")
+            .arg(&enc_time_base)
+            // libx264rgb encodes the rgb24 frames directly: bit-exact to
+            // the captured pixels and ~2.5× faster than a yuv444p10le pass.
+            .arg("-c:v")
+            .arg("libx264rgb")
+            .arg("-threads")
+            .arg(&encode_threads)
+            .arg("-pix_fmt")
+            .arg("rgb24")
+            .arg("-preset")
+            .arg("ultrafast")
+            .arg("-qp")
+            .arg("0")
+            .arg("-video_track_timescale")
+            .arg(&track_timescale);
+        if let Some(limit) = frame_limit.as_deref() {
+            command.arg("-frames:v").arg(limit);
+        }
+        command.arg(lossless_out);
+    }
+}
+
+/// Frames a batch's outputs may hold: the sum of what every entry owns.
+///
+/// The cap drops frames from the tail of the concatenated stream, which is
+/// only correct because a cut entry is always the batch's last: the dispatcher
+/// cuts a chunk at the window's stop, and every chunk that opens after that
+/// stop is dropped whole, so no chunk of the trace follows a cut one.
+fn batch_frame_count(inputs: &[BatchNutInput]) -> u32 {
+    inputs
+        .iter()
+        .fold(0u32, |total, input| total.saturating_add(input.frame_count))
+}
+
+/// Ceiling for the boundary step a declared span may add past a chunk's own
+/// content extent. At exactly `i32::MAX` the ultrafast branch silently
+/// collapses the following segment's ladder, so the safe maximum is one
+/// below. A larger real gap is compressed to this step and stays monotonic.
+pub(crate) const MAX_BOUNDARY_DELTA_US: i64 = i32::MAX as i64 - 1;
+
+/// Synthesized-PTS step bounds, mirrored from
+/// `data_daemon_bridge/src/writer.rs`: a stamp that fails to advance steps
+/// by the stream's observed frame gap, clamped to this range.
+const SYNTH_PTS_STEP_MIN_US: u64 = 1_000;
+const SYNTH_PTS_STEP_MAX_US: u64 = 100_000;
+
+/// Convert a capture timestamp in seconds to microseconds with the NUT
+/// writer's truncation: to nanoseconds first, then divide toward zero. This
+/// mirrors the writer's integer microsecond arithmetic, `timestamp_ns /
+/// 1_000` in `data_daemon_bridge/src/writer.rs`, so the replayed extent does
+/// not undershoot the spooled PTS extent. A naive `round(s * 1e6)` is off by
+/// up to 1 us.
+pub(crate) fn capture_timestamp_us(timestamp_s: f64) -> i64 {
+    ((timestamp_s * 1e9) as i64) / 1000
+}
+
+/// Span between two chunks' first capture timestamps, floored at zero so a
+/// backwards announcement cannot emit a negative `duration`. The
+/// extent-relative ceiling belongs to [`declared_batch_span_us`].
+pub(crate) fn declared_span_us(from_timestamp_s: f64, to_timestamp_s: f64) -> i64 {
+    (capture_timestamp_us(to_timestamp_s) - capture_timestamp_us(from_timestamp_s)).max(0)
+}
+
+/// The chunk's content extent: the last frame's PTS relative to the chunk
+/// start, as the spool writer stored it in the NUT.
+///
+/// Replays the writer's PTS synthesis (`data_daemon_bridge/src/writer.rs`)
+/// over the announced stamps. The writer carries its observed frame gap
+/// across chunks and the announcement does not, so the replay seeds that
+/// unknown with the step ceiling and never undershoots the real extent.
+/// Undershooting would let the next chunk start inside this one's content,
+/// which makes a B-frame encode store backwards PTS.
+pub(crate) fn replayed_chunk_extent_us(frame_timestamps_s: &[f64]) -> i64 {
+    let mut origin_us: Option<i64> = None;
+    let mut last_pts_us: Option<u64> = None;
+    let mut observed_frame_gap_us: Option<u64> = None;
+    for &timestamp_s in frame_timestamps_s {
+        let timestamp_us = capture_timestamp_us(timestamp_s);
+        let origin = *origin_us.get_or_insert(timestamp_us);
+        let mut pts = timestamp_us.saturating_sub(origin).max(0) as u64;
+        if let Some(previous) = last_pts_us {
+            if pts <= previous {
+                let step = observed_frame_gap_us
+                    .unwrap_or(SYNTH_PTS_STEP_MAX_US)
+                    .clamp(SYNTH_PTS_STEP_MIN_US, SYNTH_PTS_STEP_MAX_US);
+                pts = previous.saturating_add(step);
+                origin_us = Some(timestamp_us.saturating_sub(pts as i64));
+            } else if pts - previous <= SYNTH_PTS_STEP_MAX_US {
+                observed_frame_gap_us = Some(pts - previous);
+            }
+        }
+        last_pts_us = Some(pts);
+    }
+    last_pts_us.unwrap_or(0) as i64
+}
+
+/// Declared span for a batch entry: the capture span to the next chunk's
+/// first frame, floored at this chunk's content extent plus 1 us and capped
+/// at the extent plus [`MAX_BOUNDARY_DELTA_US`].
+///
+/// Without the floor, a backwards clock step at the boundary declares the
+/// next chunk inside this one's content and a B-frame encode stores
+/// backwards PTS; the floor degrades that to a 1 us ramp. A well-formed
+/// span already sits past the floor and passes through untouched.
+pub(crate) fn declared_batch_span_us(
+    chunk_frame_timestamps_s: &[f64],
+    next_first_timestamp_s: f64,
+) -> i64 {
+    let extent_us = replayed_chunk_extent_us(chunk_frame_timestamps_s);
+    let span_us = match chunk_frame_timestamps_s.first() {
+        Some(&first_timestamp_s) => declared_span_us(first_timestamp_s, next_first_timestamp_s),
+        None => 0,
+    };
+    span_us
+        .max(extent_us + 1)
+        .min(extent_us + MAX_BOUNDARY_DELTA_US)
+}
+
+/// Format a microsecond span as the exact decimal seconds a concat-list
+/// `duration` directive carries.
+fn duration_directive(span_us: i64) -> String {
+    format!("{}.{:06}", span_us / 1_000_000, span_us % 1_000_000)
+}
+
+/// The file id string every NUT container starts with.
+const NUT_FILE_MAGIC: &[u8] = b"nut/multimedia container\0";
+
+/// Verify `raw_nut` starts with the NUT file id string. The concat demuxer
+/// treats a file it cannot open as end of stream and ffmpeg still exits 0,
+/// so an unchecked bad entry would silently drop the rest of the batch. A
+/// truncated file with a healthy header passes, as it does today.
+fn verify_nut_header(raw_nut: &Path) -> Result<(), VideoEncodeError> {
+    let mut file = std::fs::File::open(raw_nut).map_err(|source| VideoEncodeError::Io {
+        path: raw_nut.to_path_buf(),
+        source,
+    })?;
+    let mut header = [0u8; NUT_FILE_MAGIC.len()];
+    let header_read = std::io::Read::read_exact(&mut file, &mut header);
+    if header_read.is_err() || header != *NUT_FILE_MAGIC {
+        return Err(VideoEncodeError::InvalidNutInput {
+            path: raw_nut.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 /// Build the ffmpeg `-vf` value that downscales the lossy preview proxy to at
 /// most `max_height` lines.
 ///
@@ -810,21 +1098,52 @@ fn write_concat_list(path: &Path, segments: &[PathBuf]) -> Result<(), VideoEncod
         source,
     })?;
     for segment in segments {
-        let absolute = if segment.is_absolute() {
-            segment.clone()
-        } else {
-            std::env::current_dir()
-                .map_err(|source| VideoEncodeError::Io {
-                    path: segment.clone(),
-                    source,
-                })?
-                .join(segment)
-        };
-        let escaped = absolute.to_string_lossy().replace('\'', r"'\''");
-        writeln!(file, "file '{escaped}'").map_err(|source| VideoEncodeError::Io {
+        let line = concat_file_line(segment)?;
+        writeln!(file, "{line}").map_err(|source| VideoEncodeError::Io {
             path: path.to_path_buf(),
             source,
         })?;
+    }
+    Ok(())
+}
+
+/// Render one `file '...'` concat-list entry: the path made absolute (see
+/// [`write_concat_list`]) and single-quoted with embedded quotes escaped per
+/// the demuxer's own rule (`'` -> `'\''`).
+fn concat_file_line(segment: &Path) -> Result<String, VideoEncodeError> {
+    let absolute = if segment.is_absolute() {
+        segment.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|source| VideoEncodeError::Io {
+                path: segment.to_path_buf(),
+                source,
+            })?
+            .join(segment)
+    };
+    let escaped = absolute.to_string_lossy().replace('\'', r"'\''");
+    Ok(format!("file '{escaped}'"))
+}
+
+/// Render the concat list for a batched encode: each NUT entry followed,
+/// for every entry except the last, by its declared `duration`. The demuxer
+/// stacks inputs by declared duration, which is what lands each frame on
+/// its capture timestamp. A single-entry list carries no `duration` line.
+fn write_batch_concat_list(path: &Path, inputs: &[BatchNutInput]) -> Result<(), VideoEncodeError> {
+    let mut file = std::fs::File::create(path).map_err(|source| VideoEncodeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let write_error = |source| VideoEncodeError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    for input in inputs {
+        let line = concat_file_line(&input.raw_nut)?;
+        writeln!(file, "{line}").map_err(write_error)?;
+        if let Some(span_us) = input.span_to_next_us {
+            writeln!(file, "duration {}", duration_directive(span_us)).map_err(write_error)?;
+        }
     }
     Ok(())
 }
@@ -1712,6 +2031,24 @@ mod tests {
         );
 
         // Decode-order PTS, exactly as the backend guard walks them.
+        let pts_values = decoded_frame_pts(ffprobe, video);
+        assert!(
+            !pts_values.is_empty(),
+            "{} yielded no decoded PTS",
+            video.display()
+        );
+        for pair in pts_values.windows(2) {
+            assert!(
+                pair[1] > pair[0],
+                "{}: decoded PTS must be strictly increasing, got {pair:?}",
+                video.display()
+            );
+        }
+    }
+
+    /// Decode `video` and collect its frames' PTS values in the order the
+    /// decoder presents them.
+    fn decoded_frame_pts(ffprobe: &Path, video: &Path) -> Vec<i64> {
         let probe = StdCommand::new(ffprobe)
             .args([
                 "-v",
@@ -1729,26 +2066,14 @@ mod tests {
             .expect("spawn ffprobe");
         assert!(probe.status.success());
         let stdout = String::from_utf8_lossy(&probe.stdout);
-        let pts_values: Vec<i64> = stdout
+        stdout
             .lines()
             .filter_map(|line| {
                 line.strip_prefix("pts=")
                     .or_else(|| line.strip_prefix("pkt_pts="))
             })
             .filter_map(|value| value.parse().ok())
-            .collect();
-        assert!(
-            !pts_values.is_empty(),
-            "{} yielded no decoded PTS",
-            video.display()
-        );
-        for pair in pts_values.windows(2) {
-            assert!(
-                pair[1] > pair[0],
-                "{}: decoded PTS must be strictly increasing, got {pair:?}",
-                video.display()
-            );
-        }
+            .collect()
     }
 
     #[tokio::test]
@@ -1804,5 +2129,701 @@ mod tests {
             }
             other => panic!("expected Spawn error, got {other:?}"),
         }
+    }
+
+    /// Write a NUT chunk with the real producer NUT writer: one 16x16 RGB
+    /// frame per entry of `frame_pts_us` (chunk-relative microsecond ticks;
+    /// the producer re-anchors every chunk's first frame near 0).
+    fn write_nut_chunk(path: &Path, frame_pts_us: &[i64]) {
+        use data_daemon_bridge::nut_writer::{NutVideoConfig, NutWriter};
+        let rgb = vec![128u8; 16 * 16 * 3];
+        let mut writer = NutWriter::create(
+            path,
+            NutVideoConfig {
+                width: 16,
+                height: 16,
+                time_base_num: 1,
+                time_base_den: VIDEO_SPOOL_TICKS_PER_SECOND,
+            },
+        )
+        .expect("create NUT");
+        for pts in frame_pts_us {
+            writer.write_frame(*pts as u64, &rgb).expect("write frame");
+        }
+        writer.finish().expect("finish NUT");
+    }
+
+    #[test]
+    fn capture_timestamp_us_truncates_like_the_nut_writer() {
+        assert_eq!(capture_timestamp_us(1.0), 1_000_000);
+        assert_eq!(capture_timestamp_us(0.000001), 1);
+        // Truncation toward zero, not rounding: 1.9 us of capture time is
+        // still tick 1, exactly as the writer's ns-then-divide conversion.
+        assert_eq!(capture_timestamp_us(0.0000019), 1);
+    }
+
+    #[test]
+    fn declared_span_never_goes_negative() {
+        assert_eq!(declared_span_us(0.0, 1.0), 1_000_000);
+        // A backwards announcement never yields a negative duration.
+        assert_eq!(declared_span_us(2.0, 1.0), 0);
+    }
+
+    #[test]
+    fn replayed_extent_matches_healthy_stamps() {
+        // Monotonic stamps trigger no synthesis: the extent is the plain
+        // last-minus-first capture span in writer-truncated microseconds.
+        assert_eq!(replayed_chunk_extent_us(&[0.0, 0.016683, 0.033366]), 33_366);
+        assert_eq!(replayed_chunk_extent_us(&[1.0]), 0);
+        assert_eq!(replayed_chunk_extent_us(&[]), 0);
+    }
+
+    #[test]
+    fn replayed_extent_covers_the_writer_synthesis() {
+        // All-duplicate stamps: the writer synthesizes a step per frame from
+        // the healthy gap it carried from earlier chunks. That gap is capped
+        // at 100 ms, so the replay's worst-case seed never undershoots.
+        assert_eq!(replayed_chunk_extent_us(&[1.0, 1.0, 1.0]), 200_000);
+        // A healthy gap observed inside the chunk becomes the step for a
+        // later duplicate, exactly as the writer applies it.
+        assert_eq!(replayed_chunk_extent_us(&[0.0, 0.016683, 0.016683]), 33_366);
+        // After a synthesized step the origin re-anchors on the regressed
+        // frame, so later stamps resume true capture spacing from it.
+        assert_eq!(
+            replayed_chunk_extent_us(&[0.0, 0.016683, 0.016683, 0.033366]),
+            50_049
+        );
+        // A regression below the chunk origin clamps to PTS 0 first, then
+        // synthesizes past the previous frame.
+        assert_eq!(replayed_chunk_extent_us(&[1.0, 0.5]), 100_000);
+    }
+
+    #[test]
+    fn batch_span_floors_at_the_chunk_extent_plus_one() {
+        let capture_s = |us: i64| us as f64 / 1e6;
+        let chunk: Vec<f64> = [0, 16_683, 33_366]
+            .iter()
+            .map(|us| capture_s(*us))
+            .collect();
+        // Overlap: the next chunk's announced start sits inside this chunk's
+        // content span; the declared span floors to the extent plus 1 us.
+        assert_eq!(declared_batch_span_us(&chunk, capture_s(20_000)), 33_367);
+        // A well-formed span is at least the extent plus one frame interval
+        // and passes through unchanged.
+        assert_eq!(declared_batch_span_us(&chunk, capture_s(50_049)), 50_049);
+        // A synthesized-PTS chunk: the announced extent is zero, but the
+        // NUT's real content extends up to one writer step per frame. The
+        // floor tracks the replayed extent, not the announced one.
+        let duplicates = [1.0, 1.0, 1.0];
+        assert_eq!(
+            declared_batch_span_us(&duplicates, capture_s(1_005_000)),
+            200_001
+        );
+        // A chunk whose own extent exceeds the boundary ceiling still floors
+        // to extent plus one; the boundary delta stays 1 us.
+        let long_chunk = [0.0, 5_000.0];
+        assert_eq!(
+            declared_batch_span_us(&long_chunk, capture_s(20_000)),
+            5_000_000_001
+        );
+        // A chunk with no announced frames contributes extent zero and a
+        // 1 us span instead of panicking.
+        assert_eq!(declared_batch_span_us(&[], capture_s(20_000)), 1);
+    }
+
+    #[test]
+    fn batch_span_ceilings_the_boundary_delta() {
+        let capture_s = |us: i64| us as f64 / 1e6;
+        // A gap past ~35.8 minutes saturates the 32-bit mp4 boundary sample
+        // delta: the declared span compresses so the step past the chunk's
+        // content extent never exceeds MAX_BOUNDARY_DELTA_US.
+        assert_eq!(
+            declared_batch_span_us(&[0.0], capture_s(5_000_000_000)),
+            MAX_BOUNDARY_DELTA_US
+        );
+        let chunk = [0.0, 0.016683];
+        assert_eq!(
+            declared_batch_span_us(&chunk, capture_s(5_000_000_000)),
+            16_683 + MAX_BOUNDARY_DELTA_US
+        );
+    }
+
+    #[test]
+    fn duration_directive_formats_exact_decimal_seconds() {
+        assert_eq!(duration_directive(16_683), "0.016683");
+        assert_eq!(duration_directive(1_000_000), "1.000000");
+        assert_eq!(duration_directive(0), "0.000000");
+        assert_eq!(duration_directive(MAX_BOUNDARY_DELTA_US), "2147.483646");
+    }
+
+    #[test]
+    fn batch_concat_list_emits_duration_lines_except_last() {
+        let tempdir = TempDir::new().unwrap();
+        let list = tempdir.path().join("list.txt");
+        let inputs = vec![
+            BatchNutInput {
+                raw_nut: PathBuf::from("/data/trace/chunks/chunk_0000.nut"),
+                span_to_next_us: Some(16_683),
+                frame_count: 2,
+            },
+            BatchNutInput {
+                raw_nut: PathBuf::from("/data/trace/chunks/chunk_0001.nut"),
+                span_to_next_us: Some(MAX_BOUNDARY_DELTA_US),
+                frame_count: 2,
+            },
+            BatchNutInput {
+                raw_nut: PathBuf::from("/data/trace/chunks/chunk_0002.nut"),
+                span_to_next_us: None,
+                frame_count: 2,
+            },
+        ];
+        write_batch_concat_list(&list, &inputs).expect("write list");
+        let contents = std::fs::read_to_string(&list).unwrap();
+        assert_eq!(
+            contents,
+            "file '/data/trace/chunks/chunk_0000.nut'\n\
+             duration 0.016683\n\
+             file '/data/trace/chunks/chunk_0001.nut'\n\
+             duration 2147.483646\n\
+             file '/data/trace/chunks/chunk_0002.nut'\n"
+        );
+    }
+
+    /// Run the batch PTS gate for one fixture, whose `chunk_capture_us` holds
+    /// each chunk's frame times as batch-absolute microseconds. Every output
+    /// of both codec branches must decode to the batch-relative capture
+    /// ladder exactly, frame-complete, monotonic, at the pinned timescale.
+    async fn assert_batch_pts_gate(ffprobe: &Path, chunk_capture_us: &[Vec<i64>]) {
+        // Mirror the production data flow: the announcement carries per-frame
+        // `timestamp_s` seconds; the spooled PTS and the batch spans both
+        // derive from them with the writer's truncation.
+        let capture_s = |us: i64| us as f64 / 1e6;
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            let tempdir = TempDir::new().unwrap();
+            let mut inputs = Vec::new();
+            for (index, chunk) in chunk_capture_us.iter().enumerate() {
+                let chunk_origin_us = capture_timestamp_us(capture_s(chunk[0]));
+                let relative_pts: Vec<i64> = chunk
+                    .iter()
+                    .map(|us| capture_timestamp_us(capture_s(*us)) - chunk_origin_us)
+                    .collect();
+                let raw_nut = tempdir.path().join(format!("chunk_{index:04}.nut"));
+                write_nut_chunk(&raw_nut, &relative_pts);
+                // Spans go through the same helper the worker uses, so a
+                // regression in the production span computation fails the
+                // gate.
+                let chunk_timestamps_s: Vec<f64> = chunk.iter().map(|us| capture_s(*us)).collect();
+                inputs.push(BatchNutInput {
+                    raw_nut,
+                    span_to_next_us: chunk_capture_us.get(index + 1).map(|next| {
+                        declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0]))
+                    }),
+                    frame_count: chunk.len() as u32,
+                });
+            }
+            let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+            let lossless_out = tempdir.path().join("chunk_0000_lossless.mp4");
+            let request = BatchEncodeRequest {
+                inputs,
+                lossy_out: lossy_out.clone(),
+                lossless_out: lossless_out.clone(),
+                codec,
+            };
+            VideoEncoder::new()
+                .encode_chunk_batch(&request, ENCODE_THREADS_PER_OUTPUT)
+                .await
+                .expect("batched transcode");
+
+            let batch_origin_us = capture_timestamp_us(capture_s(chunk_capture_us[0][0]));
+            let expected: Vec<i64> = chunk_capture_us
+                .iter()
+                .flatten()
+                .map(|us| capture_timestamp_us(capture_s(*us)) - batch_origin_us)
+                .collect();
+            let mut outputs = vec![lossy_out];
+            if !codec.is_lossy_only() {
+                outputs.push(lossless_out);
+            }
+            for video in &outputs {
+                assert_merged_video_is_sound(ffprobe, video);
+                assert_eq!(
+                    decoded_frame_pts(ffprobe, video),
+                    expected,
+                    "{} ({codec:?}) must decode to the batch-relative capture ladder",
+                    video.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_pts_gate_gapped_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping batch PTS gate.");
+            return;
+        };
+        // A real capture gap: chunk A at 0/66/133 ms, chunk B at 1000 ms. The
+        // gap must survive the batch instead of collapsing to a frame interval.
+        assert_batch_pts_gate(&ffprobe, &[vec![0, 66_000, 133_000], vec![1_000_000]]).await;
+    }
+
+    #[tokio::test]
+    async fn batch_pts_gate_jittered_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping batch PTS gate.");
+            return;
+        };
+        // Irregular deltas cycling ~15.4-17.9 ms, continuing across the chunk
+        // boundary like real capture jitter.
+        let deltas = [15_400i64, 16_250, 17_100, 17_900];
+        let mut capture_us = vec![0i64];
+        for index in 0..23usize {
+            capture_us.push(capture_us[index] + deltas[index % deltas.len()]);
+        }
+        let (chunk_a, chunk_b) = capture_us.split_at(12);
+        assert_batch_pts_gate(&ffprobe, &[chunk_a.to_vec(), chunk_b.to_vec()]).await;
+    }
+
+    #[tokio::test]
+    async fn batch_pts_gate_contiguous_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping batch PTS gate.");
+            return;
+        };
+        // 3 x 48 frames on a metronome 16683 us cadence with no inter-chunk gap.
+        let chunks: Vec<Vec<i64>> = (0..3i64)
+            .map(|chunk| {
+                (0..48i64)
+                    .map(|frame| (chunk * 48 + frame) * 16_683)
+                    .collect()
+            })
+            .collect();
+        assert_batch_pts_gate(&ffprobe, &chunks).await;
+    }
+
+    #[tokio::test]
+    async fn batch_of_one_matches_single_chunk_invocation() {
+        if locate_binary("ffmpeg").is_none() {
+            eprintln!("ffmpeg not on PATH — skipping batch-of-one test.");
+            return;
+        }
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            let tempdir = TempDir::new().unwrap();
+            let raw = tempdir.path().join("chunk_0000.nut");
+            write_nut_chunk(&raw, &[0, 16_683, 33_366, 50_049]);
+
+            let encoder = VideoEncoder::new();
+            let single_lossy = tempdir.path().join("single_lossy.mp4");
+            let single_lossless = tempdir.path().join("single_lossless.mp4");
+            encoder
+                .encode_chunk(
+                    &ChunkEncodeRequest {
+                        raw_nut: raw.clone(),
+                        lossy_out: single_lossy.clone(),
+                        lossless_out: single_lossless.clone(),
+                        codec,
+                        frame_count: 4,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
+                .await
+                .expect("single-chunk transcode");
+
+            let batch_lossy = tempdir.path().join("batch_lossy.mp4");
+            let batch_lossless = tempdir.path().join("batch_lossless.mp4");
+            let outcome = encoder
+                .encode_chunk_batch(
+                    &BatchEncodeRequest {
+                        inputs: vec![BatchNutInput {
+                            raw_nut: raw.clone(),
+                            span_to_next_us: None,
+                            frame_count: 4,
+                        }],
+                        lossy_out: batch_lossy.clone(),
+                        lossless_out: batch_lossless.clone(),
+                        codec,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
+                .await
+                .expect("batch-of-one transcode");
+
+            // The degenerate batch delegates to the single-chunk invocation,
+            // so its outputs are byte-identical to today's.
+            assert_eq!(
+                std::fs::read(&single_lossy).unwrap(),
+                std::fs::read(&batch_lossy).unwrap(),
+                "batch-of-one lossy must match the single-chunk encode ({codec:?})"
+            );
+            if codec.is_lossy_only() {
+                assert_eq!(outcome.lossless_bytes, 0);
+                assert!(!batch_lossless.exists(), "no lossless output ({codec:?})");
+            } else {
+                assert_eq!(
+                    std::fs::read(&single_lossless).unwrap(),
+                    std::fs::read(&batch_lossless).unwrap(),
+                    "batch-of-one lossless must match the single-chunk encode"
+                );
+            }
+            assert!(
+                !list_file_for(&batch_lossy).exists(),
+                "a degenerate batch writes no concat list"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn lossy_only_batch_produces_single_lossy_segment() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping lossy-only batch test.");
+            return;
+        };
+        let tempdir = TempDir::new().unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..3i64 {
+            let raw_nut = tempdir.path().join(format!("chunk_{index:04}.nut"));
+            write_nut_chunk(&raw_nut, &[0, 16_683]);
+            inputs.push(BatchNutInput {
+                raw_nut,
+                span_to_next_us: (index < 2).then_some(33_366),
+                frame_count: 2,
+            });
+        }
+        let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless_out = tempdir.path().join("chunk_0000_lossless.mp4");
+        let outcome = VideoEncoder::new()
+            .encode_chunk_batch(
+                &BatchEncodeRequest {
+                    inputs,
+                    lossy_out: lossy_out.clone(),
+                    lossless_out: lossless_out.clone(),
+                    codec: LossyVideoCodec::H264MediumLossyOnly,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("lossy-only batched transcode");
+
+        assert!(outcome.lossy_bytes > 0);
+        assert_eq!(outcome.lossless_bytes, 0);
+        assert!(
+            !lossless_out.exists(),
+            "no lossless segment in lossy-only mode"
+        );
+        assert_eq!(
+            decoded_frame_pts(&ffprobe, &lossy_out).len(),
+            6,
+            "the single lossy segment must carry every batched frame"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_frame_count_encodes_only_the_frames_the_recording_owns() {
+        // The dispatcher can only cut the trace's last chunk, so the batch cap
+        // drops frames from the tail of the concatenated stream: the cut
+        // entry's own. Both outputs must stop there, or an mp4 outruns the
+        // sidecar indexing it.
+        let (Some(_), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe")) else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping batch frame-cap test.");
+            return;
+        };
+
+        let tempdir = TempDir::new().unwrap();
+        let chunk_a = tempdir.path().join("chunk_0000.nut");
+        let chunk_b = tempdir.path().join("chunk_0001.nut");
+        write_nut_chunk(&chunk_a, &[0, 16_683]);
+        write_nut_chunk(&chunk_b, &[0, 16_683, 33_366]);
+        let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless_out = tempdir.path().join("chunk_0000_lossless.mp4");
+
+        VideoEncoder::new()
+            .encode_chunk_batch(
+                &BatchEncodeRequest {
+                    inputs: vec![
+                        BatchNutInput {
+                            raw_nut: chunk_a,
+                            span_to_next_us: Some(33_366),
+                            frame_count: 2,
+                        },
+                        // Cut at the recording boundary: only its first frame
+                        // belongs to this recording.
+                        BatchNutInput {
+                            raw_nut: chunk_b,
+                            span_to_next_us: None,
+                            frame_count: 1,
+                        },
+                    ],
+                    lossy_out: lossy_out.clone(),
+                    lossless_out: lossless_out.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("batched transcode");
+
+        assert_eq!(
+            decoded_frame_pts(&ffprobe, &lossy_out).len(),
+            3,
+            "the lossy output must stop at the batch's owned frame count"
+        );
+        assert_eq!(
+            decoded_frame_pts(&ffprobe, &lossless_out).len(),
+            3,
+            "the lossless output must stop at the same cut"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_with_corrupt_nut_entry_fails_instead_of_truncating() {
+        if locate_binary("ffmpeg").is_none() {
+            eprintln!("ffmpeg not on PATH — skipping corrupt batch entry test.");
+            return;
+        }
+        // The concat demuxer treats an entry it cannot open as end of stream and
+        // ffmpeg exits 0, so without the header check the batch would
+        // silently lose this chunk and every later one.
+        let tempdir = TempDir::new().unwrap();
+        let good_nut = tempdir.path().join("chunk_0000.nut");
+        write_nut_chunk(&good_nut, &[0, 16_683]);
+        let corrupt_nut = tempdir.path().join("chunk_0001.nut");
+        std::fs::write(&corrupt_nut, b"not a nut container").unwrap();
+
+        let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+        let error = VideoEncoder::new()
+            .encode_chunk_batch(
+                &BatchEncodeRequest {
+                    inputs: vec![
+                        BatchNutInput {
+                            raw_nut: good_nut,
+                            span_to_next_us: Some(33_366),
+                            frame_count: 2,
+                        },
+                        BatchNutInput {
+                            raw_nut: corrupt_nut.clone(),
+                            span_to_next_us: None,
+                            frame_count: 2,
+                        },
+                    ],
+                    lossy_out: lossy_out.clone(),
+                    lossless_out: tempdir.path().join("chunk_0000_lossless.mp4"),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect_err("a corrupt entry must fail the batch");
+        assert!(
+            matches!(error, VideoEncodeError::InvalidNutInput { ref path } if *path == corrupt_nut),
+            "unexpected error variant: {error:?}"
+        );
+        assert!(
+            !lossy_out.exists(),
+            "no output before the batch is validated"
+        );
+    }
+
+    #[tokio::test]
+    async fn batch_span_clamp_stays_monotonic_and_frame_complete() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping span clamp test.");
+            return;
+        };
+        // A 4000 s gap sits above the mp4 boundary-delta ceiling, so the
+        // span clamps to the extent plus the largest safe step. The exact
+        // ladder is unattainable; the output must stay monotonic and carry
+        // every frame.
+        let chunk_a_timestamps = [0.0, 0.016683];
+        let span_us = declared_batch_span_us(&chunk_a_timestamps, 4_000.0);
+        assert_eq!(
+            span_us,
+            16_683 + MAX_BOUNDARY_DELTA_US,
+            "the fabricated gap must clamp to the extent plus the ceiling"
+        );
+
+        let tempdir = TempDir::new().unwrap();
+        let chunk_a = tempdir.path().join("chunk_0000.nut");
+        let chunk_b = tempdir.path().join("chunk_0001.nut");
+        write_nut_chunk(&chunk_a, &[0, 16_683]);
+        write_nut_chunk(&chunk_b, &[0, 16_683]);
+        let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+        let lossless_out = tempdir.path().join("chunk_0000_lossless.mp4");
+        VideoEncoder::new()
+            .encode_chunk_batch(
+                &BatchEncodeRequest {
+                    inputs: vec![
+                        BatchNutInput {
+                            raw_nut: chunk_a,
+                            span_to_next_us: Some(span_us),
+                            frame_count: 2,
+                        },
+                        BatchNutInput {
+                            raw_nut: chunk_b,
+                            span_to_next_us: None,
+                            frame_count: 2,
+                        },
+                    ],
+                    lossy_out: lossy_out.clone(),
+                    lossless_out: lossless_out.clone(),
+                    codec: LossyVideoCodec::LosslessPlusPreview,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("clamped batched transcode");
+
+        for video in [&lossy_out, &lossless_out] {
+            assert_merged_video_is_sound(&ffprobe, video);
+            assert_eq!(
+                decoded_frame_pts(&ffprobe, video).len(),
+                4,
+                "{} must keep every frame despite the clamped span",
+                video.display()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_overlap_boundary_stays_monotonic_and_frame_complete() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping overlap boundary test.");
+            return;
+        };
+        // A backwards clock step at the boundary: chunk B's announced start
+        // sits inside chunk A's 33366 us content. The floored span degrades
+        // the boundary to a 1 us ramp, so the exact ladder is unattainable;
+        // the output must stay monotonic and frame-complete, and chunk A's
+        // frames must keep their exact capture PTS.
+        let capture_s = |us: i64| us as f64 / 1e6;
+        let chunk_a_pts_us = [0i64, 16_683, 33_366];
+        let chunk_a_timestamps: Vec<f64> = chunk_a_pts_us.iter().map(|us| capture_s(*us)).collect();
+        let span_us = declared_batch_span_us(&chunk_a_timestamps, capture_s(20_000));
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            let tempdir = TempDir::new().unwrap();
+            let chunk_a = tempdir.path().join("chunk_0000.nut");
+            let chunk_b = tempdir.path().join("chunk_0001.nut");
+            write_nut_chunk(&chunk_a, &chunk_a_pts_us);
+            write_nut_chunk(&chunk_b, &[0, 16_683]);
+            let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+            let lossless_out = tempdir.path().join("chunk_0000_lossless.mp4");
+            VideoEncoder::new()
+                .encode_chunk_batch(
+                    &BatchEncodeRequest {
+                        inputs: vec![
+                            BatchNutInput {
+                                raw_nut: chunk_a,
+                                span_to_next_us: Some(span_us),
+                                frame_count: 3,
+                            },
+                            BatchNutInput {
+                                raw_nut: chunk_b,
+                                span_to_next_us: None,
+                                frame_count: 2,
+                            },
+                        ],
+                        lossy_out: lossy_out.clone(),
+                        lossless_out: lossless_out.clone(),
+                        codec,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
+                .await
+                .expect("overlap batched transcode");
+
+            let mut outputs = vec![lossy_out];
+            if !codec.is_lossy_only() {
+                outputs.push(lossless_out);
+            }
+            for video in &outputs {
+                assert_merged_video_is_sound(&ffprobe, video);
+                let pts_values = decoded_frame_pts(&ffprobe, video);
+                assert_eq!(
+                    pts_values.len(),
+                    5,
+                    "{} ({codec:?}) must keep every frame across the overlap",
+                    video.display()
+                );
+                assert_eq!(
+                    &pts_values[..3],
+                    &chunk_a_pts_us,
+                    "{} ({codec:?}) must keep exact capture PTS before the degraded boundary",
+                    video.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_with_synthesized_pts_chunk_stays_monotonic_and_frame_complete() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping synthesized-PTS batch test.");
+            return;
+        };
+        // A synthesized-PTS chunk: the announced stamps are all the same
+        // 1.0 s duplicate, so the writer synthesized the monotonic NUT ladder
+        // this test writes directly. The next chunk's announced start sits
+        // inside that real content, so flooring only at the announced extent
+        // would make the preset-medium encode store backwards PTS. The exact
+        // ladder is degraded here; assert positive properties only.
+        let chunk_a_announced = [1.0, 1.0, 1.0];
+        let chunk_a_nut_pts = [0i64, 16_683, 33_366];
+        let span_us = declared_batch_span_us(&chunk_a_announced, 1.005);
+        let tempdir = TempDir::new().unwrap();
+        let chunk_a = tempdir.path().join("chunk_0000.nut");
+        let chunk_b = tempdir.path().join("chunk_0001.nut");
+        write_nut_chunk(&chunk_a, &chunk_a_nut_pts);
+        write_nut_chunk(&chunk_b, &[0, 16_683]);
+        let lossy_out = tempdir.path().join("chunk_0000_lossy.mp4");
+        VideoEncoder::new()
+            .encode_chunk_batch(
+                &BatchEncodeRequest {
+                    inputs: vec![
+                        BatchNutInput {
+                            raw_nut: chunk_a,
+                            span_to_next_us: Some(span_us),
+                            frame_count: 3,
+                        },
+                        BatchNutInput {
+                            raw_nut: chunk_b,
+                            span_to_next_us: None,
+                            frame_count: 2,
+                        },
+                    ],
+                    lossy_out: lossy_out.clone(),
+                    lossless_out: tempdir.path().join("chunk_0000_lossless.mp4"),
+                    codec: LossyVideoCodec::H264MediumLossyOnly,
+                },
+                ENCODE_THREADS_PER_OUTPUT,
+            )
+            .await
+            .expect("synthesized-PTS batched transcode");
+
+        assert_merged_video_is_sound(&ffprobe, &lossy_out);
+        let pts_values = decoded_frame_pts(&ffprobe, &lossy_out);
+        assert_eq!(
+            pts_values.len(),
+            5,
+            "every frame must survive the synthesized-PTS boundary"
+        );
+        assert!(
+            pts_values.windows(2).all(|pair| pair[1] > pair[0]),
+            "PTS must stay strictly monotonic across the synthesized-PTS boundary: {pts_values:?}"
+        );
     }
 }

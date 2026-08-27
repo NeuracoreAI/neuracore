@@ -41,7 +41,9 @@ flowchart LR
     DISP --> ACT["per-trace actors"]
     ACT -->|fire-and-forget| TW["trace_writer<br/>batched DB write-behind"]
     ACT -->|fire-and-forget| JW["json_writer (IO thread)"]
-    ACT -->|async subprocess| FF["ffmpeg chunk encode"]
+    ACT -->|enqueue chunk| Q["per-trace encode queue"]
+    Q -->|drain batch on permit| W["EncodeWorker<br/>batch of chunks"]
+    W -->|async subprocess| FF["ffmpeg batch encode"]
     TW --> DB[("SQLite WAL")]
     LIS -->|recording-id queries| DB
     subgraph CLOUD["cloud coordinators"]

@@ -9,9 +9,32 @@
 //!
 //! Scalar / sensor traces stream into a [`crate::encoding::json_trace::JsonTraceWriter`]; video traces
 //! consume [`TraceActorMessage::Video`] notifications that hand off
-//! daemon-relinked NUT chunks for ffmpeg-side transcoding into per-chunk MP4
-//! segments, then on finalise stitch the segments into the final `lossy.mp4` /
-//! `lossless.mp4` and flush the [`VideoMetadataAccumulator`] sidecar.
+//! daemon-relinked NUT chunks for ffmpeg-side transcoding into MP4 segments
+//! (one batch of up to [`ENCODE_BATCH_MAX_CHUNKS`] queued chunks per
+//! invocation under backlog), then on finalise stitch the segments into the
+//! final `lossy.mp4` / `lossless.mp4` and flush the
+//! [`VideoMetadataAccumulator`] sidecar.
+//!
+//! `TraceWriterKind::Video` owns the `completed_chunks` map, the worker
+//! `JoinSet`, and the shared encode queue and un-encoded chunk counter. The
+//! `EncodeWorker` holds `Arc` clones of the queue, the counter and the ffmpeg
+//! permit pool plus the encoder, paths and codec, and borrows nothing from the
+//! actor state, so it runs independently of the actor task. `handle_video`
+//! pushes the arriving chunk onto the queue and spawns a worker on the
+//! `JoinSet`. The worker that wins an ffmpeg permit drains the queue front
+//! for up to [`ENCODE_BATCH_MAX_CHUNKS`] chunks. The drain stops at a dtype
+//! change and before a chunk whose declared span exceeds
+//! [`ENCODE_BATCH_MAX_SPAN_US`].
+//! The worker relinks its batch from the producer spool only after it wins
+//! that permit, so the fixed spool cap bounds the un-encoded backlog. A worker
+//! reports `NoOp` when an earlier worker took its chunk, `Completed` with one
+//! `CompletedChunk`, or `Failed`. On the arrival path
+//! `drain_completed_encodes` reaps finished workers with `try_join_next` and
+//! marks the trace failed on `Failed`. At finalise `finalise_writer` awaits
+//! every remaining worker with `join_next` and returns `Err` on `Failed`,
+//! which skips the concat. `completed_chunks` is keyed by the batch's first
+//! chunk index, so segment indices are not dense, and finalise concatenates
+//! the segments in key order.
 //!
 //! Finalisation is driven by a single [`TraceActorMessage::WindowClosing`]
 //! signal: the dispatcher sends every routed datum to the actor's FIFO inbox
@@ -31,9 +54,10 @@
 //! before being enqueued, and the batcher further coalesces them per trace and
 //! flushes them in batched transactions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use data_daemon_shared::FrameDtype;
@@ -46,7 +70,8 @@ use crate::config::DaemonConfig;
 use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{
-    ChunkEncodeRequest, LossyVideoCodec, VideoEncodeError, VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
+    declared_batch_span_us, BatchEncodeRequest, BatchNutInput, LossyVideoCodec, VideoEncodeError,
+    VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::TraceWriteHandle;
@@ -88,9 +113,21 @@ pub struct TraceIdentity {
 /// A finalise always issues a fresh UPDATE so the terminal row is exact.
 const BYTES_WRITTEN_DEBOUNCE_FRAMES: u64 = 32;
 
+/// Cap on how many queued chunks one worker drains into a single batched
+/// ffmpeg invocation. Bounds the latency of any one batch and keeps the
+/// shared permit pool fair across traces under backlog.
+pub(crate) const ENCODE_BATCH_MAX_CHUNKS: usize = 8;
+
+/// Cap on the declared span between two chunks inside one batch. ffmpeg
+/// silently corrupts a preset-medium batched encode once a `duration` line
+/// passes a version-dependent cliff (bisected at 120 s on 5.1; CI runs 4.4).
+/// A gap this large under backlog is a recording stall, so ending the batch
+/// instead costs nothing.
+pub(crate) const ENCODE_BATCH_MAX_SPAN_US: i64 = 30_000_000;
+
 /// Cap on concurrent ffmpeg transcodes.
 ///
-/// Each per-chunk encode bounds its libx264 thread pool to
+/// Each batch encode bounds its libx264 thread pool to
 /// [`ENCODE_THREADS_PER_OUTPUT`] per output stream, so to keep the encode fleet
 /// near — not far past — the host's core count we run roughly
 /// `cores / threads_per_output` invocations at once. Letting the permit count
@@ -141,7 +178,7 @@ pub struct TraceActorContext {
     /// Shared storage-budget tracker. Reserved here so the budget can refuse
     /// frames when the configured quota is exhausted.
     pub storage_budget: Arc<StorageBudget>,
-    /// Encoder used to transcode per-chunk NUT files into MP4 segments and
+    /// Encoder used to transcode batches of NUT files into MP4 segments and
     /// to stream-copy concatenate the segments into the final outputs on
     /// finalise. Cloning a [`VideoEncoder`] is cheap (it carries only the
     /// configured ffmpeg binary path).
@@ -308,7 +345,9 @@ enum TraceWriterKind {
     /// ([`crate::pipeline::json_writer`]); the actor only holds this marker and
     /// drives it by `trace_id` through [`TraceActorContext::json_writer`].
     Json,
-    /// Video trace whose chunk encodes run concurrently as background tasks.
+    /// Video trace whose encode workers run as concurrent background tasks.
+    /// A worker drains at most one batch from the shared queue, and encodes
+    /// nothing if an earlier worker took its chunk.
     Video {
         /// Frame width in pixels (recorded from the first chunk message).
         width: u32,
@@ -317,39 +356,78 @@ enum TraceWriterKind {
         /// Lossy codec for this trace, resolved once at the first chunk and
         /// applied uniformly to every chunk encode and the finalise concat.
         codec: LossyVideoCodec,
-        /// Encodes completed so far, keyed by `chunk_index` so the finalise
-        /// concat can iterate in order regardless of completion order.
+        /// Encodes completed so far, keyed by the batch's first `chunk_index`
+        /// so the finalise concat can iterate in order regardless of
+        /// completion order.
         completed_chunks: BTreeMap<u32, CompletedChunk>,
-        /// Spawned chunk-encode tasks still running.
-        pending_encodes: JoinSet<ChunkEncodeJobResult>,
+        /// Spawned encode workers still running.
+        pending_encodes: JoinSet<EncodeWorkerOutcome>,
+        /// Chunks waiting for a worker to win an ffmpeg permit and drain
+        /// them into a batch. Shared with the spawned workers.
+        encode_queue: Arc<Mutex<VecDeque<QueuedChunk>>>,
+        /// Count of un-encoded chunks: the queue length plus the chunks
+        /// covered by in-flight batches. Reported as `pending_encode_count`
+        /// at finalise.
+        unencoded_chunks: Arc<AtomicUsize>,
     },
 }
 
-/// One successfully encoded chunk, ready to feed into the finalise concat.
+/// One un-encoded chunk waiting in a trace's encode queue for a worker to
+/// drain it into a batch.
+struct QueuedChunk {
+    /// Daemon-assigned, per-trace monotonic chunk index.
+    chunk_index: u32,
+    /// Producer-spooled source NUT, relinked into the trace's chunks dir when
+    /// its batch starts encoding.
+    spool_nut: PathBuf,
+    /// Size of the spooled NUT file in bytes.
+    byte_count: u64,
+    /// Number of frames in the chunk.
+    frame_count: u32,
+    /// Per-frame `timestamp_s` values in capture order. The first entry also
+    /// anchors the batch's inter-chunk duration spans.
+    frame_timestamps_s: Vec<f64>,
+    /// Original dtype of every frame in this chunk. A batch spans one dtype.
+    dtype: FrameDtype,
+}
+
+/// One successfully encoded batch of one or more chunks, keyed by its first
+/// chunk index, ready to feed into the finalise concat.
 struct CompletedChunk {
-    /// `chunk_NNNN_lossy.mp4` segment path.
+    /// `chunk_NNNN_lossy.mp4` segment path (first index of the batch).
     lossy_segment: PathBuf,
-    /// `chunk_NNNN_lossless.mp4` segment path.
+    /// `chunk_NNNN_lossless.mp4` segment path (first index of the batch).
     lossless_segment: PathBuf,
     /// Sum of both segments' on-disk byte counts.
     bytes: u64,
-    /// Per-frame `timestamp_s` values from the chunk message, applied to the
-    /// metadata accumulator at finalise in chunk-index order.
+    /// Per-frame `timestamp_s` values, the in-order concatenation of the
+    /// batch's per-chunk vectors, applied to the metadata accumulator at
+    /// finalise in chunk-index order.
     frame_timestamps_s: Vec<f64>,
-    /// Frame count carried by the chunk message.
+    /// Total frames covered by this entry: the sum over the batch's chunks.
     frame_count: u32,
-    /// This chunk's original frame dtype — stored per chunk (not once for the
-    /// whole trace) so each chunk's metadata entries get their own dtype even
+    /// The batch's original frame dtype — stored per batch (not once for the
+    /// whole trace) so each batch's metadata entries get their own dtype even
     /// if it somehow differs between chunks of one trace.
     dtype: FrameDtype,
 }
 
-/// Outcome of one background chunk-encode task.
-struct ChunkEncodeJobResult {
-    chunk_index: u32,
-    /// `Ok(CompletedChunk)` on success; `Err` is logged and the trace marked
-    /// failed by the polling path.
-    outcome: Result<CompletedChunk, VideoEncodeError>,
+/// Outcome of one background encode worker.
+enum EncodeWorkerOutcome {
+    /// One batch encoded; `chunk_index` is the batch's first index.
+    Completed {
+        chunk_index: u32,
+        completed: CompletedChunk,
+    },
+    /// The worker found the queue empty: an earlier worker's batch already
+    /// covered its chunk. Both reaping paths reap this silently.
+    NoOp,
+    /// The batch failed; the reaping path logs the error and marks the trace
+    /// failed. The batch's relinked NUTs stay on disk for the recovery sweep.
+    Failed {
+        chunk_index: u32,
+        error: VideoEncodeError,
+    },
 }
 
 /// Run the per-trace actor until the dispatcher closes the inbox or sends a
@@ -597,9 +675,11 @@ impl ActorState {
         }
     }
 
-    /// Handle one finished NUT chunk: transcode it to per-chunk MP4 segments,
-    /// append the segment paths to the pending list for the finalise concat,
-    /// and unlink the source NUT.
+    /// Handle one finished NUT chunk: enqueue it and spawn a worker. The
+    /// worker that wins an ffmpeg permit drains up to
+    /// [`ENCODE_BATCH_MAX_CHUNKS`] queued chunks and transcodes them as one
+    /// batch, then unlinks the source NUTs. When the encoder keeps pace the
+    /// queue holds one chunk, so batches form only under backlog.
     #[allow(clippy::too_many_arguments)]
     async fn handle_video(
         &mut self,
@@ -615,9 +695,6 @@ impl ActorState {
     ) {
         let trace_dir = self.trace_directory(context);
         let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
-        let raw_nut = chunks_dir.join(paths::chunk_filename(chunk_index));
-        let lossy_segment = trace_dir.join(paths::chunk_lossy_filename(chunk_index));
-        let lossless_segment = trace_dir.join(paths::chunk_lossless_filename(chunk_index));
 
         // Allocate the video writer on the first chunk and mark the trace
         // `writing` so the registration coordinator can observe lifecycle
@@ -639,6 +716,8 @@ impl ActorState {
                 codec,
                 completed_chunks: BTreeMap::new(),
                 pending_encodes: JoinSet::new(),
+                encode_queue: Arc::new(Mutex::new(VecDeque::new())),
+                unencoded_chunks: Arc::new(AtomicUsize::new(0)),
             };
         }
 
@@ -672,140 +751,47 @@ impl ActorState {
         let TraceWriterKind::Video {
             pending_encodes,
             codec,
+            encode_queue,
+            unencoded_chunks,
             ..
         } = &mut self.writer
         else {
             // Should be unreachable — we just allocated the writer above.
             return;
         };
-        let codec = *codec;
 
-        // Spawn the encode as a background task. The actor returns to the
-        // inbox immediately so a slow ffmpeg invocation cannot back-pressure
-        // unrelated joint / scalar publishers sharing the commands service.
-        let permits = context.ffmpeg_permits.clone();
-        let permit_total = context.ffmpeg_permit_total;
-        let encode_cores = context.encode_cores;
-        let encoder = context.video_encoder.clone();
-        let trace_id = self.identity.trace_id.clone();
-        let chunks_dir_for_task = chunks_dir.clone();
-        let request = ChunkEncodeRequest {
-            raw_nut: raw_nut.clone(),
-            lossy_out: lossy_segment.clone(),
-            lossless_out: lossless_segment.clone(),
-            codec,
-            frame_count,
+        // Enqueue the chunk, then spawn a worker as a background task. The
+        // actor returns to the inbox immediately so a slow ffmpeg invocation
+        // cannot back-pressure unrelated joint / scalar publishers sharing the
+        // commands service. A worker is not tied to "its" chunk: whichever one
+        // wins a permit drains the queue front, so it may encode several
+        // chunks or none.
+        encode_queue
+            .lock()
+            .expect("encode queue lock")
+            .push_back(QueuedChunk {
+                chunk_index,
+                spool_nut,
+                byte_count,
+                frame_count,
+                frame_timestamps_s,
+                dtype,
+            });
+        unencoded_chunks.fetch_add(1, Ordering::Relaxed);
+
+        let worker = EncodeWorker {
+            permits: context.ffmpeg_permits.clone(),
+            permit_total: context.ffmpeg_permit_total,
+            encode_cores: context.encode_cores,
+            encoder: context.video_encoder.clone(),
+            trace_id: self.identity.trace_id.clone(),
+            trace_dir,
+            chunks_dir,
+            codec: *codec,
+            queue: Arc::clone(encode_queue),
+            unencoded_chunks: Arc::clone(unencoded_chunks),
         };
-        pending_encodes.spawn(async move {
-            // Acquire a permit before relinking + encoding. Gating the relink
-            // (which frees the producer's on-disk spool) on a permit is
-            // deliberate: it makes the fixed spool cap the backstop that bounds
-            // the un-encoded backlog. When the encoder can't keep up, chunks stay
-            // in the spool until a permit frees, the spool fills, and the
-            // *producer* back-pressures — rather than the daemon-side chunks dir
-            // growing without bound. Adaptive threading (below) keeps the encoder
-            // fast enough that this backstop rarely engages. Clone the `Arc` for
-            // the (consuming) acquire so `permits` stays live for the
-            // `available_permits()` read below.
-            let permit = match permits.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    return ChunkEncodeJobResult {
-                        chunk_index,
-                        outcome: Err(VideoEncodeError::Spawn {
-                            binary: std::ffi::OsString::from("ffmpeg"),
-                            source: std::io::Error::other("ffmpeg permit pool closed"),
-                        }),
-                    };
-                }
-            };
-            // Relink the producer-spooled NUT into the recording's chunks dir
-            // here rather than on the dispatcher's routing path. The `rename`
-            // (and `mkdir`) are filesystem metadata ops that can stall behind an
-            // ext4 journal commit on the shared spool, so we run them on a
-            // blocking thread — off both the dispatcher and the runtime workers.
-            let relink = {
-                let spool = spool_nut.clone();
-                let dest = request.raw_nut.clone();
-                let chunks = chunks_dir_for_task.clone();
-                tokio::task::spawn_blocking(move || relink_nut(&spool, &chunks, &dest)).await
-            };
-            match relink {
-                Ok(Ok(())) => {}
-                Ok(Err(source)) => {
-                    return ChunkEncodeJobResult {
-                        chunk_index,
-                        outcome: Err(VideoEncodeError::Io {
-                            path: spool_nut.clone(),
-                            source,
-                        }),
-                    };
-                }
-                Err(join_error) => {
-                    return ChunkEncodeJobResult {
-                        chunk_index,
-                        outcome: Err(VideoEncodeError::Spawn {
-                            binary: std::ffi::OsString::from("relink"),
-                            source: std::io::Error::other(format!(
-                                "relink task join failed: {join_error}"
-                            )),
-                        }),
-                    };
-                }
-            }
-            // Size this encode's thread pool to the cores the rest of the fleet
-            // isn't using: with the permit held, `available_permits()` is the
-            // idle capacity, so `total - available` is how many encodes (incl.
-            // this one) are running now. Read after acquiring so we count
-            // ourselves.
-            let active_encodes = permit_total.saturating_sub(permits.available_permits());
-            let encode_threads = adaptive_encode_threads(encode_cores, active_encodes);
-            let outcome = encoder.encode_chunk(&request, encode_threads).await;
-            drop(permit);
-            match outcome {
-                Ok(encode) => {
-                    // Drop the source NUT chunk now that both segments are
-                    // sealed. Failure to unlink leaves the file for the
-                    // recovery sweep to collect.
-                    if let Err(error) = std::fs::remove_file(&request.raw_nut) {
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            tracing::warn!(
-                                %error,
-                                trace_id = %trace_id,
-                                chunk_index,
-                                path = %request.raw_nut.display(),
-                                "failed to remove source NUT chunk after encode"
-                            );
-                        }
-                    }
-                    let segment_bytes = encode.lossy_bytes.saturating_add(encode.lossless_bytes);
-                    tracing::debug!(
-                        trace_id = %trace_id,
-                        chunk_index,
-                        frame_count,
-                        byte_count,
-                        lossy_bytes = encode.lossy_bytes,
-                        lossless_bytes = encode.lossless_bytes,
-                        "video chunk encoded"
-                    );
-                    ChunkEncodeJobResult {
-                        chunk_index,
-                        outcome: Ok(CompletedChunk {
-                            lossy_segment: request.lossy_out,
-                            lossless_segment: request.lossless_out,
-                            bytes: segment_bytes,
-                            frame_timestamps_s,
-                            frame_count,
-                            dtype,
-                        }),
-                    }
-                }
-                Err(error) => ChunkEncodeJobResult {
-                    chunk_index,
-                    outcome: Err(error),
-                },
-            }
-        });
+        pending_encodes.spawn(worker.run(chunk_index));
 
         // Stamp `writing` on the first chunk so the registration coordinator
         // sees the trace's lifecycle moving forward without waiting for the
@@ -832,22 +818,24 @@ impl ActorState {
         let mut new_frames: u64 = 0;
         while let Some(joined) = pending_encodes.try_join_next() {
             match joined {
-                Ok(result) => match result.outcome {
-                    Ok(completed) => {
-                        new_bytes = new_bytes.saturating_add(completed.bytes);
-                        new_frames = new_frames.saturating_add(completed.frame_count as u64);
-                        completed_chunks.insert(result.chunk_index, completed);
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            trace_id = self.identity.trace_id,
-                            chunk_index = result.chunk_index,
-                            "failed to encode video chunk"
-                        );
-                        any_failure = true;
-                    }
-                },
+                Ok(EncodeWorkerOutcome::Completed {
+                    chunk_index,
+                    completed,
+                }) => {
+                    new_bytes = new_bytes.saturating_add(completed.bytes);
+                    new_frames = new_frames.saturating_add(completed.frame_count as u64);
+                    completed_chunks.insert(chunk_index, completed);
+                }
+                Ok(EncodeWorkerOutcome::NoOp) => {}
+                Ok(EncodeWorkerOutcome::Failed { chunk_index, error }) => {
+                    tracing::warn!(
+                        %error,
+                        trace_id = self.identity.trace_id,
+                        chunk_index,
+                        "failed to encode video chunk batch"
+                    );
+                    any_failure = true;
+                }
                 Err(join_error) => {
                     tracing::warn!(
                         %join_error,
@@ -970,9 +958,13 @@ impl ActorState {
                 codec,
                 mut completed_chunks,
                 mut pending_encodes,
+                encode_queue: _,
+                unencoded_chunks,
             } => {
                 let encode_started = Instant::now();
-                let pending_encode_count = pending_encodes.len();
+                // Un-encoded chunks, not worker tasks: the queue length plus
+                // the chunks covered by in-flight batches.
+                let pending_encode_count = unencoded_chunks.load(Ordering::Relaxed);
                 crate::perf_events::emit(
                     "video_encoding",
                     "started",
@@ -985,13 +977,22 @@ impl ActorState {
                         "already_completed_chunks": completed_chunks.len(),
                     }),
                 );
-                // Drain every still-running encode. A failure here is
-                // terminal — without a complete chunk set the concat would
-                // produce a video with a missing range, which is worse than
-                // marking the trace failed.
+                // Drain every still-running encode worker; a no-op worker
+                // reaps silently. A failure here is terminal — without a
+                // complete chunk set the concat would produce a video with a
+                // missing range, which is worse than marking the trace failed.
                 while let Some(joined) = pending_encodes.join_next().await {
-                    let result = match joined {
-                        Ok(result) => result,
+                    match joined {
+                        Ok(EncodeWorkerOutcome::Completed {
+                            chunk_index,
+                            completed,
+                        }) => {
+                            completed_chunks.insert(chunk_index, completed);
+                        }
+                        Ok(EncodeWorkerOutcome::NoOp) => {}
+                        Ok(EncodeWorkerOutcome::Failed { error, .. }) => {
+                            return Err(error.into());
+                        }
                         Err(join_error) => {
                             return Err(FrameAppendError::VideoEncode(VideoEncodeError::Spawn {
                                 binary: std::ffi::OsString::from("ffmpeg"),
@@ -1000,9 +1001,7 @@ impl ActorState {
                                 )),
                             }))
                         }
-                    };
-                    let completed = result.outcome?;
-                    completed_chunks.insert(result.chunk_index, completed);
+                    }
                 }
                 // The running total is only bumped by `drain_completed_encodes`,
                 // which misses encodes that finish here, at window close.
@@ -1083,6 +1082,9 @@ impl ActorState {
                 // bounded by an ffmpeg permit so a tail-stitch storm
                 // doesn't fork-bomb the host.
                 let concat_started = Instant::now();
+                // `chunks` counts encoded segments, one per batch, which
+                // equals the trace's chunk count only when the encoder kept
+                // pace. Integration reporting reads the field by this name.
                 crate::perf_events::emit(
                     "video_concatenation",
                     "started",
@@ -1217,6 +1219,251 @@ impl ActorState {
     }
 }
 
+/// Everything one spawned encode worker carries: the shared permit pool and
+/// chunk queue plus the per-trace paths and codec its batch encode needs.
+struct EncodeWorker {
+    permits: Arc<Semaphore>,
+    permit_total: usize,
+    encode_cores: usize,
+    encoder: VideoEncoder,
+    trace_id: String,
+    trace_dir: PathBuf,
+    chunks_dir: PathBuf,
+    codec: LossyVideoCodec,
+    queue: Arc<Mutex<VecDeque<QueuedChunk>>>,
+    unencoded_chunks: Arc<AtomicUsize>,
+}
+
+impl EncodeWorker {
+    /// Wait for an ffmpeg permit, then drain and encode one batch from the
+    /// queue front. `arrival_index` is the chunk whose arrival spawned this
+    /// worker; it is the `chunk_index` reported when the permit pool closes
+    /// before any batch is drained.
+    async fn run(self, arrival_index: u32) -> EncodeWorkerOutcome {
+        // Acquire a permit before relinking + encoding. Gating the relink
+        // (which frees the producer's on-disk spool) on a permit is
+        // deliberate: it makes the fixed spool cap the backstop that bounds
+        // the un-encoded backlog. When the encoder can't keep up, chunks stay
+        // in the spool until a permit frees, the spool fills, and the
+        // *producer* back-pressures — rather than the daemon-side chunks dir
+        // growing without bound. Adaptive threading (below) keeps the encoder
+        // fast enough that this backstop rarely engages. Clone the `Arc` for
+        // the (consuming) acquire so `permits` stays live for the
+        // `available_permits()` read below.
+        let permit = match self.permits.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => {
+                return EncodeWorkerOutcome::Failed {
+                    chunk_index: arrival_index,
+                    error: VideoEncodeError::Spawn {
+                        binary: std::ffi::OsString::from("ffmpeg"),
+                        source: std::io::Error::other("ffmpeg permit pool closed"),
+                    },
+                };
+            }
+        };
+        let batch = drain_encode_batch(&mut self.queue.lock().expect("encode queue lock"));
+        if batch.is_empty() {
+            // An earlier worker's batch already covered this arrival's chunk.
+            return EncodeWorkerOutcome::NoOp;
+        }
+        let batch_len = batch.len();
+        let outcome = self.encode_batch(batch).await;
+        // The drained chunks stop counting as un-encoded once their batch
+        // has an outcome, success or failure alike.
+        self.unencoded_chunks
+            .fetch_sub(batch_len, Ordering::Relaxed);
+        drop(permit);
+        outcome
+    }
+
+    /// Relink and encode one drained batch, then unlink its NUTs on success.
+    /// A failed batch leaves every relinked NUT on disk for the recovery
+    /// sweep.
+    async fn encode_batch(&self, batch: Vec<QueuedChunk>) -> EncodeWorkerOutcome {
+        let first_index = batch[0].chunk_index;
+        let dtype = batch[0].dtype;
+        let raw_nuts: Vec<PathBuf> = batch
+            .iter()
+            .map(|chunk| {
+                self.chunks_dir
+                    .join(paths::chunk_filename(chunk.chunk_index))
+            })
+            .collect();
+
+        // Relink every producer-spooled NUT into the recording's chunks dir
+        // here rather than on the dispatcher's routing path. The `rename`
+        // (and `mkdir`) are filesystem metadata ops that can stall behind an
+        // ext4 journal commit on the shared spool, so we run them on a
+        // blocking thread — off both the dispatcher and the runtime workers.
+        let relink = {
+            let spools: Vec<PathBuf> = batch.iter().map(|chunk| chunk.spool_nut.clone()).collect();
+            let destinations = raw_nuts.clone();
+            let chunks_dir = self.chunks_dir.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), (PathBuf, std::io::Error)> {
+                for (spool, dest) in spools.into_iter().zip(&destinations) {
+                    relink_nut(&spool, &chunks_dir, dest).map_err(|source| (spool, source))?;
+                }
+                Ok(())
+            })
+            .await
+        };
+        match relink {
+            Ok(Ok(())) => {}
+            Ok(Err((spool, source))) => {
+                return EncodeWorkerOutcome::Failed {
+                    chunk_index: first_index,
+                    error: VideoEncodeError::Io {
+                        path: spool,
+                        source,
+                    },
+                };
+            }
+            Err(join_error) => {
+                return EncodeWorkerOutcome::Failed {
+                    chunk_index: first_index,
+                    error: VideoEncodeError::Spawn {
+                        binary: std::ffi::OsString::from("relink"),
+                        source: std::io::Error::other(format!(
+                            "relink task join failed: {join_error}"
+                        )),
+                    },
+                };
+            }
+        }
+
+        // Each entry except the last declares the capture span to the next
+        // chunk's first frame, floored at the chunk's own PTS extent, so the
+        // concat demuxer lands every frame on its batch-relative capture
+        // timestamp and never rewinds at an overlapping announcement.
+        let inputs: Vec<BatchNutInput> = batch
+            .iter()
+            .zip(&raw_nuts)
+            .enumerate()
+            .map(|(position, (chunk, raw_nut))| BatchNutInput {
+                raw_nut: raw_nut.clone(),
+                span_to_next_us: batch
+                    .get(position + 1)
+                    .map(|next| queued_batch_span_us(chunk, next)),
+                frame_count: chunk.frame_count,
+            })
+            .collect();
+        let request = BatchEncodeRequest {
+            inputs,
+            lossy_out: self
+                .trace_dir
+                .join(paths::chunk_lossy_filename(first_index)),
+            lossless_out: self
+                .trace_dir
+                .join(paths::chunk_lossless_filename(first_index)),
+            codec: self.codec,
+        };
+
+        // Size this encode's thread pool to the cores the rest of the fleet
+        // isn't using: with the permit held, `available_permits()` is the
+        // idle capacity, so `total - available` is how many encodes (incl.
+        // this one) are running now. Read after acquiring so we count
+        // ourselves.
+        let active_encodes = self
+            .permit_total
+            .saturating_sub(self.permits.available_permits());
+        let encode_threads = adaptive_encode_threads(self.encode_cores, active_encodes);
+        match self
+            .encoder
+            .encode_chunk_batch(&request, encode_threads)
+            .await
+        {
+            Ok(encode) => {
+                // Drop the source NUT chunks now that the segments are sealed
+                // and verified non-empty. Failure to unlink leaves a file for
+                // the recovery sweep to collect.
+                for raw_nut in &raw_nuts {
+                    if let Err(error) = std::fs::remove_file(raw_nut) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                %error,
+                                trace_id = %self.trace_id,
+                                path = %raw_nut.display(),
+                                "failed to remove source NUT chunk after encode"
+                            );
+                        }
+                    }
+                }
+                let frame_count = batch.iter().map(|chunk| chunk.frame_count).sum::<u32>();
+                tracing::debug!(
+                    trace_id = %self.trace_id,
+                    first_chunk_index = first_index,
+                    batch_len = batch.len(),
+                    frame_count,
+                    byte_count = batch.iter().map(|chunk| chunk.byte_count).sum::<u64>(),
+                    lossy_bytes = encode.lossy_bytes,
+                    lossless_bytes = encode.lossless_bytes,
+                    "video chunk batch encoded"
+                );
+                let frame_timestamps_s: Vec<f64> = batch
+                    .into_iter()
+                    .flat_map(|chunk| chunk.frame_timestamps_s)
+                    .collect();
+                EncodeWorkerOutcome::Completed {
+                    chunk_index: first_index,
+                    completed: CompletedChunk {
+                        lossy_segment: request.lossy_out,
+                        lossless_segment: request.lossless_out,
+                        bytes: encode.lossy_bytes.saturating_add(encode.lossless_bytes),
+                        frame_timestamps_s,
+                        frame_count,
+                        dtype,
+                    },
+                }
+            }
+            Err(error) => EncodeWorkerOutcome::Failed {
+                chunk_index: first_index,
+                error,
+            },
+        }
+    }
+}
+
+/// The declared concat span from `chunk` to `next`, computed with the same
+/// helper that writes the batch `duration` lines. A next chunk that
+/// announced no frames borrows this chunk's first stamp, so the span floors
+/// to the chunk's own extent plus 1 us instead of indexing an empty vector.
+fn queued_batch_span_us(chunk: &QueuedChunk, next: &QueuedChunk) -> i64 {
+    let next_first_timestamp_s = next
+        .frame_timestamps_s
+        .first()
+        .or_else(|| chunk.frame_timestamps_s.first())
+        .copied()
+        .unwrap_or(0.0);
+    declared_batch_span_us(&chunk.frame_timestamps_s, next_first_timestamp_s)
+}
+
+/// Take up to [`ENCODE_BATCH_MAX_CHUNKS`] descriptors from the queue front,
+/// stopping early at a dtype change and before a chunk whose declared span
+/// exceeds [`ENCODE_BATCH_MAX_SPAN_US`]. A stopped-at chunk stays at the
+/// front for the worker its own arrival spawned.
+fn drain_encode_batch(queue: &mut VecDeque<QueuedChunk>) -> Vec<QueuedChunk> {
+    let mut batch: Vec<QueuedChunk> = Vec::new();
+    while batch.len() < ENCODE_BATCH_MAX_CHUNKS {
+        let Some(front) = queue.front() else { break };
+        if batch
+            .first()
+            .is_some_and(|first| first.dtype != front.dtype)
+        {
+            break;
+        }
+        if batch
+            .last()
+            .is_some_and(|last| queued_batch_span_us(last, front) > ENCODE_BATCH_MAX_SPAN_US)
+        {
+            break;
+        }
+        let chunk = queue.pop_front().expect("front exists");
+        batch.push(chunk);
+    }
+    batch
+}
+
 /// Errors that can surface while appending or finalising a frame. The variants
 /// are unified so `handle_data` / `finalise_trace` can log + mark-failed in
 /// one place regardless of which writer raised.
@@ -1289,6 +1536,20 @@ mod tests {
         root: &std::path::Path,
         store: Arc<SqliteStateStore>,
     ) -> Arc<TraceActorContext> {
+        test_context_with_permits(
+            root,
+            store,
+            Arc::new(Semaphore::new(default_ffmpeg_concurrency())),
+        )
+    }
+
+    /// As [`test_context`] but with an explicit ffmpeg permit pool, so the
+    /// batching tests can hold the only permit to force a queue backlog.
+    fn test_context_with_permits(
+        root: &std::path::Path,
+        store: Arc<SqliteStateStore>,
+        ffmpeg_permits: Arc<Semaphore>,
+    ) -> Arc<TraceActorContext> {
         let policy = StoragePolicy {
             storage_limit_bytes: None,
             min_free_disk_bytes: 0,
@@ -1297,10 +1558,11 @@ mod tests {
         let budget = Arc::new(StorageBudget::new(root, policy));
         let (trace_writer, _writer_owner) = crate::state::trace_event_database_writer::spawn(store);
         let (json_writer, _json_owner) = crate::pipeline::json_writer::spawn();
-        Arc::new(TraceActorContext::new(
+        Arc::new(TraceActorContext::with_ffmpeg_permits(
             root.to_path_buf(),
             budget,
             VideoEncoder::new(),
+            ffmpeg_permits,
             trace_writer,
             json_writer,
         ))
@@ -1318,13 +1580,40 @@ mod tests {
     }
 
     fn ffmpeg_available() -> bool {
-        std::process::Command::new("ffmpeg")
+        binary_available("ffmpeg")
+    }
+
+    fn binary_available(name: &str) -> bool {
+        std::process::Command::new(name)
             .arg("-version")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    /// Frames ffprobe decodes out of `video`.
+    fn probed_frame_count(video: &std::path::Path) -> usize {
+        let probe = std::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_frames",
+                "-show_entries",
+                "stream=nb_read_frames",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+            ])
+            .arg(video)
+            .output()
+            .expect("spawn ffprobe");
+        String::from_utf8_lossy(&probe.stdout)
+            .trim()
+            .parse()
+            .expect("frame count")
     }
 
     #[test]
@@ -1705,5 +1994,584 @@ mod tests {
             TraceWriteStatus::Written,
             "a cancelled trace is never finalised as Written"
         );
+    }
+
+    /// Write a spool NUT chunk with the real producer NUT writer: one 16x16
+    /// RGB frame per entry of `frame_pts_us` (chunk-relative microsecond
+    /// ticks; the producer re-anchors every chunk's first frame near 0).
+    fn write_nut_chunk(path: &std::path::Path, frame_pts_us: &[u64]) {
+        use data_daemon_bridge::nut_writer::{NutVideoConfig, NutWriter};
+        let rgb = vec![128u8; 16 * 16 * 3];
+        let mut writer = NutWriter::create(
+            path,
+            NutVideoConfig {
+                width: 16,
+                height: 16,
+                time_base_num: 1,
+                time_base_den: 1_000_000,
+            },
+        )
+        .expect("create NUT");
+        for pts in frame_pts_us {
+            writer.write_frame(*pts, &rgb).expect("write frame");
+        }
+        writer.finish().expect("finish NUT");
+    }
+
+    /// Spool one chunk whose frames sit at the given batch-absolute capture
+    /// microseconds, then hand it to the actor as a `Video` message.
+    async fn send_video_chunk(
+        state: &mut ActorState,
+        context: &Arc<TraceActorContext>,
+        spool_dir: &std::path::Path,
+        chunk_index: u32,
+        capture_us: &[i64],
+        dtype: FrameDtype,
+    ) {
+        send_cut_video_chunk(
+            state,
+            context,
+            spool_dir,
+            chunk_index,
+            capture_us,
+            capture_us.len() as u32,
+            dtype,
+        )
+        .await;
+    }
+
+    /// As [`send_video_chunk`], for a chunk the dispatcher cut at a recording
+    /// boundary: the NUT holds every frame in `capture_us` but the
+    /// announcement owns only the leading `owned_frames` of them.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_cut_video_chunk(
+        state: &mut ActorState,
+        context: &Arc<TraceActorContext>,
+        spool_dir: &std::path::Path,
+        chunk_index: u32,
+        capture_us: &[i64],
+        owned_frames: u32,
+        dtype: FrameDtype,
+    ) {
+        let spool_nut = spool_dir.join(format!("spool_chunk_{chunk_index}.nut"));
+        let chunk_origin = capture_us[0];
+        let relative_pts: Vec<u64> = capture_us
+            .iter()
+            .map(|us| (us - chunk_origin) as u64)
+            .collect();
+        write_nut_chunk(&spool_nut, &relative_pts);
+        let byte_count = spool_nut.metadata().unwrap().len();
+        let frame_timestamps_s: Vec<f64> = capture_us
+            .iter()
+            .take(owned_frames as usize)
+            .map(|us| *us as f64 / 1e6)
+            .collect();
+        state
+            .handle_video(
+                context,
+                chunk_index,
+                spool_nut,
+                16,
+                16,
+                byte_count,
+                owned_frames,
+                frame_timestamps_s,
+                dtype,
+            )
+            .await;
+    }
+
+    /// Poll `drain_completed_encodes` until every spawned worker is reaped.
+    /// Returns whether any worker reported a failure.
+    async fn drain_all_pending(state: &mut ActorState, context: &Arc<TraceActorContext>) -> bool {
+        let mut any_failure = false;
+        for _ in 0..600 {
+            any_failure |= state.drain_completed_encodes(context);
+            let remaining = match &state.writer {
+                TraceWriterKind::Video {
+                    pending_encodes, ..
+                } => pending_encodes.len(),
+                _ => 0,
+            };
+            if remaining == 0 {
+                return any_failure;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("encode workers did not finish in time");
+    }
+
+    #[test]
+    fn drain_stops_at_dtype_change_and_batch_cap() {
+        fn queued(chunk_index: u32, dtype: FrameDtype) -> QueuedChunk {
+            QueuedChunk {
+                chunk_index,
+                spool_nut: PathBuf::from("unused.nut"),
+                byte_count: 0,
+                frame_count: 1,
+                frame_timestamps_s: vec![0.0],
+                dtype,
+            }
+        }
+        fn indices(batch: &[QueuedChunk]) -> Vec<u32> {
+            batch.iter().map(|chunk| chunk.chunk_index).collect()
+        }
+
+        // A dtype change stops the drain so one batch spans one dtype.
+        let mut queue: VecDeque<QueuedChunk> = [
+            queued(0, FrameDtype::Rgb8),
+            queued(1, FrameDtype::Rgb8),
+            queued(2, FrameDtype::DepthF16),
+            queued(3, FrameDtype::Rgb8),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![0, 1]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![2]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![3]);
+        assert!(queue.is_empty());
+
+        // The batch cap bounds a same-dtype drain.
+        let mut queue: VecDeque<QueuedChunk> = (0..10)
+            .map(|index| queued(index, FrameDtype::Rgb8))
+            .collect();
+        let batch = drain_encode_batch(&mut queue);
+        assert_eq!(batch.len(), ENCODE_BATCH_MAX_CHUNKS);
+        assert_eq!(indices(&batch), (0..8).collect::<Vec<u32>>());
+        assert_eq!(queue.len(), 2);
+
+        // An empty queue yields an empty (no-op) batch.
+        assert!(drain_encode_batch(&mut VecDeque::new()).is_empty());
+    }
+
+    #[test]
+    fn drain_stops_before_a_chunk_past_the_span_cap() {
+        fn queued(chunk_index: u32, frame_capture_us: &[i64]) -> QueuedChunk {
+            QueuedChunk {
+                chunk_index,
+                spool_nut: PathBuf::from("unused.nut"),
+                byte_count: 0,
+                frame_count: frame_capture_us.len() as u32,
+                frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
+                dtype: FrameDtype::Rgb8,
+            }
+        }
+        fn indices(batch: &[QueuedChunk]) -> Vec<u32> {
+            batch.iter().map(|chunk| chunk.chunk_index).collect()
+        }
+
+        // Chunk 1 starts exactly one cap after chunk 0 (span == cap stays in
+        // the batch). Chunk 2's declared span from chunk 1 exceeds the cap
+        // by 1 us, so it stays at the queue front for its own worker; the
+        // drain resumes normally from it.
+        let cap_us = ENCODE_BATCH_MAX_SPAN_US;
+        let mut queue: VecDeque<QueuedChunk> = [
+            queued(0, &[0, 16_683]),
+            queued(1, &[cap_us, cap_us + 16_683]),
+            queued(2, &[2 * cap_us + 1]),
+            queued(3, &[2 * cap_us + 1 + 16_683]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![0, 1]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![2, 3]);
+        assert!(queue.is_empty());
+
+        // A chunk that announced no frames contributes extent zero: its span
+        // floors to 1 us, so it never splits the batch and never panics.
+        let mut queue: VecDeque<QueuedChunk> = [
+            queued(0, &[0, 16_683]),
+            queued(1, &[]),
+            queued(2, &[33_366]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![0, 1, 2]);
+    }
+
+    #[tokio::test]
+    async fn batched_backlog_produces_one_completed_chunk_keyed_by_first_index() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping batch accounting test.");
+            return;
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let permits = Arc::new(Semaphore::new(1));
+        let context = test_context_with_permits(
+            &tempdir.path().join("recordings"),
+            store_arc.clone(),
+            permits.clone(),
+        );
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+
+        let mut state = ActorState::new(identity(1, "trace-batch", "RGB_IMAGES"));
+        state.send_create(&context);
+
+        // Hold the only permit while three chunks arrive so every worker
+        // blocks, then release: the first worker drains all three as one
+        // batch and the other two must no-op.
+        let gate = permits.clone().acquire_owned().await.unwrap();
+        let chunks: [Vec<i64>; 3] = [vec![0, 16_683], vec![33_366, 50_049], vec![66_732, 83_415]];
+        for (chunk_index, capture_us) in chunks.iter().enumerate() {
+            send_video_chunk(
+                &mut state,
+                &context,
+                &spool_dir,
+                chunk_index as u32,
+                capture_us,
+                FrameDtype::Rgb8,
+            )
+            .await;
+        }
+        drop(gate);
+
+        let any_failure = drain_all_pending(&mut state, &context).await;
+        assert!(!any_failure, "the batch must encode cleanly");
+
+        let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-batch")
+            .directory(context.recordings_root.as_path());
+        let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
+        {
+            let TraceWriterKind::Video {
+                completed_chunks,
+                unencoded_chunks,
+                ..
+            } = &state.writer
+            else {
+                panic!("video writer expected");
+            };
+            assert_eq!(completed_chunks.len(), 1, "one CompletedChunk per batch");
+            let (first_index, completed) = completed_chunks.iter().next().unwrap();
+            assert_eq!(*first_index, 0, "the batch is keyed by its first index");
+            assert_eq!(completed.frame_count, 6, "frame_count is the batch sum");
+            let expected_timestamps: Vec<f64> =
+                chunks.iter().flatten().map(|us| *us as f64 / 1e6).collect();
+            assert_eq!(
+                completed.frame_timestamps_s, expected_timestamps,
+                "timestamps concatenate in chunk order"
+            );
+            assert_eq!(
+                completed.lossy_segment,
+                trace_dir.join(paths::chunk_lossy_filename(0))
+            );
+            assert!(completed.lossy_segment.exists());
+            assert!(completed.lossless_segment.exists());
+            assert_eq!(
+                unencoded_chunks.load(Ordering::Relaxed),
+                0,
+                "no chunk is left un-encoded"
+            );
+        }
+        // The covered indices produce no segments of their own, and every
+        // batched NUT is unlinked after the outputs verified non-empty.
+        assert!(!trace_dir.join(paths::chunk_lossy_filename(1)).exists());
+        assert!(!trace_dir.join(paths::chunk_lossy_filename(2)).exists());
+        for chunk_index in 0..3u32 {
+            assert!(!chunks_dir.join(paths::chunk_filename(chunk_index)).exists());
+        }
+
+        // The finalise concat consumes the batch segment unchanged.
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
+        assert!(trace_dir.join(paths::LOSSY_VIDEO_FILENAME).exists());
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(trace_dir.join(paths::TRACE_JSON_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar.as_array().unwrap().len(), 6);
+        let trace = store.get_trace("trace-batch").await.unwrap().unwrap();
+        assert_eq!(trace.write_status, TraceWriteStatus::Written);
+    }
+
+    #[tokio::test]
+    async fn batch_stops_at_the_frames_the_recording_owns() {
+        if !ffmpeg_available() || !binary_available("ffprobe") {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping batch frame-cap test.");
+            return;
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let permits = Arc::new(Semaphore::new(1));
+        let context = test_context_with_permits(
+            &tempdir.path().join("recordings"),
+            store_arc.clone(),
+            permits.clone(),
+        );
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+
+        let mut state = ActorState::new(identity(1, "trace-cut", "RGB_IMAGES"));
+        state.send_create(&context);
+
+        // The dispatcher cuts the trace's last chunk at the recording stop, so
+        // the batch must encode two frames of chunk 0 and one of chunk 1.
+        let gate = permits.clone().acquire_owned().await.unwrap();
+        send_video_chunk(
+            &mut state,
+            &context,
+            &spool_dir,
+            0,
+            &[0, 16_683],
+            FrameDtype::Rgb8,
+        )
+        .await;
+        send_cut_video_chunk(
+            &mut state,
+            &context,
+            &spool_dir,
+            1,
+            &[33_366, 50_049, 66_732],
+            1,
+            FrameDtype::Rgb8,
+        )
+        .await;
+        drop(gate);
+
+        let any_failure = drain_all_pending(&mut state, &context).await;
+        assert!(!any_failure, "the batch must encode cleanly");
+
+        let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-cut")
+            .directory(context.recordings_root.as_path());
+        let TraceWriterKind::Video {
+            completed_chunks, ..
+        } = &state.writer
+        else {
+            panic!("video writer expected");
+        };
+        let completed = completed_chunks.values().next().expect("one batch");
+        assert_eq!(
+            completed.frame_count, 3,
+            "the cut chunk contributes only the frames it owns"
+        );
+        assert_eq!(
+            probed_frame_count(&completed.lossy_segment),
+            3,
+            "the lossy segment must not outrun the sidecar"
+        );
+        assert_eq!(
+            probed_frame_count(&completed.lossless_segment),
+            3,
+            "the lossless segment must stop at the same cut"
+        );
+        assert!(trace_dir.exists());
+    }
+
+    #[tokio::test]
+    async fn racing_worker_noop_is_reaped_silently_at_finalise() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping worker racing test.");
+            return;
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let permits = Arc::new(Semaphore::new(1));
+        let context = test_context_with_permits(
+            &tempdir.path().join("recordings"),
+            store_arc.clone(),
+            permits.clone(),
+        );
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+
+        let mut state = ActorState::new(identity(1, "trace-race", "RGB_IMAGES"));
+        state.send_create(&context);
+
+        // Two workers race for one queued backlog: the first drains both
+        // chunks, the second finds the queue empty and must no-op. Finalise
+        // reaps both without treating the no-op as an error or a chunk.
+        let gate = permits.clone().acquire_owned().await.unwrap();
+        send_video_chunk(
+            &mut state,
+            &context,
+            &spool_dir,
+            0,
+            &[0, 16_683],
+            FrameDtype::Rgb8,
+        )
+        .await;
+        send_video_chunk(
+            &mut state,
+            &context,
+            &spool_dir,
+            1,
+            &[33_366, 50_049],
+            FrameDtype::Rgb8,
+        )
+        .await;
+        drop(gate);
+        state.finalise_trace(&context).await;
+        context.trace_writer.flush().await;
+
+        let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-race")
+            .directory(context.recordings_root.as_path());
+        assert!(trace_dir.join(paths::LOSSY_VIDEO_FILENAME).exists());
+        // Four sidecar entries: each frame encoded exactly once.
+        let sidecar: Value = serde_json::from_slice(
+            &std::fs::read(trace_dir.join(paths::TRACE_JSON_FILENAME)).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(sidecar.as_array().unwrap().len(), 4);
+        let trace = store.get_trace("trace-race").await.unwrap().unwrap();
+        assert_eq!(
+            trace.write_status,
+            TraceWriteStatus::Written,
+            "a no-op worker must not fail the trace"
+        );
+    }
+
+    #[tokio::test]
+    async fn corrupt_nut_in_batch_marks_trace_failed_and_leaves_nuts() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping batch failure test.");
+            return;
+        }
+
+        let tempdir = TempDir::new().unwrap();
+        let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+            .await
+            .expect("open store");
+        let store_arc = Arc::new(store.clone());
+        let permits = Arc::new(Semaphore::new(1));
+        let context = test_context_with_permits(
+            &tempdir.path().join("recordings"),
+            store_arc.clone(),
+            permits.clone(),
+        );
+        let spool_dir = tempdir.path().join("spool");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+
+        let mut state = ActorState::new(identity(1, "trace-bad", "RGB_IMAGES"));
+        state.send_create(&context);
+
+        let gate = permits.clone().acquire_owned().await.unwrap();
+        send_video_chunk(
+            &mut state,
+            &context,
+            &spool_dir,
+            0,
+            &[0, 16_683],
+            FrameDtype::Rgb8,
+        )
+        .await;
+        // A corrupt second chunk poisons the whole batch invocation.
+        let corrupt_nut = spool_dir.join("spool_chunk_1.nut");
+        std::fs::write(&corrupt_nut, b"not a nut container").unwrap();
+        state
+            .handle_video(
+                &context,
+                1,
+                corrupt_nut,
+                16,
+                16,
+                19,
+                2,
+                vec![0.1, 0.116683],
+                FrameDtype::Rgb8,
+            )
+            .await;
+        drop(gate);
+
+        let any_failure = drain_all_pending(&mut state, &context).await;
+        assert!(any_failure, "the corrupt batch must surface as a failure");
+        context.trace_writer.flush().await;
+
+        let trace = store.get_trace("trace-bad").await.unwrap().unwrap();
+        assert_eq!(trace.write_status, TraceWriteStatus::Failed);
+
+        // Both relinked NUTs stay on disk for the recovery sweep.
+        let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-bad")
+            .directory(context.recordings_root.as_path());
+        let chunks_dir = trace_dir.join(paths::CHUNKS_DIRNAME);
+        assert!(chunks_dir.join(paths::chunk_filename(0)).exists());
+        assert!(chunks_dir.join(paths::chunk_filename(1)).exists());
+    }
+
+    #[tokio::test]
+    async fn single_chunk_batch_matches_todays_completed_chunk() {
+        if !ffmpeg_available() {
+            eprintln!("ffmpeg not on PATH — skipping single-chunk batch test.");
+            return;
+        }
+
+        for lossy_only in [false, true] {
+            let tempdir = TempDir::new().unwrap();
+            let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+                .await
+                .expect("open store");
+            let store_arc = Arc::new(store.clone());
+            let mut context = test_context(&tempdir.path().join("recordings"), store_arc.clone());
+            let _config_tx;
+            if lossy_only {
+                let (config_tx, config_rx) = watch::channel(DaemonConfig {
+                    video_codec: Some("h264_medium".to_string()),
+                    ..DaemonConfig::default()
+                });
+                _config_tx = config_tx;
+                context = Arc::new((*context).clone().with_config_rx(config_rx));
+            }
+            let spool_dir = tempdir.path().join("spool");
+            std::fs::create_dir_all(&spool_dir).unwrap();
+
+            let mut state = ActorState::new(identity(1, "trace-single", "RGB_IMAGES"));
+            state.send_create(&context);
+            let capture_us = [0i64, 16_683];
+            send_video_chunk(
+                &mut state,
+                &context,
+                &spool_dir,
+                0,
+                &capture_us,
+                FrameDtype::Rgb8,
+            )
+            .await;
+
+            let any_failure = drain_all_pending(&mut state, &context).await;
+            assert!(!any_failure, "the single-chunk batch must encode cleanly");
+
+            let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-single")
+                .directory(context.recordings_root.as_path());
+            {
+                let TraceWriterKind::Video {
+                    completed_chunks, ..
+                } = &state.writer
+                else {
+                    panic!("video writer expected");
+                };
+                assert_eq!(completed_chunks.len(), 1);
+                let completed = &completed_chunks[&0];
+                assert_eq!(completed.frame_count, 2);
+                assert_eq!(completed.frame_timestamps_s, vec![0.0, 0.016683]);
+                assert_eq!(
+                    completed.lossy_segment,
+                    trace_dir.join(paths::chunk_lossy_filename(0)),
+                    "segment names keep today's shape (lossy_only={lossy_only})"
+                );
+                assert!(completed.lossy_segment.exists());
+                assert_eq!(
+                    completed.lossless_segment.exists(),
+                    !lossy_only,
+                    "a lossless segment exists exactly when not lossy-only"
+                );
+            }
+
+            state.finalise_trace(&context).await;
+            context.trace_writer.flush().await;
+            let trace = store.get_trace("trace-single").await.unwrap().unwrap();
+            assert_eq!(trace.write_status, TraceWriteStatus::Written);
+        }
     }
 }

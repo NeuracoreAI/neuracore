@@ -105,12 +105,15 @@ pub fn chunk_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}.nut")
 }
 
-/// Build the filename for a per-chunk encoded lossy mp4 segment.
+/// Build the filename for an encoded lossy mp4 segment. A segment covers one
+/// encode batch and is named after the batch's first chunk index, so segment
+/// indices are not dense when the encoder batches under backlog.
 pub fn chunk_lossy_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}_lossy.mp4")
 }
 
-/// Build the filename for a per-chunk encoded lossless mp4 segment.
+/// Build the filename for an encoded lossless mp4 segment. Named after the
+/// batch's first chunk index, like the lossy segment.
 pub fn chunk_lossless_filename(chunk_index: u32) -> String {
     format!("chunk_{chunk_index:04}_lossless.mp4")
 }

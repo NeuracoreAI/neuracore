@@ -68,10 +68,12 @@ use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 ///
 /// Each chunk pays a fixed per-encode cost on the daemon side (~100-200 ms of
 /// ffmpeg fork+exec + libx264 init for two output codecs). 256 MiB keeps that
-/// fixed cost a small fraction of the per-chunk wall time. The threshold is
-/// checked *after* each frame, so the on-disk file can exceed it by at most
-/// one frame. A chunk is also rolled at every lifecycle event so a single NUT
-/// only ever holds frames from one recording window.
+/// fixed cost a small fraction of the per-chunk wall time. Under backlog the
+/// daemon batches several chunks into one ffmpeg invocation, which amortises
+/// that fixed cost further, but this sizing assumes the keep-pace case. The
+/// threshold is checked *after* each frame, so the on-disk file can exceed it
+/// by at most one frame. A chunk is also rolled at every lifecycle event so a
+/// single NUT only ever holds frames from one recording window.
 ///
 /// This byte threshold has a companion frame-count cap
 /// ([`MAX_VIDEO_CHUNK_FRAMES`]): a chunk is sealed at whichever bound is hit
