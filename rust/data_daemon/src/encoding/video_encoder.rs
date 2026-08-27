@@ -752,11 +752,14 @@ impl VideoEncoder {
     ///
     /// Uses ffmpeg's `concat` demuxer with `-c copy`, so no transcode
     /// happens — total cost is bounded by the read+write of the segment
-    /// bytes. Caller is responsible for unlinking the source segments after
-    /// the concat succeeds.
+    /// bytes. `spans_to_next_us` carries one declared capture span per
+    /// segment except the last (see [`write_concat_list`]), so each segment
+    /// stacks at its trace-relative capture offset instead of its probed
+    /// duration. Caller unlinks the source segments after the concat.
     pub async fn concat_segments(
         &self,
         segments: &[PathBuf],
+        spans_to_next_us: &[i64],
         out: &Path,
     ) -> Result<ConcatOutcome, VideoEncodeError> {
         if segments.is_empty() {
@@ -769,7 +772,7 @@ impl VideoEncoder {
         // can see exactly which segments were concatenated; the file is
         // unlinked on the success path so it doesn't accumulate.
         let list_path = list_file_for(out);
-        write_concat_list(&list_path, segments)?;
+        write_concat_list(&list_path, segments, spans_to_next_us)?;
 
         let result = Command::new(&self.binary)
             .arg("-y")
@@ -996,26 +999,56 @@ pub(crate) fn replayed_chunk_extent_us(frame_timestamps_s: &[f64]) -> i64 {
     last_pts_us.unwrap_or(0) as i64
 }
 
-/// Declared span for a batch entry: the capture span to the next chunk's
-/// first frame, floored at this chunk's content extent plus 1 us and capped
-/// at the extent plus [`MAX_BOUNDARY_DELTA_US`].
+/// Declared span from a chunk or encoded segment to the next: the capture
+/// span between their first announced stamps, floored at the given content
+/// extent plus 1 us and capped at the extent plus [`MAX_BOUNDARY_DELTA_US`].
 ///
 /// Without the floor, a backwards clock step at the boundary declares the
-/// next chunk inside this one's content and a B-frame encode stores
+/// next input inside this one's content and a B-frame encode stores
 /// backwards PTS; the floor degrades that to a 1 us ramp. A well-formed
 /// span already sits past the floor and passes through untouched.
-pub(crate) fn declared_batch_span_us(
+pub(crate) fn declared_span_with_extent_us(
     chunk_frame_timestamps_s: &[f64],
     next_first_timestamp_s: f64,
+    content_extent_us: i64,
 ) -> i64 {
-    let extent_us = replayed_chunk_extent_us(chunk_frame_timestamps_s);
     let span_us = match chunk_frame_timestamps_s.first() {
         Some(&first_timestamp_s) => declared_span_us(first_timestamp_s, next_first_timestamp_s),
         None => 0,
     };
     span_us
-        .max(extent_us + 1)
-        .min(extent_us + MAX_BOUNDARY_DELTA_US)
+        .max(content_extent_us + 1)
+        .min(content_extent_us + MAX_BOUNDARY_DELTA_US)
+}
+
+/// Declared span for a batch entry: [`declared_span_with_extent_us`] on the
+/// chunk's replayed content extent.
+pub(crate) fn declared_batch_span_us(
+    chunk_frame_timestamps_s: &[f64],
+    next_first_timestamp_s: f64,
+) -> i64 {
+    declared_span_with_extent_us(
+        chunk_frame_timestamps_s,
+        next_first_timestamp_s,
+        replayed_chunk_extent_us(chunk_frame_timestamps_s),
+    )
+}
+
+/// The real mp4 content extent of a batch-encoded segment, as the batch
+/// concat list dictated it to ffmpeg: every non-last chunk occupies its
+/// declared duration line, so the extent is the stacked spans plus the last
+/// chunk's replayed extent.
+///
+/// The finalise floor needs this rather than a replay over the batch's
+/// concatenated stamps, which can undershoot the real placement: the replay
+/// cannot see the writer's carried frame gap, and a small healthy boundary
+/// delta poisons its observed gap.
+pub(crate) fn batch_content_extent_us(
+    spans_to_next_us: &[i64],
+    last_chunk_frame_timestamps_s: &[f64],
+) -> i64 {
+    let stacked_spans_us: i64 = spans_to_next_us.iter().sum();
+    stacked_spans_us.saturating_add(replayed_chunk_extent_us(last_chunk_frame_timestamps_s))
 }
 
 /// Format a microsecond span as the exact decimal seconds a concat-list
@@ -1082,7 +1115,11 @@ fn list_file_for(out: &Path) -> PathBuf {
 
 /// Render the ffmpeg `concat` list-file format: one `file '...'` entry per
 /// segment, single-quoted with escaped embedded single quotes per the
-/// demuxer's own escape rule (`'` → `'\''`).
+/// demuxer's own escape rule (`'` → `'\''`). Every entry except the last is
+/// followed by its `duration` line from `spans_to_next_us`, which lands each
+/// frame on its trace-relative capture timestamp instead of accumulating
+/// per-segment probe drift. A single-segment list carries no `duration`
+/// line, keeping it byte-identical to the pre-directive shape.
 ///
 /// Relative segment paths are resolved against the current working directory
 /// before being written. ffmpeg's concat demuxer interprets `file '...'`
@@ -1092,17 +1129,30 @@ fn list_file_for(out: &Path) -> PathBuf {
 /// `recordings/rec/cam/trace/recordings/rec/cam/trace/chunk_0000.mp4` and
 /// fail to open. Absolutising on write side-steps that without forcing
 /// callers to pre-canonicalise.
-fn write_concat_list(path: &Path, segments: &[PathBuf]) -> Result<(), VideoEncodeError> {
+fn write_concat_list(
+    path: &Path,
+    segments: &[PathBuf],
+    spans_to_next_us: &[i64],
+) -> Result<(), VideoEncodeError> {
+    debug_assert_eq!(
+        spans_to_next_us.len(),
+        segments.len().saturating_sub(1),
+        "one declared span per segment except the last"
+    );
     let mut file = std::fs::File::create(path).map_err(|source| VideoEncodeError::Io {
         path: path.to_path_buf(),
         source,
     })?;
-    for segment in segments {
+    let write_error = |source| VideoEncodeError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    for (index, segment) in segments.iter().enumerate() {
         let line = concat_file_line(segment)?;
-        writeln!(file, "{line}").map_err(|source| VideoEncodeError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        writeln!(file, "{line}").map_err(write_error)?;
+        if let Some(span_us) = spans_to_next_us.get(index) {
+            writeln!(file, "duration {}", duration_directive(*span_us)).map_err(write_error)?;
+        }
     }
     Ok(())
 }
@@ -1358,7 +1408,7 @@ mod tests {
             PathBuf::from("/var/data/recordings/rec/cam/trace/chunks/chunk_0000.nut"),
             PathBuf::from("/var/data/rec'with quote/trace/chunks/chunk_0001.nut"),
         ];
-        write_concat_list(&list, &segments).expect("write list");
+        write_concat_list(&list, &segments, &[16_683]).expect("write list");
         let contents = std::fs::read_to_string(&list).unwrap();
         assert!(
             contents.contains("file '/var/data/recordings/rec/cam/trace/chunks/chunk_0000.nut'")
@@ -1379,7 +1429,7 @@ mod tests {
         let list = tempdir.path().join("list.txt");
         let cwd = std::env::current_dir().unwrap();
         let segments = vec![PathBuf::from("rel/chunk_0000.mp4")];
-        write_concat_list(&list, &segments).expect("write list");
+        write_concat_list(&list, &segments, &[]).expect("write list");
         let contents = std::fs::read_to_string(&list).unwrap();
         let expected = cwd.join("rel/chunk_0000.mp4");
         assert!(
@@ -1389,11 +1439,44 @@ mod tests {
     }
 
     #[test]
+    fn concat_list_emits_duration_lines_except_last() {
+        let tempdir = TempDir::new().unwrap();
+        let list = tempdir.path().join("list.txt");
+        let segments = vec![
+            PathBuf::from("/data/trace/chunk_0000_lossy.mp4"),
+            PathBuf::from("/data/trace/chunk_0001_lossy.mp4"),
+            PathBuf::from("/data/trace/chunk_0003_lossy.mp4"),
+        ];
+        write_concat_list(&list, &segments, &[16_683, MAX_BOUNDARY_DELTA_US]).expect("write list");
+        let contents = std::fs::read_to_string(&list).unwrap();
+        assert_eq!(
+            contents,
+            "file '/data/trace/chunk_0000_lossy.mp4'\n\
+             duration 0.016683\n\
+             file '/data/trace/chunk_0001_lossy.mp4'\n\
+             duration 2147.483646\n\
+             file '/data/trace/chunk_0003_lossy.mp4'\n"
+        );
+    }
+
+    #[test]
+    fn single_segment_concat_list_stays_byte_identical() {
+        // A single-segment trace carries no `duration` line: its list stays
+        // byte-identical to the pre-directive format.
+        let tempdir = TempDir::new().unwrap();
+        let list = tempdir.path().join("list.txt");
+        let segments = vec![PathBuf::from("/data/trace/chunk_0000_lossy.mp4")];
+        write_concat_list(&list, &segments, &[]).expect("write list");
+        let contents = std::fs::read_to_string(&list).unwrap();
+        assert_eq!(contents, "file '/data/trace/chunk_0000_lossy.mp4'\n");
+    }
+
+    #[test]
     fn concat_segments_rejects_empty_input() {
         let tempdir = TempDir::new().unwrap();
         let out = tempdir.path().join("out.mp4");
         // Sync wrapper so the test body isn't async for this trivial case.
-        let result = futures_block(VideoEncoder::new().concat_segments(&[], &out));
+        let result = futures_block(VideoEncoder::new().concat_segments(&[], &[], &out));
         assert!(matches!(result, Err(VideoEncodeError::EmptySegments)));
     }
 
@@ -1811,7 +1894,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let frames_per_chunk: i64 = 48;
         let rgb = vec![128u8; 16 * 16 * 3];
-        let write_chunk = |path: &Path, jittery: bool| {
+        let write_chunk = |path: &Path, jittery: bool| -> Vec<f64> {
             let mut writer = NutWriter::create(
                 path,
                 NutVideoConfig {
@@ -1822,6 +1905,7 @@ mod tests {
                 },
             )
             .expect("create NUT");
+            let mut timestamps_s = Vec::new();
             let mut timestamp_us: i64 = 0;
             for index in 0..frames_per_chunk {
                 // ~59.9 fps; the jittery variant wobbles ±0.5 ms like real
@@ -1835,18 +1919,21 @@ mod tests {
                 writer
                     .write_frame(timestamp_us as u64, &rgb)
                     .expect("write frame");
+                timestamps_s.push(timestamp_us as f64 / 1e6);
             }
             writer.finish().expect("finish NUT");
+            timestamps_s
         };
 
         let encoder = VideoEncoder::new();
         let mut segments = Vec::new();
+        let mut segment_timestamps_s = Vec::new();
         for (chunk_index, jittery) in [true, false, true].into_iter().enumerate() {
             let raw = tempdir.path().join(format!("chunk_{chunk_index:04}.nut"));
             let lossy = tempdir
                 .path()
                 .join(format!("chunk_{chunk_index:04}_lossy.mp4"));
-            write_chunk(&raw, jittery);
+            segment_timestamps_s.push(write_chunk(&raw, jittery));
             encoder
                 .encode_chunk(
                     &ChunkEncodeRequest {
@@ -1865,9 +1952,15 @@ mod tests {
             segments.push(lossy);
         }
 
+        // These fixture chunks re-anchor at each chunk open, so the spans
+        // floor to each segment's extent plus 1 us; the merge must stay sound.
+        let spans_to_next_us: Vec<i64> = segment_timestamps_s
+            .windows(2)
+            .map(|pair| declared_batch_span_us(&pair[0], pair[1][0]))
+            .collect();
         let final_lossy = tempdir.path().join("lossy.mp4");
         encoder
-            .concat_segments(&segments, &final_lossy)
+            .concat_segments(&segments, &spans_to_next_us, &final_lossy)
             .await
             .expect("concat");
         assert_merged_video_is_sound(&ffprobe, &final_lossy);
@@ -1966,8 +2059,10 @@ mod tests {
         }
 
         let final_lossy = tempdir.path().join("lossy.mp4");
+        // The synthetic chunks run at 1 fps with frames at 0..3 s, so each
+        // segment spans 4 s to the next on a contiguous cadence.
         let outcome = encoder
-            .concat_segments(&segments, &final_lossy)
+            .concat_segments(&segments, &[4_000_000, 4_000_000], &final_lossy)
             .await
             .expect("concat");
         assert!(outcome.bytes > 0);
@@ -2245,6 +2340,62 @@ mod tests {
         assert_eq!(
             declared_batch_span_us(&chunk, capture_s(5_000_000_000)),
             16_683 + MAX_BOUNDARY_DELTA_US
+        );
+    }
+
+    #[test]
+    fn span_with_extent_floors_and_ceilings_on_the_carried_extent() {
+        let capture_s = |us: i64| us as f64 / 1e6;
+        // A segment whose announced stamps replay to 18000 us but whose real
+        // placement extent is 33000 us: the raw span (19000 us) sits inside
+        // the real content, so the floor binds.
+        let segment_stamps = [0.0, 0.016, 0.017, 0.0165];
+        assert_eq!(
+            declared_span_with_extent_us(&segment_stamps, capture_s(19_000), 33_000),
+            33_001
+        );
+        // A raw span past the real content passes through unchanged.
+        assert_eq!(
+            declared_span_with_extent_us(&segment_stamps, capture_s(50_000), 33_000),
+            50_000
+        );
+        // The ceiling stays extent-relative.
+        assert_eq!(
+            declared_span_with_extent_us(&segment_stamps, capture_s(5_000_000_000), 33_000),
+            33_000 + MAX_BOUNDARY_DELTA_US
+        );
+    }
+
+    #[test]
+    fn batch_content_extent_stacks_spans_and_last_chunk_extent() {
+        let capture_s = |us: i64| us as f64 / 1e6;
+        // Batch of three with a floored middle boundary: chunk B's announced
+        // start sits inside chunk A's content, so its duration line floors to
+        // 33367 and the extent stacks both lines plus the last replayed extent.
+        let chunk_a: Vec<f64> = [0, 16_683, 33_366]
+            .iter()
+            .map(|us| capture_s(*us))
+            .collect();
+        let chunk_b: Vec<f64> = [20_000, 36_683].iter().map(|us| capture_s(*us)).collect();
+        let chunk_c: Vec<f64> = [40_000, 56_683].iter().map(|us| capture_s(*us)).collect();
+        let span_a_us = declared_batch_span_us(&chunk_a, chunk_b[0]);
+        let span_b_us = declared_batch_span_us(&chunk_b, chunk_c[0]);
+        assert_eq!(span_a_us, 33_367, "the overlapped boundary floors");
+        assert_eq!(span_b_us, 20_000, "the healthy boundary passes through");
+        assert_eq!(
+            batch_content_extent_us(&[span_a_us, span_b_us], &chunk_c),
+            33_367 + 20_000 + 16_683
+        );
+
+        // A batch of one carries no duration lines: the extent is the
+        // chunk's own replayed extent.
+        assert_eq!(batch_content_extent_us(&[], &[0.0, 0.016683]), 16_683);
+
+        // A last chunk with a regressing stamp: the replay steps by the
+        // writer's step ceiling, so the extent cannot undershoot.
+        assert_eq!(
+            batch_content_extent_us(&[17_000], &[0.017, 0.0165]),
+            17_000 + 100_000
         );
     }
 
@@ -2825,5 +2976,322 @@ mod tests {
             pts_values.windows(2).all(|pair| pair[1] > pair[0]),
             "PTS must stay strictly monotonic across the synthesized-PTS boundary: {pts_values:?}"
         );
+    }
+
+    /// Encode `chunk_capture_us` into finalise-ready segments for one codec
+    /// branch, grouping consecutive chunks per `segment_chunk_counts` entry
+    /// (a count of one is a per-chunk encode). Returns the lossy and lossless
+    /// segment paths (the latter empty in lossy-only mode), each segment's
+    /// announced stamps, and the content extents the worker would carry.
+    async fn encode_finalise_segments(
+        tempdir: &TempDir,
+        chunk_capture_us: &[Vec<i64>],
+        segment_chunk_counts: &[usize],
+        codec: LossyVideoCodec,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<Vec<f64>>, Vec<i64>) {
+        assert_eq!(
+            segment_chunk_counts.iter().sum::<usize>(),
+            chunk_capture_us.len(),
+            "fixture groups must cover every chunk"
+        );
+        let capture_s = |us: i64| us as f64 / 1e6;
+        let encoder = VideoEncoder::new();
+        let mut lossy_segments = Vec::new();
+        let mut lossless_segments = Vec::new();
+        let mut segment_timestamps_s: Vec<Vec<f64>> = Vec::new();
+        let mut segment_extents_us: Vec<i64> = Vec::new();
+        let mut chunk_cursor = 0usize;
+        for (segment_index, &chunk_count) in segment_chunk_counts.iter().enumerate() {
+            let group = &chunk_capture_us[chunk_cursor..chunk_cursor + chunk_count];
+            chunk_cursor += chunk_count;
+            let mut inputs = Vec::new();
+            let mut group_spans_us: Vec<i64> = Vec::new();
+            for (offset, chunk) in group.iter().enumerate() {
+                // The spooled NUT re-anchors each chunk at its first frame;
+                // the announcement keeps the absolute stamps.
+                let chunk_origin_us = capture_timestamp_us(capture_s(chunk[0]));
+                let relative_pts: Vec<i64> = chunk
+                    .iter()
+                    .map(|us| capture_timestamp_us(capture_s(*us)) - chunk_origin_us)
+                    .collect();
+                let raw_nut = tempdir
+                    .path()
+                    .join(format!("chunk_{segment_index:04}_{offset}.nut"));
+                write_nut_chunk(&raw_nut, &relative_pts);
+                let chunk_timestamps_s: Vec<f64> = chunk.iter().map(|us| capture_s(*us)).collect();
+                let span_to_next_us = group
+                    .get(offset + 1)
+                    .map(|next| declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0])));
+                if let Some(span_us) = span_to_next_us {
+                    group_spans_us.push(span_us);
+                }
+                inputs.push(BatchNutInput {
+                    raw_nut,
+                    span_to_next_us,
+                    frame_count: chunk.len() as u32,
+                });
+            }
+            let lossy_out = tempdir
+                .path()
+                .join(format!("chunk_{segment_index:04}_lossy.mp4"));
+            let lossless_out = tempdir
+                .path()
+                .join(format!("chunk_{segment_index:04}_lossless.mp4"));
+            encoder
+                .encode_chunk_batch(
+                    &BatchEncodeRequest {
+                        inputs,
+                        lossy_out: lossy_out.clone(),
+                        lossless_out: lossless_out.clone(),
+                        codec,
+                    },
+                    ENCODE_THREADS_PER_OUTPUT,
+                )
+                .await
+                .expect("segment transcode");
+            lossy_segments.push(lossy_out);
+            if !codec.is_lossy_only() {
+                lossless_segments.push(lossless_out);
+            }
+            segment_timestamps_s.push(group.iter().flatten().map(|us| capture_s(*us)).collect());
+            let last_chunk_timestamps_s: Vec<f64> = group
+                .last()
+                .expect("group covers at least one chunk")
+                .iter()
+                .map(|us| capture_s(*us))
+                .collect();
+            segment_extents_us.push(batch_content_extent_us(
+                &group_spans_us,
+                &last_chunk_timestamps_s,
+            ));
+        }
+        (
+            lossy_segments,
+            lossless_segments,
+            segment_timestamps_s,
+            segment_extents_us,
+        )
+    }
+
+    /// Compute the finalise `duration` spans the way the trace actor does:
+    /// each segment's raw first-to-first capture span, floored and capped on
+    /// the carried content extent.
+    fn finalise_spans_us(
+        segment_timestamps_s: &[Vec<f64>],
+        segment_extents_us: &[i64],
+    ) -> Vec<i64> {
+        segment_timestamps_s
+            .windows(2)
+            .zip(segment_extents_us)
+            .map(|(pair, &extent_us)| declared_span_with_extent_us(&pair[0], pair[1][0], extent_us))
+            .collect()
+    }
+
+    /// Run the finalise PTS gate for one fixture: every final video of both
+    /// codec branches must decode to the trace-relative capture ladder
+    /// exactly, frame-complete, monotonic, at the pinned timescale.
+    async fn assert_finalise_pts_gate(
+        ffprobe: &Path,
+        chunk_capture_us: &[Vec<i64>],
+        segment_chunk_counts: &[usize],
+    ) {
+        let capture_s = |us: i64| us as f64 / 1e6;
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            let tempdir = TempDir::new().unwrap();
+            let (lossy_segments, lossless_segments, segment_timestamps_s, segment_extents_us) =
+                encode_finalise_segments(&tempdir, chunk_capture_us, segment_chunk_counts, codec)
+                    .await;
+            let spans_to_next_us = finalise_spans_us(&segment_timestamps_s, &segment_extents_us);
+
+            let encoder = VideoEncoder::new();
+            let final_lossy = tempdir.path().join("lossy.mp4");
+            encoder
+                .concat_segments(&lossy_segments, &spans_to_next_us, &final_lossy)
+                .await
+                .expect("finalise concat");
+            let mut outputs = vec![final_lossy];
+            if !codec.is_lossy_only() {
+                let final_lossless = tempdir.path().join("lossless.mp4");
+                encoder
+                    .concat_segments(&lossless_segments, &spans_to_next_us, &final_lossless)
+                    .await
+                    .expect("finalise concat");
+                outputs.push(final_lossless);
+            }
+
+            let trace_origin_us = capture_timestamp_us(capture_s(chunk_capture_us[0][0]));
+            let expected: Vec<i64> = chunk_capture_us
+                .iter()
+                .flatten()
+                .map(|us| capture_timestamp_us(capture_s(*us)) - trace_origin_us)
+                .collect();
+            for video in &outputs {
+                assert_merged_video_is_sound(ffprobe, video);
+                assert_eq!(
+                    decoded_frame_pts(ffprobe, video),
+                    expected,
+                    "{} ({codec:?}) must decode to the trace-relative capture ladder",
+                    video.display()
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finalise_pts_gate_gapped_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise PTS gate.");
+            return;
+        };
+        // A real capture gap: it must survive the finalise concat instead of
+        // collapsing to a frame interval or drifting per boundary.
+        let chunks = [vec![0, 66_000, 133_000], vec![1_000_000]];
+        // Per-chunk segments, and both chunks batched into one segment so the
+        // single-segment finalise path keeps the exact ladder too.
+        assert_finalise_pts_gate(&ffprobe, &chunks, &[1, 1]).await;
+        assert_finalise_pts_gate(&ffprobe, &chunks, &[2]).await;
+    }
+
+    #[tokio::test]
+    async fn finalise_pts_gate_jittered_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise PTS gate.");
+            return;
+        };
+        // Irregular deltas cycling ~15.4-17.9 ms, continuing across the
+        // segment boundary like real capture jitter.
+        let deltas = [15_400i64, 16_250, 17_100, 17_900];
+        let mut capture_us = vec![0i64];
+        for index in 0..23usize {
+            capture_us.push(capture_us[index] + deltas[index % deltas.len()]);
+        }
+        let (chunk_a, chunk_b) = capture_us.split_at(12);
+        assert_finalise_pts_gate(&ffprobe, &[chunk_a.to_vec(), chunk_b.to_vec()], &[1, 1]).await;
+    }
+
+    #[tokio::test]
+    async fn finalise_pts_gate_contiguous_chunks() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise PTS gate.");
+            return;
+        };
+        // 3 x 48 frames on a metronome 16683 us cadence with no gap between
+        // segments.
+        let chunks: Vec<Vec<i64>> = (0..3i64)
+            .map(|chunk| {
+                (0..48i64)
+                    .map(|frame| (chunk * 48 + frame) * 16_683)
+                    .collect()
+            })
+            .collect();
+        assert_finalise_pts_gate(&ffprobe, &chunks, &[1, 1, 1]).await;
+    }
+
+    #[tokio::test]
+    async fn finalise_pts_gate_composed_batches() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise PTS gate.");
+            return;
+        };
+        // 6 chunks of 4 frames at a 16683 us cadence with mixed inter-chunk
+        // gaps from ~16 ms to 1.5 s, grouped into batched segments of 3 and
+        // 2 chunks plus a single-chunk segment: PR 2's batch-relative
+        // exactness and the finalise duration lines must compose to a
+        // trace-relative exact final.
+        let gaps_to_next_us = [16_683i64, 250_000, 1_500_000, 33_000, 700_000, 0];
+        let mut chunks: Vec<Vec<i64>> = Vec::new();
+        let mut start_us = 0i64;
+        for gap_to_next_us in gaps_to_next_us {
+            let chunk: Vec<i64> = (0..4i64).map(|frame| start_us + frame * 16_683).collect();
+            start_us = chunk[3] + gap_to_next_us;
+            chunks.push(chunk);
+        }
+        assert_finalise_pts_gate(&ffprobe, &chunks, &[3, 2, 1]).await;
+    }
+
+    #[tokio::test]
+    async fn finalise_large_gap_keeps_exact_pts() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise large-gap test.");
+            return;
+        };
+        // A 600 s capture gap at a segment boundary. The batch encode path
+        // caps its spans well below this scale, but the finalise concat is
+        // stream-copy and must place the next segment exactly even for a
+        // gap of several hundred seconds, for both codec branches.
+        let chunks = [
+            vec![0, 16_683, 33_366],
+            vec![600_000_000, 600_016_683, 600_033_366],
+        ];
+        assert_finalise_pts_gate(&ffprobe, &chunks, &[1, 1]).await;
+    }
+
+    #[tokio::test]
+    async fn finalise_span_clamp_stays_monotonic_and_frame_complete() {
+        let (Some(_ffmpeg), Some(ffprobe)) = (locate_binary("ffmpeg"), locate_binary("ffprobe"))
+        else {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping finalise clamp test.");
+            return;
+        };
+        // A 4000 s gap between segments sits above the mp4 boundary-delta
+        // ceiling, so the declared finalise span is clamped to the segment
+        // extent plus the largest safe boundary step. The exact ladder is
+        // unattainable by construction; the final must stay strictly
+        // monotonic and carry every frame, for both codec branches, over
+        // real batched segments.
+        let chunks = [
+            vec![0i64, 16_683],
+            vec![33_366, 50_049],
+            vec![4_000_000_000, 4_000_016_683],
+            vec![4_000_033_366, 4_000_050_049],
+        ];
+        let segment_chunk_counts = [2usize, 2];
+        for codec in [
+            LossyVideoCodec::LosslessPlusPreview,
+            LossyVideoCodec::H264MediumLossyOnly,
+        ] {
+            let tempdir = TempDir::new().unwrap();
+            let (lossy_segments, lossless_segments, segment_timestamps_s, segment_extents_us) =
+                encode_finalise_segments(&tempdir, &chunks, &segment_chunk_counts, codec).await;
+            let spans_to_next_us = finalise_spans_us(&segment_timestamps_s, &segment_extents_us);
+            assert_eq!(
+                spans_to_next_us,
+                vec![50_049 + MAX_BOUNDARY_DELTA_US],
+                "the fabricated gap must clamp to the segment extent plus the ceiling"
+            );
+
+            let encoder = VideoEncoder::new();
+            let final_lossy = tempdir.path().join("lossy.mp4");
+            encoder
+                .concat_segments(&lossy_segments, &spans_to_next_us, &final_lossy)
+                .await
+                .expect("finalise concat");
+            let mut outputs = vec![final_lossy];
+            if !codec.is_lossy_only() {
+                let final_lossless = tempdir.path().join("lossless.mp4");
+                encoder
+                    .concat_segments(&lossless_segments, &spans_to_next_us, &final_lossless)
+                    .await
+                    .expect("finalise concat");
+                outputs.push(final_lossless);
+            }
+            for video in &outputs {
+                assert_merged_video_is_sound(&ffprobe, video);
+                assert_eq!(
+                    decoded_frame_pts(&ffprobe, video).len(),
+                    8,
+                    "{} ({codec:?}) must keep every frame despite the clamped span",
+                    video.display()
+                );
+            }
+        }
     }
 }

@@ -70,8 +70,9 @@ use crate::config::DaemonConfig;
 use crate::encoding::json_trace::JsonTraceError;
 use crate::encoding::metadata::{MetadataError, VideoMetadataAccumulator};
 use crate::encoding::video_encoder::{
-    declared_batch_span_us, BatchEncodeRequest, BatchNutInput, LossyVideoCodec, VideoEncodeError,
-    VideoEncoder, ENCODE_THREADS_PER_OUTPUT,
+    batch_content_extent_us, declared_batch_span_us, declared_span_with_extent_us,
+    BatchEncodeRequest, BatchNutInput, LossyVideoCodec, VideoEncodeError, VideoEncoder,
+    ENCODE_THREADS_PER_OUTPUT,
 };
 use crate::pipeline::json_writer::JsonWriteHandle;
 use crate::state::TraceWriteHandle;
@@ -406,6 +407,11 @@ struct CompletedChunk {
     frame_timestamps_s: Vec<f64>,
     /// Total frames covered by this entry: the sum over the batch's chunks.
     frame_count: u32,
+    /// The segment's real mp4 content extent, as the batch concat list
+    /// dictated it to ffmpeg. The finalise span floors on this so the next
+    /// segment never starts inside this one's content, which a replay of the
+    /// announced stamps cannot guarantee for a synthesized-PTS batch.
+    content_extent_us: i64,
     /// The batch's original frame dtype — stored per batch (not once for the
     /// whole trace) so each batch's metadata entries get their own dtype even
     /// if it somehow differs between chunks of one trace.
@@ -1057,6 +1063,16 @@ impl ActorState {
                         .collect()
                 };
 
+                // Each segment except the last declares its capture span to
+                // the next, so the concat lands every frame on its
+                // trace-relative capture timestamp instead of accumulating
+                // per-segment probe drift.
+                let segment_spans_us: Vec<i64> = completed_chunks
+                    .values()
+                    .zip(completed_chunks.values().skip(1))
+                    .map(|(segment, next)| declared_finalise_span_us(segment, next))
+                    .collect();
+
                 // Build the metadata accumulator in the same chunk-index
                 // order so per-frame entries appear in capture order. Each
                 // chunk applies its own stored dtype (not just the first
@@ -1104,14 +1120,14 @@ impl ActorState {
                     .map_err(|_| FrameAppendError::FfmpegPermits)?;
                 let lossy_outcome = context
                     .video_encoder
-                    .concat_segments(&lossy_segments, &lossy_out)
+                    .concat_segments(&lossy_segments, &segment_spans_us, &lossy_out)
                     .await?;
                 let lossless_bytes = if lossy_only {
                     0
                 } else {
                     context
                         .video_encoder
-                        .concat_segments(&lossless_segments, &lossless_out)
+                        .concat_segments(&lossless_segments, &segment_spans_us, &lossless_out)
                         .await?
                         .bytes
                 };
@@ -1336,15 +1352,29 @@ impl EncodeWorker {
         // chunk's first frame, floored at the chunk's own PTS extent, so the
         // concat demuxer lands every frame on its batch-relative capture
         // timestamp and never rewinds at an overlapping announcement.
+        let spans_to_next_us: Vec<i64> = batch
+            .windows(2)
+            .map(|pair| {
+                declared_segment_span_us(&pair[0].frame_timestamps_s, &pair[1].frame_timestamps_s)
+            })
+            .collect();
+        // The placement those duration lines dictate is the segment's real
+        // content extent, which the finalise span floors on.
+        let content_extent_us = batch_content_extent_us(
+            &spans_to_next_us,
+            &batch
+                .last()
+                .expect("drained batch is never empty")
+                .frame_timestamps_s,
+        );
         let inputs: Vec<BatchNutInput> = batch
             .iter()
             .zip(&raw_nuts)
             .enumerate()
             .map(|(position, (chunk, raw_nut))| BatchNutInput {
                 raw_nut: raw_nut.clone(),
-                span_to_next_us: batch
-                    .get(position + 1)
-                    .map(|next| queued_batch_span_us(chunk, next)),
+                // One entry per non-last chunk, so the last gets no line.
+                span_to_next_us: spans_to_next_us.get(position).copied(),
                 frame_count: chunk.frame_count,
             })
             .collect();
@@ -1412,6 +1442,7 @@ impl EncodeWorker {
                         bytes: encode.lossy_bytes.saturating_add(encode.lossless_bytes),
                         frame_timestamps_s,
                         frame_count,
+                        content_extent_us,
                         dtype,
                     },
                 }
@@ -1424,18 +1455,35 @@ impl EncodeWorker {
     }
 }
 
-/// The declared concat span from `chunk` to `next`, computed with the same
-/// helper that writes the batch `duration` lines. A next chunk that
-/// announced no frames borrows this chunk's first stamp, so the span floors
-/// to the chunk's own extent plus 1 us instead of indexing an empty vector.
-fn queued_batch_span_us(chunk: &QueuedChunk, next: &QueuedChunk) -> i64 {
+/// The declared concat span from one chunk's announced frames to the next's,
+/// used by the batch worker and the drain span cap. A next chunk with no
+/// announced frames borrows this chunk's first stamp, so the span floors to
+/// this chunk's extent plus 1 us instead of indexing an empty vector.
+fn declared_segment_span_us(frame_timestamps_s: &[f64], next_frame_timestamps_s: &[f64]) -> i64 {
+    let next_first_timestamp_s = next_frame_timestamps_s
+        .first()
+        .or_else(|| frame_timestamps_s.first())
+        .copied()
+        .unwrap_or(0.0);
+    declared_batch_span_us(frame_timestamps_s, next_first_timestamp_s)
+}
+
+/// The declared finalise span from one encoded segment to the next. Flooring
+/// on the carried content extent, rather than a replay of the announced
+/// stamps, is what guarantees the next segment never starts inside this
+/// segment's real mp4 content.
+fn declared_finalise_span_us(segment: &CompletedChunk, next: &CompletedChunk) -> i64 {
     let next_first_timestamp_s = next
         .frame_timestamps_s
         .first()
-        .or_else(|| chunk.frame_timestamps_s.first())
+        .or_else(|| segment.frame_timestamps_s.first())
         .copied()
         .unwrap_or(0.0);
-    declared_batch_span_us(&chunk.frame_timestamps_s, next_first_timestamp_s)
+    declared_span_with_extent_us(
+        &segment.frame_timestamps_s,
+        next_first_timestamp_s,
+        segment.content_extent_us,
+    )
 }
 
 /// Take up to [`ENCODE_BATCH_MAX_CHUNKS`] descriptors from the queue front,
@@ -1452,10 +1500,10 @@ fn drain_encode_batch(queue: &mut VecDeque<QueuedChunk>) -> Vec<QueuedChunk> {
         {
             break;
         }
-        if batch
-            .last()
-            .is_some_and(|last| queued_batch_span_us(last, front) > ENCODE_BATCH_MAX_SPAN_US)
-        {
+        if batch.last().is_some_and(|last| {
+            declared_segment_span_us(&last.frame_timestamps_s, &front.frame_timestamps_s)
+                > ENCODE_BATCH_MAX_SPAN_US
+        }) {
             break;
         }
         let chunk = queue.pop_front().expect("front exists");
@@ -1593,27 +1641,37 @@ mod tests {
             .unwrap_or(false)
     }
 
-    /// Frames ffprobe decodes out of `video`.
-    fn probed_frame_count(video: &std::path::Path) -> usize {
+    fn ffprobe_available() -> bool {
+        binary_available("ffprobe")
+    }
+
+    /// Decode `video` with ffprobe and collect frame PTS in presentation
+    /// order, as the cloud guard walks them.
+    fn decoded_frame_pts(video: &std::path::Path) -> Vec<i64> {
         let probe = std::process::Command::new("ffprobe")
             .args([
                 "-v",
                 "error",
                 "-select_streams",
                 "v:0",
-                "-count_frames",
+                "-show_frames",
                 "-show_entries",
-                "stream=nb_read_frames",
+                "frame=pts,pkt_pts",
                 "-of",
-                "default=nokey=1:noprint_wrappers=1",
+                "default=noprint_wrappers=1",
             ])
             .arg(video)
             .output()
             .expect("spawn ffprobe");
+        assert!(probe.status.success());
         String::from_utf8_lossy(&probe.stdout)
-            .trim()
-            .parse()
-            .expect("frame count")
+            .lines()
+            .filter_map(|line| {
+                line.strip_prefix("pts=")
+                    .or_else(|| line.strip_prefix("pkt_pts="))
+            })
+            .filter_map(|value| value.parse().ok())
+            .collect()
     }
 
     #[test]
@@ -2043,7 +2101,6 @@ mod tests {
     /// As [`send_video_chunk`], for a chunk the dispatcher cut at a recording
     /// boundary: the NUT holds every frame in `capture_us` but the
     /// announcement owns only the leading `owned_frames` of them.
-    #[allow(clippy::too_many_arguments)]
     async fn send_cut_video_chunk(
         state: &mut ActorState,
         context: &Arc<TraceActorContext>,
@@ -2053,19 +2110,47 @@ mod tests {
         owned_frames: u32,
         dtype: FrameDtype,
     ) {
-        let spool_nut = spool_dir.join(format!("spool_chunk_{chunk_index}.nut"));
         let chunk_origin = capture_us[0];
         let relative_pts: Vec<u64> = capture_us
             .iter()
             .map(|us| (us - chunk_origin) as u64)
             .collect();
-        write_nut_chunk(&spool_nut, &relative_pts);
-        let byte_count = spool_nut.metadata().unwrap().len();
         let frame_timestamps_s: Vec<f64> = capture_us
             .iter()
             .take(owned_frames as usize)
             .map(|us| *us as f64 / 1e6)
             .collect();
+        send_video_chunk_with_nut_pts(
+            state,
+            context,
+            spool_dir,
+            chunk_index,
+            &relative_pts,
+            owned_frames,
+            frame_timestamps_s,
+            dtype,
+        )
+        .await;
+    }
+
+    /// Spool one chunk whose NUT PTS may differ from its announced capture
+    /// stamps (the writer's synthesized-PTS class) and send it to the actor.
+    /// `frame_count` is what the announcement owns, which is every NUT frame
+    /// unless the dispatcher cut the chunk.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_video_chunk_with_nut_pts(
+        state: &mut ActorState,
+        context: &Arc<TraceActorContext>,
+        spool_dir: &std::path::Path,
+        chunk_index: u32,
+        nut_pts_us: &[u64],
+        frame_count: u32,
+        frame_timestamps_s: Vec<f64>,
+        dtype: FrameDtype,
+    ) {
+        let spool_nut = spool_dir.join(format!("spool_chunk_{chunk_index}.nut"));
+        write_nut_chunk(&spool_nut, nut_pts_us);
+        let byte_count = spool_nut.metadata().unwrap().len();
         state
             .handle_video(
                 context,
@@ -2074,7 +2159,7 @@ mod tests {
                 16,
                 16,
                 byte_count,
-                owned_frames,
+                frame_count,
                 frame_timestamps_s,
                 dtype,
             )
@@ -2257,6 +2342,10 @@ mod tests {
                 "timestamps concatenate in chunk order"
             );
             assert_eq!(
+                completed.content_extent_us, 83_415,
+                "the carried extent stacks the duration lines plus the last chunk's replayed extent"
+            );
+            assert_eq!(
                 completed.lossy_segment,
                 trace_dir.join(paths::chunk_lossy_filename(0))
             );
@@ -2291,7 +2380,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_stops_at_the_frames_the_recording_owns() {
-        if !ffmpeg_available() || !binary_available("ffprobe") {
+        if !ffmpeg_available() || !ffprobe_available() {
             eprintln!("ffmpeg/ffprobe not on PATH — skipping batch frame-cap test.");
             return;
         }
@@ -2354,12 +2443,12 @@ mod tests {
             "the cut chunk contributes only the frames it owns"
         );
         assert_eq!(
-            probed_frame_count(&completed.lossy_segment),
+            decoded_frame_pts(&completed.lossy_segment).len(),
             3,
             "the lossy segment must not outrun the sidecar"
         );
         assert_eq!(
-            probed_frame_count(&completed.lossless_segment),
+            decoded_frame_pts(&completed.lossless_segment).len(),
             3,
             "the lossless segment must stop at the same cut"
         );
@@ -2556,6 +2645,10 @@ mod tests {
                 assert_eq!(completed.frame_count, 2);
                 assert_eq!(completed.frame_timestamps_s, vec![0.0, 0.016683]);
                 assert_eq!(
+                    completed.content_extent_us, 16_683,
+                    "a batch of one carries its chunk's replayed extent"
+                );
+                assert_eq!(
                     completed.lossy_segment,
                     trace_dir.join(paths::chunk_lossy_filename(0)),
                     "segment names keep today's shape (lossy_only={lossy_only})"
@@ -2572,6 +2665,156 @@ mod tests {
             context.trace_writer.flush().await;
             let trace = store.get_trace("trace-single").await.unwrap().unwrap();
             assert_eq!(trace.write_status, TraceWriteStatus::Written);
+        }
+    }
+
+    #[tokio::test]
+    async fn finalise_after_synthesized_batch_never_rewinds_into_its_content() {
+        if !ffmpeg_available() || !ffprobe_available() {
+            eprintln!("ffmpeg/ffprobe not on PATH — skipping synthesized-batch finalise gate.");
+            return;
+        }
+
+        // The undershoot counterexample. c1's first stamp lands 1 ms past
+        // c0's last frame but its second regresses, so the writer synthesized
+        // c1's NUT ladder from the 16000 us gap carried out of c0 and the
+        // batch places frames at [0, 16000, 17000, 33000]. A span replayed
+        // from the announced stamps reads the 1000 us boundary delta as the
+        // healthy gap, covers only 18000 us and starts the next segment
+        // inside the real content, which decodes backwards on preset medium.
+        for lossy_only in [false, true] {
+            let tempdir = TempDir::new().unwrap();
+            let store = SqliteStateStore::open(&tempdir.path().join("state.db"))
+                .await
+                .expect("open store");
+            let store_arc = Arc::new(store.clone());
+            let permits = Arc::new(Semaphore::new(1));
+            let mut context = test_context_with_permits(
+                &tempdir.path().join("recordings"),
+                store_arc.clone(),
+                permits.clone(),
+            );
+            let _config_tx;
+            if lossy_only {
+                let (config_tx, config_rx) = watch::channel(DaemonConfig {
+                    video_codec: Some("h264_medium".to_string()),
+                    ..DaemonConfig::default()
+                });
+                _config_tx = config_tx;
+                context = Arc::new((*context).clone().with_config_rx(config_rx));
+            }
+            let spool_dir = tempdir.path().join("spool");
+            std::fs::create_dir_all(&spool_dir).unwrap();
+
+            let mut state = ActorState::new(identity(1, "trace-synth", "RGB_IMAGES"));
+            state.send_create(&context);
+
+            // Hold the only permit while c0 and c1 arrive so one worker takes
+            // both as a single batch.
+            let gate = permits.clone().acquire_owned().await.unwrap();
+            send_video_chunk_with_nut_pts(
+                &mut state,
+                &context,
+                &spool_dir,
+                0,
+                &[0, 16_000],
+                2,
+                vec![0.0, 0.016],
+                FrameDtype::Rgb8,
+            )
+            .await;
+            send_video_chunk_with_nut_pts(
+                &mut state,
+                &context,
+                &spool_dir,
+                1,
+                &[0, 16_000],
+                2,
+                vec![0.017, 0.0165],
+                FrameDtype::Rgb8,
+            )
+            .await;
+            drop(gate);
+            assert!(
+                !drain_all_pending(&mut state, &context).await,
+                "the batch must encode cleanly (lossy_only={lossy_only})"
+            );
+
+            // Arrives after the batch completed, so it is its own segment.
+            send_video_chunk_with_nut_pts(
+                &mut state,
+                &context,
+                &spool_dir,
+                2,
+                &[0, 16_000, 32_000],
+                3,
+                vec![0.019, 0.035, 0.051],
+                FrameDtype::Rgb8,
+            )
+            .await;
+            assert!(
+                !drain_all_pending(&mut state, &context).await,
+                "the following segment must encode cleanly (lossy_only={lossy_only})"
+            );
+
+            {
+                let TraceWriterKind::Video {
+                    completed_chunks, ..
+                } = &state.writer
+                else {
+                    panic!("video writer expected");
+                };
+                assert_eq!(completed_chunks.len(), 2);
+                // The carried extent stacks the 17000 us duration line with
+                // the last chunk's replayed extent, which seeds the unknown
+                // carried gap with the 100 ms ceiling: it may overshoot the
+                // real 33000 us placement but never undershoot it.
+                assert_eq!(completed_chunks[&0].content_extent_us, 117_000);
+                assert_eq!(completed_chunks[&2].content_extent_us, 32_000);
+            }
+
+            state.finalise_trace(&context).await;
+            context.trace_writer.flush().await;
+            let trace = store.get_trace("trace-synth").await.unwrap().unwrap();
+            assert_eq!(trace.write_status, TraceWriteStatus::Written);
+
+            let trace_dir = TracePath::new("1", "RGB_IMAGES", "trace-synth")
+                .directory(context.recordings_root.as_path());
+            let mut outputs = vec![trace_dir.join(paths::LOSSY_VIDEO_FILENAME)];
+            if !lossy_only {
+                outputs.push(trace_dir.join(paths::LOSSLESS_VIDEO_FILENAME));
+            }
+            for video in &outputs {
+                let pts_values = decoded_frame_pts(video);
+                assert_eq!(
+                    pts_values.len(),
+                    7,
+                    "{} must keep every frame (lossy_only={lossy_only})",
+                    video.display()
+                );
+                assert!(
+                    pts_values.windows(2).all(|pair| pair[1] > pair[0]),
+                    "{} must decode strictly monotonic PTS, got {pts_values:?}",
+                    video.display()
+                );
+                assert_eq!(
+                    &pts_values[..4],
+                    &[0, 16_000, 17_000, 33_000],
+                    "{} must keep the batch segment's real ladder",
+                    video.display()
+                );
+                assert!(
+                    pts_values[4] > 33_000,
+                    "{} must start the next segment after the batch content, got {pts_values:?}",
+                    video.display()
+                );
+                assert_eq!(
+                    (pts_values[5] - pts_values[4], pts_values[6] - pts_values[5]),
+                    (16_000, 16_000),
+                    "{} must keep the next segment's capture deltas, got {pts_values:?}",
+                    video.display()
+                );
+            }
         }
     }
 }
