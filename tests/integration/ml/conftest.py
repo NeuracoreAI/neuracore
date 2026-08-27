@@ -1,5 +1,6 @@
 import os
 import sys
+from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -15,11 +16,41 @@ if repo_root not in sys.path:
     sys.path.insert(0, repo_root)
 
 _CONFIGS_FILE = os.path.join(THIS_DIR, "algorithm_configs.yaml")
+_TRUTHY_VALUES = frozenset({"1", "true", "yes", "on"})
 
 
 def _load_algorithm_configs() -> list[dict]:
     with open(_CONFIGS_FILE) as f:
         return yaml.safe_load(f)["algorithms"]
+
+
+@pytest.fixture(autouse=True)
+def _attach_daemon_diagnostics() -> Generator[None]:
+    """Attach the data daemon's log and state DB to the running Allure test.
+
+    Opt-in via NCD_ATTACH_DAEMON_DIAGNOSTICS (set by the CI workflow) so local
+    runs, and daemon-less test paths, skip the file I/O entirely.
+    """
+    yield
+    enabled = os.environ.get("NCD_ATTACH_DAEMON_DIAGNOSTICS", "").strip().lower()
+    if enabled not in _TRUTHY_VALUES:
+        return
+    try:
+        import allure
+    except ImportError:
+        return
+    from neuracore.data_daemon.helpers import get_daemon_db_path
+
+    db_path = get_daemon_db_path()
+    log_path = db_path.parent / "daemon.log"
+    if log_path.exists():
+        allure.attach.file(
+            str(log_path),
+            name="daemon.log",
+            attachment_type=allure.attachment_type.TEXT,
+        )
+    if db_path.exists():
+        allure.attach.file(str(db_path), name="state.db", extension="db")
 
 
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
