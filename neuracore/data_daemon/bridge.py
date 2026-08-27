@@ -82,6 +82,10 @@ class RecordingContext:
         processes still need the source identity in order to contribute data to
         the daemon-owned recording window, but must not publish another start.
 
+        Announces the binding to the daemon, which reads it only to know that a
+        producer for this source exists on this machine — never as a claim about
+        any recording.
+
         Args:
             robot_id: Robot identifier used as the daemon source key.
             robot_instance: Robot instance used as the daemon source key.
@@ -90,6 +94,7 @@ class RecordingContext:
             raise ValueError("robot_id is required to bind a recording source.")
         self._robot_id = robot_id
         self._robot_instance = robot_instance
+        _load_native().attach_source(robot_id, robot_instance)
 
     def start_recording(
         self,
@@ -305,5 +310,8 @@ class RecordingContext:
         """Release resources owned by this instance.
 
         The native producer is process-global and outlives any single context,
-        so there is nothing to tear down here.
+        so the only thing to release is this process's announced binding to the
+        source — after which the daemon stops counting it as present here.
         """
+        if self._robot_id:
+            _load_native().detach_source(self._robot_id, self._robot_instance)

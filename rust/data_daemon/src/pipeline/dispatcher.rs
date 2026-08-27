@@ -113,6 +113,14 @@ const DISPATCHER_INBOX_CAPACITY: usize = 1024;
 /// Source identity: `(robot_id, robot_instance)`.
 type Source = (String, i64);
 
+/// How long a producer stays counted as present after its last
+/// [`Envelope::ProducerAttached`].
+///
+/// Several of the producer's own 1 s heartbeat, so a briefly busy publisher
+/// thread never reads as a departed process, while a crashed one — which sends
+/// no detach — is forgotten promptly.
+const ATTACH_LIVENESS: Duration = Duration::from_secs(5);
+
 /// Resolve the configured holdback, honouring the `NCD_HOLDBACK_MS` override.
 fn configured_holdback() -> Duration {
     let millis = std::env::var(HOLDBACK_ENV)
@@ -332,6 +340,12 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// Producers bound to each source, by OS pid, with when each was last heard
+    /// from. Says only that a producer for the source exists on this machine —
+    /// never anything about a recording. Read when deciding whether an org-wide
+    /// backend notification concerns a source here; see
+    /// [`Dispatcher::has_attached_producer`].
+    attached: HashMap<Source, HashMap<u32, Instant>>,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -354,6 +368,7 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            attached: HashMap::new(),
             last_housekeep: Instant::now(),
         }
     }
@@ -568,8 +583,33 @@ impl Dispatcher {
                     payload: HeldPayload::VideoProducerActive { producer_pid },
                 });
             }
+            Envelope::ProducerAttached {
+                robot_id,
+                robot_instance,
+                producer_pid,
+                ..
+            } => {
+                // Not held: presence is not window membership, and holding it
+                // only delays learning that a producer exists. `publish_timestamp_ns`
+                // is diagnostic — liveness is measured on the daemon's own clock,
+                // so a producer with a skewed clock cannot look departed.
+                self.attached
+                    .entry((robot_id, robot_instance))
+                    .or_default()
+                    .insert(producer_pid, recv_at);
+            }
             Envelope::RefreshConfig {} => self.handle_refresh_config().await,
         }
+    }
+
+    /// Drop producers whose heartbeat has stopped, and sources left with
+    /// none. Runs on the housekeeping cadence, so a departed producer is
+    /// forgotten without a timer of its own.
+    fn prune_attached(&mut self, now: Instant) {
+        self.attached.retain(|_, producers| {
+            producers.retain(|_, last_seen| now.duration_since(*last_seen) < ATTACH_LIVENESS);
+            !producers.is_empty()
+        });
     }
 
     /// Force the config watcher to re-resolve the profile and wait for it to
@@ -895,6 +935,7 @@ impl Dispatcher {
     /// window scans, so throttled to [`HOUSEKEEP_INTERVAL`] by the caller rather
     /// than run per inbound envelope.
     async fn housekeep(&mut self, now: Instant) {
+        self.prune_attached(now);
         let retention = self.holdback * 2;
         let (closing_actors, empty_sources) = self.evict_closing_windows(now, retention);
 
@@ -1844,6 +1885,83 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
         assert_eq!(a, serde_json::json!([{"i": 1}]));
+    }
+
+    #[tokio::test]
+    async fn an_attached_producer_ages_out_without_a_detach() {
+        // Presence gates whether an org-wide backend notification is acted on
+        // here. A producer that crashes sends no detach, so the only thing that
+        // can retire it is its heartbeat going quiet.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let attached_at = Instant::now();
+        assert!(
+            !dispatcher.attached.contains_key(&source),
+            "nothing has attached to this source yet"
+        );
+
+        dispatcher
+            .handle_inbound(
+                Envelope::ProducerAttached {
+                    robot_id: "robot-1".into(),
+                    robot_instance: 0,
+                    publish_timestamp_ns: 100,
+                    producer_pid: 4242,
+                },
+                attached_at,
+            )
+            .await;
+        assert!(dispatcher.attached.contains_key(&source));
+
+        // Still present while the heartbeat would have been restated.
+        dispatcher.prune_attached(attached_at + ATTACH_LIVENESS / 2);
+        assert!(
+            dispatcher.attached.contains_key(&source),
+            "a producer inside its lease survives a prune"
+        );
+
+        dispatcher.prune_attached(attached_at + ATTACH_LIVENESS + Duration::from_millis(1));
+        assert!(
+            !dispatcher.attached.contains_key(&source),
+            "a source with no live producers is forgotten entirely"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_live_producer_keeps_a_source_present() {
+        // Multi-process is the case this exists for: one process exiting must
+        // not make the source look absent while another still logs to it.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let source = ("robot-1".to_string(), 0);
+        let first_at = Instant::now();
+        let second_at = first_at + ATTACH_LIVENESS - Duration::from_millis(1);
+        for (pid, at) in [(4242u32, first_at), (4243, second_at)] {
+            dispatcher
+                .handle_inbound(
+                    Envelope::ProducerAttached {
+                        robot_id: "robot-1".into(),
+                        robot_instance: 0,
+                        publish_timestamp_ns: 100,
+                        producer_pid: pid,
+                    },
+                    at,
+                )
+                .await;
+        }
+
+        // Past the first producer's lease, inside the second's.
+        dispatcher.prune_attached(first_at + ATTACH_LIVENESS + Duration::from_millis(1));
+        assert_eq!(
+            dispatcher.attached.get(&source).map(HashMap::len),
+            Some(1),
+            "only the departed producer is forgotten"
+        );
     }
 
     #[tokio::test]

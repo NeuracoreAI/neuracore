@@ -31,6 +31,8 @@
 //! This file is a thin PyO3 façade: the `#[pyfunction]` wrappers do argument
 //! validation, release the GIL, and delegate into the submodules.
 //!
+//! - [`attachment`] — which sources this process is bound to, restated on a
+//!   heartbeat so the daemon knows whose robots live on this machine.
 //! - [`paths`] — filesystem layout shared with the daemon (recordings root,
 //!   spool paths, `(source, sensor)` stream keys).
 //! - [`publisher`] — per-thread iceoryx2 publisher state, fork safety, the
@@ -42,7 +44,9 @@
 
 pub mod nut_writer;
 
+mod attachment;
 mod depth;
+mod logging;
 mod paths;
 mod publisher;
 mod query;
@@ -419,6 +423,52 @@ fn flush_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult
     Ok(())
 }
 
+/// Announce that this process is bound to a source and may log for it.
+///
+/// Publishes one [`Envelope::ProducerAttached`] immediately and enrolls the
+/// source in the publisher thread's heartbeat. Claims nothing about any
+/// recording — the daemon reads it only to know that a producer for this source
+/// exists here, so an org-wide backend notification for a robot on some other
+/// machine is never acted on.
+///
+/// Idempotent: re-binding an already-attached source is a no-op beyond the
+/// heartbeat that was already running.
+#[pyfunction]
+fn attach_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let robot_id = robot_id.to_string();
+    py.detach(|| {
+        if !attachment::attach(&robot_id, robot_instance) {
+            return;
+        }
+        // Announce at once rather than waiting a heartbeat: a recording can be
+        // started from the web the instant after a robot connects.
+        let _ = publisher_tx().send(PublishMsg::Announce(Envelope::ProducerAttached {
+            robot_id,
+            robot_instance,
+            publish_timestamp_ns: now_ns(),
+            producer_pid: std::process::id(),
+        }));
+    });
+    Ok(())
+}
+
+/// Stop announcing this process's binding to a source.
+///
+/// The daemon drops the source once its liveness bound elapses; there is no
+/// detach envelope, because a process that has died cannot send one and the
+/// daemon must handle that case identically.
+#[pyfunction]
+fn detach_source(py: Python<'_>, robot_id: &str, robot_instance: i64) -> PyResult<()> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    py.detach(|| attachment::detach(robot_id, robot_instance));
+    Ok(())
+}
+
 /// Cancel a recording — drop the source's in-progress chunk state without
 /// flushing (the daemon's cancel handler removes the relinked artefacts and
 /// the recovery sweep reclaims any spooled NUTs).
@@ -562,12 +612,17 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Before anything else can want to report a problem: several failures in
+    // here are otherwise indistinguishable from an idle sensor.
+    logging::init();
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
     module.add_function(wrap_pyfunction!(log_json, module)?)?;
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
+    module.add_function(wrap_pyfunction!(attach_source, module)?)?;
+    module.add_function(wrap_pyfunction!(detach_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
