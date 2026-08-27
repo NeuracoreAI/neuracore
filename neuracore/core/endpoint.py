@@ -802,13 +802,6 @@ def policy_remote_server(
 def _download_model(job_id: str, org_id: str) -> Path:
     """Download model from training run."""
     auth = get_auth()
-    destination = Path(tempfile.gettempdir()) / job_id / "model.nc.zip"
-    if destination.exists():
-        print(f"Model already downloaded at {destination}. Skipping download.")
-        return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    print("Downloading model from training run...")
     session = thread_local_session()
     response = session.get(
         f"{API_URL}/org/{org_id}/training/jobs/{job_id}/model_url",
@@ -817,9 +810,17 @@ def _download_model(job_id: str, org_id: str) -> Path:
     )
     response.raise_for_status()
 
-    model_url_response = response.json()
+    data = response.json()
+    train_run_name = data["train_run_name"]
+    destination = Path(tempfile.gettempdir()) / job_id / f"{train_run_name}.nc.zip"
+    if destination.exists():
+        print(f"Model already downloaded at {destination}. Skipping download.")
+        return destination
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    print("Downloading model from training run...")
     model_path = download_with_progress(
-        model_url_response["url"],
+        data["url"],
         "Downloading model...",
         destination=destination,
     )
