@@ -117,6 +117,13 @@ pub trait StateStore: Send + Sync {
         recording_id: &str,
     ) -> Result<Option<RecordingRow>, StateStoreError>;
 
+    /// Look up the local `recording_index` already assigned to `recording_id`,
+    /// if any.
+    async fn recording_index_for_cloud_id(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<i64>, StateStoreError>;
+
     /// List recordings whose `/recording/start` POST has not yet succeeded:
     /// `recording_id IS NULL`, `backend_start_notified_at IS NULL`, and the
     /// recording is not cancelled. The start notifier's startup sweep.
@@ -822,6 +829,19 @@ impl StateStore for SqliteStateStore {
         let row = Self::fetch_recording_locked(&mut tx, recording_index).await?;
         tx.commit().await?;
         Ok(row)
+    }
+
+    async fn recording_index_for_cloud_id(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<i64>, StateStoreError> {
+        let recording_index = sqlx::query_scalar::<_, i64>(
+            "SELECT recording_index FROM recordings WHERE recording_id = ?1 LIMIT 1",
+        )
+        .bind(recording_id)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(recording_index)
     }
 
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError> {

@@ -246,7 +246,9 @@ def test_recording_manager_tears_down_owned_state(nc_loop) -> None:
         )
 
     key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
-    manager.recording_robot_instances[key] = TrackedRecording("recording-1", 1.0)
+    manager.recording_robot_instances[key] = TrackedRecording(
+        "recording-1", 1.0, opened_locally=True
+    )
     manager.active_dataset_ids[key] = "dataset-1"
     manager._drain_callbacks[key] = MagicMock()
     timer = MagicMock()

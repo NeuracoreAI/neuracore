@@ -394,6 +394,38 @@ class Robot:
         )
         self._recording_state_manager = manager
 
+    def _notify_daemon_of_remote_start(
+        self, recording_id: str, dataset_id: str, start_time: float
+    ) -> None:
+        """Open the daemon window for a recording started from the web frontend.
+
+        Args:
+            recording_id: The cloud recording id the backend already minted.
+            dataset_id: Dataset the recording is being saved to.
+            start_time: The recording's capture start time (Unix seconds).
+        """
+        if not self.id:
+            return
+        self._get_daemon_recording_context().start_recording(
+            robot_id=self.id,
+            robot_instance=self.instance,
+            robot_name=self.name,
+            dataset_id=dataset_id,
+            dataset_name=None,
+            timestamp=start_time,
+            cloud_recording_id=recording_id,
+        )
+
+    def _register_remote_start_handler(self) -> None:
+        """Register a callback to notify the daemon of a remote start."""
+        assert self.id is not None
+        manager = get_recording_state_manager()
+        manager.register_remote_start_handler(
+            robot_id=self.id,
+            instance=self.instance,
+            callback=self._notify_daemon_of_remote_start,
+        )
+
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
         for stream_id, stream in list(self._data_streams.items()):
@@ -797,6 +829,7 @@ class Robot:
         self._recording_state_manager = None
         if self.id is not None and manager is not None:
             manager.deregister_remote_stop_handler(self.id, self.instance)
+            manager.deregister_remote_start_handler(self.id, self.instance)
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None
