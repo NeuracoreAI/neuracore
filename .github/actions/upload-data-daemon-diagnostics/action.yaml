@@ -1,0 +1,88 @@
+name: "Upload data-daemon diagnostics"
+description: >
+  Upload the data daemon's log and SQLite state, plus explicitly configured
+  test reports, without changing the result of the test step that preceded it.
+
+inputs:
+  artifact-name:
+    description: >
+      Short artifact label. Matrix callers must include their distinguishing
+      axes; workflow, job, runner, run, and rerun context are appended here.
+    required: false
+    default: "data-daemon-diagnostics"
+  state-directory:
+    description: "Directory containing data-daemon test state"
+    required: false
+    default: ".data_daemon_test_state"
+  additional-paths:
+    description: >
+      Optional newline-separated analytics paths to include, such as Allure,
+      JUnit, performance metrics, or structured phase-event outputs.
+    required: false
+    default: ""
+  retention-days:
+    description: "Number of days to retain the artifact"
+    required: false
+    default: "14"
+
+outputs:
+  artifact-id:
+    description: "GitHub artifact ID, or empty when nothing was uploaded"
+    value: ${{ steps.upload.outputs.artifact-id }}
+  artifact-name:
+    description: "Resolved unique artifact name"
+    value: ${{ steps.name.outputs.artifact-name }}
+  artifact-url:
+    description: "GitHub artifact URL, or empty when nothing was uploaded"
+    value: ${{ steps.upload.outputs.artifact-url }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Build unique artifact name
+      id: name
+      continue-on-error: true
+      shell: bash
+      env:
+        ARTIFACT_LABEL: ${{ inputs.artifact-name }}
+      run: |
+        set -euo pipefail
+        raw_name="${ARTIFACT_LABEL}-${GITHUB_WORKFLOW}-${GITHUB_JOB}-${RUNNER_OS}-${RUNNER_ARCH}-run${GITHUB_RUN_ID}-attempt${GITHUB_RUN_ATTEMPT}"
+        artifact_name="$(printf '%s' "$raw_name" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+        echo "artifact-name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+    - name: Upload diagnostics and configured reports
+      id: upload
+      continue-on-error: true
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ steps.name.outputs.artifact-name }}
+        include-hidden-files: true
+        if-no-files-found: warn
+        retention-days: ${{ inputs.retention-days }}
+        path: |
+          ${{ inputs.state-directory }}/daemon.log
+          ${{ inputs.state-directory }}/state.db
+          ${{ inputs.state-directory }}/state.db-wal
+          ${{ inputs.state-directory }}/state.db-shm
+          ${{ inputs.state-directory }}/artifacts/**/daemon.log
+          ${{ inputs.state-directory }}/artifacts/**/state.db
+          ${{ inputs.state-directory }}/artifacts/**/state.db-wal
+          ${{ inputs.state-directory }}/artifacts/**/state.db-shm
+          ${{ inputs.additional-paths }}
+
+    - name: Add diagnostics artifact to job summary
+      if: always() && steps.upload.outputs.artifact-url != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ steps.name.outputs.artifact-name }}
+        ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+      run: |
+        {
+          echo "### Data-daemon diagnostics"
+          echo
+          echo "[Download \`$ARTIFACT_NAME\`]($ARTIFACT_URL)"
+          echo
+          echo "Retained for ${{ inputs.retention-days }} days."
+        } >> "$GITHUB_STEP_SUMMARY"

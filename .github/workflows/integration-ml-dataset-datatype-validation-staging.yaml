@@ -11,4 +11,5 @@ jobs:
     with:
       environment: staging
       test-path: tests/integration/ml/test_dataset_datatype_validation.py
+      data-daemon-diagnostics: true
     secrets: inherit

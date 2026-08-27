@@ -7,8 +7,12 @@ on:
 
 jobs:
   test:
-    uses: NeuracoreAI/shared-workflows/.github/workflows/integration-ml-test.yaml@main
+    # TEMPORARY: pointed at the local vendored copy while data-daemon-diagnostics
+    # is tested here; switch back to NeuracoreAI/shared-workflows@main once that
+    # input is merged upstream.
+    uses: ./.github/workflows/_local-integration-ml-test.yaml
     with:
       environment: staging
       test-path: tests/integration/ml/test_dataset_mutation_training.py
+      data-daemon-diagnostics: true
     secrets: inherit

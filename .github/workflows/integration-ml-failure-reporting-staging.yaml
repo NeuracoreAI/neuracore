@@ -11,4 +11,5 @@ jobs:
     with:
       environment: staging
       test-path: tests/integration/ml/test_failure_reporting.py
+      data-daemon-diagnostics: true
     secrets: inherit

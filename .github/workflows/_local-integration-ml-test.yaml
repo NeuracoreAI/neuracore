@@ -1,0 +1,173 @@
+name: Integration ML Test (local, temporary)
+
+# TEMPORARY local vendored copy of shared-workflows' integration-ml-test.yaml,
+# used only to test the data-daemon-diagnostics upload path in CI before it's
+# merged upstream to NeuracoreAI/shared-workflows. Delete this file and the
+# .github/actions/upload-data-daemon-diagnostics copy once shared-workflows@main
+# has been updated, and point callers back at the shared-workflows reusable
+# workflow.
+#
+# Runs one neuracore ML integration test. Intended to be called from the
+# neuracore repo's integration-ml-* workflows.
+#
+# environment: staging    — checks out the caller's ref, builds and installs
+#   neuracore from source with the bundled data daemon.
+# environment: production — resolves the latest v* release tag, checks out the
+#   test harness at that tag and installs the released wheel from PyPI.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Environment to test against: staging or production"
+        required: true
+        type: string
+      test-path:
+        description: "Pytest target, e.g. tests/integration/ml/test_training_flow.py (may include a ::testcase selector)"
+        required: true
+        type: string
+      extras:
+        description: "Comma-separated pip extras to install neuracore with"
+        required: false
+        type: string
+        default: "dev,ml,examples"
+      lfs:
+        description: "Pull Git LFS objects after checkout"
+        required: false
+        type: boolean
+        default: true
+      data-daemon-diagnostics:
+        description: "Upload daemon diagnostics after a daemon-backed test"
+        required: false
+        type: boolean
+        default: false
+    secrets:
+      STAGING_SERVICE_API_KEY:
+        required: false
+      PROD_SERVICE_API_KEY:
+        required: false
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    env:
+      NCD_TEST_REPORT_DIR: ${{ github.workspace }}/.ml_test_reports/${{ inputs.environment }}
+      NCD_TEST_REPORT_HTML: ${{ github.workspace }}/ml-${{ inputs.environment }}-report-run${{ github.run_id }}-attempt${{ github.run_attempt }}.html
+    steps:
+      - name: Show disk space
+        run: df -h /
+
+      # Headless rendering deps for the ML test suites (Xvfb + OpenGL) and
+      # xmllint for URDF validation. FFmpeg comes with the neuracore install
+      # below (daemon action on staging, explicit install on production).
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ${{ inputs.environment == 'production' && 'ffmpeg' || '' }} libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
+
+      # Ref resolution (staging: caller's branch, production: latest v*
+      # release tag, verified) + checkout + LFS pull + harness summary.
+      - name: Checkout test harness
+        id: harness
+        uses: NeuracoreAI/shared-workflows/actions/checkout-test-harness@main
+        with:
+          environment: ${{ inputs.environment }}
+          lfs: ${{ inputs.lfs }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up neuracore with Rust data daemon
+        if: inputs.environment == 'staging'
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-source@main
+        with:
+          checkout: "false"
+          path: "."
+          extras: ${{ inputs.extras }}
+
+      - name: Set up neuracore from PyPI
+        if: inputs.environment == 'production'
+        uses: NeuracoreAI/shared-workflows/actions/setup-neuracore-from-pypi@main
+        with:
+          version: ${{ steps.harness.outputs.release-tag }}
+          extras: ${{ inputs.extras }}
+
+      - name: Prepare Allure report directory
+        run: mkdir -p "$NCD_TEST_REPORT_DIR/allure-results"
+
+      - name: Run Integration Test
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          NEURACORE_API_URL: ${{ inputs.environment == 'production' && 'https://api.neuracore.com/api' || 'https://staging.api.neuracore.com/api' }}
+          NEURACORE_API_KEY: ${{ inputs.environment == 'production' && secrets.PROD_SERVICE_API_KEY || secrets.STAGING_SERVICE_API_KEY }}
+          NEURACORE_ORG_ID: ${{ inputs.environment == 'production' && vars.PROD_SERVICE_ORG_ID || vars.STAGING_SERVICE_ORG_ID }}
+          NEURACORE_ENDPOINT_TIMEOUT: 30
+          DISPLAY: :0
+          TEST_PATH: ${{ inputs.test-path }}
+          # The daemon otherwise writes to ~/.neuracore/data_daemon; point it
+          # into the report dir and have each test attach daemon.log/state.db
+          # to its own Allure result (see tests/integration/ml/conftest.py).
+          NEURACORE_DAEMON_DB_PATH: ${{ env.NCD_TEST_REPORT_DIR }}/data_daemon/state.db
+          NCD_ATTACH_DAEMON_DIAGNOSTICS: ${{ inputs.data-daemon-diagnostics }}
+        run: |
+          Xvfb $DISPLAY -screen 0 1280x1024x24 &
+          pytest \
+            -o log_cli=true \
+            --log-cli-level=INFO \
+            --log-cli-format="%(asctime)s %(levelname)-8s [%(name)s] %(message)s" \
+            --log-cli-date-format="%H:%M:%S" \
+            --alluredir="$NCD_TEST_REPORT_DIR/allure-results" \
+            --clean-alluredir \
+            --junitxml="$NCD_TEST_REPORT_DIR/junit.xml" \
+            -v \
+            "$TEST_PATH"
+
+      - name: Generate Allure report
+        if: always()
+        continue-on-error: true
+        run: |
+          if find "$NCD_TEST_REPORT_DIR/allure-results" -type f -print -quit | grep -q .; then
+            npx --yes allure@3.14.3 awesome \
+              --single-file \
+              --output "$NCD_TEST_REPORT_DIR/allure-report" \
+              "$NCD_TEST_REPORT_DIR/allure-results"
+            cp "$NCD_TEST_REPORT_DIR/allure-report/index.html" "$NCD_TEST_REPORT_HTML"
+          else
+            echo "No Allure results were produced"
+          fi
+
+      # Upload Allure's self-contained page directly, without archiving it, so
+      # the artifact link opens straight in a browser instead of requiring a
+      # zip download.
+      - name: Upload HTML report
+        id: upload-report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ml-${{ inputs.environment }}-report-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+          path: ${{ env.NCD_TEST_REPORT_HTML }}
+          archive: false
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Per-test attachments (daemon.log/state.db, see
+      # tests/integration/ml/conftest.py) already cover the daemon diagnostics
+      # from inside the report itself, so there's no separate artifact to
+      # link here.
+      - name: Add report to job summary
+        if: always() && steps.upload-report.outputs.artifact-url != ''
+        continue-on-error: true
+        env:
+          REPORT_URL: ${{ steps.upload-report.outputs.artifact-url }}
+        run: |
+          {
+            echo "### ML integration test report"
+            echo
+            echo "[Open the self-contained HTML report]($REPORT_URL)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Show disk space after tests
+        if: always()
+        run: df -h /

@@ -11,4 +11,5 @@ jobs:
     with:
       environment: production
       test-path: tests/integration/ml/test_ml_lifecycle.py
+      data-daemon-diagnostics: true
     secrets: inherit

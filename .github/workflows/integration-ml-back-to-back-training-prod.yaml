@@ -11,4 +11,5 @@ jobs:
     with:
       environment: production
       test-path: tests/integration/ml/test_back_to_back_training.py
+      data-daemon-diagnostics: true
     secrets: inherit
