@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, watch};
 use crate::cli::coordinators::{build_api_client, spawn_cloud_coordinators};
 use crate::cli::launch_logging::{init_tracing, log_path_for, report_failure};
 use crate::cloud::{
-    read_org_id_from_config, spawn_config_watcher, spawn_recording_reaper, ConfigRefreshRequest,
+    read_org_id_from_config, spawn_config_watcher, spawn_recording_notification_stream,
+    spawn_recording_reaper, ConfigRefreshRequest,
 };
 use crate::config::env::RuntimeEnv;
 use crate::config::profile::{ProfileError, ProfileManager};
@@ -389,25 +390,35 @@ fn run_daemon(
             // the next periodic tick. Order is also load-bearing for
             // ordered shutdown: dropping the dispatcher first guarantees
             // no new `TraceWritten` lands while the coordinators drain.
-            let cloud_handles = if config_for_runtime.offline.unwrap_or(false) {
+            // The API client is kept alongside the handles: the recording
+            // notification stream needs it, but cannot be spawned until the
+            // dispatcher exists to give it a command channel.
+            let (cloud_handles, notification_client) = if config_for_runtime
+                .offline
+                .unwrap_or(false)
+            {
                 tracing::info!("offline mode — skipping cloud coordinator spawn");
-                None
+                (None, None)
             } else {
                 match build_api_client(&api_url, &config_path) {
-                    Ok(api_client) => Some(spawn_cloud_coordinators(
-                        state_store.clone(),
-                        trace_write_handle.clone(),
-                        event_bus.clone(),
-                        api_client,
-                        Arc::new(recordings_root.clone()),
-                        config_path.clone(),
-                        org_id.clone(),
-                        shutdown_tx.clone(),
-                        config_rx.clone(),
-                    )),
+                    Ok(api_client) => {
+                        let handles = spawn_cloud_coordinators(
+                            state_store.clone(),
+                            trace_write_handle.clone(),
+                            event_bus.clone(),
+                            Arc::clone(&api_client),
+                            Arc::new(recordings_root.clone()),
+                            config_path.clone(),
+                            org_id.clone(),
+                            shutdown_tx.clone(),
+                            config_rx.clone(),
+                        );
+                        let org_rx = handles.org_rx.clone();
+                        (Some(handles), Some((api_client, org_rx)))
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "failed to build API client; cloud uploads disabled");
-                        None
+                        (None, None)
                     }
                 }
             };
@@ -435,6 +446,19 @@ fn run_daemon(
                 dispatcher_context,
                 shutdown_tx.subscribe(),
             );
+
+            // Web-initiated start/stop reach the daemon here rather than being
+            // relayed by producers, so one such event stays one event and needs
+            // no disambiguating on the producer side. Offline has no backend to
+            // hear from, and no web-initiated recording to hear about.
+            let notification_handle = notification_client.map(|(api_client, org_rx)| {
+                spawn_recording_notification_stream(
+                    api_client,
+                    org_rx,
+                    dispatcher_handle.recording_command_tx.clone(),
+                    shutdown_tx.subscribe(),
+                )
+            });
 
             // Reclaim fully-uploaded recordings' files + rows. On by default
             // (opt out via the `recording_reaper` profile field or
@@ -501,6 +525,9 @@ fn run_daemon(
             // before the store closes so finalise/failed states are durable.
             trace_writer.shutdown().await;
             if let Some(handle) = reaper_handle {
+                handle.join().await;
+            }
+            if let Some(handle) = notification_handle {
                 handle.join().await;
             }
             if let Some(handles) = cloud_handles {

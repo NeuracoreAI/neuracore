@@ -6,14 +6,14 @@
 //! source, which is a fact about the process and cannot be wrong about a
 //! recording.
 //!
-//! It is published as [`Envelope::ProducerAttached`], and the daemon uses it to
-//! tell whether an org-wide backend recording notification concerns a source
-//! with a producer on this machine. A source nothing has attached to never has a
-//! window opened on its behalf.
+//! It is published as [`data_daemon_shared::Envelope::ProducerAttached`]. The
+//! daemon reads it to tell whether an org-wide backend recording notification
+//! concerns a source with a producer on this machine — a source nothing has
+//! attached to never has a window opened on its behalf.
 //!
-//! Restated on a heartbeat from the publisher thread (see
-//! [`crate::publisher::publish_loop`]) so a daemon that starts after its
-//! producers still learns they are there.
+//! Restated on a heartbeat from the publisher thread (see [`crate::publisher`]),
+//! so a daemon that starts after its producers still learns they are there, and
+//! one whose producers have died stops believing in them.
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};

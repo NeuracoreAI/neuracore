@@ -346,22 +346,30 @@ class Robot:
         self,
         recording_id: str | None,
         timestamp: float | None = None,
+        publish_stop: bool = True,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon.
+        """Stop all streams and, for a local stop, tell the daemon.
 
-        The local ``log_*`` gate closes in the instant between the window
-        closing and the writer's tail-chunk barrier. Closing
-        it before the notify would silently discard data the daemon would still
-        have accepted — the window is open until it receives the stop. Closing it
-        after the barrier instead leaves it open for as long as the writer's
-        backlog takes to drain (over a second under burst logging), publishing
-        data the daemon has already stopped accepting and simply throws away.
+        Args:
+            recording_id: Recording the stop refers to, for logging only.
+            timestamp: Optional capture time for the recording's stop.
+            publish_stop: Whether to publish ``StopRecording``. True for a local
+                ``nc.stop_recording()`` — one process, one envelope, nothing to
+                disambiguate. False for a web-initiated stop, which the daemon
+                hears from the backend itself: a process that merely *learned*
+                of it publishes no lifecycle envelope, so one such stop cannot
+                become one envelope per connected process.
+
+        Either way this process stops its streams and seals its own tail chunks.
+        Those are statements about itself, and stay safe to make from any number
+        of processes.
         """
         try:
             self._stop_all_streams()
             context = self._get_daemon_recording_context()
             try:
-                context.stop_recording(timestamp=timestamp)
+                if publish_stop:
+                    context.stop_recording(timestamp=timestamp)
             finally:
                 # Both run even if the notify failed.
                 self._close_local_recording_gate()
@@ -390,9 +398,17 @@ class Robot:
         manager.register_remote_stop_handler(
             robot_id=self.id,
             instance=self.instance,
-            callback=self._drain_streams_and_notify_daemon,
+            callback=self._drain_streams_for_remote_stop,
         )
         self._recording_state_manager = manager
+
+    def _drain_streams_for_remote_stop(self, recording_id: str | None) -> None:
+        """Drain this process's streams for a stop the daemon already knows about.
+
+        Args:
+            recording_id: Recording the remote stop refers to.
+        """
+        self._drain_streams_and_notify_daemon(recording_id, publish_stop=False)
 
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
