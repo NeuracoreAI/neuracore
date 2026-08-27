@@ -205,7 +205,7 @@ def _setup_direct_policy_train_run_mocks(
     _mock_training_job_metadata(mock_auth_requests, mocked_org_id)
     mock_auth_requests.get(
         f"{API_URL}/org/{mocked_org_id}/training/jobs/{job_id}/model_url",
-        json={"url": f"{localhost}/model.nc.zip"},
+        json={"url": f"{localhost}/model.nc.zip", "train_run_name": train_run_name},
         status_code=200,
     )
     mock_auth_requests.get(
