@@ -1392,3 +1392,400 @@ class TestDatasetDeletion:
 
         with pytest.raises(DatasetError, match="deleted"):
             _ = dataset._recordings_cache
+
+
+def _make_recordings(n: int) -> list[dict]:
+    """Raw recording dicts, index 0 = newest ... index n-1 = oldest.
+
+    Mirrors the backend's canonical newest-to-oldest dataset order so tests
+    can slice it directly to build expected pages.
+    """
+    return [
+        RecordingModel(
+            id=f"rec-{i:04d}",
+            robot_id=TEST_ROBOT_ID,
+            instance=1,
+            org_id="test-org-id",
+            start_time=float(n - i),
+            end_time=float(n - i) + 1.0,
+            total_bytes=512,
+            metadata=RecordingMetadata(),
+        ).model_dump(mode="json")
+        for i in range(n)
+    ]
+
+
+def _page_bounds(total: int, limit: int) -> list[tuple[int, int]]:
+    """Fixed forward page grid: chunks of `limit`, last chunk truncated."""
+    bounds = []
+    start = 0
+    while start < total:
+        end = min(start + limit, total)
+        bounds.append((start, end))
+        start = end
+    return bounds
+
+
+def _make_paginated_post(all_recordings: list[dict], total: int | None = None):
+    """Fake `session.post` for the by-dataset endpoint.
+
+    `all_recordings` must be newest-first. Both directions walk the same
+    fixed page grid, so backward starts at the same truncated chunk forward
+    reaches last — matching a real cursor-paginated backend.
+
+    Returns (fake_post, calls); `calls` records each request's params/json.
+    """
+    total = len(all_recordings) if total is None else total
+    calls: list[dict] = []
+
+    def _index_of(recording_id: str) -> int:
+        return next(i for i, r in enumerate(all_recordings) if r["id"] == recording_id)
+
+    def fake_post(url, headers=None, params=None, json=None, timeout=None):
+        params = dict(params or {})
+        calls.append({"params": params, "json": json})
+        limit = params.get("limit", PAGE_SIZE)
+
+        response = MagicMock()
+        response.status_code = 200
+        response.raise_for_status = MagicMock()
+
+        if limit == 1:
+            # Count probe (_initialize_num_recordings) — only `total` matters.
+            response.json.return_value = {"data": all_recordings[:1], "total": total}
+            return response
+
+        chunks = _page_bounds(total, limit)
+        direction = params.get("direction")
+
+        if direction == "backward":
+            if json is None:
+                start, end = chunks[-1] if chunks else (0, 0)
+            else:
+                cursor_idx = _index_of(json["id"])
+                chunk_idx = next(
+                    i for i, (s, _) in enumerate(chunks) if s == cursor_idx
+                )
+                if chunk_idx == 0:
+                    response.json.return_value = {"data": [], "total": total}
+                    return response
+                start, end = chunks[chunk_idx - 1]
+        else:
+            start = 0 if json is None else _index_of(json["id"]) + 1
+            end = min(start + limit, total)
+
+        response.json.return_value = {"data": all_recordings[start:end], "total": total}
+        return response
+
+    return fake_post, calls
+
+
+@pytest.fixture
+def patched_session(dataset_dict):
+    """Patch dataset.py's session/auth so `fake_post` controls the wire."""
+    import neuracore.core.data.dataset as ds_mod
+
+    def _install(fake_post):
+        session = MagicMock()
+        session.post.side_effect = fake_post
+        return (
+            patch.object(ds_mod, "thread_local_session", return_value=session),
+            patch.object(ds_mod, "get_auth", return_value=MagicMock(get_headers=dict)),
+        )
+
+    return _install
+
+
+class TestForwardPaginationWireContract:
+    """Forward requests must remain byte-for-byte unchanged."""
+
+    def test_initial_forward_request_body_is_none_no_direction(
+        self, dataset_dict, patched_session
+    ):
+        """The first forward page sends json=None and omits `direction`."""
+        recordings = _make_recordings(5)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            _ = dataset[0]
+
+        assert calls[0]["json"] is None
+        assert "direction" not in calls[0]["params"]
+
+    def test_forward_continuation_body_is_raw_last_recording_no_direction(
+        self, dataset_dict, patched_session
+    ):
+        """Continuation body is exactly the previous page's last recording."""
+        recordings = _make_recordings(35)  # two forward pages: 30, 5
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            _ = dataset[34]  # forces both pages to load
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert page_calls[0]["json"] is None
+        assert "direction" not in page_calls[0]["params"]
+        assert page_calls[1]["json"] == recordings[29]  # batch[-1] of page 1
+        assert "direction" not in page_calls[1]["params"]
+        # No envelope: the raw recording dict is sent as-is.
+        assert set(page_calls[1]["json"].keys()) >= {"id", "robot_id", "start_time"}
+
+
+class TestForwardPaginationRegression:
+    """102 recordings at page size 30, including a repeated-page-one server."""
+
+    def test_102_recordings_four_unique_pages(self, dataset_dict, patched_session):
+        """Exactly four requests, page sizes 30/30/30/12, 102 unique IDs in order."""
+        recordings = _make_recordings(102)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            all_loaded = list(dataset)
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert len(page_calls) == 4
+
+        ids = [r.id for r in all_loaded]
+        assert len(ids) == 102
+        assert len(set(ids)) == 102
+        assert ids == [r["id"] for r in recordings]
+        assert len(dataset._recordings_cache) == 102
+        assert len({r.id for r in dataset._recordings_cache}) == 102
+
+    def test_repeated_page_one_raises_instead_of_duplicating(
+        self, dataset_dict, patched_session
+    ):
+        """A backend that ignores the cursor must raise, not silently duplicate."""
+        recordings = _make_recordings(102)
+
+        def stuck_fake_post(url, headers=None, params=None, json=None, timeout=None):
+            limit = (params or {}).get("limit", PAGE_SIZE)
+            response = MagicMock()
+            response.status_code = 200
+            response.raise_for_status = MagicMock()
+            if limit == 1:
+                response.json.return_value = {"data": recordings[:1], "total": 102}
+            else:
+                # Always returns page one, no matter what cursor is sent.
+                response.json.return_value = {"data": recordings[:30], "total": 102}
+            return response
+
+        patch_a, patch_b = patched_session(stuck_fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            with pytest.raises(DatasetError, match="pagination stalled"):
+                list(dataset)
+
+        # The stalled page must never have been appended.
+        assert len(dataset._recordings_cache) == 30
+        assert len({r.id for r in dataset._recordings_cache}) == 30
+
+
+class TestBackwardPagination:
+    """`reversed(dataset)` walks the backend with direction=backward."""
+
+    def test_initial_backward_request_body_none_with_direction(
+        self, dataset_dict, patched_session
+    ):
+        """The first backward page sends json=None and direction=backward."""
+        recordings = _make_recordings(5)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            _ = next(reversed(dataset))
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert page_calls[0]["json"] is None
+        assert page_calls[0]["params"]["direction"] == "backward"
+
+    def test_backward_continuation_body_is_raw_first_recording(
+        self, dataset_dict, patched_session
+    ):
+        """Continuation body is exactly the previous page's first recording."""
+        recordings = _make_recordings(35)  # backward pages: 5, 30
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            list(reversed(dataset))
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert len(page_calls) == 2
+        assert page_calls[0]["json"] is None
+        assert page_calls[1]["json"] == recordings[30]  # batch[0] of terminal page
+        for c in page_calls:
+            assert c["params"]["direction"] == "backward"
+            # Raw recording body, never a {"start_after"/"start_before": ...} envelope.
+            assert c["json"] is None or "id" in c["json"]
+            assert c["json"] is None or "start_before" not in c["json"]
+
+    def test_102_recordings_oldest_to_newest_unique(
+        self, dataset_dict, patched_session
+    ):
+        """Backward pages are 12/30/30/30 and yield the exact reverse order."""
+        recordings = _make_recordings(102)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            reversed_ids = [r.id for r in reversed(dataset)]
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert len(page_calls) == 4
+
+        expected_order = list(reversed([r["id"] for r in recordings]))
+        assert reversed_ids == expected_order
+        assert len(set(reversed_ids)) == 102
+
+    def test_equal_timestamps_do_not_cause_reordering(
+        self, dataset_dict, patched_session
+    ):
+        """Ties in start_time must not perturb the server-defined order."""
+        recordings = [
+            RecordingModel(
+                id=f"rec-{i:04d}",
+                robot_id=TEST_ROBOT_ID,
+                instance=1,
+                org_id="test-org-id",
+                start_time=0.0,
+                end_time=1.0,
+                total_bytes=512,
+                metadata=RecordingMetadata(),
+            ).model_dump(mode="json")
+            for i in range(10)
+        ]
+        fake_post, _ = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            reversed_ids = [r.id for r in reversed(dataset)]
+
+        assert reversed_ids == list(reversed([r["id"] for r in recordings]))
+
+    def test_repeated_backward_page_raises(self, dataset_dict, patched_session):
+        """A backward cursor that never advances must raise, not loop."""
+        recordings = _make_recordings(102)
+
+        def stuck_fake_post(url, headers=None, params=None, json=None, timeout=None):
+            limit = (params or {}).get("limit", PAGE_SIZE)
+            response = MagicMock()
+            response.status_code = 200
+            response.raise_for_status = MagicMock()
+            if limit == 1:
+                response.json.return_value = {"data": recordings[:1], "total": 102}
+            else:
+                # Always returns the terminal page, ignoring the cursor.
+                response.json.return_value = {"data": recordings[90:102], "total": 102}
+            return response
+
+        patch_a, patch_b = patched_session(stuck_fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            with pytest.raises(DatasetError, match="pagination stalled"):
+                list(reversed(dataset))
+
+    def test_empty_dataset(self, dataset_dict, patched_session):
+        """An empty dataset yields nothing and issues no page request."""
+        fake_post, calls = _make_paginated_post([], total=0)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            assert list(reversed(dataset)) == []
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert page_calls == []
+
+    def test_single_page_dataset(self, dataset_dict, patched_session):
+        """A dataset smaller than one page needs exactly one backward request."""
+        recordings = _make_recordings(12)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            reversed_ids = [r.id for r in reversed(dataset)]
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        assert len(page_calls) == 1
+        assert reversed_ids == list(reversed([r["id"] for r in recordings]))
+
+    @pytest.mark.parametrize("total", [0, 1, 29, 30, 31, 60, 95, 102])
+    def test_page_size_boundaries(self, dataset_dict, patched_session, total):
+        """Exact page-size boundaries traverse correctly in both directions."""
+        recordings = _make_recordings(total)
+        fake_post, _ = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            reversed_ids = [r.id for r in reversed(dataset)]
+
+        assert reversed_ids == list(reversed([r["id"] for r in recordings]))
+        assert len(set(reversed_ids)) == total
+
+    def test_repeated_calls_are_independent(self, dataset_dict, patched_session):
+        """Two live reversed() iterators must not share cursor state."""
+        recordings = _make_recordings(45)  # backward pages: 15, 30
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            it1 = reversed(dataset)
+            first_from_it1 = [next(it1), next(it1), next(it1)]
+
+            it2 = reversed(dataset)
+            all_from_it2 = list(it2)
+
+            rest_from_it1 = list(it1)
+
+        expected = list(reversed([r["id"] for r in recordings]))
+        assert [r.id for r in first_from_it1] == expected[:3]
+        assert [r.id for r in all_from_it2] == expected
+        assert [r.id for r in first_from_it1 + rest_from_it1] == expected
+
+        page_calls = [c for c in calls if c["params"].get("limit") != 1]
+        # it1's 2 pages + it2's independent 2 pages — no call reused.
+        assert len(page_calls) == 4
+
+    def test_partial_forward_then_reversed_leaves_forward_state_untouched(
+        self, dataset_dict, patched_session
+    ):
+        """reversed() must not read or mutate the forward cache/cursor."""
+        recordings = _make_recordings(45)
+        fake_post, calls = _make_paginated_post(recordings)
+        patch_a, patch_b = patched_session(fake_post)
+
+        with patch_a, patch_b:
+            dataset = Dataset(**dataset_dict)
+            forward_iter = iter(dataset)
+            first_forward = next(forward_iter)  # loads only the first forward page
+
+            cache_snapshot = list(dataset._recordings_cache)
+            cursor_snapshot = dict(dataset._start_after)
+
+            reversed_ids = [r.id for r in reversed(dataset)]
+
+            assert dataset._recordings_cache == cache_snapshot
+            assert dataset._start_after == cursor_snapshot
+
+            rest_forward = list(forward_iter)
+
+        assert [first_forward.id] + [r.id for r in rest_forward] == [
+            r["id"] for r in recordings
+        ]
+        assert reversed_ids == list(reversed([r["id"] for r in recordings]))

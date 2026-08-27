@@ -10,7 +10,9 @@ post-mutation re-sync:
 * :func:`test_dataset_synchronization_missing_data` — **fails on missing data**
   (``SynchronizationMissingDataError``), and
 * :func:`test_dataset_synchronization_after_mutation` — **re-synchronizes** after
-  removing and replacing half the recordings.
+  removing and replacing half the recordings, and
+* :func:`test_recording_pagination_forward_and_backward` — forward and backward
+  ``Dataset`` traversal agree on a dataset spanning more than one page.
 
 Each scenario drives the high-level ``Dataset.synchronize()``: success returns a
 ``SynchronizedDataset``, while the two failure classes raise a ``DatasetError``
@@ -41,7 +43,7 @@ import pytest
 from neuracore_types import DataType
 
 import neuracore as nc
-from neuracore.core.data.dataset import Dataset
+from neuracore.core.data.dataset import PAGE_SIZE, Dataset
 from neuracore.core.exceptions import DatasetError
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,6 +80,8 @@ MAX_FRAMES = 30  # Truncate the rollout to keep recordings short.
 RECORDINGS_PER_DATASET = 10  # Recordings collected for each dataset.
 RECORDINGS_TO_REMOVE = 5  # Recordings removed during the mutation scenario.
 RECORDINGS_TO_ADD = 5  # Replacement recordings added after removal.
+# > PAGE_SIZE so pagination requires a real page continuation.
+PAGINATION_RECORDINGS_PER_DATASET = PAGE_SIZE + 1
 NC_CAM_NAME = "rgb_angle"
 MJ_CAM_NAME = "angle"
 LANGUAGE_LABEL = "instruction"
@@ -160,8 +164,13 @@ def _record_one(robot_name: str, instance: int) -> None:
     nc.stop_recording(wait=True, robot_name=robot_name, instance=instance)
 
 
-def _collect_dataset(robot_name: str, dataset_name: str, instance: int) -> Dataset:
-    """Collect ``RECORDINGS_PER_DATASET`` scripted recordings into one dataset."""
+def _collect_dataset(
+    robot_name: str,
+    dataset_name: str,
+    instance: int,
+    count: int = RECORDINGS_PER_DATASET,
+) -> Dataset:
+    """Collect ``count`` scripted recordings into one dataset."""
     nc.connect_robot(
         robot_name=robot_name,
         instance=instance,
@@ -170,12 +179,12 @@ def _collect_dataset(robot_name: str, dataset_name: str, instance: int) -> Datas
     )
     dataset = nc.create_dataset(name=dataset_name)
 
-    for _ in range(RECORDINGS_PER_DATASET):
+    for _ in range(count):
         _record_one(robot_name=robot_name, instance=instance)
 
     wait_for_dataset_ready(
         dataset_name,
-        expected_recording_count=RECORDINGS_PER_DATASET,
+        expected_recording_count=count,
         timeout_s=RECORDING_STOP_TIMEOUT_SECONDS,
         poll_interval_s=PROGRESS_POLL_SECONDS,
     )
@@ -246,13 +255,10 @@ def _assert_failure_with_reason(
 
 
 @contextlib.contextmanager
-def _collected_dataset(name_prefix: str) -> Iterator[Dataset]:
-    """Yield a freshly collected dataset, cleaning it up on exit.
-
-    Logs in, runs the online daemon while collecting
-    ``RECORDINGS_PER_DATASET`` recordings into a uniquely named dataset, then
-    deletes the dataset once the caller is done.
-    """
+def _collected_dataset(
+    name_prefix: str, count: int = RECORDINGS_PER_DATASET
+) -> Iterator[Dataset]:
+    """Yield a freshly collected dataset of ``count`` recordings, then delete it."""
     nc.login()
     run_id = uuid.uuid4().hex[:8]
     robot_name = f"sync_it_robot_{run_id}"
@@ -264,6 +270,7 @@ def _collected_dataset(name_prefix: str) -> Iterator[Dataset]:
                 robot_name=robot_name,
                 dataset_name=_unique_name(name_prefix),
                 instance=0,
+                count=count,
             )
         yield dataset
     finally:
@@ -445,3 +452,36 @@ def test_dataset_synchronization_after_mutation() -> None:
             except Exception:  # noqa: BLE001
                 logger.warning("Failed to clean up dataset %s", dataset.id)
         delete_cloud_robot(robot_name)
+
+
+def test_recording_pagination_forward_and_backward() -> None:
+    """Forward and backward SDK traversal agree with each other on a live backend."""
+    with _collected_dataset(
+        "pagination_it", count=PAGINATION_RECORDINGS_PER_DATASET
+    ) as dataset:
+        assert len(dataset) == PAGINATION_RECORDINGS_PER_DATASET
+
+        # Separate handles: neither may reuse the other's forward cache/cursor.
+        forward_dataset = nc.get_dataset(dataset.name)
+        forward_ids = [str(recording.id) for recording in forward_dataset]
+
+        assert len(forward_ids) == PAGINATION_RECORDINGS_PER_DATASET
+        assert len(set(forward_ids)) == PAGINATION_RECORDINGS_PER_DATASET, (
+            "Forward pagination returned duplicate recordings — the backend "
+            "may be repeating a page instead of advancing the cursor."
+        )
+
+        # The legacy raw-body contract must still round-trip against a live backend.
+        first_page = forward_dataset._request_recordings_page(None)
+        assert "data" in first_page and "total" in first_page
+        assert first_page["total"] == PAGINATION_RECORDINGS_PER_DATASET
+
+        backward_dataset = nc.get_dataset(dataset.name)
+        backward_ids = [str(recording.id) for recording in reversed(backward_dataset)]
+
+        assert len(backward_ids) == PAGINATION_RECORDINGS_PER_DATASET
+        assert len(set(backward_ids)) == PAGINATION_RECORDINGS_PER_DATASET
+        assert backward_ids == list(reversed(forward_ids))
+        assert (
+            forward_dataset._recordings_cache is not backward_dataset._recordings_cache
+        )
