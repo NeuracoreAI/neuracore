@@ -129,3 +129,10 @@ examples/test_streaming/
 # See docs/rust_data_daemon_development.md#packaging-the-wheel.
 neuracore/data_daemon/bin/
 neuracore/data_daemon/_data_bridge*.so
+
+# Internal staging infra reference (project IDs, service names, log filters) —
+# not a secret, but not something to publish either.
+.dbcreds.md
+
+# Downloaded CI artifacts from scripts/ci_poc.py -- scratch, not repo content.
+ci_poc_runs/

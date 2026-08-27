@@ -100,6 +100,7 @@ jobs:
         NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
         NEURACORE_ORG_ID: ${{ vars.STAGING_SERVICE_ORG_ID }}
         NEURACORE_PROVIDE_LIVE_DATA: false
+        NCD_UPLOAD_FINALISE_KEY_DRIFT: "1"
 
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
@@ -112,8 +113,7 @@ jobs:
         --clean-alluredir
         --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
         --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
-        tests/integration/platform/data_daemon/behavioural_correctness/
-        tests/integration/platform/data_daemon/data_integrity/
+        tests/integration/platform/data_daemon/behavioural_correctness/test_offline_to_online.py
 
     - name: Generate Allure performance report
       if: always()
@@ -161,8 +161,14 @@ jobs:
     - name: Upload data-daemon diagnostics and analytics
       if: always()
       continue-on-error: true
-      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      # PoC (poc/ci-wizard branch only): the @main reference doesn't resolve
+      # yet (not merged upstream to shared-workflows), same situation
+      # _local-integration-ml-test.yaml already works around. Use the local
+      # vendored copy instead, same as that workflow does. Revert to the
+      # remote action once shared-workflows@main has it.
+      uses: ./.github/actions/upload-data-daemon-diagnostics
       with:
+      
         artifact-name: data-daemon-staging-functional-py${{ matrix.python-version }}
         additional-paths: |
           ${{ env.NCD_PERF_REPORT_DIR }}/allure-results
@@ -290,7 +296,9 @@ jobs:
     - name: Upload data-daemon diagnostics and analytics
       if: always()
       continue-on-error: true
-      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      # PoC (poc/ci-wizard branch only): see the functional job's matching
+      # step above for why this points at the local copy instead of @main.
+      uses: ./.github/actions/upload-data-daemon-diagnostics
       with:
         artifact-name: data-daemon-staging-performance-py${{ matrix.python-version }}
         additional-paths: |

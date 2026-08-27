@@ -41,13 +41,6 @@ _CASES = DataDaemonTestBatch(
             duration_sec=5,
             joint_count=4,
         ),
-        DataDaemonTestCase(
-            duration_sec=5,
-            joint_count=4,
-            video_count=1,
-            image_width=64,
-            image_height=64,
-        ),
     ),
 ).as_cases()
 

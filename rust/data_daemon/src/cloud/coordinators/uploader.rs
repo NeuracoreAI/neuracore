@@ -35,6 +35,12 @@ use crate::storage::paths::TracePath;
 /// per-request latency and its p95/p99 tail, which drives timeouts and retries.
 pub const MAX_CONCURRENT_UPLOADS: usize = 16;
 
+/// When set, every successfully-uploaded trace's local finalise call uses a
+/// non-canonical key. Unset in normal operation.
+fn upload_finalise_key_drift_enabled() -> bool {
+    std::env::var("NCD_UPLOAD_FINALISE_KEY_DRIFT").is_ok()
+}
+
 /// Handle returned by [`spawn_uploader`].
 pub struct UploaderHandle {
     join: JoinHandle<()>,
@@ -496,7 +502,12 @@ async fn finalise_upload(
         total_bytes: Some(total_uploaded.max(trace.total_bytes)),
         ..TraceUpdate::default()
     };
-    if let Err(error) = store.update_trace(&trace.trace_id, update).await {
+    let persist_key = if upload_finalise_key_drift_enabled() {
+        format!("{}#", trace.trace_id)
+    } else {
+        trace.trace_id.clone()
+    };
+    if let Err(error) = store.update_trace(&persist_key, update).await {
         tracing::warn!(%error, trace_id = trace.trace_id, "failed to mark trace uploaded");
     }
     bus.publish(DaemonEvent::UploadComplete {

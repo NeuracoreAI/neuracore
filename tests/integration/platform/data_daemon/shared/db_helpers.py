@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import sqlite3
 import time
 from collections.abc import Callable, Iterable
@@ -1177,7 +1178,9 @@ def wait_for_upload_complete_in_db(
 
     Args:
         recording_key: The ``recording_index`` correlation key to wait on.
-        timeout_s: Base no-progress timeout in seconds.
+        timeout_s: Base no-progress timeout in seconds. Overridable via
+            ``NCD_UPLOAD_WAIT_TIMEOUT_S`` for environments with different
+            upload latency characteristics.
 
     Raises:
         pytest failure: If upload completion is not observed before timeout.
@@ -1185,6 +1188,10 @@ def wait_for_upload_complete_in_db(
     min_poll_interval_s = 0.1
     max_poll_interval_s = 2.0
     max_timeout_backoff_factor = 8.0
+
+    env_timeout = os.environ.get("NCD_UPLOAD_WAIT_TIMEOUT_S")
+    if env_timeout is not None:
+        timeout_s = float(env_timeout)
 
     poll_interval_s = min_poll_interval_s
     progress_timeout_s = timeout_s
