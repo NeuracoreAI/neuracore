@@ -47,6 +47,15 @@ fn content_type_for(data_type: &str) -> ContentKind {
     }
 }
 
+/// Whether a data type produces video artefacts at all.
+///
+/// The public face of [`content_type_for`], so callers can gate on the video
+/// family without re-listing the data types and drifting from the artefact
+/// layout this module owns.
+pub fn is_video_family(data_type: &str) -> bool {
+    matches!(content_type_for(data_type), ContentKind::Rgb)
+}
+
 /// The MIME content-type the daemon registers (and re-acquires session URIs)
 /// for an artefact, keyed off its filename suffix. The single source of truth
 /// for the mapping, shared by [`cloud_file_list`] and the uploader's session
