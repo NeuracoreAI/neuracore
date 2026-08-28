@@ -113,6 +113,58 @@ const DISPATCHER_INBOX_CAPACITY: usize = 1024;
 /// Source identity: `(robot_id, robot_instance)`.
 type Source = (String, i64);
 
+/// Wall clock in nanoseconds, the same clock a producer stamps its envelopes
+/// with. Used for the boundaries of a backend-driven start or stop, which carry
+/// no publish stamp of their own.
+fn now_ns() -> i64 {
+    Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX)
+}
+
+/// A recording lifecycle decision the backend has already made, delivered by
+/// [`crate::cloud::watchers::recording_notification_stream`].
+///
+/// The daemon learns web-initiated start and stop on the connection that
+/// already carries recording identity — its own — rather than having them
+/// relayed by N producer processes that would each have to work out which
+/// window they meant. Producers publish no lifecycle envelope for these at all.
+#[derive(Debug, Clone)]
+pub enum RecordingCommand {
+    /// The backend has a recording open for this source.
+    Start {
+        source: Source,
+        /// Cloud id the backend already minted. The daemon adopts it instead of
+        /// POSTing `/recording/start` for a recording that already exists.
+        recording_id: String,
+        dataset_id: Option<String>,
+        /// Backend-reported capture-clock start (Unix seconds).
+        start_time_s: f64,
+    },
+    /// The backend considers this recording over.
+    Stop {
+        source: Source,
+        /// Cloud id of the recording being stopped. Matched against the live
+        /// window's own row, so a notification for a recording that already
+        /// ended cannot close its successor.
+        recording_id: String,
+    },
+}
+
+/// Whether a source's live window is the recording a backend notification named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveMatch {
+    /// The live window is that recording, at this local index.
+    Matches(i64),
+    /// A window is live, but it is a different recording (or the named one is
+    /// unknown here) — so the notification must not touch it.
+    Different,
+    /// Nothing is live for the source.
+    None,
+}
+
+/// Bounded backend → dispatcher command channel. Lifecycle events are rare, so
+/// a small buffer is ample.
+const RECORDING_COMMAND_CAPACITY: usize = 64;
+
 /// How long a producer stays counted as present after its last
 /// [`Envelope::ProducerAttached`].
 ///
@@ -134,6 +186,10 @@ fn configured_holdback() -> Duration {
 /// per-trace actor.
 pub struct DispatcherHandle {
     join: JoinHandle<()>,
+    /// Sender the backend's recording notification stream reaches the
+    /// dispatcher's window state through. Cloned by the notification watcher;
+    /// producers never touch it.
+    pub recording_command_tx: mpsc::Sender<RecordingCommand>,
 }
 
 impl DispatcherHandle {
@@ -183,11 +239,19 @@ pub fn spawn_with_context(
     shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) -> (mpsc::Sender<Envelope>, DispatcherHandle) {
     let (tx, rx) = mpsc::channel::<Envelope>(DISPATCHER_INBOX_CAPACITY);
+    let (recording_command_tx, recording_command_rx) =
+        mpsc::channel::<RecordingCommand>(RECORDING_COMMAND_CAPACITY);
     let join = tokio::spawn(async move {
         let mut dispatcher = Dispatcher::new(store, actor_context, context);
-        dispatcher.run(rx, shutdown_rx).await;
+        dispatcher.run(rx, recording_command_rx, shutdown_rx).await;
     });
-    (tx, DispatcherHandle { join })
+    (
+        tx,
+        DispatcherHandle {
+            join,
+            recording_command_tx,
+        },
+    )
 }
 
 /// A per-trace actor's routing handle, stored inside its window.
@@ -343,7 +407,8 @@ struct Dispatcher {
     /// Producers bound to each source, by OS pid, with when each was last heard
     /// from. Says only that a producer for the source exists on this machine —
     /// never anything about a recording. Read when deciding whether an org-wide
-    /// backend notification concerns a source here.
+    /// backend notification concerns a source here; see
+    /// [`Dispatcher::has_attached_producer`].
     attached: HashMap<Source, HashMap<u32, Instant>>,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
@@ -375,6 +440,7 @@ impl Dispatcher {
     async fn run(
         &mut self,
         mut rx: mpsc::Receiver<Envelope>,
+        mut recording_command_rx: mpsc::Receiver<RecordingCommand>,
         mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
     ) {
         tracing::info!(
@@ -403,6 +469,11 @@ impl Dispatcher {
                         break;
                     };
                     self.handle_inbound(envelope, Instant::now()).await;
+                }
+                command = recording_command_rx.recv() => {
+                    if let Some(command) = command {
+                        self.handle_recording_command(command, Instant::now()).await;
+                    }
                 }
                 _ = sleep(housekeep_after) => {}
             }
@@ -603,6 +674,23 @@ impl Dispatcher {
         }
     }
 
+    /// Whether any producer on this machine is currently bound to the source.
+    ///
+    /// The gate on acting for a backend recording notification: the stream is
+    /// org-wide, so it carries robots whose producers live on other machines
+    /// entirely, and opening a window for one of those would mint a recording
+    /// that could never receive data.
+    ///
+    /// A producer that dies stops sending its heartbeat and ages out — there is no
+    /// detach envelope to rely on, because a crashed process cannot send one.
+    fn has_attached_producer(&self, source: &Source, now: Instant) -> bool {
+        self.attached.get(source).is_some_and(|producers| {
+            producers
+                .values()
+                .any(|last_seen| now.duration_since(*last_seen) < ATTACH_LIVENESS)
+        })
+    }
+
     /// Drop producers whose heartbeat has stopped, and sources left with
     /// none. Runs on the housekeeping cadence, so a departed producer is
     /// forgotten without a timer of its own.
@@ -643,6 +731,148 @@ impl Dispatcher {
             window.last_seen = Some(recv_at);
         } else {
             self.windows.entry(source.clone()).or_default().last_seen = Some(recv_at);
+        }
+    }
+
+    /// Act on a lifecycle decision the backend has already made.
+    ///
+    /// Ignored outright for a source no producer here is bound to: the
+    /// notification stream is org-wide, so most of what arrives concerns robots
+    /// on other machines.
+    async fn handle_recording_command(&mut self, command: RecordingCommand, recv_at: Instant) {
+        let source = match &command {
+            RecordingCommand::Start { source, .. } | RecordingCommand::Stop { source, .. } => {
+                source.clone()
+            }
+        };
+        if !self.has_attached_producer(&source, recv_at) {
+            tracing::debug!(
+                robot_id = source.0,
+                "ignoring recording notification for a source with no producer here"
+            );
+            return;
+        }
+        match command {
+            RecordingCommand::Start {
+                recording_id,
+                dataset_id,
+                start_time_s,
+                ..
+            } => {
+                self.handle_backend_start(source, recording_id, dataset_id, start_time_s, recv_at)
+                    .await
+            }
+            RecordingCommand::Stop { recording_id, .. } => {
+                self.handle_backend_stop(source, recording_id, recv_at)
+                    .await
+            }
+        }
+    }
+
+    /// Open a window for a recording the backend already created.
+    ///
+    /// Idempotent against both a repeat `START` and the `INIT` snapshot every
+    /// reconnect replays: if this source's live window already *is* that
+    /// recording, there is nothing to do. That check is what replaces a
+    /// producer-side "did someone already open this?" flag — it reads state the
+    /// daemon owns rather than state a process guessed at.
+    async fn handle_backend_start(
+        &mut self,
+        source: Source,
+        recording_id: String,
+        dataset_id: Option<String>,
+        start_time_s: f64,
+        recv_at: Instant,
+    ) {
+        if let LiveMatch::Matches(_) = self.live_recording_index_for(&source, &recording_id).await {
+            tracing::debug!(
+                robot_id = source.0,
+                recording_id,
+                "recording notification names the window already open; ignoring"
+            );
+            return;
+        }
+        // The window's lower bound is the publish clock, as for a producer's own
+        // start: it is when the daemon began accepting data for this recording,
+        // which is the only thing it can honestly claim.
+        let publish_timestamp_ns = now_ns();
+        let capture_timestamp_ns = (start_time_s * 1e9) as i64;
+        self.handle_start(
+            source,
+            dataset_id,
+            Some(recording_id),
+            publish_timestamp_ns,
+            capture_timestamp_ns,
+            recv_at,
+        )
+        .await;
+    }
+
+    /// Close the window carrying the named recording.
+    ///
+    /// Matched on the recording the notification names, never on "whatever is
+    /// live now": a `STOP` that arrives after the next recording has begun — or
+    /// an `INIT` replay of an already-finished one — must not end its successor.
+    async fn handle_backend_stop(
+        &mut self,
+        source: Source,
+        recording_id: String,
+        recv_at: Instant,
+    ) {
+        let LiveMatch::Matches(recording_index) =
+            self.live_recording_index_for(&source, &recording_id).await
+        else {
+            tracing::debug!(
+                robot_id = source.0,
+                recording_id,
+                "stop notification does not name the live window; ignoring"
+            );
+            return;
+        };
+        // The backend initiated this stop, so it already knows: stamping the
+        // notify keeps the stop notifier from POSTing it straight back.
+        if let Err(error) = self
+            .store
+            .mark_recording_stop_notified(recording_index)
+            .await
+        {
+            tracing::warn!(%error, recording_index, "failed to stamp backend-originated stop");
+        }
+        let stop_ns = now_ns();
+        self.handle_stop(source, stop_ns, stop_ns, recv_at).await;
+    }
+
+    /// Whether the source's live window is the recording the backend named.
+    ///
+    /// Resolved through the recording row rather than any in-memory map,
+    /// because a locally-started recording's cloud id is stamped there
+    /// asynchronously by the start notifier — the dispatcher never sees it
+    /// otherwise.
+    async fn live_recording_index_for(&self, source: &Source, recording_id: &str) -> LiveMatch {
+        let Some(live_index) = self
+            .windows
+            .get(source)
+            .and_then(|entry| entry.live.as_ref())
+            .map(|window| window.recording_index)
+        else {
+            return LiveMatch::None;
+        };
+        match self.store.recordings_for_source(&source.0, source.1).await {
+            Ok(rows) => {
+                let named = rows
+                    .iter()
+                    .find(|row| row.recording_id.as_deref() == Some(recording_id));
+                match named {
+                    Some(row) if row.recording_index == live_index => {
+                        LiveMatch::Matches(live_index)
+                    }
+                    _ => LiveMatch::Different,
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, robot_id = source.0, "failed to resolve recording by cloud id");
+                LiveMatch::Different
+            }
         }
     }
 
@@ -1943,6 +2173,164 @@ mod tests {
         let a: serde_json::Value =
             serde_json::from_slice(&std::fs::read(a_dir.join("trace.json")).unwrap()).unwrap();
         assert_eq!(a, serde_json::json!([{"i": 1}]));
+    }
+
+    /// Attach a producer so backend notifications for the source are acted on.
+    async fn attach_producer(dispatcher: &mut Dispatcher, robot: &str, at: Instant) {
+        dispatcher
+            .handle_inbound(
+                Envelope::ProducerAttached {
+                    robot_id: robot.into(),
+                    robot_instance: 0,
+                    publish_timestamp_ns: 1,
+                    producer_pid: 4242,
+                },
+                at,
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_backend_notification_is_ignored_without_a_producer_here() {
+        // The stream is org-wide, so most of what arrives is for robots on other
+        // machines. Opening a window for one would mint a recording that could
+        // never receive data.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Start {
+                    source: ("robot-elsewhere".to_string(), 0),
+                    recording_id: "cloud-1".into(),
+                    dataset_id: Some("ds-1".into()),
+                    start_time_s: 1_700_000_000.0,
+                },
+                Instant::now(),
+            )
+            .await;
+
+        assert!(
+            store
+                .recordings_for_source("robot-elsewhere", 0)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no recording may be minted for a source with no producer here"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_backend_start_adopts_the_cloud_id_and_is_idempotent() {
+        // The INIT snapshot replays every live recording on each reconnect, so a
+        // repeat of the recording already open must do nothing. This is what
+        // replaces a producer-side "did someone already open this?" flag: it
+        // reads state the daemon owns.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        attach_producer(&mut dispatcher, "robot-1", now).await;
+        let command = RecordingCommand::Start {
+            source: ("robot-1".to_string(), 0),
+            recording_id: "cloud-1".into(),
+            dataset_id: Some("ds-1".into()),
+            start_time_s: 1_700_000_000.0,
+        };
+        dispatcher
+            .handle_recording_command(command.clone(), now)
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(
+            recordings[0].recording_id.as_deref(),
+            Some("cloud-1"),
+            "the backend's id is adopted rather than re-minted"
+        );
+
+        // Replayed by the next INIT.
+        dispatcher.handle_recording_command(command, now).await;
+        assert_eq!(
+            store
+                .recordings_for_source("robot-1", 0)
+                .await
+                .unwrap()
+                .len(),
+            1,
+            "replaying the live recording must not open a second window"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_backend_stop_never_closes_the_next_recording() {
+        // The case the whole design exists for. A stop for recording A that
+        // arrives after B has begun — a delayed notification, or an INIT replay
+        // of an already-finished recording — must not end B.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        attach_producer(&mut dispatcher, "robot-1", now).await;
+        for recording_id in ["cloud-a", "cloud-b"] {
+            dispatcher
+                .handle_recording_command(
+                    RecordingCommand::Start {
+                        source: ("robot-1".to_string(), 0),
+                        recording_id: recording_id.into(),
+                        dataset_id: Some("ds-1".into()),
+                        start_time_s: 1_700_000_000.0,
+                    },
+                    now,
+                )
+                .await;
+        }
+        let live_index = dispatcher.windows[&("robot-1".to_string(), 0)]
+            .live
+            .as_ref()
+            .expect("B is live")
+            .recording_index;
+
+        // A's stop, arriving late.
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Stop {
+                    source: ("robot-1".to_string(), 0),
+                    recording_id: "cloud-a".into(),
+                },
+                now,
+            )
+            .await;
+
+        let still_live = dispatcher.windows[&("robot-1".to_string(), 0)]
+            .live
+            .as_ref()
+            .map(|window| window.recording_index);
+        assert_eq!(
+            still_live,
+            Some(live_index),
+            "a stop naming an earlier recording must leave the live one open"
+        );
+
+        // B's own stop does close it.
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Stop {
+                    source: ("robot-1".to_string(), 0),
+                    recording_id: "cloud-b".into(),
+                },
+                now,
+            )
+            .await;
+        assert!(
+            dispatcher.windows[&("robot-1".to_string(), 0)]
+                .live
+                .is_none(),
+            "the recording its own stop names does close"
+        );
     }
 
     #[tokio::test]
