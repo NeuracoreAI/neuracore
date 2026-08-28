@@ -37,9 +37,9 @@
 //! it, so a recording's data is on the wire before the call returns.
 
 use std::cell::RefCell;
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{LazyLock, Mutex, Once};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
@@ -253,10 +253,28 @@ pub(crate) fn flush_published_data() -> bool {
     ack_rx.recv().is_ok()
 }
 
-/// The publisher thread's run loop: publish every queued data envelope. Exits
-/// when the last [`Sender`] is dropped (the channel closes).
+/// How often this process restates which sources it is bound to.
+///
+/// Bounded below by IPC cost (one tiny sample per attached source per interval,
+/// nothing next to the data plane) and above by how long a daemon that started
+/// after its producers may go on ignoring notifications for their sources. The
+/// daemon's own liveness bound is several of these, so a briefly busy publisher
+/// thread never looks like a departed producer.
+const ATTACH_HEARTBEAT: Duration = Duration::from_secs(1);
+
+/// The publisher thread's run loop: publish every queued data envelope, and on
+/// each idle tick restate this process's source bindings. Exits when the last
+/// [`Sender`] is dropped (the channel closes).
 fn publish_loop(rx: Receiver<PublishMsg>) {
-    while let Ok(msg) = rx.recv() {
+    loop {
+        let msg = match rx.recv_timeout(ATTACH_HEARTBEAT) {
+            Ok(msg) => msg,
+            Err(RecvTimeoutError::Timeout) => {
+                publish_attachments();
+                continue;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        };
         let result = match msg {
             PublishMsg::Joint {
                 robot_id,
@@ -328,6 +346,26 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
         };
         if let Err(error) = result {
             tracing::warn!(%error, "failed to publish data envelope");
+        }
+    }
+}
+
+/// Restate every source this process is bound to.
+///
+/// Idempotent and free of recording state: the daemon reads these only to know
+/// which sources have a producer here (see [`crate::attachment`]). A failed
+/// publish is dropped rather than retried — the next heartbeat restates it.
+fn publish_attachments() {
+    let producer_pid = std::process::id();
+    for (robot_id, robot_instance) in crate::attachment::attached_sources() {
+        let envelope = Envelope::ProducerAttached {
+            robot_id,
+            robot_instance,
+            publish_timestamp_ns: now_ns(),
+            producer_pid,
+        };
+        if let Err(error) = publish(&envelope) {
+            tracing::debug!(%error, "failed to publish producer attachment heartbeat");
         }
     }
 }

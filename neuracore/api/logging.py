@@ -226,7 +226,8 @@ def _record_json_to_daemon(
     ``log_json`` entry point is datatype-agnostic, so adding a new JSON type
     needs no daemon-side change.
 
-    A no-op unless a recording is in progress.
+    Always forwarded; the daemon is the one that decides whether a recording
+    is in progress and drops the sample if not.
 
     Args:
         robot: Robot instance owning the daemon recording context.
@@ -235,12 +236,9 @@ def _record_json_to_daemon(
         data: Data object to serialize and persist.
         timestamp: Capture timestamp in seconds.
     """
-    if robot.get_current_recording_id() is None:
-        return
+    context = robot._get_daemon_recording_context()
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
-    robot._get_daemon_recording_context().log_json(
-        data_type.value, storage_name, payload, timestamp
-    )
+    context.log_json(data_type.value, storage_name, payload, timestamp)
 
 
 def _publish_video_to_p2p(
@@ -386,7 +384,10 @@ def _log_group_of_joint_data(
     if bindings_for_type is None:
         bindings_for_type = {}
         binding_cache[data_type] = bindings_for_type
+    # The bucket/live streams key off this process's own recording handle; the
+    # daemon decides for itself, from the same call, whether it's recording.
     current_recording_id = robot.get_current_recording_id()
+    daemon_context = robot._get_daemon_recording_context()
     live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
     robot_id = robot.id
     robot_instance = robot.instance
@@ -406,10 +407,9 @@ def _log_group_of_joint_data(
         native_values = list(joint_data.values())
         for binding, joint_value in zip(group.bindings, native_values):
             binding.stream.record_scalar(timestamp, joint_value)
-        if current_recording_id is not None:
-            robot._get_daemon_recording_context().log_joints(
-                data_type.value, timestamp, group.joined_names, native_values
-            )
+        daemon_context.log_joints(
+            data_type.value, timestamp, group.joined_names, native_values
+        )
         return
 
     native_values = []
@@ -433,11 +433,10 @@ def _log_group_of_joint_data(
             # allocation-free (see JointDataStream).
             binding.stream.record_scalar(timestamp, joint_value)
 
-        if current_recording_id is not None:
-            native_values.append(joint_value)
+        native_values.append(joint_value)
 
     if native_values:
-        robot._get_daemon_recording_context().log_joints(
+        daemon_context.log_joints(
             data_type.value, timestamp, group.joined_names, native_values
         )
 
@@ -532,17 +531,19 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
 
-    if robot.get_current_recording_id() is not None:
-        contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
-        robot._get_daemon_recording_context().log_frame(
-            camera_type.value,
-            storage_name,
-            int(image.shape[1]),
-            int(image.shape[0]),
-            image.dtype.name,
-            memoryview(contiguous).cast("B"),
-            camera_data_without_frame.timestamp,
-        )
+    # The daemon decides whether this lands in a recording, not this process —
+    # always forward and let it route by window.
+    context = robot._get_daemon_recording_context()
+    contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
+    context.log_frame(
+        camera_type.value,
+        storage_name,
+        int(image.shape[1]),
+        int(image.shape[0]),
+        image.dtype.name,
+        memoryview(contiguous).cast("B"),
+        camera_data_without_frame.timestamp,
+    )
 
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 
