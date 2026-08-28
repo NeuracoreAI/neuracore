@@ -15,7 +15,7 @@ use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
     spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
     spawn_recording_start_notifier, spawn_recording_stop_notifier, spawn_registration,
-    spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle, StatusUpdate,
+    spawn_status_updater, spawn_uploader, ConfigRx, OrgIdRx, OrgWatcherHandle, StatusUpdate,
 };
 use crate::connection::spawn_connection_monitor;
 use crate::state::{EventBus, SqliteStateStore, TraceWriteHandle};
@@ -31,6 +31,10 @@ pub(crate) struct CloudHandles {
     recording_start: crate::cloud::NotifierHandle,
     recording_stop: crate::cloud::NotifierHandle,
     recording_cancel: crate::cloud::NotifierHandle,
+    /// Live org id, re-exposed so the recording-notification stream — which is
+    /// spawned after the dispatcher, because it needs the dispatcher's command
+    /// channel — can share this watcher rather than starting a second one.
+    pub(crate) org_rx: OrgIdRx,
 }
 
 impl CloudHandles {
@@ -138,7 +142,7 @@ pub(crate) fn spawn_cloud_coordinators(
         state_store,
         event_bus,
         Arc::clone(&client),
-        org_rx,
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
 
@@ -152,5 +156,6 @@ pub(crate) fn spawn_cloud_coordinators(
         recording_start,
         recording_stop,
         recording_cancel,
+        org_rx,
     }
 }
