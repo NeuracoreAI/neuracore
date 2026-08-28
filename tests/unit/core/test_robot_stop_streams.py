@@ -23,8 +23,15 @@ class _FailingStopStream(_ActiveStream):
         raise RuntimeError("stop failed")
 
 
-def test_web_stop_drains_streams_and_notifies_daemon() -> None:
-    """Callback registered at connect time must drain streams and notify the daemon."""
+def test_web_stop_drains_streams_without_publishing_a_stop() -> None:
+    """A web stop drains this process but publishes no lifecycle envelope.
+
+    The daemon hears a web-initiated stop from the backend itself, so a process
+    that merely learned of it must not publish ``StopRecording`` — otherwise one
+    stop becomes one envelope per connected process, and the daemon has to work
+    out which recording each of them meant. Sealing this process's own tail
+    chunks is a statement about itself and still happens.
+    """
     robot = Robot("robot", instance=0, org_id="org-1")
     robot.id = "robot-id-1"
 
@@ -56,7 +63,32 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     callback("rec-abc")
 
     assert active.stop_calls == 1
-    fake_daemon.stop_recording.assert_called_once_with(timestamp=None)
+    fake_daemon.stop_recording.assert_not_called()
+    fake_daemon.flush_source.assert_called_once_with()
+
+
+def test_local_stop_publishes_a_stop() -> None:
+    """A local ``stop_recording()`` is one process's intent, so it does publish.
+
+    There is no fan-out to disambiguate here: exactly one process calls it, so
+    exactly one ``StopRecording`` reaches the daemon and matching it by publish
+    stamp is unambiguous.
+    """
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+
+    active = _ActiveStream()
+    robot.add_data_stream("JOINT_POSITIONS:joint", active)  # type: ignore[arg-type]
+
+    fake_daemon = MagicMock()
+    robot._daemon_recording_context = fake_daemon
+
+    with patch("neuracore.core.robot.get_recording_state_manager"):
+        robot.stop_recording(timestamp=123.0)
+        robot.id = None  # prevent __del__ from hitting the real manager
+
+    assert active.stop_calls == 1
+    fake_daemon.stop_recording.assert_called_once_with(timestamp=123.0)
     fake_daemon.flush_source.assert_called_once_with()
 
 
