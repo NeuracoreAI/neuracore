@@ -281,6 +281,18 @@ async fn submit_batch(
 
                 for trace in &traces {
                     if let Some(uris) = registered_ids.get(&trace.trace_id) {
+                        // The uploader finalises an empty URI map as a 0 byte upload.
+                        if uris.is_empty() {
+                            handle_registration_setback(
+                                store,
+                                registration_attempts,
+                                &trace.trace_id,
+                                Some("backend returned no upload session URIs".to_string()),
+                                "backend registered trace without upload URIs",
+                            )
+                            .await;
+                            continue;
+                        }
                         // A serialise failure must NOT mark the trace registered
                         // with a "{}" placeholder — that records an empty URI map
                         // and the uploader later finalises it as 0 bytes uploaded
@@ -558,6 +570,59 @@ mod tests {
         let mut options = ApiClientOptions::new(server.uri());
         options.max_backoff = Duration::from_millis(10);
         Arc::new(ApiClient::new(options, auth).unwrap())
+    }
+
+    #[tokio::test]
+    async fn empty_session_uris_are_not_persisted_as_registered() {
+        // Persisting "{}" would settle the trace as uploaded with no bytes.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/traces/batch-register"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "registered_traces": [{
+                    "trace_id": "trace-1",
+                    "upload_session_uris": {}
+                }],
+                "failed_traces": []
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        seed_written_trace(&store, "trace-1", Some("cloud-rec-1")).await;
+        let bus = EventBus::new();
+        let api = client(&server);
+
+        let store_arc = Arc::new(store.clone());
+        let claimed = store
+            .claim_traces_for_registration(BATCH_SIZE, 0.0)
+            .await
+            .unwrap();
+        submit_batch(
+            &store_arc,
+            &bus,
+            &api,
+            &org_rx(Some("org-1")),
+            &config_rx(None),
+            claimed,
+            &mut HashMap::new(),
+        )
+        .await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_ne!(
+            trace.registration_status,
+            TraceRegistrationStatus::Registered,
+            "a trace with no upload URIs must not be recorded as registered"
+        );
+        assert!(
+            trace
+                .upload_session_uris
+                .as_deref()
+                .is_none_or(|uris| uris != "{}"),
+            "an empty URI map must never be persisted"
+        );
     }
 
     #[tokio::test]
