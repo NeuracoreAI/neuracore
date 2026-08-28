@@ -53,15 +53,15 @@ pub(crate) fn source_prefix(robot_id: &str, robot_instance: i64) -> String {
     format!("{robot_id}\u{0}{robot_instance}\u{0}")
 }
 
-/// Split a `stream_key` back into `(data_type, sensor_name)`. The leading
-/// `robot_id\0instance\0` is dropped.
-pub(crate) fn split_stream_key(key: &str) -> (String, String) {
+/// Split a `stream_key` back into `(robot_id, robot_instance, data_type,
+/// sensor_name)`. An unparseable instance reads as `0`.
+pub(crate) fn split_stream_key(key: &str) -> (String, i64, String, String) {
     let mut parts = key.splitn(4, '\u{0}');
-    let _robot_id = parts.next().unwrap_or("");
-    let _instance = parts.next().unwrap_or("");
+    let robot_id = parts.next().unwrap_or("").to_string();
+    let robot_instance = parts.next().unwrap_or("").parse().unwrap_or(0);
     let data_type = parts.next().unwrap_or("").to_string();
     let sensor_name = parts.next().unwrap_or("").to_string();
-    (data_type, sensor_name)
+    (robot_id, robot_instance, data_type, sensor_name)
 }
 
 /// Build the spool directory for a `(source, sensor)` stream, or `None` if the
