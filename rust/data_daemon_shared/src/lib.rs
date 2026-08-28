@@ -627,6 +627,30 @@ pub enum Envelope {
         /// [`Envelope::SourceFlushed`] reports under.
         producer_pid: u32,
     },
+    /// Producer reports that it is bound to a source and may log for it.
+    ///
+    /// A statement about the producer, in the same family as
+    /// [`Envelope::SourceFlushed`] and [`Envelope::VideoProducerActive`]: it
+    /// names a process and a source and claims nothing about any recording.
+    /// Published when a process binds the source and restated on a slow
+    /// heartbeat, so a daemon that starts after its producers still learns they
+    /// are there and one that dies with them stops believing it.
+    ///
+    /// The daemon needs it to tell whether a backend recording notification —
+    /// which is org-wide, and so covers robots on other machines entirely —
+    /// concerns a source with a producer *here*. A source nothing has attached
+    /// to never has a window opened on its behalf.
+    ProducerAttached {
+        robot_id: String,
+        robot_instance: i64,
+        /// Publish time of the bind or heartbeat, stamped on the calling
+        /// thread. Bounds how long the daemon keeps believing this producer is
+        /// present; never used for window membership.
+        publish_timestamp_ns: i64,
+        /// OS process id of the attached producer, the same identity
+        /// [`Envelope::SourceFlushed`] reports under.
+        producer_pid: u32,
+    },
 }
 
 /// Original pixel/sample representation of one video-family frame.
@@ -714,6 +738,7 @@ impl Envelope {
             Envelope::RefreshConfig {} => "refresh_config",
             Envelope::SourceFlushed { .. } => "source_flushed",
             Envelope::VideoProducerActive { .. } => "video_producer_active",
+            Envelope::ProducerAttached { .. } => "producer_attached",
         }
     }
 
@@ -1115,6 +1140,24 @@ mod tests {
         let bytes = claim.encode().expect("encode");
         assert_eq!(claim, Envelope::decode(&bytes).expect("decode"));
         assert_eq!(claim.kind(), "video_producer_active");
+    }
+
+    #[test]
+    fn producer_attached_round_trips() {
+        let attach = Envelope::ProducerAttached {
+            robot_id: "robot-1".into(),
+            robot_instance: 3,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            producer_pid: 4242,
+        };
+        let bytes = attach.encode().expect("encode");
+        assert!(
+            bytes.len() <= service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+            "attach ({} bytes) must fit the commands slice",
+            bytes.len(),
+        );
+        assert_eq!(attach, Envelope::decode(&bytes).expect("decode"));
+        assert_eq!(attach.kind(), "producer_attached");
     }
 
     #[test]
