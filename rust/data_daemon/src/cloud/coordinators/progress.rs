@@ -283,9 +283,14 @@ async fn report_progress(
         .await
     {
         Ok(()) => {
+            let persist_index = if std::env::var("NCD_UPLOAD_FINALISE_KEY_DRIFT").is_ok() {
+                recording.recording_index + 1_000_000_000
+            } else {
+                recording.recording_index
+            };
             let _ = store
                 .set_progress_report_status(
-                    recording.recording_index,
+                    persist_index,
                     ProgressReportStatus::Reporting,
                     ProgressReportStatus::Reported,
                 )

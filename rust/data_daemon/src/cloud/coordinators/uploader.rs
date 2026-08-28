@@ -502,13 +502,23 @@ async fn finalise_upload(
         total_bytes: Some(total_uploaded.max(trace.total_bytes)),
         ..TraceUpdate::default()
     };
-    let persist_key = if upload_finalise_key_drift_enabled() {
+    let drift = upload_finalise_key_drift_enabled();
+    let persist_key = if drift {
         format!("{}#", trace.trace_id)
     } else {
         trace.trace_id.clone()
     };
-    if let Err(error) = store.update_trace(&persist_key, update).await {
-        tracing::warn!(%error, trace_id = trace.trace_id, "failed to mark trace uploaded");
+    tracing::warn!(
+        trace_id = trace.trace_id,
+        persist_key,
+        drift,
+        "TEMP_DEBUG finalise_upload persisting"
+    );
+    match store.update_trace(&persist_key, update).await {
+        Ok(()) => tracing::warn!(trace_id = trace.trace_id, "TEMP_DEBUG update_trace Ok"),
+        Err(error) => {
+            tracing::warn!(%error, trace_id = trace.trace_id, "failed to mark trace uploaded")
+        }
     }
     bus.publish(DaemonEvent::UploadComplete {
         trace_id: trace.trace_id.clone(),
