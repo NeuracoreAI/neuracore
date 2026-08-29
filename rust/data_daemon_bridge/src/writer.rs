@@ -41,6 +41,12 @@
 //! first chunk seals — which is as late as the backlog is deep. Hence the claim
 //! comes off the logging thread, not the writer: see [`note_video_activity`].
 //!
+//! A process that never brackets a recording of its own — a camera logging
+//! unconditionally while another process owns the window — publishes no marker
+//! until it exits, so the daemon's cap is what retires those windows. Its video
+//! has to reach the daemon on a cadence rather than at a lifecycle event: see
+//! [`CHUNK_MAX_OPEN_NS`].
+//!
 //! ## Fork safety
 //!
 //! The process-wide [`VIDEO_CHUNKS`] registry stores the owning PID and wipes
@@ -74,11 +80,12 @@ use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 /// threshold is checked *after* each frame, so the on-disk file can exceed it
 /// by at most one frame.
 ///
-/// This byte threshold has a companion frame-count cap
-/// ([`MAX_VIDEO_CHUNK_FRAMES`]): a chunk is sealed at whichever bound is hit
-/// first (see [`should_flush_chunk`]). Small frames never reach 256 MiB
-/// mid-recording, so the frame cap is what bounds the chunk's announcement
-/// envelope to one commands slice.
+/// This byte threshold has two companion caps — a frame count
+/// ([`MAX_VIDEO_CHUNK_FRAMES`]) and an age ([`CHUNK_MAX_OPEN_NS`]) — and a chunk
+/// is sealed at whichever bound is hit first (see [`should_flush_chunk`]). Small
+/// frames never reach 256 MiB mid-recording, so the frame cap is what bounds the
+/// chunk's announcement envelope to one commands slice, and the age cap is what
+/// bounds how long any frame waits to be announced.
 ///
 /// A chunk is *not* aligned to recording boundaries: it is a container, not a
 /// member. The daemon resolves membership per frame and splits one chunk across
@@ -89,6 +96,28 @@ use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 /// ([`WRITER_QUEUE_MAX_BYTES`]): changing this size moves both the chunk
 /// granularity *and* the producer's backpressure headroom.
 const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
+
+/// How long a chunk may stay open before it is sealed regardless of how little
+/// it holds, measured on the publish clock the daemon routes windows on.
+///
+/// The size and frame caps are both throughput bounds: a low-rate or
+/// low-resolution camera reaches neither for many minutes (64x64 @ 30 fps needs
+/// ~12 minutes to hit the frame cap and ~12 hours to hit the byte one). A
+/// producer that brackets its own recordings still seals at every
+/// `stop_recording`, but one that never calls it — a camera process that logs
+/// unconditionally while some other process owns the recording — would hold a
+/// single chunk until it exits, long after the daemon has given up waiting for
+/// its flush marker and retired the windows those frames belonged to. Their
+/// video is then dropped as an orphan.
+///
+/// So the age bound, not the lifecycle, is what guarantees a frame is announced
+/// while its window is still open. It must stay comfortably under the daemon's
+/// `FLUSH_MARKER_WAIT_CAP` (30 s), which is how long a closing window waits for
+/// a marker before retiring; 5 s leaves the daemon's holdback and transcode
+/// queue room to route a sealed chunk with time to spare. The cost is one extra
+/// per-chunk encode (~100-200 ms of daemon-side ffmpeg) per 5 s per camera that
+/// would not otherwise have sealed.
+const CHUNK_MAX_OPEN_NS: i64 = 5 * 1_000_000_000;
 
 /// Backpressure cap for the writer's frame queue. `log_frame` copies a frame in
 /// and returns; the background writer thread drains the queue to disk, so the
@@ -207,6 +236,10 @@ struct VideoChunkState {
     last_chunk_publish_ns: i64,
     /// OS thread id (`gettid`) of the thread that opened the in-progress chunk.
     chunk_thread_id: i64,
+    /// Whether a frame reached this stream since the last [`seal_aged_chunks`]
+    /// sweep, which consumes the flag. Distinguishes a stream that has gone
+    /// quiet from one the writer is merely behind on.
+    appended_since_sweep: bool,
     /// Frames already written into the in-progress chunk.
     frame_count: u32,
     /// Per-stream PTS origin, microseconds since the Unix epoch.
@@ -499,8 +532,9 @@ impl FrameQueue {
     }
 
     /// Block indefinitely until a message is available, then pop it (FIFO).
-    /// Used when the spool cap is disabled, where the writer has no reason to
-    /// wake on a timer.
+    /// Test-only: the writer loop always waits on a timer, so the queue's FIFO
+    /// order is asserted through this rather than a timeout.
+    #[cfg(test)]
     fn pop(&self) -> WriterMsg {
         self.pop_inner(None)
             .expect("an unbounded wait never times out")
@@ -883,8 +917,10 @@ fn write_front(in_flight: &mut VecDeque<PendingFrame>) {
 /// pool — so it keeps up with multi-camera capture the single-thread inline
 /// encode could not.
 fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
-    // With the spool cap disabled there is nothing to scan, so block on each
-    // message indefinitely rather than waking on a timer.
+    // The spool rescan is only needed when the cap is on, but the tick itself is
+    // unconditional: `seal_aged_chunks` needs it to age out the chunk of a
+    // camera that has stopped sending frames, and a blocking pop would never
+    // wake to run it.
     let bounded = queue.spool_max > 0;
     if bounded {
         // Prime the backlog estimate so the first frames see a real spool size.
@@ -893,11 +929,7 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
     let mut in_flight: VecDeque<PendingFrame> = VecDeque::new();
     let mut last_scan = Instant::now();
     loop {
-        let next = if bounded {
-            queue.pop_timeout(SPOOL_SCAN_INTERVAL)
-        } else {
-            Some(queue.pop())
-        };
+        let next = queue.pop_timeout(SPOOL_SCAN_INTERVAL);
         match next {
             Some(WriterMsg::Frame(job)) => {
                 submit_frame(pool, &mut in_flight, job);
@@ -942,16 +974,22 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 });
                 let _ = ack.send(());
             }
-            // pop_timeout elapsed with no message: fall through to the rescan.
+            // pop_timeout elapsed with no message: fall through to the sweeps.
             None => {}
         }
         // Mux whatever finished compressing, keeping spooling latency low without
         // ever blocking on a slow frame.
         drain_ready(&mut in_flight);
-        // Refresh the backlog estimate on a coarse cadence so frame-admission
-        // backpressure tracks the daemon draining the spool inbox.
-        if bounded && last_scan.elapsed() >= SPOOL_SCAN_INTERVAL {
-            refresh_spool_backlog(queue);
+        if last_scan.elapsed() >= SPOOL_SCAN_INTERVAL {
+            // Age out any chunk whose stream has gone quiet. Runs after
+            // `drain_ready`, so a frame that just landed counts towards the
+            // chunk it was muxed into rather than sealing behind it.
+            seal_aged_chunks();
+            // Refresh the backlog estimate on the same coarse cadence, so
+            // frame-admission backpressure tracks the daemon draining the spool.
+            if bounded {
+                refresh_spool_backlog(queue);
+            }
             last_scan = Instant::now();
         }
     }
@@ -985,7 +1023,7 @@ fn current_thread_id() -> i64 {
 }
 
 /// Whether the in-progress chunk should be sealed now, checked after each
-/// appended frame. A chunk is rolled at the **lower** of two bounds:
+/// appended frame. A chunk is rolled at the **lowest** of three bounds:
 ///
 /// * [`CHUNK_FLUSH_BYTES`] — measured against *logical* (decoded-equivalent)
 ///   bytes, not the compressed on-disk size, so chunk granularity (and the
@@ -998,8 +1036,15 @@ fn current_thread_id() -> i64 {
 ///   long recording accumulates one ever-growing chunk whose per-frame
 ///   timestamp vectors eventually overflow the commands slice — the
 ///   announcement then fails to publish and the recording's video is lost.
-fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32) -> bool {
-    logical_chunk_bytes >= CHUNK_FLUSH_BYTES || frame_count >= MAX_VIDEO_CHUNK_FRAMES
+/// * [`CHUNK_MAX_OPEN_NS`] — bounds how long a frame waits to be announced, so
+///   a camera too slow or too small to reach either throughput bound still gets
+///   its video routed while the window it belongs to is open. `open_ns` is the
+///   chunk's span on the publish clock: this frame's stamp less the chunk's
+///   opening stamp.
+fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32, open_ns: i64) -> bool {
+    logical_chunk_bytes >= CHUNK_FLUSH_BYTES
+        || frame_count >= MAX_VIDEO_CHUNK_FRAMES
+        || open_ns >= CHUNK_MAX_OPEN_NS
 }
 
 /// Append one frame to the `(source, sensor)` in-progress NUT chunk, opening
@@ -1046,6 +1091,7 @@ fn record_video_frame(
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
             chunk_thread_id: 0,
+            appended_since_sweep: false,
             frame_count: 0,
             pts_origin_us: None,
             last_pts_us: None,
@@ -1269,6 +1315,8 @@ fn append_frame_locked(
         writer.logical_bytes()
     };
     state.last_pts_us = Some(pts);
+    // Set after the write, so a dropped frame never reads as progress.
+    state.appended_since_sweep = true;
     state.frame_count = state.frame_count.saturating_add(1);
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
@@ -1276,7 +1324,11 @@ fn append_frame_locked(
         .frame_publish_offsets_us
         .push(publish_offset_us(state.chunk_publish_ns, publish_ns));
 
-    if should_flush_chunk(logical_bytes_after_write, state.frame_count) {
+    if should_flush_chunk(
+        logical_bytes_after_write,
+        state.frame_count,
+        publish_ns.saturating_sub(state.chunk_publish_ns),
+    ) {
         seal(state, &mut announcements);
     }
     announcements
@@ -1337,6 +1389,59 @@ fn flush_chunk_locked(
     })
 }
 
+/// Seal and announce the open chunk of every stream that has gone **quiet**
+/// holding one older than [`CHUNK_MAX_OPEN_NS`].
+///
+/// The frame-driven bound in [`append_frame_locked`] fires only while frames
+/// keep arriving, so it cannot age out the last chunk of a camera that has
+/// stopped sending. This sweep runs off the writer's idle tick and covers
+/// exactly that: the stream stays registered (it is not a stop, and more frames
+/// may follow), only its open chunk is sealed.
+///
+/// A stream that took a frame since the previous sweep is left alone, even
+/// though its chunk may read as old. Age here is measured against `now`, and
+/// `chunk_publish_ns` is stamped on the *logging* thread — so when the writer
+/// runs a backlog deeper than the cap, every chunk it opens is already "old" on
+/// arrival. Sealing those would cut a chunk per tick, each paying a daemon-side
+/// encode, precisely when the pipeline is furthest behind. The frame-driven
+/// bound has no such blind spot (it compares two logging-thread stamps, so a
+/// backlog cannot inflate it), and it owns any stream still being written.
+fn seal_aged_chunks() {
+    let now = now_ns();
+    let slots: Vec<(String, VideoChunkSlot)> = with_video_chunks(|streams| {
+        streams
+            .iter()
+            .map(|(key, slot)| (key.clone(), slot.clone()))
+            .collect()
+    });
+    for (key, slot) in slots {
+        let (robot_id, robot_instance, data_type, sensor_name) = split_stream_key(&key);
+        let aged_envelope = {
+            let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            // Consumed every sweep, so "quiet" means quiet since the last one.
+            let was_written = std::mem::take(&mut state.appended_since_sweep);
+            // No open chunk, one still inside its age budget, or one still being
+            // written — the frame-driven bound covers the last of those.
+            if state.nut_writer.is_none()
+                || was_written
+                || now.saturating_sub(state.chunk_publish_ns) < CHUNK_MAX_OPEN_NS
+            {
+                continue;
+            }
+            flush_chunk_locked(
+                &robot_id,
+                robot_instance,
+                &data_type,
+                &sensor_name,
+                &mut state,
+            )
+        };
+        if let Some(envelope) = aged_envelope {
+            let _ = publisher_tx().send(PublishMsg::Announce(envelope));
+        }
+    }
+}
+
 /// Flush and remove every open video chunk for a source. Each flushed chunk is
 /// announced so the daemon can route it before the `StopRecording` lands.
 fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), ProducerError> {
@@ -1352,7 +1457,7 @@ fn flush_source_chunks(robot_id: &str, robot_instance: i64) -> Result<(), Produc
             .collect()
     });
     for (key, slot) in slots {
-        let (data_type, sensor_name) = split_stream_key(&key);
+        let (_, _, data_type, sensor_name) = split_stream_key(&key);
         let flush_envelope = {
             let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             flush_chunk_locked(
@@ -1436,8 +1541,8 @@ mod tests {
     fn flushes_when_byte_threshold_reached() {
         // The byte threshold seals the chunk regardless of frame count (large
         // frames hit 256 MiB long before the frame cap).
-        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
-        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES + 1, 1));
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1, 0));
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES + 1, 1, 0));
     }
 
     #[test]
@@ -1445,16 +1550,25 @@ mod tests {
         // Small frames never reach the byte threshold, so the frame cap is what
         // bounds the chunk — it seals at MAX_VIDEO_CHUNK_FRAMES even with a
         // near-empty NUT file.
-        assert!(should_flush_chunk(0, MAX_VIDEO_CHUNK_FRAMES));
-        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES + 1));
+        assert!(should_flush_chunk(0, MAX_VIDEO_CHUNK_FRAMES, 0));
+        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES + 1, 0));
     }
 
     #[test]
-    fn does_not_flush_below_both_bounds() {
-        assert!(!should_flush_chunk(0, 0));
+    fn flushes_when_age_cap_reached() {
+        // A camera too slow or too small to reach either throughput bound still
+        // seals, so its frames are announced while their window is open.
+        assert!(should_flush_chunk(0, 1, CHUNK_MAX_OPEN_NS));
+        assert!(should_flush_chunk(0, 1, CHUNK_MAX_OPEN_NS + 1));
+    }
+
+    #[test]
+    fn does_not_flush_below_every_bound() {
+        assert!(!should_flush_chunk(0, 0, 0));
         assert!(!should_flush_chunk(
             CHUNK_FLUSH_BYTES - 1,
-            MAX_VIDEO_CHUNK_FRAMES - 1
+            MAX_VIDEO_CHUNK_FRAMES - 1,
+            CHUNK_MAX_OPEN_NS - 1
         ));
     }
 
@@ -1515,12 +1629,14 @@ mod tests {
     }
 
     #[test]
-    fn flush_is_the_lower_of_the_two_bounds() {
+    fn flush_is_the_lowest_of_the_three_bounds() {
         // A chunk of tiny frames is sealed by the frame cap with bytes still far
         // under the byte threshold — i.e. whichever bound is hit first wins.
-        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES));
-        // ...and a byte-heavy chunk is sealed before the frame cap.
-        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1));
+        assert!(should_flush_chunk(1, MAX_VIDEO_CHUNK_FRAMES, 0));
+        // ...a byte-heavy chunk is sealed before the frame cap...
+        assert!(should_flush_chunk(CHUNK_FLUSH_BYTES, 1, 0));
+        // ...and an old one seals having reached neither.
+        assert!(should_flush_chunk(1, 1, CHUNK_MAX_OPEN_NS));
     }
 
     /// Build a fresh, empty per-stream chunk state rooted at `spool_dir`. The
@@ -1538,6 +1654,7 @@ mod tests {
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
             chunk_thread_id: 0,
+            appended_since_sweep: false,
             frame_count: 0,
             pts_origin_us: None,
             last_pts_us: None,
@@ -1637,6 +1754,98 @@ mod tests {
             state.frame_publish_offsets_us,
             vec![0, 1_000],
             "and each frame carries its own offset, so the daemon can split them"
+        );
+    }
+
+    #[test]
+    fn appending_a_frame_marks_the_stream_written_for_the_next_sweep() {
+        // What tells `seal_aged_chunks` a stream that has gone quiet from one the
+        // writer is only behind on: both hold a chunk that reads as old, and only
+        // the quiet one may be sealed off the tick.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        assert!(!state.appended_since_sweep, "a fresh stream is quiet");
+
+        append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &[0u8; 2 * 2 * 3],
+            TEST_PUBLISH_NS,
+            1_000,
+            0.0,
+        );
+
+        assert!(
+            state.appended_since_sweep,
+            "a frame landing marks the stream written, so the sweep defers to \
+             the frame-driven bound"
+        );
+    }
+
+    #[test]
+    fn an_open_chunk_seals_once_it_reaches_the_age_cap() {
+        // Neither throughput bound is anywhere near reached; the age cap alone
+        // must seal, or these frames wait for a lifecycle event that a producer
+        // logging into someone else's recording never has.
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
+        let frame = vec![0u8; 2 * 2 * 3];
+
+        let sealed = append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            TEST_PUBLISH_NS,
+            1_000,
+            0.0,
+        );
+        assert!(sealed.is_empty(), "a fresh chunk is not yet old");
+
+        let sealed = append_frame_locked(
+            &mut state,
+            "r",
+            0,
+            "RGB",
+            "cam",
+            2,
+            2,
+            FrameDtype::Rgb8,
+            &frame,
+            TEST_PUBLISH_NS + CHUNK_MAX_OPEN_NS,
+            2_000,
+            0.001,
+        );
+
+        match sealed.as_slice() {
+            [Envelope::VideoChunkReady {
+                publish_timestamp_ns,
+                frame_count,
+                ..
+            }] => {
+                assert_eq!(*publish_timestamp_ns, TEST_PUBLISH_NS);
+                assert_eq!(
+                    *frame_count, 2,
+                    "the frame that crossed the cap is sealed into the chunk, \
+                     as it is for the byte and frame bounds"
+                );
+            }
+            other => panic!("expected one VideoChunkReady, got {other:?}"),
+        }
+        assert!(
+            state.nut_writer.is_none(),
+            "and the stream is left ready to open a fresh chunk"
         );
     }
 
@@ -2285,14 +2494,17 @@ mod tests {
         for index in 0..3 {
             append_ts_us(&mut state, base + index * FRAME_GAP_US);
         }
-        // Frame 3 spikes ~5 s forward; frames 4 and 5 resume the true series.
-        append_ts_us(&mut state, base + 3 * FRAME_GAP_US + 5_000_000);
+        // Frame 3 spikes ~1 s forward; frames 4 and 5 resume the true series.
+        // `append_ts_us` publishes on the capture stamp, so the spike is kept
+        // under CHUNK_MAX_OPEN_NS — a larger one would seal on the age cap and
+        // split the chunk this test reads back.
+        append_ts_us(&mut state, base + 3 * FRAME_GAP_US + 1_000_000);
         for index in 4..6 {
             append_ts_us(&mut state, base + index * FRAME_GAP_US);
         }
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
 
-        let spike = 5_000_000 + 3 * FRAME_GAP_US;
+        let spike = 1_000_000 + 3 * FRAME_GAP_US;
         let expected: Vec<u64> = vec![
             0,
             FRAME_GAP_US as u64,
