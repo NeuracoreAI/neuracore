@@ -314,8 +314,12 @@ pub enum TraceActorMessage {
         height: u32,
         /// Size of the spooled NUT file in bytes.
         byte_count: u64,
-        /// Number of frames in the chunk.
+        /// Number of frames of the chunk this recording owns, counted from
+        /// `skip_frames`.
         frame_count: u32,
+        /// Leading frames of the chunk published before this recording's window
+        /// opened, discarded by the encode.
+        skip_frames: u32,
         /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
         frame_timestamps_s: Vec<f64>,
         /// Original dtype of every frame in this chunk. The daemon never
@@ -383,8 +387,13 @@ struct QueuedChunk {
     spool_nut: PathBuf,
     /// Size of the spooled NUT file in bytes.
     byte_count: u64,
-    /// Number of frames in the chunk.
+    /// Number of frames of the chunk this recording owns, counted from
+    /// `skip_frames`.
     frame_count: u32,
+    /// Leading frames the encode discards (see
+    /// [`BatchNutInput::skip_frames`]). A chunk with a head cut is never
+    /// batched with another (see [`drain_encode_batch`]).
+    skip_frames: u32,
     /// Per-frame `timestamp_s` values in capture order. The first entry also
     /// anchors the batch's inter-chunk duration spans.
     frame_timestamps_s: Vec<f64>,
@@ -468,6 +477,7 @@ pub async fn run(
                 height,
                 byte_count,
                 frame_count,
+                skip_frames,
                 frame_timestamps_s,
                 dtype,
             } => {
@@ -480,6 +490,7 @@ pub async fn run(
                         height,
                         byte_count,
                         frame_count,
+                        skip_frames,
                         frame_timestamps_s,
                         dtype,
                     )
@@ -696,6 +707,7 @@ impl ActorState {
         height: u32,
         byte_count: u64,
         frame_count: u32,
+        skip_frames: u32,
         frame_timestamps_s: Vec<f64>,
         dtype: FrameDtype,
     ) {
@@ -780,6 +792,7 @@ impl ActorState {
                 spool_nut,
                 byte_count,
                 frame_count,
+                skip_frames,
                 frame_timestamps_s,
                 dtype,
             });
@@ -1376,6 +1389,7 @@ impl EncodeWorker {
                 // One entry per non-last chunk, so the last gets no line.
                 span_to_next_us: spans_to_next_us.get(position).copied(),
                 frame_count: chunk.frame_count,
+                skip_frames: chunk.skip_frames,
             })
             .collect();
         let request = BatchEncodeRequest {
@@ -1506,8 +1520,18 @@ fn drain_encode_batch(queue: &mut VecDeque<QueuedChunk>) -> Vec<QueuedChunk> {
         }) {
             break;
         }
+        // A head cut is a filter over the whole concatenated stream, and the
+        // frames it discards still occupy the entry's declared span, so a chunk
+        // with one only ever encodes alone.
+        if front.skip_frames > 0 && !batch.is_empty() {
+            break;
+        }
+        let head_cut = front.skip_frames > 0;
         let chunk = queue.pop_front().expect("front exists");
         batch.push(chunk);
+        if head_cut {
+            break;
+        }
     }
     batch
 }
@@ -1830,6 +1854,7 @@ mod tests {
                     16,
                     byte_count,
                     4,
+                    0,
                     frame_timestamps_s,
                     FrameDtype::Rgb8,
                 )
@@ -1930,6 +1955,7 @@ mod tests {
                     16,
                     byte_count,
                     2,
+                    0,
                     frame_timestamps_s,
                     dtype,
                 )
@@ -2160,6 +2186,7 @@ mod tests {
                 16,
                 byte_count,
                 frame_count,
+                0,
                 frame_timestamps_s,
                 dtype,
             )
@@ -2194,6 +2221,7 @@ mod tests {
                 spool_nut: PathBuf::from("unused.nut"),
                 byte_count: 0,
                 frame_count: 1,
+                skip_frames: 0,
                 frame_timestamps_s: vec![0.0],
                 dtype,
             }
@@ -2230,6 +2258,43 @@ mod tests {
     }
 
     #[test]
+    fn drain_keeps_a_head_cut_chunk_in_its_own_batch() {
+        fn queued(chunk_index: u32, skip_frames: u32) -> QueuedChunk {
+            QueuedChunk {
+                chunk_index,
+                spool_nut: PathBuf::from("unused.nut"),
+                byte_count: 0,
+                frame_count: 1,
+                skip_frames,
+                frame_timestamps_s: vec![0.0],
+                dtype: FrameDtype::Rgb8,
+            }
+        }
+        fn indices(batch: &[QueuedChunk]) -> Vec<u32> {
+            batch.iter().map(|chunk| chunk.chunk_index).collect()
+        }
+
+        // The head cut trims the whole concatenated stream, so a chunk that
+        // carries one encodes alone; the chunks behind it batch normally.
+        let mut queue: VecDeque<QueuedChunk> = [queued(0, 2), queued(1, 0), queued(2, 0)]
+            .into_iter()
+            .collect();
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![0]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![1, 2]);
+        assert!(queue.is_empty());
+
+        // A head cut behind an uncut chunk ends that batch before it rather
+        // than joining it.
+        let mut queue: VecDeque<QueuedChunk> = [queued(0, 0), queued(1, 3), queued(2, 0)]
+            .into_iter()
+            .collect();
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![0]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![1]);
+        assert_eq!(indices(&drain_encode_batch(&mut queue)), vec![2]);
+        assert!(queue.is_empty());
+    }
+
+    #[test]
     fn drain_stops_before_a_chunk_past_the_span_cap() {
         fn queued(chunk_index: u32, frame_capture_us: &[i64]) -> QueuedChunk {
             QueuedChunk {
@@ -2237,6 +2302,7 @@ mod tests {
                 spool_nut: PathBuf::from("unused.nut"),
                 byte_count: 0,
                 frame_count: frame_capture_us.len() as u32,
+                skip_frames: 0,
                 frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
                 dtype: FrameDtype::Rgb8,
             }
@@ -2568,6 +2634,7 @@ mod tests {
                 16,
                 19,
                 2,
+                0,
                 vec![0.1, 0.116683],
                 FrameDtype::Rgb8,
             )

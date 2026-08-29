@@ -307,6 +307,7 @@ multihead
 Multihead
 multinode
 multirun
+muxed
 muxer
 muxes
 muxing
@@ -452,6 +453,7 @@ seqlen
 serde
 sess
 setpriority
+setpts
 setsid
 setuptools
 shadowsize
@@ -468,6 +470,7 @@ sqlx
 squaredcos
 startcode
 startcodes
+STARTPTS
 staticmethod
 statvfs
 subdirs

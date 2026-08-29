@@ -57,7 +57,7 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::service_name::{MAX_VIDEO_CHUNK_FRAMES, VIDEO_SPOOL_TICKS_PER_SECOND};
-use data_daemon_shared::video_boundary::{at_or_past_boundary, publish_offset_ms};
+use data_daemon_shared::video_boundary::publish_offset_us;
 use data_daemon_shared::{Envelope, FrameDtype};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
@@ -72,14 +72,18 @@ use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 /// daemon batches several chunks into one ffmpeg invocation, which amortises
 /// that fixed cost further, but this sizing assumes the keep-pace case. The
 /// threshold is checked *after* each frame, so the on-disk file can exceed it
-/// by at most one frame. A chunk is also rolled at every lifecycle event so a
-/// single NUT only ever holds frames from one recording window.
+/// by at most one frame.
 ///
 /// This byte threshold has a companion frame-count cap
 /// ([`MAX_VIDEO_CHUNK_FRAMES`]): a chunk is sealed at whichever bound is hit
 /// first (see [`should_flush_chunk`]). Small frames never reach 256 MiB
 /// mid-recording, so the frame cap is what bounds the chunk's announcement
 /// envelope to one commands slice.
+///
+/// A chunk is *not* aligned to recording boundaries: it is a container, not a
+/// member. The daemon resolves membership per frame and splits one chunk across
+/// every window its frames fall in, so the producer never needs to know where a
+/// window opened.
 ///
 /// One chunk's worth is also the in-RAM writer-queue ceiling
 /// ([`WRITER_QUEUE_MAX_BYTES`]): changing this size moves both the chunk
@@ -201,9 +205,6 @@ struct VideoChunkState {
     /// Previous chunk's `chunk_publish_ns`, so the next open can be forced
     /// strictly above it. `0` before the first chunk.
     last_chunk_publish_ns: i64,
-    /// A recording-window boundary this stream has yet to cross: the first
-    /// frame to reach it seals the open chunk, so none spans the boundary.
-    pending_split_ns: Option<i64>,
     /// OS thread id (`gettid`) of the thread that opened the in-progress chunk.
     chunk_thread_id: i64,
     /// Frames already written into the in-progress chunk.
@@ -229,9 +230,9 @@ struct VideoChunkState {
     frame_timestamps_ns: Vec<i64>,
     /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
     frame_timestamps_s: Vec<f64>,
-    /// Per-frame publish time as ms after `chunk_publish_ns`, which is what
+    /// Per-frame publish time as µs after `chunk_publish_ns`, which is what
     /// lets the daemon cut this chunk at a boundary inside it.
-    frame_publish_offsets_ms: Vec<u32>,
+    frame_publish_offsets_us: Vec<u32>,
 }
 
 /// Process-wide registry of in-progress per-`(source, sensor)` video chunk
@@ -242,8 +243,6 @@ type VideoChunkSlot = Arc<Mutex<VideoChunkState>>;
 struct VideoChunkRegistry {
     owner_pid: u32,
     streams: HashMap<String, VideoChunkSlot>,
-    /// Latest recording-window boundary seen per source prefix.
-    boundaries: HashMap<String, i64>,
     /// Last claim published per source prefix — the rate limiter's only state.
     claims: HashMap<String, i64>,
 }
@@ -252,7 +251,6 @@ static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
     Mutex::new(VideoChunkRegistry {
         owner_pid: 0,
         streams: HashMap::new(),
-        boundaries: HashMap::new(),
         claims: HashMap::new(),
     })
 });
@@ -269,7 +267,6 @@ fn with_video_registry<R>(operation: impl FnOnce(&mut VideoChunkRegistry) -> R) 
     let pid = std::process::id();
     if registry.owner_pid != pid {
         registry.streams.clear();
-        registry.boundaries.clear();
         // A forked child is a different pid, so it owes its own claim.
         registry.claims.clear();
         registry.owner_pid = pid;
@@ -323,12 +320,6 @@ pub(crate) enum WriterMsg {
         robot_id: String,
         robot_instance: i64,
         ack: Sender<()>,
-    },
-    /// A window opened at `publish_ns`; no chunk may straddle it.
-    Boundary {
-        robot_id: String,
-        robot_instance: i64,
-        publish_ns: i64,
     },
 }
 
@@ -951,13 +942,6 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 });
                 let _ = ack.send(());
             }
-            Some(WriterMsg::Boundary {
-                robot_id,
-                robot_instance,
-                publish_ns,
-            }) => {
-                arm_boundary_split(&robot_id, robot_instance, publish_ns);
-            }
             // pop_timeout elapsed with no message: fall through to the rescan.
             None => {}
         }
@@ -1053,11 +1037,6 @@ fn record_video_frame(
             return Some(slot.clone());
         }
         let spool = spool_dir(robot_id, robot_instance, data_type, sensor_name)?;
-        // This stream is new, but its first frames may predate the window.
-        let pending_split_ns = registry
-            .boundaries
-            .get(&source_prefix(robot_id, robot_instance))
-            .copied();
         let slot = Arc::new(Mutex::new(VideoChunkState {
             width,
             height,
@@ -1066,7 +1045,6 @@ fn record_video_frame(
             nut_writer: None,
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
-            pending_split_ns,
             chunk_thread_id: 0,
             frame_count: 0,
             pts_origin_us: None,
@@ -1075,7 +1053,7 @@ fn record_video_frame(
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
-            frame_publish_offsets_ms: Vec::new(),
+            frame_publish_offsets_us: Vec::new(),
         }));
         registry.streams.insert(key.clone(), slot.clone());
         Some(slot)
@@ -1155,20 +1133,6 @@ fn append_frame_locked(
             announcements.push(envelope);
         }
     };
-
-    // A window opened partway through the queued frames. Without this seal one
-    // chunk spans the boundary and its pre-window open stamp orphans every
-    // in-window frame in it. The boundary is one-shot, so the first frame to
-    // reach it consumes it whether or not a chunk was open to seal.
-    if state
-        .pending_split_ns
-        .is_some_and(|split_ns| at_or_past_boundary(split_ns, publish_ns))
-    {
-        state.pending_split_ns = None;
-        if state.nut_writer.is_some() {
-            seal(state, &mut announcements);
-        }
-    }
 
     // A mid-stream resolution *or dtype* change can't share a chunk with the
     // prior state: the NUT header advertises the opening frame's size, and a
@@ -1309,8 +1273,8 @@ fn append_frame_locked(
     state.frame_timestamps_ns.push(timestamp_ns);
     state.frame_timestamps_s.push(timestamp_s);
     state
-        .frame_publish_offsets_ms
-        .push(publish_offset_ms(state.chunk_publish_ns, publish_ns));
+        .frame_publish_offsets_us
+        .push(publish_offset_us(state.chunk_publish_ns, publish_ns));
 
     if should_flush_chunk(logical_bytes_after_write, state.frame_count) {
         seal(state, &mut announcements);
@@ -1340,7 +1304,7 @@ fn flush_chunk_locked(
             state.frame_count = 0;
             state.frame_timestamps_ns.clear();
             state.frame_timestamps_s.clear();
-            state.frame_publish_offsets_ms.clear();
+            state.frame_publish_offsets_us.clear();
             return None;
         }
     };
@@ -1350,7 +1314,7 @@ fn flush_chunk_locked(
     let frame_count = state.frame_count;
     let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
     let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
-    let frame_publish_offsets_ms = std::mem::take(&mut state.frame_publish_offsets_ms);
+    let frame_publish_offsets_us = std::mem::take(&mut state.frame_publish_offsets_us);
 
     state.frame_count = 0;
 
@@ -1369,27 +1333,8 @@ fn flush_chunk_locked(
         frame_timestamps_ns,
         frame_timestamps_s,
         dtype: state.dtype,
-        frame_publish_offsets_ms,
+        frame_publish_offsets_us,
     })
-}
-
-/// Arm a pending window-boundary split on every stream of a source.
-fn arm_boundary_split(robot_id: &str, robot_instance: i64, publish_ns: i64) {
-    let prefix = source_prefix(robot_id, robot_instance);
-    let slots: Vec<VideoChunkSlot> = with_video_registry(|registry| {
-        // Recorded per source, so a not-yet-created stream still picks it up.
-        registry.boundaries.insert(prefix.clone(), publish_ns);
-        registry
-            .streams
-            .iter()
-            .filter(|(key, _)| key.starts_with(&prefix))
-            .map(|(_, slot)| slot.clone())
-            .collect()
-    });
-    for slot in slots {
-        let mut state = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.pending_split_ns = Some(publish_ns);
-    }
 }
 
 /// Flush and remove every open video chunk for a source. Each flushed chunk is
@@ -1592,7 +1537,6 @@ mod tests {
             nut_writer: None,
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
-            pending_split_ns: None,
             chunk_thread_id: 0,
             frame_count: 0,
             pts_origin_us: None,
@@ -1601,7 +1545,7 @@ mod tests {
             pts_synth_warned: false,
             frame_timestamps_ns: Vec::new(),
             frame_timestamps_s: Vec::new(),
-            frame_publish_offsets_ms: Vec::new(),
+            frame_publish_offsets_us: Vec::new(),
         }
     }
 
@@ -1648,75 +1592,51 @@ mod tests {
     }
 
     #[test]
-    fn a_window_boundary_splits_the_chunk_it_would_have_spanned() {
-        // Frames logged either side of `start_recording` can sit in the queue
-        // together, and a chunk spanning the boundary is orphaned whole.
+    fn a_chunk_may_span_a_window_boundary() {
+        // The producer knows nothing of windows: frames logged either side of a
+        // `start_recording` share a chunk, and the per-frame publish offsets are
+        // what let the daemon cut it at the boundary inside it.
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
         let frame = vec![0u8; 2 * 2 * 3];
         let boundary = TEST_PUBLISH_NS;
 
-        // A frame logged before the window opened.
-        append_frame_locked(
-            &mut state,
-            "r",
-            0,
-            "RGB",
-            "cam",
-            2,
-            2,
-            FrameDtype::Rgb8,
-            &frame,
-            boundary - 1_000_000,
-            1_000,
-            0.0,
-        );
-        let pre_window_stamp = state.chunk_publish_ns;
-        state.pending_split_ns = Some(boundary);
-
-        // The first frame at/after the boundary must seal that chunk first.
-        let sealed = append_frame_locked(
-            &mut state,
-            "r",
-            0,
-            "RGB",
-            "cam",
-            2,
-            2,
-            FrameDtype::Rgb8,
-            &frame,
-            boundary,
-            2_000,
-            0.001,
-        );
-
-        assert_eq!(
-            sealed.len(),
-            1,
-            "crossing the boundary seals the open chunk"
-        );
-        match &sealed[0] {
-            Envelope::VideoChunkReady {
-                publish_timestamp_ns,
-                frame_count,
-                ..
-            } => {
-                assert_eq!(
-                    *publish_timestamp_ns, pre_window_stamp,
-                    "the sealed chunk keeps its pre-window stamp, so the daemon \
-                     orphans only the frames that really are pre-window"
-                );
-                assert_eq!(*frame_count, 1);
-            }
-            other => panic!("expected VideoChunkReady, got {other:?}"),
+        for (publish_ns, timestamp_ns, timestamp_s) in
+            [(boundary - 1_000_000, 1_000, 0.0), (boundary, 2_000, 0.001)]
+        {
+            let sealed = append_frame_locked(
+                &mut state,
+                "r",
+                0,
+                "RGB",
+                "cam",
+                2,
+                2,
+                FrameDtype::Rgb8,
+                &frame,
+                publish_ns,
+                timestamp_ns,
+                timestamp_s,
+            );
+            assert!(
+                sealed.is_empty(),
+                "no bound was reached, so nothing seals at the boundary"
+            );
         }
+
         assert_eq!(
-            state.chunk_publish_ns, boundary,
-            "and the replacement chunk opens inside the window"
+            state.frame_count, 2,
+            "both frames sit in the one open chunk"
         );
-        assert!(
-            state.pending_split_ns.is_none(),
-            "a boundary is applied exactly once"
+        assert_eq!(
+            state.chunk_publish_ns,
+            boundary - 1_000_000,
+            "which keeps the pre-window stamp of the frame that opened it"
+        );
+        assert_eq!(
+            state.frame_publish_offsets_us,
+            vec![0, 1_000],
+            "and each frame carries its own offset, so the daemon can split them"
         );
     }
 
@@ -2024,7 +1944,7 @@ mod tests {
         assert_eq!(state.frame_count, 0);
         assert!(state.frame_timestamps_ns.is_empty());
         assert!(state.frame_timestamps_s.is_empty());
-        assert!(state.frame_publish_offsets_ms.is_empty());
+        assert!(state.frame_publish_offsets_us.is_empty());
     }
 
     #[test]
@@ -2057,14 +1977,14 @@ mod tests {
         match envelope {
             Envelope::VideoChunkReady {
                 publish_timestamp_ns,
-                frame_publish_offsets_ms,
+                frame_publish_offsets_us,
                 ..
             } => {
                 assert_eq!(
                     publish_timestamp_ns, TEST_PUBLISH_NS,
                     "the chunk's open stamp is its first frame's publish stamp"
                 );
-                assert_eq!(frame_publish_offsets_ms, vec![0, 33, 66]);
+                assert_eq!(frame_publish_offsets_us, vec![0, 33_333, 66_666]);
             }
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }

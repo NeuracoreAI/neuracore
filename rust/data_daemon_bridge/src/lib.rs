@@ -101,7 +101,7 @@ fn start_recording(
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
         publish(&Envelope::StartRecording {
-            robot_id: robot_id.clone(),
+            robot_id,
             robot_instance,
             robot_name,
             dataset_id,
@@ -110,12 +110,8 @@ fn start_recording(
             timestamp_ns: capture_timestamp_ns,
             cloud_recording_id,
         })?;
-        // Tell the writer where the window opened, so no chunk spans it.
-        let _ = writer_queue().push(WriterMsg::Boundary {
-            robot_id,
-            robot_instance,
-            publish_ns: publish_timestamp_ns,
-        });
+        // The writer is deliberately not told where the window opened: a chunk
+        // may span the boundary, and the daemon splits it per frame.
         Ok(capture_timestamp_ns)
     })
 }
