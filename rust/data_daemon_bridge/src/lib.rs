@@ -46,6 +46,7 @@ mod depth;
 mod paths;
 mod publisher;
 mod query;
+mod windows;
 mod writer;
 
 use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery};
@@ -100,6 +101,10 @@ fn start_recording(
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
         // (publish clock when omitted). Decoupled from the window boundary.
         let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
+        // Open this process's logging gate before the envelope goes out, so a
+        // `log_*` on the very next line is not dropped while the daemon is still
+        // answering. The claim expires against the daemon's own snapshots.
+        windows::claim(&robot_id, robot_instance, publish_timestamp_ns);
         publish(&Envelope::StartRecording {
             robot_id,
             robot_instance,
@@ -139,6 +144,14 @@ fn log_joints(
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
 ) -> PyResult<()> {
+    // Nothing is recording for this source: drop the sample before copying,
+    // spooling or publishing anything. This is where the SDK's Python-side
+    // recording gate used to sit, and it sits *before* argument validation for
+    // the same reason it used to skip this call entirely — a caller logging
+    // while idle sees the same nothing it always did.
+    if !windows::is_open(robot_id, robot_instance) {
+        return Ok(());
+    }
     if robot_id.is_empty() || data_type.is_empty() {
         return Err(PyValueError::new_err(
             "robot_id and data_type must not be empty",
@@ -208,6 +221,10 @@ fn log_frame(
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
 ) -> PyResult<()> {
+    // Not recording: drop it before any work (see `log_joints`).
+    if !windows::is_open(robot_id, robot_instance) {
+        return Ok(());
+    }
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
             "robot_id, data_type and name must not be empty",
@@ -296,6 +313,10 @@ fn log_json(
     timestamp_ns: i64,
     timestamp_s: Option<f64>,
 ) -> PyResult<()> {
+    // Not recording: drop it before any work (see `log_joints`).
+    if !windows::is_open(robot_id, robot_instance) {
+        return Ok(());
+    }
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
             "robot_id, data_type and name must not be empty",
@@ -385,6 +406,10 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        // Only now: the daemon's window is open until it receives the stop, so
+        // closing this process's gate any earlier would discard data the daemon
+        // would still have accepted.
+        windows::release(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -459,10 +484,11 @@ fn cancel_recording(
         // Publish `CancelRecording` from THIS (the calling) thread's publisher,
         // ordered with Start/Stop on the same port (see the writer module note).
         publish(&Envelope::CancelRecording {
-            robot_id,
+            robot_id: robot_id.clone(),
             robot_instance,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        windows::release(&robot_id, robot_instance);
         Ok(())
     })
 }

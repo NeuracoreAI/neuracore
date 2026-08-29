@@ -313,8 +313,10 @@ pub mod service_name {
 
     /// Maximum number of concurrent subscribers per service.
     ///
-    /// The daemon opens exactly one subscriber per service; producers never
-    /// subscribe. iceoryx2 sizes every publisher's data segment as
+    /// The daemon opens exactly one subscriber per producer-published service,
+    /// and producers subscribe to none of them (they subscribe only to
+    /// [`RECORDING_WINDOWS`], which has its own cap). iceoryx2 sizes every
+    /// publisher's data segment as
     /// `max_subscribers × (buffer + borrowed) × slice`, so the default of 8
     /// inflates each segment 8× for subscribers that never exist. Pinning
     /// this to 1 keeps the segment proportional to the real topology.
@@ -392,6 +394,54 @@ pub mod service_name {
 
     /// Maximum number of concurrent request-response servers. The daemon opens exactly one.
     pub const MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE: usize = 1;
+
+    /// Pub/sub service the **daemon** publishes on and producers subscribe to:
+    /// which sources currently have an open recording window.
+    ///
+    /// The only channel that runs daemon → producer. It carries no instruction
+    /// and names no producer: it is a snapshot of the daemon's own window state
+    /// ([`crate::RecordingWindows`]), which a producer reads to decide whether
+    /// logging for its source is worth spooling. A process that opened no window
+    /// of its own learns of one this way — which is the whole point, since it is
+    /// the camera child that would otherwise discard every frame of a recording
+    /// another process started.
+    pub const RECORDING_WINDOWS: &str = "neuracore/data_daemon/recording_windows";
+
+    /// Maximum size of a single `recording_windows` sample.
+    ///
+    /// A snapshot is one entry per source with a live window — a robot UUID plus
+    /// two integers, ~50 bytes — so 4 KiB holds ~80 concurrent sources, far past
+    /// any real machine. Sized tightly on purpose: iceoryx2 allocates the
+    /// publisher's segment as `max_subscribers x (buffer + borrowed) x slice`, and
+    /// this service's subscriber cap is high, so a generous slice here would cost
+    /// tens of MiB of `/dev/shm`. Guarded by
+    /// `a_full_window_snapshot_fits_the_slice`.
+    pub const RECORDING_WINDOWS_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+
+    /// History depth for `recording_windows`, so a producer that starts *during*
+    /// a recording is handed the current snapshot on connect rather than waiting
+    /// for the next change. One is enough: a snapshot is absolute, never a delta,
+    /// so the newest one is the whole truth and older ones are worthless.
+    pub const RECORDING_WINDOWS_HISTORY_SIZE: usize = 1;
+
+    /// Subscriber buffer depth for `recording_windows`. Two, because a reader
+    /// drains everything pending and keeps only the last: depth buys nothing but
+    /// staleness, and this service is deliberately lossy (see
+    /// [`RECORDING_WINDOWS_MAX_SUBSCRIBERS`]).
+    pub const RECORDING_WINDOWS_SUBSCRIBER_BUFFER_SIZE: usize = 2;
+
+    /// Publishers on `recording_windows`. The daemon's listener thread owns the
+    /// only one; producers never publish window state, because they do not own
+    /// it.
+    pub const RECORDING_WINDOWS_MAX_PUBLISHERS: usize = 1;
+
+    /// Subscribers on `recording_windows` — one per producer *process* (not per
+    /// thread, unlike the publisher ports on [`COMMANDS`]).
+    ///
+    /// Unlike [`COMMANDS`], this service leaves iceoryx2's safe-overflow *on*:
+    /// a producer that stops draining must never block the daemon, and evicting
+    /// the oldest snapshot costs nothing when only the newest is meaningful.
+    pub const RECORDING_WINDOWS_MAX_SUBSCRIBERS: usize = 128;
 }
 
 /// A single message exchanged between the producer and the daemon.
@@ -775,6 +825,50 @@ pub struct RecordingIdQuery {
 pub struct RecordingIdReply {
     /// The daemon-owned cloud recording id, once available.
     pub recording_id: Option<String>,
+}
+
+/// One source with a recording window open right now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenWindow {
+    pub robot_id: String,
+    pub robot_instance: i64,
+    /// The window's inclusive lower bound on the producer publish clock — the
+    /// same `started_at_ns` the daemon routes membership against. Carried so a
+    /// reader can say *since when*, not merely *whether*.
+    pub started_at_publish_ns: i64,
+}
+
+/// Every source the daemon currently holds a live window for, published on
+/// [`service_name::RECORDING_WINDOWS`] whenever that set changes.
+///
+/// A **complete snapshot**, never a delta: a reader that misses one sample and
+/// sees the next is fully caught up, which is what lets the service be lossy and
+/// its history exactly one deep. A source absent from `windows` has no live
+/// window — an empty snapshot is meaningful, not "no news".
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RecordingWindows {
+    pub windows: Vec<OpenWindow>,
+    /// Daemon wall clock (Unix nanoseconds) at which this snapshot was taken.
+    ///
+    /// Lets a producer retire its *own* optimistic claim: having published a
+    /// `StartRecording` it opens its gate at once, without waiting for a round
+    /// trip, and keeps it open only until a snapshot taken after that claim
+    /// arrives. From then on the daemon's silence about the source is
+    /// meaningful — it is how a producer learns its recording was stopped by
+    /// someone else, even if nothing else tells it.
+    pub published_at_ns: i64,
+}
+
+impl RecordingWindows {
+    /// Encode as a postcard byte vector for a `recording_windows` sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `recording_windows` sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
 }
 
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
@@ -1284,6 +1378,58 @@ mod tests {
             "chunk at frame cap ({count} frames, {} bytes) must fit the commands slice ({} bytes)",
             bytes.len(),
             service_name::COMMANDS_MAX_PAYLOAD_BYTES,
+        );
+    }
+
+    #[test]
+    fn window_snapshots_round_trip() {
+        let snapshot = RecordingWindows {
+            windows: vec![OpenWindow {
+                robot_id: "11111111-2222-3333-4444-555555555555".into(),
+                robot_instance: i64::MAX,
+                started_at_publish_ns: i64::MAX,
+            }],
+            published_at_ns: i64::MAX,
+        };
+        let bytes = snapshot.encode().expect("encode");
+        assert_eq!(snapshot, RecordingWindows::decode(&bytes).expect("decode"));
+    }
+
+    #[test]
+    fn an_empty_snapshot_is_distinguishable_from_no_snapshot() {
+        // "Nothing is recording" is a statement the service must be able to
+        // make: a producer that reads an empty snapshot closes its gate, so
+        // this must decode to an empty vec rather than fail.
+        let bytes = RecordingWindows::default().encode().expect("encode");
+        assert!(RecordingWindows::decode(&bytes)
+            .expect("decode")
+            .windows
+            .is_empty());
+    }
+
+    #[test]
+    fn a_full_window_snapshot_fits_the_slice() {
+        // Sizing claim behind RECORDING_WINDOWS_MAX_PAYLOAD_BYTES: a snapshot of
+        // far more sources than a machine can host still fits one sample, so the
+        // publish never fails for want of room.
+        let windows = (0..64)
+            .map(|instance| OpenWindow {
+                robot_id: "11111111-2222-3333-4444-555555555555".into(),
+                robot_instance: instance,
+                started_at_publish_ns: i64::MAX,
+            })
+            .collect();
+        let bytes = RecordingWindows {
+            windows,
+            published_at_ns: i64::MAX,
+        }
+        .encode()
+        .expect("encode");
+        assert!(
+            bytes.len() <= service_name::RECORDING_WINDOWS_MAX_PAYLOAD_BYTES,
+            "64 open windows ({} bytes) must fit the slice ({} bytes)",
+            bytes.len(),
+            service_name::RECORDING_WINDOWS_MAX_PAYLOAD_BYTES,
         );
     }
 }

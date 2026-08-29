@@ -25,6 +25,15 @@ data and fire-and-forget lifecycle events, and the daemon owns all recording
 identity and routing. Pixel data never travels the IPC bus — the producer spools
 NUT chunks to disk and only announces them.
 
+One channel runs the other way. The daemon publishes which sources have a live
+recording window on `recording_windows`, and the producer's `log_*` entry points
+drop a sample before any work when the source has none. It is what lets a camera
+process that never brackets a recording contribute to one another process
+started, without spooling every frame it ever captures. The producer still owns
+no recording state: it caches the daemon's answer, and covers the round trip
+after its own `start_recording` with a claim that the daemon's next snapshot
+supersedes.
+
 ```mermaid
 flowchart LR
     subgraph SDK["Python SDK"]
@@ -38,6 +47,9 @@ flowchart LR
     WRT -. VideoChunkReady .-> PUBT
     BUS --> LIS["ipc::listener (adaptive poll)"]
     LIS --> DISP["dispatcher<br/>single task · holdback · publish-clock routing"]
+    DISP -. live-window snapshot .-> LIS
+    LIS -->|iceoryx2 recording_windows| GATE[("log gate")]
+    GATE -. drop when no window .-> LOG
     DISP --> ACT["per-trace actors"]
     ACT -->|fire-and-forget| TW["trace_writer<br/>batched DB write-behind"]
     ACT -->|fire-and-forget| JW["json_writer (IO thread)"]

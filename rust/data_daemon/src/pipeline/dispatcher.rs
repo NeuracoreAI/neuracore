@@ -57,7 +57,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use data_daemon_shared::{video_boundary, BatchedDataItem, Envelope, FrameDtype};
+use data_daemon_shared::{
+    video_boundary, BatchedDataItem, Envelope, FrameDtype, OpenWindow, RecordingWindows,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -148,6 +150,11 @@ pub struct DispatcherContext {
     /// `None` in tests / when no watcher is wired, where `RefreshConfig` is a
     /// no-op.
     pub config_refresh_tx: Option<tokio::sync::mpsc::Sender<crate::cloud::ConfigRefreshRequest>>,
+    /// Where window snapshots go on their way to producers. The IPC listener
+    /// owns the only publisher port, so the dispatcher hands snapshots to it
+    /// rather than publishing them itself. `None` in tests, where nothing
+    /// subscribes.
+    pub window_snapshot_tx: Option<mpsc::Sender<RecordingWindows>>,
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -332,6 +339,14 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// The live-window set as last published to producers, sorted, so an
+    /// unchanged set publishes nothing.
+    published_windows: Vec<(Source, i64)>,
+    /// Whether anything since the last publish could have opened or closed a
+    /// window. Set by the three lifecycle handlers and by housekeeping, which
+    /// are the only things that can: re-deriving the set on every wake-up would
+    /// clone every source id on the data path, which is most of them.
+    windows_dirty: bool,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -354,6 +369,10 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            published_windows: Vec::new(),
+            // Publish the (empty) set once at startup, so a producer that
+            // attaches before any recording is told so rather than left waiting.
+            windows_dirty: true,
             last_housekeep: Instant::now(),
         }
     }
@@ -401,6 +420,7 @@ impl Dispatcher {
                 self.housekeep(now).await;
                 self.last_housekeep = now;
             }
+            self.publish_windows_if_changed();
         }
 
         self.shutdown().await;
@@ -617,6 +637,7 @@ impl Dispatcher {
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
+        self.windows_dirty = true;
         // A `StartRecording` carrying a known cloud id can reach this daemon
         // more than once for the very same recording: every local process
         // connected to the source learns about a web-started recording
@@ -769,6 +790,7 @@ impl Dispatcher {
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
+        self.windows_dirty = true;
         let Some(entry) = self.windows.get_mut(&source) else {
             tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
             return;
@@ -884,6 +906,7 @@ impl Dispatcher {
     }
 
     async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
+        self.windows_dirty = true;
         let Some(mut entry) = self.windows.remove(&source) else {
             return;
         };
@@ -953,6 +976,8 @@ impl Dispatcher {
     /// window scans, so throttled to [`HOUSEKEEP_INTERVAL`] by the caller rather
     /// than run per inbound envelope.
     async fn housekeep(&mut self, now: Instant) {
+        // The idle reaper below can close a live window.
+        self.windows_dirty = true;
         let retention = self.holdback * 2;
         let (closing_actors, empty_sources) = self.evict_closing_windows(now, retention);
 
@@ -1433,6 +1458,60 @@ impl Dispatcher {
         })
     }
 
+    /// Publish the live-window set to producers, if it has changed since the
+    /// last time.
+    ///
+    /// A producer decides whether logging for a source is worth spooling by
+    /// reading this, so the snapshot is a complete statement every time: a
+    /// source absent from it has no live window. `try_send` rather than `send`
+    /// because the dispatcher must never wait on the listener — snapshots are
+    /// rare (one per start or stop) and a dropped one is corrected by the next.
+    fn publish_windows_if_changed(&mut self) {
+        if !self.windows_dirty {
+            return;
+        }
+        self.windows_dirty = false;
+        let Some(tx) = self.context.window_snapshot_tx.as_ref() else {
+            return;
+        };
+        let mut live: Vec<(Source, i64)> = self
+            .windows
+            .iter()
+            .filter_map(|(source, entry)| {
+                entry
+                    .live
+                    .as_ref()
+                    .map(|window| (source.clone(), window.started_at_ns))
+            })
+            .collect();
+        live.sort();
+        if live == self.published_windows {
+            return;
+        }
+
+        let snapshot = RecordingWindows {
+            windows: live
+                .iter()
+                .map(|((robot_id, robot_instance), started_at_ns)| OpenWindow {
+                    robot_id: robot_id.clone(),
+                    robot_instance: *robot_instance,
+                    started_at_publish_ns: *started_at_ns,
+                })
+                .collect(),
+            // Same wall clock the producer stamps its publish times on, so a
+            // producer can compare this against its own claim.
+            published_at_ns: Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX),
+        };
+        match tx.try_send(snapshot) {
+            Ok(()) => self.published_windows = live,
+            // Stay dirty so the next wake-up tries again.
+            Err(error) => {
+                self.windows_dirty = true;
+                tracing::warn!(%error, "window snapshot not queued for producers");
+            }
+        }
+    }
+
     fn note_orphan(&mut self) {
         self.orphan_drops = self.orphan_drops.saturating_add(1);
         if self.orphan_drops == 1 || self.orphan_drops.is_multiple_of(1024) {
@@ -1756,6 +1835,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: Some(refresh_tx),
+            window_snapshot_tx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1795,6 +1875,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: None,
+            window_snapshot_tx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1820,6 +1901,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            window_snapshot_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1906,6 +1988,62 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn producers_are_told_which_sources_have_a_window_open() {
+        // What a producer gates its logging on. A camera process that publishes
+        // no lifecycle envelope of its own has no other way to know, so a start
+        // must produce a snapshot naming the source and a stop must produce one
+        // that does not.
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (window_snapshot_tx, mut window_snapshot_rx) = mpsc::channel(8);
+        let mut dispatcher = Dispatcher::new(
+            store.clone(),
+            context,
+            DispatcherContext {
+                window_snapshot_tx: Some(window_snapshot_tx),
+                ..DispatcherContext::default()
+            },
+        );
+
+        dispatcher
+            .handle_inbound(start("robot-1", 100), Instant::now())
+            .await;
+        dispatcher.publish_windows_if_changed();
+
+        let opened = window_snapshot_rx.try_recv().expect("a start is published");
+        assert_eq!(opened.windows.len(), 1);
+        assert_eq!(opened.windows[0].robot_id, "robot-1");
+        assert_eq!(opened.windows[0].started_at_publish_ns, 100);
+
+        // Nothing changed, so nothing is said again — the snapshot is a
+        // statement about the window set, not a heartbeat. True both when
+        // nothing marked the set dirty and when something did but the set is
+        // the same (housekeeping runs on a timer and marks it every time).
+        dispatcher.publish_windows_if_changed();
+        assert!(window_snapshot_rx.try_recv().is_err());
+        dispatcher.windows_dirty = true;
+        dispatcher.publish_windows_if_changed();
+        assert!(window_snapshot_rx.try_recv().is_err());
+
+        dispatcher
+            .handle_inbound(stop("robot-1", 200), Instant::now())
+            .await;
+        dispatcher.publish_windows_if_changed();
+
+        let closed = window_snapshot_rx.try_recv().expect("a stop is published");
+        assert!(
+            closed.windows.is_empty(),
+            "the source must be absent, which is how a producer closes its gate"
+        );
+        assert!(
+            closed.published_at_ns >= opened.published_at_ns,
+            "snapshots must be orderable, so a producer can tell which is newer"
+        );
+
+        dispatcher.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn inverted_stop_after_next_start_preserves_both_recordings() {
         // A slow stop can reach the daemon after the next recording's start
         // (start/stop inversion). Listener order here is:
@@ -1925,6 +2063,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            window_snapshot_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2542,6 +2681,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            window_snapshot_tx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2595,6 +2735,7 @@ mod tests {
             DispatcherContext {
                 event_bus: Some(bus.clone()),
                 config_refresh_tx: None,
+                window_snapshot_tx: None,
             },
         );
 

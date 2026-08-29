@@ -481,10 +481,12 @@ def test_log_parallel_gripper_open_amounts(
     )
 
 
-def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None:
-    """A producer that did not publish StartRecording can log after SSE state.
+def test_logs_forward_without_any_local_recording_state(monkeypatch) -> None:
+    """A producer with no recording state of its own still forwards.
 
-    The active recording id represents state learned from SSE. Creating the
+    The camera-child case: this process published no `StartRecording` and knows
+    of no recording, and its samples must still reach the bridge — which drops
+    them itself unless the daemon has told it a window is open. Creating the
     robot's daemon context must bind its source without publishing a duplicate
     native start event.
     """
@@ -493,11 +495,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     native = MagicMock()
 
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
-    monkeypatch.setattr(
-        robot,
-        "get_current_recording_id",
-        lambda: "cloud-recording-id-from-sse",
-    )
+    monkeypatch.setattr(robot, "get_current_recording_id", lambda: None)
 
     sample = ParallelGripperOpenAmountData(timestamp=12.5, open_amount=0.4)
     api_logging._record_json_to_daemon(

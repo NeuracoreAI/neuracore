@@ -16,12 +16,13 @@
 //! the later `serve_recording_id_queries` borrow is itself held across an await.)
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, VersionReply,
-    VersionRequest,
+    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, RecordingWindows,
+    VersionReply, VersionRequest,
 };
+use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
 use iceoryx2::prelude::ipc;
@@ -56,6 +57,17 @@ const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// cost and avoids relaxing during a brief lull mid-recording.
 const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 
+/// How often the current window snapshot is re-sent unchanged.
+///
+/// Change-driven publishing alone does not reach a producer that attaches
+/// *between* two changes: iceoryx2 hands a new subscriber the service history
+/// only when the publisher next sends, and `update_connections` is not public,
+/// so a process that starts mid-recording would stay blind until the next start
+/// or stop — and drop every frame until then. Re-sending bounds that at one
+/// interval, and 250 ms costs four ~50-byte samples a second against ~8 dropped
+/// frames from a 30 fps camera.
+const WINDOW_REPUBLISH_INTERVAL: Duration = Duration::from_millis(250);
+
 /// Drain the iceoryx2 subscriber until a shutdown signal arrives.
 ///
 /// Each successfully decoded envelope is forwarded to the dispatcher's
@@ -69,6 +81,7 @@ const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
+    mut window_snapshot_rx: mpsc::Receiver<RecordingWindows>,
     store: Arc<SqliteStateStore>,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
@@ -81,6 +94,7 @@ pub async fn run(
     );
 
     let mut counters = LoopCounters::default();
+    let mut windows = WindowPublishState::default();
     let mut batch: Vec<Envelope> = Vec::with_capacity(64);
     // Consecutive empty drains, used to relax the poll cadence on an idle
     // daemon. Reset to 0 the moment any envelope arrives.
@@ -110,6 +124,16 @@ pub async fn run(
                 return;
             }
         }
+
+        // -- Tell producers which sources have a window open --------------------
+        // The dispatcher owns the window state but not the publisher port, so it
+        // hands snapshots here. Published from this loop, which is the only
+        // thread allowed to touch iceoryx2 ports.
+        publish_window_snapshots(
+            transport.recording_window_publisher(),
+            &mut window_snapshot_rx,
+            &mut windows,
+        );
 
         // -- Answer readiness probes --------------------------------------------
         // A health reply is the SDK launcher's readiness contract: reaching this
@@ -303,6 +327,70 @@ async fn serve_recording_id_queries(
 struct LoopCounters {
     decode_failures: u64,
     receive_failures: u64,
+}
+
+/// The window snapshot most recently sent to producers, and when it last went
+/// out.
+#[derive(Default)]
+struct WindowPublishState {
+    latest: Option<RecordingWindows>,
+    last_sent: Option<Instant>,
+}
+
+/// Publish the dispatcher's window snapshots, and re-send the current one on
+/// [`WINDOW_REPUBLISH_INTERVAL`].
+///
+/// A snapshot is a complete statement of which sources have a live window, so an
+/// older one queued behind a newer has nothing to add and is skipped rather than
+/// sent. The re-send exists for producers that attach between changes (see
+/// [`WINDOW_REPUBLISH_INTERVAL`]) and carries the snapshot **verbatim**,
+/// `published_at_ns` included: a producer expires its own claim against that
+/// stamp, so re-stamping a re-send would retire a claim the snapshot never
+/// spoke about.
+///
+/// Failures are logged and dropped — the next re-send is 250 ms away.
+fn publish_window_snapshots(
+    publisher: &Publisher<ipc::Service, [u8], ()>,
+    rx: &mut mpsc::Receiver<RecordingWindows>,
+    state: &mut WindowPublishState,
+) {
+    let mut newest = None;
+    while let Ok(snapshot) = rx.try_recv() {
+        newest = Some(snapshot);
+    }
+    if let Some(snapshot) = newest {
+        state.latest = Some(snapshot);
+        state.last_sent = None;
+    }
+    let Some(snapshot) = state.latest.as_ref() else {
+        return;
+    };
+    let now = Instant::now();
+    let due = state
+        .last_sent
+        .is_none_or(|sent| now.duration_since(sent) >= WINDOW_REPUBLISH_INTERVAL);
+    if !due {
+        return;
+    }
+    state.last_sent = Some(now);
+
+    let bytes = match snapshot.encode() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "window snapshot encode failed");
+            return;
+        }
+    };
+    let sample = match publisher.loan_slice_uninit(bytes.len()) {
+        Ok(sample) => sample,
+        Err(error) => {
+            tracing::warn!(%error, "window snapshot loan failed");
+            return;
+        }
+    };
+    if let Err(error) = sample.write_from_slice(&bytes).send() {
+        tracing::warn!(%error, "window snapshot send failed");
+    }
 }
 
 /// Synchronously drain every available sample on `subscriber`, appending

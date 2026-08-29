@@ -14,12 +14,16 @@ use data_daemon_shared::service_name::{
     COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
     MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS,
-    RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
+    RECORDING_ID_MAX_PAYLOAD_BYTES, RECORDING_WINDOWS, RECORDING_WINDOWS_HISTORY_SIZE,
+    RECORDING_WINDOWS_MAX_PAYLOAD_BYTES, RECORDING_WINDOWS_MAX_PUBLISHERS,
+    RECORDING_WINDOWS_MAX_SUBSCRIBERS, RECORDING_WINDOWS_SUBSCRIBER_BUFFER_SIZE, VERSION,
+    VERSION_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
+use iceoryx2::port::publisher::Publisher;
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
-use iceoryx2::prelude::{ipc, NodeName};
+use iceoryx2::prelude::{ipc, NodeName, UnableToDeliverStrategy};
 use iceoryx2::service::port_factory::publish_subscribe::PortFactory;
 use iceoryx2::service::port_factory::request_response::PortFactory as QueryPortFactory;
 use thiserror::Error;
@@ -66,6 +70,14 @@ pub enum IpcSetupError {
         /// Underlying iceoryx2 error message.
         detail: String,
     },
+    /// Building a publisher port failed.
+    #[error("failed to create publisher on '{name}': {detail}")]
+    PublisherCreate {
+        /// Owning service.
+        name: String,
+        /// Underlying iceoryx2 error message.
+        detail: String,
+    },
     /// Building a request-response server port failed.
     #[error("failed to create server on '{name}': {detail}")]
     ServerCreate {
@@ -106,6 +118,11 @@ pub struct IpcTransport {
     version_server: Server<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the version server.
     _version_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Publisher on `neuracore/data_daemon/recording_windows` — the one channel
+    /// that runs daemon → producer, carrying which sources have a live window.
+    recording_window_publisher: Publisher<ipc::Service, [u8], ()>,
+    /// Service handle held alongside the window publisher.
+    _recording_window_service: PortFactory<ipc::Service, [u8], ()>,
 }
 
 impl IpcTransport {
@@ -136,6 +153,8 @@ impl IpcTransport {
         let (version_service, version_server) =
             open_query_server(&node, VERSION, VERSION_MAX_PAYLOAD_BYTES)?;
 
+        let (recording_window_service, recording_window_publisher) = open_window_publisher(&node)?;
+
         Ok(IpcTransport {
             _node: node,
             commands_subscriber,
@@ -146,6 +165,8 @@ impl IpcTransport {
             _health_service: health_service,
             version_server,
             _version_service: version_service,
+            recording_window_publisher,
+            _recording_window_service: recording_window_service,
         })
     }
 
@@ -168,11 +189,61 @@ impl IpcTransport {
     pub fn version_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
         &self.version_server
     }
+
+    /// Borrow the `recording_windows` publisher port.
+    pub fn recording_window_publisher(&self) -> &Publisher<ipc::Service, [u8], ()> {
+        &self.recording_window_publisher
+    }
+}
+
+/// Open (or attach to) the `recording_windows` pub/sub service and build the
+/// daemon's single publisher on it.
+///
+/// The mirror image of [`open_subscriber`], and configured the opposite way on
+/// purpose: safe overflow is left **on** and delivery discards rather than
+/// blocks, so a producer that stops draining its buffer can never stall the
+/// daemon's listener loop. Losing a snapshot costs nothing — the next one is a
+/// complete replacement, and one sample of history hands the current state to
+/// any producer that attaches later.
+fn open_window_publisher(
+    node: &Node<ipc::Service>,
+) -> Result<(ByteSliceFactory, ByteSlicePublisher), IpcSetupError> {
+    let service_name =
+        RECORDING_WINDOWS
+            .try_into()
+            .map_err(|error| IpcSetupError::InvalidServiceName {
+                name: RECORDING_WINDOWS.to_string(),
+                detail: format!("{error}"),
+            })?;
+    let service = node
+        .service_builder(&service_name)
+        .publish_subscribe::<[u8]>()
+        .history_size(RECORDING_WINDOWS_HISTORY_SIZE)
+        .subscriber_max_buffer_size(RECORDING_WINDOWS_SUBSCRIBER_BUFFER_SIZE)
+        .max_publishers(RECORDING_WINDOWS_MAX_PUBLISHERS)
+        .max_subscribers(RECORDING_WINDOWS_MAX_SUBSCRIBERS)
+        .max_nodes(MAX_NODES_PER_SERVICE)
+        .open_or_create()
+        .map_err(|error| IpcSetupError::ServiceOpen {
+            name: RECORDING_WINDOWS.to_string(),
+            detail: error.to_string(),
+        })?;
+    let publisher = service
+        .publisher_builder()
+        .initial_max_slice_len(RECORDING_WINDOWS_MAX_PAYLOAD_BYTES)
+        .unable_to_deliver_strategy(UnableToDeliverStrategy::DiscardSample)
+        .create()
+        .map_err(|error| IpcSetupError::PublisherCreate {
+            name: RECORDING_WINDOWS.to_string(),
+            detail: error.to_string(),
+        })?;
+    Ok((service, publisher))
 }
 
 /// Convenience alias for the `[u8]` pub/sub factory + subscriber pair
 /// [`open_subscriber`] returns.
 type ByteSliceFactory = PortFactory<ipc::Service, [u8], ()>;
+type ByteSlicePublisher = Publisher<ipc::Service, [u8], ()>;
 type ByteSliceSubscriber = Subscriber<ipc::Service, [u8], ()>;
 
 /// Open or attach to a `[u8]` pub/sub service and build a subscriber on it.

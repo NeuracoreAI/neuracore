@@ -43,6 +43,11 @@ const SIGNAL_CAPTURE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Buffer for dispatcher → config-watcher refresh requests (rare, drained promptly).
 const CONFIG_REFRESH_CHANNEL_CAPACITY: usize = 8;
 
+/// Buffer for dispatcher → listener window snapshots. One per recording start or
+/// stop, and the listener keeps only the newest, so this only has to cover a
+/// burst of lifecycle events arriving inside one listener pass.
+const WINDOW_SNAPSHOT_CAPACITY: usize = 16;
+
 /// Run the launch command.
 pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()> {
     let runtime_env = RuntimeEnv::from_env();
@@ -425,9 +430,14 @@ fn run_daemon(
                     spawn_wakelock(event_bus.clone(), shutdown_tx.subscribe())
                 });
 
+            // Window snapshots run dispatcher → listener → producers: the
+            // dispatcher owns the state, the listener owns the iceoryx2 port.
+            let (window_snapshot_tx, window_snapshot_rx) =
+                tokio::sync::mpsc::channel(WINDOW_SNAPSHOT_CAPACITY);
             let dispatcher_context = DispatcherContext {
                 event_bus: Some(event_bus.clone()),
                 config_refresh_tx: Some(config_refresh_tx),
+                window_snapshot_tx: Some(window_snapshot_tx),
             };
             let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
                 state_store.clone(),
@@ -479,6 +489,7 @@ fn run_daemon(
             listener::run(
                 transport,
                 dispatcher_tx.clone(),
+                window_snapshot_rx,
                 Arc::new(state_store.clone()),
                 shutdown_tx.subscribe(),
             )
