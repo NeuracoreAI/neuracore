@@ -770,6 +770,9 @@ class Robot:
         if self._daemon_recording_context is None:
             return
         try:
+            # Seal this process's tail chunks on the way out: nothing else will
+            # once the context is gone.
+            self._daemon_recording_context.flush_source()
             self._daemon_recording_context.close()
         except Exception:
             logger.exception("Failed to cleanup daemon recording context")
