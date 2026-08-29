@@ -191,6 +191,23 @@ class RecordingStateManager(BaseSSEConsumer):
 
         self._discard_cached_manager()
 
+    def on_authentication_error(self) -> None:
+        """Stop consuming notifications, but keep locally owned recording state.
+
+        A stream the platform rejects is a lost notification channel, not the
+        end of the session. ``nc.stop_recording`` reads this state to decide
+        there is anything to stop, so clearing it here would leave the stop
+        unpublished and the daemon's recording window open until the reaper's
+        max-duration bound. An explicit logout still goes through
+        :meth:`close`, which clears everything — that is a statement that the
+        session is over, which this is not.
+        """
+        logger.warning(
+            "Recording notifications stopped: the stream could not authenticate. "
+            "Locally started recordings can still be stopped; remote stops will "
+            "not be observed until the next login."
+        )
+
     def _remove_logout_listener(self) -> None:
         """Remove the logout listener when it has not already fired."""
         if self._logout_listener in self.auth.listeners(Auth.LOGOUT_EVENT):

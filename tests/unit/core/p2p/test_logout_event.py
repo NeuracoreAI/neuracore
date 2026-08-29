@@ -273,6 +273,58 @@ def test_recording_manager_tears_down_owned_state(nc_loop) -> None:
     auth.emit(Auth.LOGOUT_EVENT)
 
 
+def test_recording_manager_keeps_owned_state_when_the_stream_cannot_authenticate(
+    nc_loop,
+) -> None:
+    """A rejected notification stream must not discard a local recording.
+
+    `nc.stop_recording` reads this state to decide there is anything to stop, so
+    clearing it on a stream failure leaves the stop unpublished and the daemon's
+    window open. Contrast `test_recording_manager_tears_down_owned_state`, where
+    an explicit logout clears it — that says the session is over, this does not.
+    """
+    auth = UnauthenticatedAuth()
+    session = FakeSession()
+    enabled = EnabledManager(True, loop=nc_loop)
+    with patch(
+        "neuracore.core.streaming.base_sse_consumer.ClientSession",
+        return_value=session,
+    ):
+        manager = RecordingStateManager(
+            org_id="org-1",
+            loop=nc_loop,
+            enabled_manager=enabled,
+            auth=auth,
+        )
+
+    key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
+    manager.recording_robot_instances[key] = TrackedRecording(
+        "recording-1", 1.0, opened_locally=True
+    )
+    manager.active_dataset_ids[key] = "dataset-1"
+
+    manager_future: Future[RecordingStateManager] = Future()
+    manager_future.set_result(manager)
+    recording_module._recording_manager = manager_future
+    try:
+        # The consumer loop returns once it gives up on the stream.
+        manager.signalling_stream_future.result(timeout=2)
+
+        assert manager.get_current_recording_id("robot-1", 0) == "recording-1"
+        assert manager.is_recording("robot-1", 0)
+        assert manager.active_dataset_ids[key] == "dataset-1"
+        assert enabled.is_enabled()
+        assert recording_module._recording_manager is manager_future
+
+        # Logout is still the statement that clears it.
+        auth.emit(Auth.LOGOUT_EVENT)
+        assert session.closed_event.wait(timeout=2)
+        assert manager.recording_robot_instances == {}
+        assert recording_module._recording_manager is None
+    finally:
+        recording_module._recording_manager = None
+
+
 @pytest.mark.parametrize(
     "manager_type",
     [StreamManagerOrchestrator, OrgNodesManager, RecordingStateManager],
