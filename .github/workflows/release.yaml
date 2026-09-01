@@ -500,7 +500,7 @@ jobs:
             ? `- Alpha version built from \`${alphaBranch}\`, no version bump pushed\n`
             : `- Version bumped and pushed to \`main\`\n`;
           summary += `- Git tag \`v${version}\` created\n`;
-          summary += `- Platform wheels (linux x86_64 + macOS arm64, cp310-cp314) publishing to PyPI (see publish job)\n`;
+          summary += `- Platform wheels (linux x86_64/aarch64 + macOS arm64/x86_64, cp310-cp314) publishing to PyPI (see publish job)\n`;
           summary += `- GitHub Release created\n\n`;
           summary += `### Links\n\n`;
           summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;
@@ -541,8 +541,8 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_PASSWORD }}
         run: |
           ls -l dist/
-          # 3 platform legs x 5 Python minors (cp310-cp314)
-          [ "$(ls dist/*.whl | wc -l)" -eq 15 ] || { echo "expected 15 wheels"; exit 1; }
+          # 4 platform legs x 5 Python minors (cp310-cp314)
+          [ "$(ls dist/*.whl | wc -l)" -eq 20 ] || { echo "expected 20 wheels"; exit 1; }
           # packaging>=24.2 is required for twine to parse maturin's
           # Metadata-Version 2.4 License-File field; the runner ships an older one.
           python -m pip install --upgrade twine "packaging>=24.2"

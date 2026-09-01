@@ -1,11 +1,12 @@
 name: Build Wheels
 
 # Builds the merged `neuracore` wheels (SDK + Rust `_data_bridge` extension +
-# bundled `data-daemon` binary) for Linux, macOS arm64 and macOS x86_64, one per
-# Python minor (cp310-cp314) — no sdist, no pure wheel. maturin owns the build;
-# the daemon binary is a separate crate compiled into the package tree first by
-# rust/scripts/build_wheel_artefacts.sh. A separate smoke-test job installs and
-# launches the wheels on a different machine than the one that built them.
+# bundled `data-daemon` binary) for Linux x86_64, Linux aarch64, macOS arm64 and
+# macOS x86_64, one per Python minor (cp310-cp314) — no sdist, no pure wheel.
+# maturin owns the build; the daemon binary is a separate crate compiled into the
+# package tree first by rust/scripts/build_wheel_artefacts.sh. A separate
+# smoke-test job installs and launches the wheels on a different machine than
+# the one that built them.
 
 on:
   pull_request:
@@ -46,6 +47,9 @@ jobs:
           # interpreters in the manylinux container, macOS via setup-python.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            interpreters: "3.10 3.11 3.12 3.13 3.14"
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
             interpreters: "3.10 3.11 3.12 3.13 3.14"
           - os: macos-26
             target: aarch64-apple-darwin
@@ -123,7 +127,7 @@ jobs:
   # macOS legs run on a different, older OS image (macos-15) than their macos-26
   # builder, so a signature that only validated on the build machine, a
   # deployment-target mismatch, or a glibc-floor problem fails here instead of
-  # at a user's install. Each macOS leg must keep the builder's architecture —
+  # at a user's install. Each leg must keep the builder's architecture —
   # an arm64 runner cannot install an x86_64 wheel, and vice versa.
   smoke-test:
     name: smoke (${{ matrix.target }})
@@ -135,6 +139,8 @@ jobs:
         include:
           - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: macos-15
             target: aarch64-apple-darwin
           - os: macos-15-intel
