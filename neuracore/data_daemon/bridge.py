@@ -20,8 +20,8 @@ _DATA_BRIDGE_MODULE: ModuleType | None = None
 
 _DATA_BRIDGE_IMPORT_HINT = (
     "neuracore.data_daemon._data_bridge is not available. The Rust extension "
-    "is bundled in the neuracore wheel (prebuilt for Linux x86_64 and "
-    "Apple-Silicon macOS); reinstall with `pip install neuracore` on one of "
+    "is bundled in the neuracore wheel (prebuilt for Linux x86_64/aarch64 and "
+    "macOS); reinstall with `pip install neuracore` on one of "
     "those platforms, or build it into a source checkout with "
     "`bash rust/scripts/build_wheel_artefacts.sh && pip install -e .`."
 )
@@ -31,7 +31,7 @@ def _load_native() -> ModuleType:
     """Lazily import and cache the PyO3 data daemon bridge module for the process.
 
     The compiled extension ships inside the ``neuracore`` wheel (prebuilt for
-    Linux x86_64 and Apple-Silicon macOS), so this raises a helpful error when
+    Linux x86_64/aarch64 and macOS), so this raises a helpful error when
     it is absent (e.g. a source install without the Rust build).
     """
     global _DATA_BRIDGE_MODULE

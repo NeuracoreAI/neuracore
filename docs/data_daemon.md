@@ -119,8 +119,8 @@ neuracore data-daemon launch
 ```
 
 the CLI launches the daemon as a separate background process. It `exec`s the
-native binary bundled in the `neuracore` wheel (Linux x86_64 and Apple-Silicon
-macOS) at `neuracore/data_daemon/bin/data-daemon`; see
+native binary bundled in the `neuracore` wheel (Linux x86_64/aarch64 and macOS)
+at `neuracore/data_daemon/bin/data-daemon`; see
 [rust_data_daemon_development.md](rust_data_daemon_development.md). When that
 binary is absent — a source install that never ran
 `rust/scripts/build_wheel_artefacts.sh`, or a platform with no published wheel —

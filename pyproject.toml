@@ -7,11 +7,11 @@ name = "neuracore"
 # `neuracore` is a single merged distribution: the Python SDK plus the Rust
 # data daemon (the `_data_bridge` extension built by maturin from
 # rust/data_daemon_bridge and the standalone `data-daemon` binary bundled via
-# [tool.maturin] include). Wheels ship for Linux x86_64 (manylinux_2_28) and
-# Apple-Silicon macOS only — no sdist and no pure wheel, so other platforms
-# resolve to the last pure release. neuracore/__init__.py re-derives
-# __version__ from the installed metadata, so this is the single source of
-# truth.
+# [tool.maturin] include). Wheels ship for Linux x86_64 and aarch64
+# (manylinux_2_28) and macOS arm64 and x86_64 only — no sdist and no pure wheel,
+# so other platforms resolve to the last pure release. neuracore/__init__.py
+# re-derives __version__ from the installed metadata, so this is the single
+# source of truth.
 version = "16.1.0"
 description = "Neuracore Client Library"
 readme = "README.md"
