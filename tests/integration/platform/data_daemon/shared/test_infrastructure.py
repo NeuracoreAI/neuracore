@@ -19,7 +19,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 import neuracore as nc
-from neuracore.core.robot import Robot, get_robot_id_from_name
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.robot import Robot, list_organization_robots
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
@@ -226,20 +227,44 @@ def delete_cloud_dataset(dataset_name: str) -> None:
         logger.warning("Failed to delete cloud dataset %r", dataset_name, exc_info=True)
 
 
+def delete_cloud_robots(robot_names: Sequence[str]) -> None:
+    """Delete cloud robots by name, resolving every id from one listing.
+
+    Args:
+        robot_names: Names of the cloud robots to delete.
+    """
+    try:
+        ensure_login()
+        org_id = get_current_org()
+        robots = list_organization_robots(
+            org_id, is_shared=True
+        ) + list_organization_robots(org_id, is_shared=False)
+        ids_by_name = {robot["name"]: robot["id"] for robot in robots}
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to list cloud robots for cleanup", exc_info=True)
+        return
+
+    for robot_name in robot_names:
+        robot_id = ids_by_name.get(robot_name)
+        if robot_id is None:
+            logger.warning("Cloud robot %r not found in org for cleanup", robot_name)
+            continue
+        try:
+            robot = Robot(robot_name, instance=0)
+            robot.id = robot_id
+            robot.delete()
+            logger.info("Deleted cloud robot %r", robot_name)
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to delete cloud robot %r", robot_name, exc_info=True)
+
+
 def delete_cloud_robot(robot_name: str) -> None:
-    """Delete a cloud robot by name, logging a warning when the delete fails.
+    """Delete a single cloud robot by name.
 
     Args:
         robot_name: Name of the cloud robot to delete.
     """
-    try:
-        ensure_login()
-        robot = Robot(robot_name, instance=0)
-        robot.id = get_robot_id_from_name(robot_name)
-        robot.delete()
-        logger.info("Deleted cloud robot %r", robot_name)
-    except Exception:  # noqa: BLE001
-        logger.warning("Failed to delete cloud robot %r", robot_name, exc_info=True)
+    delete_cloud_robots([robot_name])
 
 
 def delete_cloud_resources(
@@ -254,8 +279,8 @@ def delete_cloud_resources(
     """
     if dataset_name is not None:
         delete_cloud_dataset(dataset_name)
-    for robot_name in robot_names:
-        delete_cloud_robot(robot_name)
+    if robot_names:
+        delete_cloud_robots(robot_names)
 
 
 def cloud_resource_names(
