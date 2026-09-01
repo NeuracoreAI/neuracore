@@ -8,7 +8,7 @@ license = "MIT"
 # Kept equal to the neuracore version in pyproject.toml: the release bump
 # rewrites both (see .bumpversion.cfg), so the daemon can report the neuracore
 # version it was built from as CARGO_PKG_VERSION.
-version = "16.1.0"
+version = "16.1.1-alpha.80"
 
 [workspace.dependencies]
 anyhow = "1"
