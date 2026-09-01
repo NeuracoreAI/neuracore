@@ -1,5 +1,5 @@
 name: Release
-run-name: ${{ inputs.emergency_deploy && 'Release (Emergency)' || (inputs.dry_run && 'Release (Dry Run)' || 'Release') }}
+run-name: ${{ inputs.emergency_deploy && 'Release (Emergency)' || (inputs.dry_run && 'Release (Dry Run)' || (inputs.alpha_release && 'Release (Alpha)' || 'Release')) }}
 
 on:
   workflow_dispatch:
@@ -14,6 +14,16 @@ on:
         required: false
         type: boolean
         default: false
+      alpha_release:
+        description: 'Alpha pre-release from `branch` - tags and publishes a pre-release without changing main'
+        required: false
+        type: boolean
+        default: false
+      branch:
+        description: 'Branch to build the alpha pre-release from (alpha releases only)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   analyze-changes:
@@ -24,15 +34,29 @@ jobs:
       pr_data: ${{ steps.analyze.outputs.pr_data }}
 
     steps:
+    - name: Validate alpha release inputs
+      if: ${{ inputs.alpha_release }}
+      env:
+        BRANCH: ${{ inputs.branch }}
+      run: |
+        if [ -z "$BRANCH" ]; then
+          echo "ERROR: alpha_release needs a branch to build from"
+          exit 1
+        fi
+        if [ "${{ inputs.emergency_deploy }}" = "true" ]; then
+          echo "ERROR: alpha_release and emergency_deploy cannot be combined"
+          exit 1
+        fi
+
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: ${{ inputs.emergency_deploy && github.ref_name || 'main' }}
+        ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         fetch-depth: 0
 
     - name: Get latest release tag
       id: get_tag
-      if: ${{ !inputs.emergency_deploy }}
+      if: ${{ !inputs.emergency_deploy && !inputs.alpha_release }}
       run: |
         LATEST_TAG=$(git describe --tags --abbrev=0 --match "v*" 2>/dev/null || echo "")
         if [ -z "$LATEST_TAG" ]; then
@@ -43,7 +67,7 @@ jobs:
         echo "Found latest release tag: $LATEST_TAG"
 
     - name: Check for new commits since last tag
-      if: ${{ !inputs.emergency_deploy }}
+      if: ${{ !inputs.emergency_deploy && !inputs.alpha_release }}
       run: |
         COMMITS_SINCE=$(git rev-list --count ${{ steps.get_tag.outputs.latest_tag }}..HEAD)
 
@@ -57,7 +81,7 @@ jobs:
 
     - name: Get commit SHAs since last release
       id: get_commits
-      if: ${{ !inputs.emergency_deploy }}
+      if: ${{ !inputs.emergency_deploy && !inputs.alpha_release }}
       run: |
         TAG="${{ steps.get_tag.outputs.latest_tag }}"
 
@@ -74,13 +98,15 @@ jobs:
       env:
         COMMIT_SHAS: ${{ steps.get_commits.outputs.commit_shas || '[]' }}
         EMERGENCY: ${{ inputs.emergency_deploy }}
+        ALPHA: ${{ inputs.alpha_release }}
       with:
         script: |
-          if (process.env.EMERGENCY === 'true') {
+          if (process.env.EMERGENCY === 'true' || process.env.ALPHA === 'true') {
             core.setOutput('should_release', true);
             core.setOutput('bump_type', 'patch');
             core.setOutput('pr_data', '[]');
-            console.log('Emergency deploy: forcing a patch release and skipping PR/label verification');
+            const mode = process.env.ALPHA === 'true' ? 'Alpha release' : 'Emergency deploy';
+            console.log(`${mode}: forcing a patch bump and skipping PR/label verification`);
             return;
           }
 
@@ -171,7 +197,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: ${{ inputs.emergency_deploy && github.ref_name || 'main' }}
+        ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         fetch-depth: 0
 
     - name: Calculate new version
@@ -208,6 +234,11 @@ jobs:
         esac
 
         NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+        if [ "${{ inputs.alpha_release }}" = "true" ]; then
+          NEW_VERSION="${NEW_VERSION}a${{ github.run_number }}"
+        fi
+
         echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
 
         if [ "$BUMP_TYPE" = "none" ]; then
@@ -246,9 +277,11 @@ jobs:
       env:
         PENDING_CONTENT: ${{ steps.read_pending.outputs.pending_content }}
         PR_DATA: ${{ needs.analyze-changes.outputs.pr_data }}
+        ALPHA_BRANCH: ${{ inputs.alpha_release && inputs.branch || '' }}
       with:
         script: |
           const version = '${{ steps.calc_version.outputs.new_version }}';
+          const alphaBranch = process.env.ALPHA_BRANCH;
           const prData = JSON.parse(process.env.PR_DATA);
           const pendingContent = process.env.PENDING_CONTENT ? JSON.parse(process.env.PENDING_CONTENT) : '';
 
@@ -271,6 +304,10 @@ jobs:
           }
 
           let changelog = `# Release v${version} - ${date}\n\n`;
+
+          if (alphaBranch) {
+            changelog += `Alpha pre-release built from \`${alphaBranch}\`. Not a production release.\n\n`;
+          }
 
           if (pendingContent && pendingContent.trim()) {
             changelog += `## Summary\n\n${pendingContent.trim()}\n\n---\n\n`;
@@ -343,7 +380,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        ref: ${{ inputs.emergency_deploy && github.ref_name || 'main' }}
+        ref: ${{ inputs.alpha_release && inputs.branch || (inputs.emergency_deploy && github.ref_name || 'main') }}
         token: ${{ steps.generate-token.outputs.token }}
         fetch-depth: 0
 
@@ -369,7 +406,17 @@ jobs:
         NEW_VERSION=$(grep -m 1 '^current_version = ' .bumpversion.cfg | cut -d'=' -f2 | tr -d ' ')
         echo "Bumped to version: $NEW_VERSION"
 
+        if [ "${{ inputs.alpha_release }}" = "true" ]; then
+          RUN="${{ github.run_number }}"
+          sed -i "s/^current_version = ${NEW_VERSION}$/current_version = ${NEW_VERSION}a${RUN}/" .bumpversion.cfg
+          sed -i "s/^version = \"${NEW_VERSION}\"$/version = \"${NEW_VERSION}a${RUN}\"/" pyproject.toml
+          # Cargo parses semver, which spells the same pre-release differently.
+          sed -i "s/^version = \"${NEW_VERSION}\"$/version = \"${NEW_VERSION}-alpha.${RUN}\"/" rust/Cargo.toml rust/Cargo.lock
+          echo "Alpha version: ${NEW_VERSION}a${RUN}"
+        fi
+
     - name: Reset pending changelog
+      if: ${{ !inputs.alpha_release }}
       run: |
         cp changelogs/template.md changelogs/pending-changelog.md
         echo "Reset pending changelog to template"
@@ -381,10 +428,13 @@ jobs:
         git add .bumpversion.cfg pyproject.toml changelogs/pending-changelog.md rust/Cargo.toml rust/Cargo.lock
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
 
-        TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
-        git push origin "HEAD:${TARGET_BRANCH}"
-
-        echo "Pushed version bump to ${TARGET_BRANCH}"
+        if [ "${{ inputs.alpha_release }}" = "true" ]; then
+          echo "Alpha release: version bump kept local, only the tag is pushed"
+        else
+          TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
+          git push origin "HEAD:${TARGET_BRANCH}"
+          echo "Pushed version bump to ${TARGET_BRANCH}"
+        fi
 
     - name: Create git tag
       run: |
@@ -428,7 +478,7 @@ jobs:
             name: `Release v${version}`,
             body: changelogBody,
             draft: false,
-            prerelease: false
+            prerelease: ${{ inputs.alpha_release }}
           });
 
           console.log(`Created GitHub Release for v${version}`);
@@ -436,14 +486,19 @@ jobs:
 
     - name: Generate release summary
       uses: actions/github-script@v7
+      env:
+        ALPHA_BRANCH: ${{ inputs.alpha_release && inputs.branch || '' }}
       with:
         script: |
           const version = '${{ needs.generate-changelog.outputs.new_version }}';
+          const alphaBranch = process.env.ALPHA_BRANCH;
           const fs = require('fs');
           let summary = `# Release Published Successfully\n\n`;
           summary += `**Version:** \`${version}\`\n\n`;
           summary += `## Actions Completed\n\n`;
-          summary += `- Version bumped and pushed to \`main\`\n`;
+          summary += alphaBranch
+            ? `- Alpha version built from \`${alphaBranch}\`, no version bump pushed\n`
+            : `- Version bumped and pushed to \`main\`\n`;
           summary += `- Git tag \`v${version}\` created\n`;
           summary += `- Platform wheels (linux x86_64 + macOS arm64, cp310-cp314) publishing to PyPI (see publish job)\n`;
           summary += `- GitHub Release created\n\n`;
@@ -503,8 +558,10 @@ jobs:
       uses: actions/github-script@v7
       env:
         CHANGELOG_CONTENT: ${{ needs.generate-changelog.outputs.changelog_content }}
+        ALPHA_BRANCH: ${{ inputs.alpha_release && inputs.branch || '' }}
       with:
         script: |
+          const alphaBranch = process.env.ALPHA_BRANCH;
           const shouldRelease = '${{ needs.analyze-changes.outputs.should_release }}' === 'true';
           const bumpType = '${{ needs.analyze-changes.outputs.bump_type }}';
           const newVersion = '${{ needs.generate-changelog.outputs.new_version }}';
@@ -526,7 +583,9 @@ jobs:
             summary += '## What Would Happen\n\n';
             summary += `- **Version Bump:** \`${bumpType}\` -> \`${newVersion}\`\n`;
             summary += `- Version updated in \`.bumpversion.cfg\`, \`pyproject.toml\`, \`rust/Cargo.toml\` and \`rust/Cargo.lock\`\n`;
-            summary += `- Changes committed and pushed to \`main\`\n`;
+            summary += alphaBranch
+              ? `- Alpha built from \`${alphaBranch}\`, nothing pushed to the branch\n`
+              : `- Changes committed and pushed to \`main\`\n`;
             summary += `- Package published to PyPI\n`;
             summary += `- Git tag \`v${newVersion}\` created\n`;
             summary += `- GitHub Release created\n\n`;
@@ -541,7 +600,7 @@ jobs:
 
   no-release-needed:
     needs: [analyze-changes, generate-changelog]
-    if: always() && needs.analyze-changes.outputs.should_release != 'true' && inputs.dry_run == false && inputs.emergency_deploy == false
+    if: always() && needs.analyze-changes.outputs.should_release != 'true' && inputs.dry_run == false && inputs.emergency_deploy == false && inputs.alpha_release == false
     runs-on: ubuntu-24.04
 
     steps:

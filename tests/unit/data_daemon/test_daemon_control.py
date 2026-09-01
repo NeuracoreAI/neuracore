@@ -407,6 +407,37 @@ def test_ensure_daemon_running_adopts_daemon_built_from_the_installed_version(
     assert version_timeouts == [2.5]
 
 
+def test_ensure_daemon_running_accepts_an_alpha_daemon(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An alpha wheel ships the two spellings of one version, not two versions."""
+    _use_live_daemon_paths(monkeypatch, tmp_path)
+    _install_sdk_version(monkeypatch, "99.9.9a7")
+    _install_fake_bridge(
+        monkeypatch,
+        lambda _timeout_s: os.getpid(),
+        daemon_version=lambda _timeout_s: "99.9.9-alpha.7",
+    )
+
+    assert daemon_control.ensure_daemon_running(timeout_s=0.0) == os.getpid()
+
+
+def test_ensure_daemon_running_rejects_a_daemon_from_another_alpha(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Two alphas of the same release are still two different builds."""
+    _use_live_daemon_paths(monkeypatch, tmp_path)
+    _install_sdk_version(monkeypatch, "99.9.9a7")
+    _install_fake_bridge(
+        monkeypatch,
+        lambda _timeout_s: os.getpid(),
+        daemon_version=lambda _timeout_s: "99.9.9-alpha.6",
+    )
+
+    with pytest.raises(DaemonVersionMismatchError):
+        daemon_control.ensure_daemon_running(timeout_s=0.0)
+
+
 def test_ensure_daemon_running_rejects_daemon_built_from_another_version(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

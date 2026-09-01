@@ -317,6 +317,12 @@ tag, re-runs `build-wheels.yaml` against that tag, and publishes **all** wheels
 in a single job only after every platform leg succeeds — so a version can never
 be half-published. `twine --skip-existing` makes re-running idempotent.
 
+The `alpha_release` option builds the same pipeline from the `branch` input
+instead of `main`. It tags and publishes `<next patch>a<run number>` as a
+pre-release and pushes no commit to the branch. The rust workspace needs
+semver, so an alpha carries `15.0.1-alpha.7` there against `15.0.1a7` in
+pyproject; the daemon version check reads the first as the second.
+
 ---
 
 ## SQLite state inspection

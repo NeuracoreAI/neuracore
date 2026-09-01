@@ -6,6 +6,7 @@ import importlib
 import importlib.metadata
 import logging
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -51,6 +52,17 @@ class DaemonLifecycleError(RuntimeError):
 
 class DaemonVersionMismatchError(DaemonLifecycleError):
     """Raised when the running daemon comes from a different neuracore version."""
+
+
+# Cargo needs semver, so an alpha release carries `15.0.1-alpha.7` in the rust
+# workspace while PyPI normalises the same release to `15.0.1a7`. Pre-releases
+# are the only versions where the two spellings differ.
+_CARGO_PRE_RELEASE = re.compile(r"-alpha\.(\d+)$")
+
+
+def _pep440(version: str) -> str:
+    """Return a cargo version string in the PEP 440 spelling."""
+    return _CARGO_PRE_RELEASE.sub(r"a\1", version)
 
 
 def _sdk_version() -> str | None:
@@ -176,7 +188,7 @@ def _check_daemon_version(timeout_s: float, *, just_launched: bool = False) -> N
     except RuntimeError as error:
         logger.warning("Skipped the daemon version check: %s", error)
         return
-    if daemon_version != sdk_version:
+    if daemon_version is None or _pep440(daemon_version) != sdk_version:
         raise DaemonVersionMismatchError(
             _format_version_mismatch(daemon_version, sdk_version, just_launched)
         )
