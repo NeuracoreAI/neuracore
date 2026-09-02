@@ -203,6 +203,30 @@ def assert_no_training_log_errors(
     )
 
 
+def get_training_failure_context(job_id: str, max_entries: int = 10_000) -> str:
+    """Fetch ERROR/CRITICAL training log entries for a failed job's message.
+
+    Best-effort: if the logs themselves can't be fetched, returns a note to
+    that effect rather than raising, so a failure here never masks the
+    original training failure.
+    """
+    try:
+        offending_entries: list[dict] = []
+        for severity in ("ERROR", "CRITICAL"):
+            logs = nc.get_training_job_logs(
+                job_id,
+                max_entries=max_entries,
+                severity_filter=severity,
+            )
+            offending_entries.extend(logs.get("logs", []))
+    except Exception as e:
+        return f"(failed to fetch training logs for {job_id}: {e})"
+
+    if not offending_entries:
+        return f"(no ERROR/CRITICAL training log entries found for {job_id})"
+    return format_training_log_entries(offending_entries)
+
+
 def get_training_job_metrics(job_id: str) -> Metrics:
     """Fetch training metrics for a completed or in-progress job."""
     org_id = get_current_org()

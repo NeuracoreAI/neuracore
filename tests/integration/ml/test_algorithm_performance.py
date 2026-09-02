@@ -41,7 +41,10 @@ from neuracore_types.training.training import GPUType
 
 import neuracore as nc
 from neuracore.core.endpoint import Policy
-from tests.integration.ml.shared.training import wait_for_training
+from tests.integration.ml.shared.training import (
+    get_training_failure_context,
+    wait_for_training,
+)
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(THIS_DIR, "..", "..", "..", "examples"))
@@ -235,9 +238,10 @@ class TestAlgorithmPerformance:
             poll_seconds=60,
         )
         if training_job_status != "COMPLETED":
+            failure_context = get_training_failure_context(training_job_id)
             raise ValueError(
                 f"[{algorithm_name}] Training job did not complete, "
-                f"status: {training_job_status}"
+                f"status: {training_job_status}\n\n{failure_context}"
             )
 
         timestamp = int(time.time())
