@@ -28,8 +28,8 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    CONTROL_SPLIT_PROCESS,
     MAX_TIME_TO_START_S,
-    STOP_RECORDING_OVERHEAD_PER_SEC,
     camera_names,
     joint_names_for_count,
 )
@@ -40,6 +40,9 @@ from tests.integration.platform.data_daemon.shared.test_case.context_spec import
 from tests.integration.platform.data_daemon.shared.test_case.context_worker import (
     create_testing_dataset_name,
     log_frames,
+)
+from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
+    make_recording_controller,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,
@@ -56,6 +59,7 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
+            wait=True,
         ),
         Synchronous(
             duration_sec=5,
@@ -63,6 +67,7 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
+            recording_control=CONTROL_SPLIT_PROCESS,
         ),
     ),
 ).as_cases()
@@ -75,7 +80,11 @@ def test_cancel_recording_produces_no_data(
     request: pytest.FixtureRequest,
     test_wall_timer: Callable[[], float],
 ) -> None:
-    """Verify that cancelling a recording discards all logged data."""
+    """Verify that cancelling a recording discards all logged data.
+
+    Runs for every way a case can make the cancel: from this process, and from
+    a peer that knows of the window only because the backend said so.
+    """
     if not has_configured_org():
         pytest.skip(
             "Cancel-recording behavioural tests require NEURACORE_ORG_ID"
@@ -86,6 +95,7 @@ def test_cancel_recording_produces_no_data(
     specs = build_context_specs(case, dataset_name=dataset_name)
     spec = specs[0]
     robot_name = spec.robot_name
+    controller = None
 
     try:
         with scoped_storage_state(case, specs):
@@ -101,23 +111,16 @@ def test_cancel_recording_produces_no_data(
                 ):
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
-                    nc.start_recording(robot_name=robot_name)
-                assert robot.is_recording()
+                controller = make_recording_controller(spec, robot=robot)
+                controller.open(time.time())
+                cancelled_recording_id = robot.get_current_recording_id()
+                assert cancelled_recording_id is not None
 
                 log_frames(
                     spec, robot=robot, recording_index=0, marker_name="marker_cancel"
                 )
 
-                with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.cancel_recording",
-                    always_log=True,
-                    assert_deadline=False,
-                ):
-                    nc.cancel_recording(robot_name=robot_name)
+                controller.cancel(time.time())
 
                 time.sleep(5)
 
@@ -132,6 +135,8 @@ def test_cancel_recording_produces_no_data(
                     len(dataset) == 0
                 ), f"Expected 0 recordings after cancel, got {len(dataset)}"
     finally:
+        if controller is not None:
+            controller.shutdown()
         set_case_analysis_report(
             request=request,
             case=case,
@@ -154,7 +159,10 @@ def test_cancel_then_start_new_recording(
     """Verify a valid recording succeeds after cancelling a prior one.
 
     Two variants are tested: resuming immediately (gap_s=0) and after a 10s
-    pause (gap_s=10) to cover both tight and relaxed timing paths.
+    pause (gap_s=10) to cover both tight and relaxed timing paths. Under split
+    control this is the sharper of the two cancel tests: a successor window
+    opens right behind a cancelled one, which is exactly the shape that lets an
+    unqualified control call reach the wrong recording.
     """
     if not has_configured_org():
         pytest.skip(
@@ -167,6 +175,7 @@ def test_cancel_then_start_new_recording(
     spec = specs[0]
     robot_name = spec.robot_name
     results: list[ContextResult] = []
+    controller = None
 
     try:
         with scoped_storage_state(case, specs):
@@ -185,24 +194,18 @@ def test_cancel_then_start_new_recording(
                 ):
                     robot = nc.connect_robot(robot_name, overwrite=False)
 
+                controller = make_recording_controller(spec, robot=robot)
+
                 # --- cancelled recording ---
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
-                    nc.start_recording(robot_name=robot_name)
-                assert robot.is_recording()
+                controller.open(time.time())
+                cancelled_recording_id = robot.get_current_recording_id()
+                assert cancelled_recording_id is not None
 
                 log_frames(
                     spec, robot=robot, recording_index=0, marker_name="marker_cancelled"
                 )
 
-                with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.cancel_recording",
-                    always_log=True,
-                    assert_deadline=False,
-                ):
-                    nc.cancel_recording(robot_name=robot_name)
+                controller.cancel(time.time())
 
                 if gap_s > 0:
                     logger.info("Waiting %ds between cancel and next recording", gap_s)
@@ -210,10 +213,7 @@ def test_cancel_then_start_new_recording(
 
                 # --- valid recording ---
                 wall_started_at = time.time()
-                with Timer(
-                    MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
-                ):
-                    nc.start_recording(robot_name=robot_name)
+                controller.open(wall_started_at)
                 resumed_recording_id = robot.get_cloud_recording_id()
                 assert resumed_recording_id is not None
 
@@ -221,14 +221,8 @@ def test_cancel_then_start_new_recording(
                     spec, robot=robot, recording_index=0, marker_name="marker_resume"
                 )
 
-                with Timer(
-                    case.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC,
-                    label="nc.stop_recording",
-                    always_log=True,
-                    assert_deadline=False,
-                ):
-                    nc.stop_recording(robot_name=robot_name, wait=True)
-                wall_stopped_at = time.time()
+                closed = controller.close(time.time())
+                wall_stopped_at = closed.settled_at
 
                 results = [
                     ContextResult(
@@ -254,6 +248,8 @@ def test_cancel_then_start_new_recording(
                 ]
                 verify_cloud_results(results=results, case=case)
     finally:
+        if controller is not None:
+            controller.shutdown()
         set_case_analysis_report(
             request=request,
             case=case,
