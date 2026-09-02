@@ -75,6 +75,59 @@ def test_log_with_extrinsics_intrinsics(
     nc.log_depth("depth_camera", depth, extrinsics=extrinsics, intrinsics=intrinsics)
 
 
+def test_logging_reaches_the_daemon_with_no_local_recording_handle(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """Every data type forwards to the daemon even when this process holds no
+    recording handle.
+
+    A producer is a thin shipper: which recording a datum belongs to is decided
+    by the daemon, from the window it owns and the datum's publish stamp. A
+    process that never brackets a recording — a camera child, a limb driver —
+    still contributes to one another process started, and gating locally on a
+    handle this process has not been told about is what used to discard its
+    data for as long as its notification stream took to catch up.
+    """
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    robot = _get_robot(None, 0)
+    # The gate this process would have consulted: it knows of no recording.
+    monkeypatch.setattr(robot, "get_current_recording_id", lambda: None)
+
+    nc.log_joint_positions(positions={"vx300s_left/waist": 0.5})
+    nc.log_rgb("front_camera", np.zeros((8, 8, 3), dtype=np.uint8))
+    api_logging._record_json_to_daemon(
+        robot,
+        DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
+        "gripper",
+        ParallelGripperOpenAmountData(timestamp=1.0, open_amount=0.4),
+        1.0,
+    )
+
+    native.log_joints.assert_called_once()
+    native.log_frame.assert_called_once()
+    native.log_json.assert_called_once()
+    # Nothing here opens a window: the daemon owns that, and a producer that
+    # published a start it was never asked for would mint a second recording.
+    native.start_recording.assert_not_called()
+
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
 def test_log_frame_forwards_dtype_derived_from_the_array(
     temp_config_dir,
     mock_auth_requests,
