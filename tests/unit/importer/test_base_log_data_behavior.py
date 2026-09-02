@@ -1,5 +1,6 @@
 """Unit tests for NeuracoreDatasetImporter data logging and config ordering."""
 
+import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -372,3 +373,124 @@ def test_get_ordered_import_configs_raises_when_fk_and_ik_both_requested():
 
     with pytest.raises(ImportError, match="Cannot request both FK and IK"):
         importer._get_ordered_import_configs()
+
+
+def _make_importer_for_timestamp_guard() -> NeuracoreDatasetImporter:
+    """Build an importer instance carrying only the monotonic guard state."""
+    importer = object.__new__(_ConcreteImporter)
+    importer._last_logged_timestamps = {}
+    return importer
+
+
+def test_strictly_increasing_timestamp_nudges_colliding_float():
+    importer = _make_importer_for_timestamp_guard()
+    collided = 1788363776958256896 / 1e9
+    assert collided == 1788363776958257000 / 1e9
+
+    first = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=collided
+    )
+    second = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=collided
+    )
+
+    assert first == collided
+    assert second > first
+    assert second == math.nextafter(first, math.inf)
+
+
+def test_strictly_increasing_timestamp_leaves_increasing_input_untouched():
+    importer = _make_importer_for_timestamp_guard()
+
+    values = [100.0, 100.5, 101.0]
+    logged = [
+        importer._strictly_increasing_timestamp(
+            data_type=DataType.RGB_IMAGES, name="cam", timestamp=value
+        )
+        for value in values
+    ]
+
+    assert logged == values
+
+
+def test_strictly_increasing_timestamp_tracks_streams_independently():
+    importer = _make_importer_for_timestamp_guard()
+
+    first = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam_a", timestamp=100.0
+    )
+    other_name = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam_b", timestamp=100.0
+    )
+    other_type = importer._strictly_increasing_timestamp(
+        data_type=DataType.DEPTH_IMAGES, name="cam_a", timestamp=100.0
+    )
+
+    assert first == other_name == other_type == 100.0
+
+
+def test_strictly_increasing_timestamp_passes_through_large_regression():
+    importer = _make_importer_for_timestamp_guard()
+    importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=9.22e9
+    )
+
+    out_of_order = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=1.79e9
+    )
+
+    assert out_of_order == 1.79e9
+
+
+def test_strictly_increasing_timestamp_does_not_nudge_from_infinity():
+    importer = _make_importer_for_timestamp_guard()
+    importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=math.inf
+    )
+
+    following = importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=1.79e9
+    )
+
+    assert following == 1.79e9
+
+
+def test_reset_episode_state_clears_timestamp_guard():
+    importer = _make_importer_for_timestamp_guard()
+    importer.ik_init_config = None
+    importer._strictly_increasing_timestamp(
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=100.0
+    )
+
+    importer._reset_episode_state()
+
+    assert (
+        importer._strictly_increasing_timestamp(
+            data_type=DataType.RGB_IMAGES, name="cam", timestamp=100.0
+        )
+        == 100.0
+    )
+
+
+def test_log_transformed_data_applies_timestamp_guard(monkeypatch):
+    importer = _make_importer_for_timestamp_guard()
+    importer.dry_run = False
+    importer._worker_id = 0
+    importer.dataset_config = SimpleNamespace(robot=SimpleNamespace(name="robot"))
+    importer.robot_instance = MagicMock(return_value=0)
+    logged = MagicMock()
+    monkeypatch.setattr(
+        "neuracore.importer.core.base.nc", SimpleNamespace(log_rgb=logged)
+    )
+
+    collided = 1788363776958256896 / 1e9
+    for _ in range(2):
+        importer._log_transformed_data(
+            data_type=DataType.RGB_IMAGES,
+            transformed_data=None,
+            name="head_camera2",
+            timestamp=collided,
+        )
+
+    stamps = [call.kwargs["timestamp"] for call in logged.call_args_list]
+    assert stamps[1] > stamps[0]

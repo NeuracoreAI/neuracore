@@ -36,7 +36,7 @@ from neuracore.importer.mcap.utils import (
     read_image_data,
     repair_protobuf_schema_data,
     resolve_path,
-    resolve_timestamp_seconds,
+    resolve_timestamp_ns,
     split_topic_path,
     to_numpy,
     to_python_types,
@@ -358,20 +358,28 @@ def test_resolve_path_missing_key_raises():
 @pytest.mark.parametrize(
     "log_ns,pub_ns,expected",
     [
-        (2_000_000_000, 0, 2.0),
-        (0, 1_000_000_000, 1.0),
+        (2_000_000_000, 0, 2_000_000_000),
+        (0, 1_000_000_000, 1_000_000_000),
     ],
 )
-def test_resolve_timestamp_seconds(log_ns, pub_ns, expected):
-    assert resolve_timestamp_seconds(
-        log_time_ns=log_ns, publish_time_ns=pub_ns
-    ) == pytest.approx(expected)
+def test_resolve_timestamp_ns(log_ns, pub_ns, expected):
+    assert resolve_timestamp_ns(log_time_ns=log_ns, publish_time_ns=pub_ns) == expected
+
+
+def test_resolve_timestamp_ns_preserves_sub_microsecond_spacing():
+    first = 1788363776958256896
+    second = 1788363776958257000
+    assert (
+        resolve_timestamp_ns(log_time_ns=second, publish_time_ns=0)
+        - resolve_timestamp_ns(log_time_ns=first, publish_time_ns=0)
+        == 104
+    )
 
 
 def test_resolve_timestamp_falls_back_to_wall_clock():
-    before = time.time()
-    ts = resolve_timestamp_seconds(log_time_ns=0, publish_time_ns=0)
-    assert before <= ts <= time.time()
+    before = time.time_ns()
+    ts = resolve_timestamp_ns(log_time_ns=0, publish_time_ns=0)
+    assert before <= ts <= time.time_ns()
 
 
 def test_validate_requested_topics_raises_on_missing():

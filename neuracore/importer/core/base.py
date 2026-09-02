@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import multiprocessing as mp
 import os
 import random
@@ -65,6 +66,7 @@ from .exceptions import (
 )
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
+TIMESTAMP_COLLISION_TOLERANCE_S = 1e-6
 
 
 @dataclass(frozen=True)
@@ -185,6 +187,7 @@ class NeuracoreDatasetImporter(ABC):
         self.random_sample = random_sample
         self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
+        self._last_logged_timestamps: dict[tuple[DataType, str], float] = {}
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
@@ -358,6 +361,7 @@ class NeuracoreDatasetImporter(ABC):
     def _reset_episode_state(self) -> None:
         """Reset episode-specific state at the start of each episode."""
         self.prev_ik_solution = self.ik_init_config
+        self._last_logged_timestamps = {}
 
     def _reset_step_state(self) -> None:
         """Reset step-specific state at the start of each step."""
@@ -743,6 +747,36 @@ class NeuracoreDatasetImporter(ABC):
             )
             raise
 
+    def _strictly_increasing_timestamp(
+        self, data_type: DataType, name: str, timestamp: float
+    ) -> float:
+        """Return a timestamp strictly greater than the last one for this stream.
+
+        Track the last value per data type and name, matching the granularity
+        Neuracore enforces per stream. Distinct nanosecond capture times can
+        resolve to the same float64 at Unix epoch magnitudes, so raise a
+        timestamp that trails the previous one by at most
+        TIMESTAMP_COLLISION_TOLERANCE_S by one unit in the last place. Return a
+        larger regression unchanged, leaving Neuracore to reject it.
+
+        Args:
+            data_type: The type of data being logged.
+            name: The name of the data.
+            timestamp: The timestamp of the data.
+
+        Returns:
+            float: The timestamp to log, nudged up only when it collides.
+        """
+        key = (data_type, name)
+        previous = self._last_logged_timestamps.get(key)
+        if (
+            previous is not None
+            and 0.0 <= previous - timestamp <= TIMESTAMP_COLLISION_TOLERANCE_S
+        ):
+            timestamp = math.nextafter(previous, math.inf)
+        self._last_logged_timestamps[key] = timestamp
+        return timestamp
+
     def _log_transformed_data(
         self,
         data_type: DataType,
@@ -763,6 +797,9 @@ class NeuracoreDatasetImporter(ABC):
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
+        timestamp = self._strictly_increasing_timestamp(
+            data_type=data_type, name=name, timestamp=timestamp
+        )
         instance = self.robot_instance(self._worker_id)
         if data_type == DataType.RGB_IMAGES:
             nc.log_rgb(
