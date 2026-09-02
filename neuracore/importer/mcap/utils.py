@@ -306,6 +306,36 @@ def estimate_total_messages(summary: Any | None, topics: list[str]) -> int | Non
     return total if total > 0 else None
 
 
+def topic_schema_names(summary: Any | None, topics: list[str]) -> dict[str, str]:
+    """Map each requested topic to its schema type name in one MCAP summary.
+
+    Read from the summary section, so no message is decoded. Topics absent from
+    the file, and channels carrying no schema, are left out of the result.
+
+    Args:
+        summary: The MCAP summary, or None when the file has no summary section.
+        topics: The topics to look up.
+
+    Returns:
+        dict[str, str]: Schema type name keyed by topic.
+    """
+    if summary is None or not getattr(summary, "channels", None):
+        return {}
+
+    schemas = getattr(summary, "schemas", None) or {}
+    requested = set(topics)
+    names: dict[str, str] = {}
+    for channel in summary.channels.values():
+        topic = getattr(channel, "topic", "")
+        if topic not in requested:
+            continue
+        schema = schemas.get(getattr(channel, "schema_id", 0))
+        schema_name = getattr(schema, "name", "") if schema is not None else ""
+        if schema_name:
+            names[topic] = schema_name
+    return names
+
+
 def validate_requested_topics(summary: Any | None, topics: list[str]) -> None:
     """Validate configured topics against the MCAP summary when available."""
     if summary is None or not getattr(summary, "channels", None) or not topics:
