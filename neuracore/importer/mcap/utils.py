@@ -193,7 +193,7 @@ class DecodedMCAPMessage:
         source topic used to select mapping rules.
     log_time_ns: MCAP message log timestamp in nanoseconds.
     publish_time_ns: MCAP message publish timestamp in nanoseconds.
-    timestamp_seconds: Resolved timestamp in seconds, preferring log time.
+    timestamp_ns: Resolved timestamp in nanoseconds, preferring log time.
     data: Decoded message data returned by the MCAP decoder factory. This is
         the source object Neuracore mappings read from.
     """
@@ -201,7 +201,7 @@ class DecodedMCAPMessage:
     topic: str
     log_time_ns: int
     publish_time_ns: int
-    timestamp_seconds: float
+    timestamp_ns: int
     data: Any
 
 
@@ -246,17 +246,17 @@ def log_mcap_summary_details(summary: Any | None, logger: logging.Logger) -> Non
         )
 
 
-def resolve_timestamp_seconds(
+def resolve_timestamp_ns(
     *,
     log_time_ns: int,
     publish_time_ns: int,
-) -> float:
-    """Resolve message timestamp from log/publish time nanoseconds."""
+) -> int:
+    """Resolve message timestamp in nanoseconds from log/publish time."""
     if log_time_ns > 0:
-        return log_time_ns / 1e9
+        return log_time_ns
     if publish_time_ns > 0:
-        return publish_time_ns / 1e9
-    return time.time()
+        return publish_time_ns
+    return time.time_ns()
 
 
 def iter_decoded_mcap_messages(
@@ -281,7 +281,7 @@ def iter_decoded_mcap_messages(
             topic=str(getattr(channel, "topic", "") or ""),
             log_time_ns=log_time_ns,
             publish_time_ns=publish_time_ns,
-            timestamp_seconds=resolve_timestamp_seconds(
+            timestamp_ns=resolve_timestamp_ns(
                 log_time_ns=log_time_ns,
                 publish_time_ns=publish_time_ns,
             ),
