@@ -117,7 +117,7 @@ const CHUNK_FLUSH_BYTES: u64 = 256 * 1024 * 1024;
 /// queue room to route a sealed chunk with time to spare. The cost is one extra
 /// per-chunk encode (~100-200 ms of daemon-side ffmpeg) per 5 s per camera that
 /// would not otherwise have sealed.
-const CHUNK_MAX_OPEN_NS: i64 = 5 * 1_000_000_000;
+const CHUNK_MAX_OPEN_NS: i64 = data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS;
 
 /// Backpressure cap for the writer's frame queue. `log_frame` copies a frame in
 /// and returns; the background writer thread drains the queue to disk, so the
