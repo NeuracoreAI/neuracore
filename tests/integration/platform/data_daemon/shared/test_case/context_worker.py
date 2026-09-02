@@ -4,12 +4,8 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-import threading
 import time
 import uuid
-from collections.abc import Generator
-from contextlib import contextmanager
-from dataclasses import dataclass
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
@@ -35,8 +31,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_TYPE_RGB_IMAGES,
     DATASET_POLL_INTERVAL_S,
-    GATE_CLOSE_POLL_INTERVAL_S,
-    GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S,
     MAX_TIME_TO_START_S,
     PRODUCER_MULTI_PROCESS,
     PRODUCER_PER_THREAD,
@@ -57,6 +51,9 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
 )
 from tests.integration.platform.data_daemon.shared.test_case.producers import (
     make_producer_session,
+)
+from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
+    make_recording_controller,
 )
 from tests.integration.platform.data_daemon.shared.test_case.streams import (
     rgb_frame_code,
@@ -81,49 +78,6 @@ def _cleanup_test_worker_robot(robot: object | None) -> None:
 
     if hasattr(robot, "_daemon_recording_context"):
         robot._daemon_recording_context = None
-
-
-@dataclass(slots=True)
-class _GateCloseObservation:
-    """Carries the gate-close wall clock out of the block that measured it."""
-
-    result: float = 0.0
-
-
-@contextmanager
-def watch_local_gate_close(
-    robot: object, *, enabled: bool
-) -> Generator[_GateCloseObservation]:
-    """Measure when this process's local recording gate closes, if asked to.
-
-    A tighter upper bracket than ``stop_recording`` returning, which waits out
-    the flush barrier. Falls back to the block's exit time when disabled.
-    """
-    observation = _GateCloseObservation()
-    stop_polling = threading.Event()
-
-    def poll() -> None:
-        while not stop_polling.is_set():
-            if robot.get_current_recording_id() is None:  # type: ignore[attr-defined]
-                observation.result = time.time()
-                return
-            time.sleep(GATE_CLOSE_POLL_INTERVAL_S)
-
-    watcher = (
-        threading.Thread(target=poll, name="gate-close-watch", daemon=True)
-        if enabled
-        else None
-    )
-    if watcher is not None:
-        watcher.start()
-    try:
-        yield observation
-    finally:
-        stop_polling.set()
-        if watcher is not None:
-            watcher.join(timeout=GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S)
-        if observation.result == 0.0:
-            observation.result = time.time()
 
 
 def log_frames(
@@ -240,6 +194,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         session = make_producer_session(
             spec, robot=robot, marker_name="marker_synchronous"
         )
+        controller = make_recording_controller(spec, robot=robot)
         marker_names = session.marker_names
         try:
             session.start()
@@ -247,17 +202,9 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 recording_capture_start_s = time.time()
                 recording_capture_stop_s = recording_capture_start_s + case.duration_sec
 
-                start_called_at = time.time()
-                with Timer(
-                    MAX_TIME_TO_START_S,
-                    label="nc.start_recording",
-                    always_log=True,
-                    assert_deadline=spec.assert_deadline,
-                ):
-                    nc.start_recording(
-                        robot_name=spec.robot_name, timestamp=recording_capture_start_s
-                    )
-                start_returned_at = time.time()
+                opened = controller.open(recording_capture_start_s)
+                start_called_at = opened.called_at
+                start_returned_at = opened.settled_at
                 if wall_started_at is None:
                     wall_started_at = start_returned_at
 
@@ -274,29 +221,12 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 recording_ids.append(str(cloud_recording_id or ""))
 
                 disk_recording_key = str(daemon_recording_index)
-                recording_handle = robot.get_current_recording_id()
+                recording_handle = opened.handle
 
                 session.run_recording(recording_ordinal)
 
                 # Brackets the window's upper bound, the mirror of the start.
-                stop_called_at = time.time()
-                stop_handle = robot.get_current_recording_id()
-                with (
-                    watch_local_gate_close(
-                        robot, enabled=session.needs_stop_gate_bracket
-                    ) as gate_closed_at,
-                    Timer(
-                        case.stop_recording_sla_s,
-                        label="nc.stop_recording",
-                        always_log=True,
-                        assert_deadline=spec.assert_deadline,
-                    ),
-                ):
-                    nc.stop_recording(
-                        robot_name=spec.robot_name,
-                        wait=case.wait,
-                        timestamp=recording_capture_stop_s,
-                    )
+                closed = controller.close(recording_capture_stop_s)
                 wall_stopped_at = time.time()
                 expected_video_stop_timestamp_by_recording[disk_recording_key] = (
                     spec.timestamp_start_s + (recording_ordinal + 1) * case.duration_sec
@@ -305,13 +235,13 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
                     handles=frozenset(
                         handle
-                        for handle in (recording_handle, stop_handle)
+                        for handle in (recording_handle, closed.handle)
                         if handle is not None
                     ),
                     start_called_at=start_called_at,
                     start_returned_at=start_returned_at,
-                    stop_called_at=stop_called_at,
-                    stop_settled_at=gate_closed_at.result,
+                    stop_called_at=closed.called_at,
+                    stop_settled_at=closed.settled_at,
                 )
                 ordinal_by_disk_key[disk_recording_key] = recording_ordinal
                 publish_timer_stats(spec.context_index)

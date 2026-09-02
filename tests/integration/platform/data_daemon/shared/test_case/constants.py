@@ -63,6 +63,10 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
+# recording_control — who opens and closes the recording window.
+CONTROL_LOCAL = "local"  # nc.start_recording/nc.stop_recording, in the test process
+CONTROL_REMOTE = "remote"  # the backend's own endpoints, as the web frontend calls them
+
 # producer_pacing — when a stream offers its next frame.
 PACING_DEADLINE = "deadline"  # one frame per interval, what a real robot does
 PACING_BURST_VIDEO = "burst-video"  # video clumps; joints keep their deadlines
@@ -107,6 +111,7 @@ PRODUCER_CHANNELS = (
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
+RECORDING_CONTROLS = (CONTROL_LOCAL, CONTROL_REMOTE)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -120,6 +125,7 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
+RecordingControl = Literal["local", "remote"]
 ProducerChannels = Literal[
     "synchronous", "old_per_thread", "per_thread", "multi_process"
 ]
@@ -264,10 +270,19 @@ PRODUCER_PROCESS_READY_POLL_S = 0.1
 # How long a producer child gets after terminate() before it reads as leaked.
 PRODUCER_PROCESS_TERMINATE_TIMEOUT_S = 5.0
 
-# watch_local_gate_close: poll interval — the width of the bracket it measures
-# (see RecordingControlBounds.stop_settled_at) — and its thread join timeout.
-GATE_CLOSE_POLL_INTERVAL_S = 0.001
-GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S = 5.0
+# How long after the stop call the window's publish-clock bound can still fall:
+# the stop envelope is published before the flush, so only a robot lookup,
+# disarming the streams and one IPC publish sit inside this.
+STOP_PUBLISH_SKEW_S = 0.25
+
+# Remote control: the HTTP timeout on the backend's own start/stop endpoints,
+# how long the stop may take to come back round to this process, and how often
+# the gate is checked for either.
+REMOTE_CONTROL_REQUEST_TIMEOUT_S = 20.0
+REMOTE_STOP_PROPAGATION_SLA_S = 2.0
+REMOTE_GATE_POLL_INTERVAL_S = 0.005
+
+REMOTE_START_ANNOUNCEMENT_SLA_S = 3.0
 
 # How far either side of the control calls a condemned frame keeps its reason.
 CONDEMNED_PROVENANCE_MARGIN_S = 2.0

@@ -11,7 +11,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import Any
 
 import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
@@ -280,10 +280,6 @@ class ProducerSession(ABC):
     frame with wall-clock brackets, so one classification decides which
     recording owns which (see :meth:`classify`).
     """
-
-    needs_stop_gate_bracket: ClassVar[bool] = False
-    """Whether :meth:`classify` needs ``stop_settled_at`` measured, not assumed
-    — costs a polling thread inside every ``stop_recording`` call."""
 
     def __init__(
         self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
@@ -587,8 +583,6 @@ class MultiProcessProducerSession(ProducerSession):
     published sample against its own window state — the topology a real
     deployment has when camera and recording owner are separate, and it needs
     no cloud."""
-
-    needs_stop_gate_bracket: ClassVar[bool] = True
 
     def __init__(
         self,

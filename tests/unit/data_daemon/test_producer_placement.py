@@ -5,10 +5,13 @@ All of it is decided before a process is spawned or a robot connected.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     PerThread,
+    SeparateProcessJoints,
     SeparateProcessPerCamera,
     Synchronous,
     case_id,
@@ -17,6 +20,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CAMERA_0,
     CAMERA_1,
     DEPTH_CAMERA_0,
+    DETAIL_FLAT,
+    PACING_DEADLINE,
     STREAM_DEPTH,
     STREAM_JOINT_POSITIONS,
     STREAM_JOINT_TORQUES,
@@ -29,11 +34,14 @@ from tests.integration.platform.data_daemon.shared.test_case.context_spec import
 from tests.integration.platform.data_daemon.shared.test_case.producers import (
     LifetimeProducerSession,
     MultiProcessProducerSession,
+    ProducerRequest,
     make_producer_session,
     partition_plans,
+    run_threaded_logging,
 )
 from tests.integration.platform.data_daemon.shared.test_case.streams import (
     build_stream_plans,
+    case_stream_plans,
     late_starting_trace_keys,
 )
 
@@ -315,6 +323,63 @@ def test_a_depth_only_case_has_a_stream_to_move() -> None:
     ] == [[(DEPTH_CAMERA_0,)]]
 
 
+def test_separate_process_joints_leaves_the_owner_only_the_window() -> None:
+    """Three processes: the controller, the joints, and the camera."""
+    session = _session(
+        SeparateProcessJoints(
+            duration_sec=1, joint_count=2, video_count=1, image_width=8, image_height=8
+        )
+    )
+
+    assert [[plan.name for plan in group] for group in session._child_plan_groups] == [
+        [STREAM_JOINT_POSITIONS, STREAM_JOINT_VELOCITIES, STREAM_JOINT_TORQUES],
+        [STREAM_RGB],
+    ]
+    assert session._local.plans == ()
+
+
+def test_separate_process_joints_without_a_camera_still_moves_the_joints() -> None:
+    """A joints-only workload is still two processes, not one."""
+    session = _session(SeparateProcessJoints(duration_sec=1, joint_count=2))
+
+    assert [[plan.name for plan in group] for group in session._child_plan_groups] == [
+        [STREAM_JOINT_POSITIONS, STREAM_JOINT_VELOCITIES, STREAM_JOINT_TORQUES]
+    ]
+    assert session._local.plans == ()
+
+
+def test_every_trace_starts_late_when_the_owner_only_holds_the_window() -> None:
+    case = SeparateProcessJoints(
+        joint_count=1, video_count=1, image_width=8, image_height=8
+    )
+
+    assert late_starting_trace_keys(case) == frozenset(
+        key for plan in case_stream_plans(case) for key in plan.trace_keys
+    )
+
+
+def test_an_owner_with_no_streams_of_its_own_runs_and_reports_nothing() -> None:
+    """The engine is asked for zero threads, which it must not treat as an error."""
+    request = ProducerRequest(
+        robot=object(),
+        robot_name="robot",
+        context_index=0,
+        recording_index=0,
+        seed_ordinal=0,
+        plans=(),
+        image_width=None,
+        image_height=None,
+        video_detail=DETAIL_FLAT,
+        timestamp_start_s=0.0,
+        random_phase=False,
+        duration_sec=1,
+        pacing=PACING_DEADLINE,
+        stop_event=threading.Event(),
+    )
+
+    assert run_threaded_logging(request) == {}
+
+
 def test_per_thread_still_builds_a_single_process_session() -> None:
     session = _session(
         PerThread(
@@ -323,13 +388,6 @@ def test_per_thread_still_builds_a_single_process_session() -> None:
     )
 
     assert isinstance(session, LifetimeProducerSession)
-    assert not session.needs_stop_gate_bracket
-
-
-def test_only_the_multi_process_session_asks_for_the_gate_bracket() -> None:
-    """Measuring it costs a polling thread inside every stop_recording call."""
-    assert MultiProcessProducerSession.needs_stop_gate_bracket
-    assert not LifetimeProducerSession.needs_stop_gate_bracket
 
 
 def test_late_starting_keys_cover_the_moved_streams_and_their_markers() -> None:
