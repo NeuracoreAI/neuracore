@@ -137,7 +137,6 @@ class RecordingStateManager(BaseSSEConsumer):
         ] = dict()
         self._expired_recording_ids: set[str] = set()
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
-        self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
         self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
 
         self._logout_listener = self._on_logout
@@ -174,7 +173,6 @@ class RecordingStateManager(BaseSSEConsumer):
             self._recording_timers.clear()
             self.recording_robot_instances.clear()
             self._expired_recording_ids.clear()
-            self.active_dataset_ids.clear()
             self._drain_callbacks.clear()
             self._connected_robot_id = None
 
@@ -486,11 +484,9 @@ class RecordingStateManager(BaseSSEConsumer):
             assert (
                 len(details.dataset_ids) == 1
             ), "Recording can only be started in one dataset"
-            dataset_id = details.dataset_ids[0]
-            self.active_dataset_ids[instance_key] = dataset_id
             logger.info(
-                "active_dataset_received_from_sse: dataset_id=%s recording_id=%s",
-                dataset_id,
+                "recording start received from sse: dataset_id=%s recording_id=%s",
+                details.dataset_ids[0],
                 recording_id,
             )
 
@@ -514,7 +510,6 @@ class RecordingStateManager(BaseSSEConsumer):
                     daemon=True,
                     name=f"remote-stop-{recording_id[:8]}",
                 ).start()
-            self.active_dataset_ids.pop(instance_key, None)
             self.recording_stopped(
                 robot_id=robot_id,
                 instance=instance,

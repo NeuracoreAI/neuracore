@@ -25,16 +25,13 @@ from neuracore_types import (
     PointCloudData,
     PoseData,
     RGBCameraData,
-    RobotInstanceIdentifier,
 )
 from neuracore_types.utils import validate_safe_name
 
 from neuracore.api.core import _get_robot
-from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
-    DataRecordingContext,
     DataStream,
     DepthDataStream,
     JointDataStream,
@@ -49,7 +46,6 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.bridge import notify_daemon_config_changed
@@ -110,14 +106,11 @@ class ResolvedJointGroup:
         bindings: The frame's bindings in order (``list(JointStreamBinding)``).
         joined_names: ``\0``-joined storage names for the batched
             ``log_joints`` call.
-        started_recording_id: The recording the bindings' streams were started
-            for (``None`` when not recording).
     """
 
     joint_names: tuple[str, ...]
     bindings: list[JointStreamBinding]
     joined_names: str
-    started_recording_id: str | None
 
 
 def _resolve_joint_group(
@@ -125,46 +118,39 @@ def _resolve_joint_group(
     data_type: DataType,
     joint_names: tuple[str, ...],
     bindings_for_type: dict[str, JointStreamBinding],
-    current_recording_id: str | None,
 ) -> ResolvedJointGroup:
     """Return the cached resolution for ``joint_names``, rebuilding if it changed.
+
+    Keyed on the joint names alone. It used to be keyed on the active recording
+    as well, so that every recording boundary rebuilt the group and re-armed its
+    streams; arming now happens where a recording actually starts, which leaves
+    this cache to do the one job it was for — resolving names to bindings.
 
     Args:
         robot: Robot instance.
         data_type: Joint data type being logged.
         joint_names: The frame's joint names in order (``tuple(joint_data)``).
         bindings_for_type: The robot's per-joint binding cache for this type.
-        current_recording_id: The active recording id, or ``None``.
 
     Returns:
         The resolved, cached group for this frame.
     """
     cached = robot._joint_group_cache.get(data_type)
-    if (
-        cached is not None
-        and cached.started_recording_id == current_recording_id
-        and cached.joint_names == joint_names
-    ):
+    if cached is not None and cached.joint_names == joint_names:
         return cached
 
-    record_context: DataRecordingContext | None = None
     bindings: list[JointStreamBinding] = []
     for joint_name in joint_names:
         binding = bindings_for_type.get(joint_name)
         if binding is None:
             binding = _get_or_create_joint_stream(data_type, joint_name, robot)
             bindings_for_type[joint_name] = binding
-        if current_recording_id is not None and not binding.stream.is_recording():
-            if record_context is None:
-                record_context = _build_recording_context(robot, current_recording_id)
-            binding.stream.start_recording(record_context)
         bindings.append(binding)
 
     group = ResolvedJointGroup(
         joint_names=joint_names,
         bindings=bindings,
         joined_names="\0".join(binding.storage_name for binding in bindings),
-        started_recording_id=current_recording_id,
     )
     robot._joint_group_cache[data_type] = group
     return group
@@ -266,54 +252,25 @@ def _publish_video_to_p2p(
     )
 
 
-def _build_recording_context(robot: Robot, recording_id: str) -> DataRecordingContext:
-    """Build the recording context a robot's streams start with for one recording.
-
-    Every field is invariant across the streams logged in a single call (they
-    share one recording, robot, and dataset), so this can be resolved once and
-    reused — see :func:`_log_group_of_joint_data`, which hoists it out of the
-    per-joint loop rather than rebuilding it (and re-querying the dataset id) for
-    each of a robot's joints on a recording's first frame.
-
-    Args:
-        robot: Robot instance.
-        recording_id: The active recording id the streams are being started for.
-
-    Returns:
-        The shared :class:`DataRecordingContext` for the streams to start with.
-    """
-    instance_key = RobotInstanceIdentifier(
-        robot_id=robot.id,
-        robot_instance=robot.instance,
-    )
-    dataset_id = get_recording_state_manager().active_dataset_ids.get(instance_key)
-    if dataset_id is None:
-        dataset_id = GlobalSingleton()._active_dataset_id
-        logger.debug(
-            "start_stream: falling back to global dataset_id=%s recording_id=%s",
-            dataset_id,
-            recording_id,
-        )
-    return DataRecordingContext(
-        recording_id=recording_id,
-        robot_id=robot.id,
-        robot_name=robot.name,
-        robot_instance=robot.instance,
-        dataset_id=dataset_id,
-        dataset_name=None,
-    )
-
-
 def start_stream(robot: Robot, data_stream: DataStream) -> None:
-    """Start recording on a data stream if robot is currently recording.
+    """Arm a stream for the robot's current recording, if there is one.
+
+    Nothing about the recording is carried into the stream: the daemon decides
+    which recording a sample belongs to from when it was published, and does so
+    whether or not this ran. Arming only starts a fresh timeline for the
+    stream's monotonic-timestamp check.
+
+    An armed stream short-circuits on an attribute read, so the common case —
+    logging into a recording already under way — costs nothing further.
 
     Args:
         robot: Robot instance
-        data_stream: Data stream to start recording on
+        data_stream: Data stream to arm
     """
-    current_recording = robot.get_current_recording_id()
-    if current_recording is not None and not data_stream.is_recording():
-        data_stream.start_recording(_build_recording_context(robot, current_recording))
+    if data_stream.is_recording():
+        return
+    if robot.is_recording():
+        data_stream.start_recording()
 
 
 def _get_or_create_joint_stream(
@@ -331,6 +288,10 @@ def _get_or_create_joint_stream(
     assert isinstance(
         joint_stream, JointDataStream
     ), "Expected stream to be instance of JointDataStream"
+    # A joint logged for the first time part-way through a recording gets its
+    # stream here, after `Robot.start_recording` armed the others.
+    if not joint_stream.is_recording() and robot.is_recording():
+        joint_stream.start_recording()
     return JointStreamBinding(
         stream_id=str_id,
         storage_name=storage_name,
@@ -382,7 +343,6 @@ def _log_group_of_joint_data(
     if bindings_for_type is None:
         bindings_for_type = {}
         binding_cache[data_type] = bindings_for_type
-    current_recording_id = robot.get_current_recording_id()
     live_data_disabled = get_provide_live_data_enabled_manager().is_disabled()
     robot_id = robot.id
     robot_instance = robot.instance
@@ -395,7 +355,6 @@ def _log_group_of_joint_data(
         data_type,
         tuple(joint_data),
         bindings_for_type,
-        current_recording_id,
     )
 
     if live_data_orchestrator is None:

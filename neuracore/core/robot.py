@@ -286,6 +286,7 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
+        self._start_all_streams()
         local_handle = str(uuid.uuid4())
         # The recording window's lower bound, on the same clock the backend
         # reports for it. Without an explicit timestamp the producer stamps
@@ -412,6 +413,21 @@ class Robot:
             callback=self._drain_for_remote_stop,
         )
         self._recording_state_manager = manager
+
+    def _start_all_streams(self) -> None:
+        """Arm every existing data stream for a recording starting now.
+
+        The mirror of :meth:`_stop_all_streams`. Streams carry no recording
+        identity — the daemon decides what belongs to which recording — so this
+        only starts each stream's timestamp timeline afresh. A stream created
+        later in the recording is armed as it is built.
+        """
+        for stream_id, stream in list(self._data_streams.items()):
+            try:
+                if not stream.is_recording():
+                    stream.start_recording()
+            except Exception:
+                logger.exception("Failed to start data stream %s", stream_id)
 
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
