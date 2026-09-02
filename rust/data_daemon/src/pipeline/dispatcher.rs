@@ -1702,7 +1702,7 @@ impl Dispatcher {
     fn note_orphan(&mut self) {
         self.orphan_drops = self.orphan_drops.saturating_add(1);
         if self.orphan_drops == 1 || self.orphan_drops.is_multiple_of(1024) {
-            tracing::warn!(
+            tracing::debug!(
                 dropped = self.orphan_drops,
                 "dropped datum outside any recording window"
             );
