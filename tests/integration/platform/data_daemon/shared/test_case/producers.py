@@ -21,6 +21,7 @@ from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     RecordingControlBounds,
     TraceClassification,
     _classify_boundary_frames,
+    _classify_cross_process_boundary_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_REALISTIC,
@@ -748,7 +749,7 @@ class MultiProcessProducerSession(ProducerSession):
         accepted."""
         if trace_key not in self._child_trace_keys:
             return super().classify(trace_key, frames, bounds)
-        return _classify_boundary_frames(frames, bounds)
+        return _classify_cross_process_boundary_frames(frames, bounds)
 
 
 def make_producer_session(

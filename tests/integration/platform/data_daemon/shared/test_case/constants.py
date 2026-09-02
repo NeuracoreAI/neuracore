@@ -269,6 +269,15 @@ PRODUCER_PROCESS_TERMINATE_TIMEOUT_S = 5.0
 GATE_CLOSE_POLL_INTERVAL_S = 0.001
 GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S = 5.0
 
+# How far past stop_called_at a cross-process frame may land and still be
+# unknowable rather than condemned. A child's own recording handle answers a
+# different, SSE-propagated question than the dispatcher's window boundary,
+# so it cannot stand in for the in-process gate-refusal rule (see
+# _classify_cross_process_boundary_frames); this covers the dispatcher's own
+# routing holdback plus IPC latency, well under PER_THREAD_LOGGING_TAIL_S so
+# genuinely stale tail frames are still condemned.
+CROSS_PROCESS_STOP_SKEW_MARGIN_S = 1.0
+
 # How far either side of the control calls a condemned frame keeps its reason.
 CONDEMNED_PROVENANCE_MARGIN_S = 2.0
 

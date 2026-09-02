@@ -12,6 +12,7 @@ from typing import NamedTuple
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CONDEMNED_PROVENANCE_MARGIN_S,
+    CROSS_PROCESS_STOP_SKEW_MARGIN_S,
 )
 
 
@@ -161,6 +162,45 @@ def _classify_boundary_frames(
         is_outside = frame.completed_at <= bounds.start_called_at or (
             frame.emitted_at >= bounds.stop_settled_at
             and frame.handle not in bounds.handles
+        )
+        if is_inside:
+            owed.append(frame)
+        elif is_outside:
+            condemned.append(frame)
+        else:
+            unknowable.append(frame)
+    return _classification(owed, unknowable, condemned, bounds)
+
+
+def _classify_cross_process_boundary_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> TraceClassification:
+    """Split a child process's frames into those inside a recording and those unknowable.
+
+    A child never calls ``start_recording``/``stop_recording`` itself, so its
+    ``handle`` reflects a recording-state notification propagated to it
+    separately (over its own transport, on its own schedule) rather than the
+    same local gate the owning process's call closes synchronously. That
+    makes gate refusal unreliable as proof of exclusion here, unlike
+    :func:`_classify_boundary_frames`: a child can still read "no recording"
+    for a frame the dispatcher's window legitimately admits, simply because
+    its own notification arrived early. Only clock-based bounds are used —
+    the inside rule stays as tight, and a frame is outside only when it is
+    unambiguously before the window opened or well past
+    :data:`CROSS_PROCESS_STOP_SKEW_MARGIN_S` after stop was called; everything
+    closer to the boundary is unknowable, same as a straddling frame.
+    """
+    owed: list[EmittedFrame] = []
+    unknowable: list[EmittedFrame] = []
+    condemned: list[EmittedFrame] = []
+    for frame in frames:
+        is_inside = (
+            frame.emitted_at >= bounds.start_returned_at
+            and frame.completed_at <= bounds.stop_called_at
+        )
+        is_outside = frame.completed_at <= bounds.start_called_at or (
+            frame.emitted_at >= bounds.stop_called_at + CROSS_PROCESS_STOP_SKEW_MARGIN_S
         )
         if is_inside:
             owed.append(frame)
