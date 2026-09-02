@@ -108,8 +108,7 @@ def test_cancel_recording_produces_no_data(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
                     nc.start_recording(robot_name=robot_name)
-                cancelled_recording_id = robot.get_current_recording_id()
-                assert cancelled_recording_id is not None
+                assert robot.is_recording()
 
                 log_frames(spec, recording_index=0, marker_name="marker_cancel")
 
@@ -196,8 +195,7 @@ def test_cancel_then_start_new_recording(
                     MAX_TIME_TO_START_S, label="nc.start_recording", always_log=True
                 ):
                     nc.start_recording(robot_name=robot_name)
-                cancelled_recording_id = robot.get_current_recording_id()
-                assert cancelled_recording_id is not None
+                assert robot.is_recording()
 
                 log_frames(spec, recording_index=0, marker_name="marker_cancelled")
 
