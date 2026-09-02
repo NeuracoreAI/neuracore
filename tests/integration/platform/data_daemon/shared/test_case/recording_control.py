@@ -111,6 +111,14 @@ class RecordingController(ABC):
     def close(self, capture_stop_s: float) -> ControlBracket:
         """Close the current window and return once it is known to be closed."""
 
+    def cancel(self, capture_stop_s: float) -> ControlBracket:
+        """Discard the current window and return once it is known to be gone.
+
+        Not abstract: a case that never cancels should not have to carry an
+        implementation for it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} cannot cancel a recording")
+
     def shutdown(self) -> None:
         """Release whatever this controller holds past the last recording."""
 
@@ -134,6 +142,23 @@ class LocalRecordingController(RecordingController):
             called_at=called_at,
             settled_at=time.time(),
             handle=self.robot.get_current_recording_id(),
+        )
+
+    def cancel(self, capture_stop_s: float) -> ControlBracket:
+        """Discard the recording with the SDK's own call, from this process."""
+        called_at = time.time()
+        handle = self.robot.get_current_recording_id()
+        with Timer(
+            self.spec.case.stop_recording_sla_s,
+            label="nc.cancel_recording",
+            always_log=True,
+            assert_deadline=self.spec.assert_deadline,
+        ):
+            nc.cancel_recording(
+                robot_name=self.spec.robot_name, timestamp=capture_stop_s
+            )
+        return ControlBracket(
+            called_at=called_at, settled_at=time.time(), handle=handle
         )
 
     def close(self, capture_stop_s: float) -> ControlBracket:
@@ -279,6 +304,7 @@ class RemoteRecordingController(RecordingController):
 
 _PEER_AWAIT_OPEN = "await-open"
 _PEER_STOP = "stop"
+_PEER_CANCEL = "cancel"
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +333,14 @@ class _StopAck:
     returned_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class _CancelAck:
+    """When the peer's cancel call returned. Separate from :class:`_StopAck` so
+    an answer out of step is caught by kind, not read as the other call."""
+
+    returned_at: float
+
+
 def _peer_control_process(
     spec: ControlProcessSpec,
     ready_event: Any,
@@ -314,12 +348,13 @@ def _peer_control_process(
     acks: Any,
     result_queue: Any,
 ) -> None:
-    """Stop recordings this process never started, in its own OS process.
+    """End recordings this process never started, in its own OS process.
 
     Logs nothing and starts nothing. It connects — which subscribes it to the
-    notification stream — waits to be told a window opened, and closes it with
-    the SDK's own call. Every order is answered, so a caller blocked on one
-    learns of a failure from the reaped traceback rather than a timeout.
+    notification stream — waits to be told a window opened, and ends it with
+    the SDK's own call: a stop that keeps the data, or a cancel that discards
+    it. Every order is answered, so a caller blocked on one learns of a failure
+    from the reaped traceback rather than a timeout.
     """
     robot = None
     try:
@@ -333,6 +368,8 @@ def _peer_control_process(
             order, timestamp = command
             if order == _PEER_AWAIT_OPEN:
                 acks.put(_await_peer_open(spec, robot, announced_start_s=timestamp))
+            elif order == _PEER_CANCEL:
+                acks.put(_cancel_from_peer(spec, robot, capture_stop_s=timestamp))
             else:
                 acks.put(_stop_from_peer(spec, robot, capture_stop_s=timestamp))
         result_queue.put(
@@ -378,6 +415,28 @@ def _await_peer_open(
             ),
         )
     )
+
+
+def _cancel_from_peer(
+    spec: ControlProcessSpec, robot: object, *, capture_stop_s: float
+) -> _CancelAck:
+    """Make the SDK's own cancel call for a window this process never opened.
+
+    The discarding counterpart of :func:`_stop_from_peer`: it has to reach every
+    trace of a recording this process never wrote a byte of, and drop them.
+    """
+    with Timer(
+        spec.stop_sla_s,
+        label="peer.cancel_recording",
+        always_log=True,
+        assert_deadline=spec.assert_deadline,
+    ):
+        nc.cancel_recording(robot_name=spec.robot_name, timestamp=capture_stop_s)
+    assert robot.get_current_recording_id() is None, (  # type: ignore[attr-defined]
+        "the cancelling peer's nc.cancel_recording left its gate open, so the "
+        "call was refused before it reached the daemon at all"
+    )
+    return _CancelAck(returned_at=time.time())
 
 
 def _stop_from_peer(
@@ -470,17 +529,7 @@ class SplitProcessRecordingController(RecordingController):
         transition is the only thing that settles the close and is always
         waited for.
         """
-        opened: _OpenAck = self._await_ack(
-            _PEER_AWAIT_OPEN,
-            _OpenAck,
-            deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
-        )
-        peer_start_lag_s = opened.gate_opened_at - self._window_start_s
-        assert peer_start_lag_s <= REMOTE_START_ANNOUNCEMENT_SLA_S, (
-            f"the window opened at {self._window_start_s} reached the stopping "
-            f"peer {peer_start_lag_s:.3f}s later, over the "
-            f"{REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
-        )
+        self._await_peer_heard_of_the_window()
         called_at = time.time()
         handle = self.robot.get_current_recording_id()
         self._commands.put((_PEER_STOP, capture_stop_s))
@@ -507,6 +556,56 @@ class SplitProcessRecordingController(RecordingController):
             ),
         )
         return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+
+    def cancel(self, capture_stop_s: float) -> ControlBracket:
+        """Have the peer cancel the recording, then wait to be told it did.
+
+        The same split as :meth:`close`, discarding instead of keeping: the
+        peer must still have heard the window open before it can name anything
+        to cancel.
+        """
+        self._await_peer_heard_of_the_window()
+        called_at = time.time()
+        handle = self.robot.get_current_recording_id()
+        self._commands.put((_PEER_CANCEL, capture_stop_s))
+        cancelled: _CancelAck = self._await_ack(
+            _PEER_CANCEL,
+            _CancelAck,
+            deadline=time.time()
+            + self.spec.case.stop_recording_sla_s
+            + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+        )
+        settled_at = await_gate(
+            self.robot,
+            open_gate=False,
+            deadline=cancelled.returned_at + REMOTE_STOP_PROPAGATION_SLA_S,
+            label="split.cancel_gate_wait",
+            assert_deadline=self.spec.assert_deadline,
+            overdue=(
+                "the peer's cancel never came back round to this process: its "
+                f"own gate was still open {REMOTE_STOP_PROPAGATION_SLA_S}s "
+                "after the peer's call returned"
+            ),
+        )
+        return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+
+    def _await_peer_heard_of_the_window(self) -> None:
+        """Block until the peer has been told the window this process opened.
+
+        Nothing the peer can do names a recording until this lands, so both
+        ways of ending one wait on it, and both assert the same SLA.
+        """
+        opened: _OpenAck = self._await_ack(
+            _PEER_AWAIT_OPEN,
+            _OpenAck,
+            deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+        )
+        peer_start_lag_s = opened.gate_opened_at - self._window_start_s
+        assert peer_start_lag_s <= REMOTE_START_ANNOUNCEMENT_SLA_S, (
+            f"the window opened at {self._window_start_s} reached the stopping "
+            f"peer {peer_start_lag_s:.3f}s later, over the "
+            f"{REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
+        )
 
     def shutdown(self) -> None:
         """Retire the peer and surface anything it raised."""
