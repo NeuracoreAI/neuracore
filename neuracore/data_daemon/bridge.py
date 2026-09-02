@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from importlib import import_module
 from types import ModuleType
+from typing import NamedTuple
 
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
@@ -41,6 +42,54 @@ def _load_native() -> ModuleType:
         except ImportError as error:
             raise RuntimeError(_DATA_BRIDGE_IMPORT_HINT) from error
     return _DATA_BRIDGE_MODULE
+
+
+class LiveRecording(NamedTuple):
+    """The recording a source has open, as the daemon reports it.
+
+    Attributes:
+        recording_index: The daemon's own primary key. It exists before the
+            cloud id does, so it is what tells two consecutive recordings of
+            one source apart.
+        recording_id: The cloud handle, once ``/recording/start`` has been
+            notified. ``None`` while the recording is still local-only.
+        start_timestamp_ns: The recording's capture-clock start marker, as
+            returned by :meth:`RecordingContext.start_recording`.
+    """
+
+    recording_index: int
+    recording_id: str | None
+    start_timestamp_ns: int | None
+
+
+def query_recording_state(
+    robot_id: str, robot_instance: int, timeout_s: float = 0.5
+) -> tuple[bool, LiveRecording | None]:
+    """Ask the daemon which recording, if any, a source currently has open.
+
+    The daemon holds the only subscription to the backend's recording
+    notification stream, so this is how a process learns about a recording it
+    did not itself start or stop.
+
+    Returns:
+        ``(answered, recording)``. ``answered`` is ``False`` when nothing
+        replied in ``timeout_s``; read that as *unknown*, never as "not
+        recording". ``recording`` is ``None`` when the daemon answered and the
+        source has no open recording.
+
+    May block for up to ``timeout_s``; for a polling thread, not the log path.
+    """
+    reply = _load_native().recording_state(robot_id, robot_instance, timeout_s)
+    if reply is None:
+        return False, None
+    live = reply["recording"]
+    if live is None:
+        return True, None
+    return True, LiveRecording(
+        recording_index=live["recording_index"],
+        recording_id=live["recording_id"],
+        start_timestamp_ns=live["start_timestamp_ns"],
+    )
 
 
 class LoggingStalledError(RuntimeError):
@@ -100,7 +149,7 @@ class RecordingContext:
         dataset_name: str | None = None,
         timestamp: float | None = None,
         cloud_recording_id: str | None = None,
-    ) -> None:
+    ) -> int:
         """Announce a recording to the daemon for a source.
 
         Publishes one ``StartRecording`` envelope tagged with the source
@@ -113,6 +162,11 @@ class RecordingContext:
         stored and reported as such, and returned as the marker that resolves the
         cloud id (:meth:`get_recording_id`). It does **not** bound the recording
         window, which the daemon takes from a publish stamp inside this call.
+
+        Returns:
+            The capture marker the daemon stored as this recording's
+            ``start_timestamp_ns``, which tells it apart from its predecessor
+            before either has a cloud id.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
@@ -127,6 +181,7 @@ class RecordingContext:
             timestamp_ns,
             cloud_recording_id,
         )
+        return self._recording_marker_ns
 
     def log_joints(
         self,
