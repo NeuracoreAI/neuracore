@@ -195,7 +195,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         """Stream messages from one MCAP episode file."""
         topics = get_mcap_topics(topic_map=self.topic_map)
         factories = list(self._decoder_factories or [])
-        source_start_timestamp: float | None = None
+        source_start_timestamp_ns: int | None = None
         recording_stop_timestamp = recording_start_timestamp
         message_count = 0
         # Fresh video decoders per episode: state must never carry across files.
@@ -220,14 +220,13 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 reader=reader,
                 topics=topics,
             ):
-                if source_start_timestamp is None:
-                    source_start_timestamp = decoded_message.timestamp_seconds
+                if source_start_timestamp_ns is None:
+                    source_start_timestamp_ns = decoded_message.timestamp_ns
 
-                relative_timestamp = max(
-                    0.0,
-                    decoded_message.timestamp_seconds - source_start_timestamp,
+                relative_timestamp_ns = max(
+                    0, decoded_message.timestamp_ns - source_start_timestamp_ns
                 )
-                timestamp = recording_start_timestamp + relative_timestamp
+                timestamp = recording_start_timestamp + relative_timestamp_ns / 1e9
                 recording_stop_timestamp = max(recording_stop_timestamp, timestamp)
 
                 decoded_data = convert_decoded_mcap_data(

@@ -331,6 +331,7 @@ neginf
 neuraco
 neuracore
 newbyteorder
+nextafter
 nhead
 nheads
 njoints
