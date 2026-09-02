@@ -353,25 +353,19 @@ def test_is_recording_upload_complete_rejects_invalid_response(
 
 
 def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
-    calls: list[tuple[str, bool]] = []
+    stops = 0
     completion_checks: list[str] = []
 
     class _FakeRobot:
         def is_recording(self) -> bool:
             return True
 
-        def get_current_recording_id(self) -> str:
-            return "rec-123"
-
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(
-            self,
-            recording_id: str,
-            timestamp: float | None = None,
-        ) -> None:
-            calls.append(recording_id)
+        def stop_recording(self, timestamp: float | None = None) -> None:
+            nonlocal stops
+            stops += 1
 
     def is_upload_complete(recording_id: str) -> bool:
         completion_checks.append(recording_id)
@@ -391,7 +385,9 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
     nc.stop_recording(wait=False)
     nc.stop_recording(wait=True)
 
-    assert calls == ["rec-123", "rec-123"]
+    assert stops == 2
+    # Only the waiting call polls, and it polls the cloud id — the stop itself
+    # names no recording; the daemon stops the one open for the source.
     assert completion_checks == ["rec-123"]
 
 
@@ -404,17 +400,10 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         def is_recording(self) -> bool:
             return True
 
-        def get_current_recording_id(self) -> str:
-            return "rec-123"
-
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(
-            self,
-            recording_id: str,
-            timestamp: float | None = None,
-        ) -> None:
+        def stop_recording(self, timestamp: float | None = None) -> None:
             pass
 
     def upload_never_completes(recording_id: str) -> bool:

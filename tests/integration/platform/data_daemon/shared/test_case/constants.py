@@ -92,6 +92,12 @@ derives from the array's own dtype (`image.dtype.name`)."""
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
+# The backend expires any recording still running after this long
+# (`running_pending_recording_manager.MAX_RECORDING_DURATION_S`) and notifies
+# EXPIRED, which the daemon acts on. Cases must stay under it or their
+# recordings are closed out from under them.
+MAX_RECORDING_DURATION_S = 60 * 5
+
 STOP_RECORDING_NO_WAIT_SLA_S = 1.0
 STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
 STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
