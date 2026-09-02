@@ -5,7 +5,7 @@ The `neuracore.importer` module provides utilities for importing and uploading r
 ## Overview
 
 This module enables you to:
-- Import datasets from RLDS and LeRobot formats
+- Import datasets from MCAP, RLDS and LeRobot formats
 - Automatically detect dataset types based on file structure
 - Map various data types (images, joint states, poses, language, etc.) from source datasets
 - Upload datasets to Neuracore with proper robot model associations
@@ -93,6 +93,8 @@ Each data type mapping supports:
 
     - **LeRobot:** LeRobot datasets use the Hugging Face Arrow format, where data is organized in columns accessible via keys. Here, `source_name` refers to the column name in the dataset table. For instance, with `source: observation` and `source_name: image`, the importer will retrieve image data from the Arrow column named "image" within the "observation" structure (if nested).
 
+    - **MCAP:** Paths are `/topic[.nested.field.path]`, where the first dot-separated segment is the channel topic. A `source_name` that starts with `/` is an absolute path to its own topic, so a single data type can pull from many topics without a shared `source`. See [MCAP datasets](#mcap-datasets).
+
   - `index`: Index in source array (for array access, e.g., `observation.state[0]`)
   - `index_range`: Range of indices (for array slicing, e.g., `observation.state[0:7]`)
     - `start`: Start index (inclusive)
@@ -102,7 +104,7 @@ Each data type mapping supports:
 
 ```yaml
 input_dataset_name: my_dataset
-dataset_type: RLDS  # Optional: RLDS | LEROBOT | TFDS (auto-detected if omitted)
+dataset_type: RLDS  # Optional: MCAP | RLDS | LEROBOT | TFDS (auto-detected if omitted)
 
 output_dataset:
   name: my_output_dataset
@@ -115,7 +117,7 @@ robot:
   # mjcf_path: ""  # Alternative to urdf_path
   overwrite_existing: true  # Whether to overwrite existing robot configuration
 
-frequency: 50.0  # Data frequency in Hz (required for RLDS, optional for LeRobot)
+frequency: 50.0  # Data frequency in Hz (required for RLDS, optional for LeRobot, ignored for MCAP)
 
 data_import_config:
   # Define data mappings here for each data type
@@ -547,6 +549,92 @@ JOINT_TARGET_POSITIONS:
     - name: joint_7
 ```
 
+## MCAP datasets
+
+MCAP support covers `protobuf`, `ros1`, `ros2`, `json`, `cbor` and plain-text
+message encodings, with a raw-bytes fallback. Set `dataset_type: MCAP`, or let
+detection find it: any `.mcap` file in the top two levels of the dataset
+directory selects MCAP.
+
+**One file, one episode.** Every `.mcap` found under `--dataset-dir` (recursively)
+becomes one Neuracore recording. Note `--dataset-dir` must be a directory, so
+place a single file inside one.
+
+**Timestamps** come from each message's MCAP log time (falling back to publish
+time), rebased so the first message of a file starts the recording. Streams
+therefore keep their native rates -- a 200 Hz IMU and a 30 Hz camera in one file
+are logged at their own timestamps. `frequency` is unused.
+
+**`source` and `source_name`** take the form `/topic[.nested.field.path]`, split
+at the first `.`:
+
+```yaml
+JOINT_POSITIONS:
+  source: /joint_states.position   # topic `/joint_states`, field `position`
+  mapping:
+    - name: joint_1
+      index: 0
+```
+
+A `source_name` beginning with `/` names its own topic, which is how one data
+type maps several topics:
+
+```yaml
+RGB_IMAGES:
+  mapping:
+    - name: head_camera
+      source_name: /robot0/sensor/camera0/compressed
+    - name: wrist_camera
+      source_name: /robot0/sensor/camera1/compressed
+```
+
+For such absolute entries, `index` / `index_range` apply to the value the path
+resolves to.
+
+**Nested numeric messages are flattened.** A message whose fields are all
+numeric (directly or through nested messages) is converted to a 1-D array in
+field-declaration order. This is how poses are imported, since they usually
+arrive as sub-messages rather than flat arrays -- `foxglove.Pose` becomes
+`[x, y, z, qx, qy, qz, qw]`, matching `POSITION_ORIENTATION` + `QUATERNION` +
+`XYZW`:
+
+```yaml
+END_EFFECTOR_POSES:
+  format:
+    pose_type: POSITION_ORIENTATION
+    orientation: {type: QUATERNION, quaternion_order: XYZW}
+  mapping:
+    - name: left_hand
+      source_name: /robot1/vio/eef_pose.pose
+      index_range: {start: 0, end: 7}
+```
+
+A message containing any string, bytes, enum or repeated field is left alone, so
+point the mapping at the numeric subfield you want (`....imu.angular_velocity`,
+not `....imu`).
+
+**Images.** `CompressedImage`-style messages are decoded from still-image
+containers (PNG/JPEG) with Pillow. When the `format` field names H.264
+(`h264`, `avc1`, ...), the payload is treated as an inter-frame video stream and
+decoded per topic with PyAV. Because such a stream cannot be decoded from the
+middle, messages before a topic's first keyframe are skipped, and the count is
+reported per topic at the end of the episode. Raw `sensor_msgs/Image`-style
+messages (`height` + `width` + `encoding`) are also supported.
+
+**Malformed schemas.** Schema records with a few stray bytes appended to the
+serialised `FileDescriptorSet` are repaired by dropping the tail, with a warning
+naming the schema. Without this, one bad schema record aborts the whole episode.
+Schemas that stay unreadable fall back to raw bytes.
+
+**Camera calibration.** `extrinsics_source` and `intrinsics_source` are not yet
+read for MCAP datasets, so camera streams are imported without calibration.
+
+Worked examples: `neuracore/importer/config/mcap/example_openarm.yaml` (flat
+`sensor_msgs`-style topics) and
+`neuracore/importer/config/mcap/example_das_ego.yaml` (GenRobot DAS-Ego:
+nine H.264 camera streams, nested VIO poses, gripper widths and IMU).
+
+
 ## Example Workflow
 
 1. **Prepare your dataset**: Ensure your dataset is in RLDS or LeRobot format
@@ -583,6 +671,15 @@ JOINT_TARGET_POSITIONS:
 **Dataset type not detected**
 - Ensure your dataset directory contains the expected marker files
 - Manually specify `dataset_type` in the configuration file
+
+**MCAP: "Configured topic(s) not present in MCAP"**
+- The error lists the topics that are available; check for typos and remember
+  that the topic is only the part of `source` before the first `.`
+
+**MCAP: image or pose mapping resolves to an unsupported payload**
+- For poses, point the mapping at the numeric sub-message (for example
+  `/robot0/vio/eef_pose.pose`), not the whole message
+- For images, point it at the topic (or the field holding the image bytes)
 
 **Robot description not found**
 - Check that URDF/MJCF files are in the specified `--robot-dir`
