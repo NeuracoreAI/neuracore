@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import struct
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,8 @@ from typing import cast
 
 import numpy as np
 import pytest
+from google.protobuf import descriptor_pb2
+from mcap.writer import Writer
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
 from PIL import Image
@@ -204,11 +207,6 @@ def _make_importer(
         MCAPDatasetImporter,
         "_discover_mcap_files",
         staticmethod(lambda dataset_dir: [mcap_path]),
-    )
-    monkeypatch.setattr(
-        MCAPDatasetImporter,
-        "_init_runtime_components",
-        lambda self: setattr(self, "_decoder_factories", []),
     )
 
     return MCAPDatasetImporter(
@@ -562,27 +560,11 @@ def test_convert_decoded_mcap_data_plain_dict_passthrough():
     assert convert_decoded_mcap_data(d) is d
 
 
-def test_mcap_importer_getstate_clears_decoder_factories(monkeypatch, tmp_path):
+def test_mcap_importer_getstate_clears_video_decoders(monkeypatch, tmp_path):
     importer = _make_importer(monkeypatch, tmp_path)
-    importer._decoder_factories = [RawPassthroughDecoderFactory()]
+    importer._video_decoders = {"/topic": object()}
     state = importer.__getstate__()
-    assert state["_decoder_factories"] is None
-
-
-def test_mcap_importer_prepare_worker_re_initializes_factories(monkeypatch, tmp_path):
-    from neuracore.importer.core.base import NeuracoreDatasetImporter
-
-    importer = _make_importer(monkeypatch, tmp_path)
-    importer._decoder_factories = None
-    inited = []
-    monkeypatch.setattr(
-        NeuracoreDatasetImporter,
-        "prepare_worker",
-        lambda self, worker_id, chunk=None: None,
-    )
-    monkeypatch.setattr(importer, "_init_runtime_components", lambda: inited.append(1))
-    importer.prepare_worker(0)
-    assert inited
+    assert state["_video_decoders"] == {}
 
 
 def test_mcap_importer_import_item_missing_file_raises(monkeypatch, tmp_path):
@@ -1108,3 +1090,101 @@ def test_das_ego_example_config_maps_every_das_topic():
     assert "/robot2/sensor/magnetic_encoder" in topics
     # robot0 = ego head, robot1 = left DAS Finger, robot2 = right DAS Finger.
     assert len(topics) == 20
+
+
+def _protobuf_schema_bytes(file_name: str, message_name: str, fields) -> bytes:
+    """Serialize a one message FileDescriptorSet for use as an MCAP schema."""
+    descriptor_set = descriptor_pb2.FileDescriptorSet()
+    file_descriptor = descriptor_set.file.add()
+    file_descriptor.name = file_name
+    file_descriptor.package = "demo"
+    file_descriptor.syntax = "proto3"
+    message = file_descriptor.message_type.add()
+    message.name = message_name
+    for number, (field_name, field_type) in enumerate(fields, start=1):
+        field = message.field.add()
+        field.name = field_name
+        field.number = number
+        field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+        field.type = field_type
+    return descriptor_set.SerializeToString()
+
+
+_MCAP_TEST_TYPES = {
+    "/cam": (
+        "CompressedImage",
+        "cam.proto",
+        [("payload", descriptor_pb2.FieldDescriptorProto.TYPE_BYTES)],
+        bytes([0x0A, 4]) + b"\xff\xd8\xff\xe0",
+    ),
+    "/jnt": (
+        "JointState",
+        "jnt.proto",
+        [("position", descriptor_pb2.FieldDescriptorProto.TYPE_DOUBLE)],
+        bytes([0x09]) + struct.pack("<d", 1.5),
+    ),
+}
+
+
+def _write_protobuf_mcap(path: Path, registration_order: list[str]) -> None:
+    """Write a two topic protobuf MCAP, assigning schema ids in the given order."""
+    with path.open("wb") as handle:
+        writer = Writer(handle)
+        writer.start()
+        schema_ids = {}
+        for topic in registration_order:
+            message_name, file_name, fields, _payload = _MCAP_TEST_TYPES[topic]
+            schema_ids[topic] = writer.register_schema(
+                name=f"demo.{message_name}",
+                encoding="protobuf",
+                data=_protobuf_schema_bytes(file_name, message_name, fields),
+            )
+        for log_time, topic in enumerate(registration_order, start=1):
+            channel_id = writer.register_channel(
+                topic=topic,
+                message_encoding="protobuf",
+                schema_id=schema_ids[topic],
+            )
+            writer.add_message(
+                channel_id,
+                log_time=log_time,
+                data=_MCAP_TEST_TYPES[topic][3],
+                publish_time=log_time,
+            )
+        writer.finish()
+
+
+def test_stream_episode_file_decodes_each_file_with_its_own_schema_ids(
+    monkeypatch, tmp_path: Path
+):
+    first = tmp_path / "ep1.mcap"
+    second = tmp_path / "ep2.mcap"
+    _write_protobuf_mcap(first, ["/cam", "/jnt"])
+    _write_protobuf_mcap(second, ["/jnt", "/cam"])
+
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: ["/cam", "/jnt"],
+    )
+
+    decoded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        importer,
+        "_record_step",
+        lambda step, timestamp: decoded.extend(
+            (topic, type(value).DESCRIPTOR.full_name) for topic, value in step.items()
+        ),
+    )
+
+    for path in (first, second):
+        importer._stream_episode_file(
+            episode_file_path=path,
+            item=ImportItem(index=0, description=path.name, metadata={}),
+            label=path.name,
+            recording_start_timestamp=100.0,
+        )
+
+    expected = {"/cam": "demo.CompressedImage", "/jnt": "demo.JointState"}
+    assert dict(decoded[:2]) == expected
+    assert dict(decoded[2:]) == expected
