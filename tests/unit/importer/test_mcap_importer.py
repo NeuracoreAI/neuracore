@@ -17,17 +17,24 @@ from neuracore.importer.core.base import ImportItem
 from neuracore.importer.core.exceptions import ImportError
 from neuracore.importer.mcap.mcap_importer import MCAPDatasetImporter
 from neuracore.importer.mcap.utils import (
+    MAX_TRAILING_SCHEMA_BYTES,
+    H264StreamDecoder,
     JSONDecoderFactory,
     MCAPSourceEvent,
     RawPassthroughDecoderFactory,
+    SkipMCAPMessage,
+    TolerantProtobufDecoderFactory,
     build_topic_map,
     clip_depth,
     convert_decoded_mcap_data,
     estimate_total_messages,
+    flatten_numeric_protobuf,
     get_mcap_topics,
+    is_h264_image_format,
     iter_mcap_source_events,
     list_decoder_factories,
     read_image_data,
+    repair_protobuf_schema_data,
     resolve_path,
     resolve_timestamp_seconds,
     split_topic_path,
@@ -673,3 +680,423 @@ def test_mcap_importer_log_transformed_clips_depth(monkeypatch, tmp_path):
     )
     assert len(logged) == 1
     assert float(np.max(logged[0][1])) <= MAX_DEPTH
+
+
+# --------------------------------------------------------------------------
+# Numeric protobuf flattening
+# --------------------------------------------------------------------------
+
+
+def _build_pose_message_classes():
+    """Build foxglove-shaped pose protos in a private descriptor pool.
+
+    Mirrors the field numbering of ``foxglove.Vector3``/``Quaternion``/``Pose``
+    so the flattening order under test matches real DAS-Ego payloads, without
+    depending on the foxglove schemas being installed.
+    """
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+    file_proto = descriptor_pb2.FileDescriptorProto(
+        name="nc_pose_test.proto", package="nctest", syntax="proto3"
+    )
+
+    def _add_message(name: str, fields: list[tuple[str, int, int, str | None]]):
+        message = file_proto.message_type.add()
+        message.name = name
+        for field_name, number, field_type, type_name in fields:
+            field = message.field.add()
+            field.name = field_name
+            field.number = number
+            field.label = descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL
+            field.type = field_type
+            if type_name is not None:
+                field.type_name = type_name
+
+    double = descriptor_pb2.FieldDescriptorProto.TYPE_DOUBLE
+    message_type = descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE
+    string_type = descriptor_pb2.FieldDescriptorProto.TYPE_STRING
+
+    _add_message(
+        "Vector3", [(axis, i + 1, double, None) for i, axis in enumerate("xyz")]
+    )
+    _add_message(
+        "Quaternion", [(axis, i + 1, double, None) for i, axis in enumerate("xyzw")]
+    )
+    _add_message(
+        "Pose",
+        [
+            ("position", 1, message_type, ".nctest.Vector3"),
+            ("orientation", 2, message_type, ".nctest.Quaternion"),
+        ],
+    )
+    _add_message(
+        "PoseInFrame",
+        [("frame_id", 1, string_type, None), ("pose", 2, message_type, ".nctest.Pose")],
+    )
+    repeated = file_proto.message_type.add()
+    repeated.name = "Samples"
+    repeated_field = repeated.field.add()
+    repeated_field.name = "values"
+    repeated_field.number = 1
+    repeated_field.label = descriptor_pb2.FieldDescriptorProto.LABEL_REPEATED
+    repeated_field.type = double
+
+    pool = descriptor_pool.DescriptorPool()
+    pool.Add(file_proto)
+    classes = {
+        name: message_factory.GetMessageClass(
+            pool.FindMessageTypeByName(f"nctest.{name}")
+        )
+        for name in ("Vector3", "Quaternion", "Pose", "PoseInFrame", "Samples")
+    }
+    descriptor_set = descriptor_pb2.FileDescriptorSet()
+    descriptor_set.file.add().CopyFrom(file_proto)
+    return classes, descriptor_set.SerializeToString()
+
+
+def _sample_pose():
+    classes, _ = _build_pose_message_classes()
+    return classes, classes["Pose"](
+        position=classes["Vector3"](x=1.0, y=2.0, z=3.0),
+        orientation=classes["Quaternion"](x=0.1, y=0.2, z=0.3, w=0.9),
+    )
+
+
+def test_flatten_numeric_protobuf_uses_field_order():
+    _, pose = _sample_pose()
+    assert flatten_numeric_protobuf(pose) == [1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9]
+
+
+def test_flatten_numeric_protobuf_reads_proto3_zero_defaults():
+    classes, _ = _build_pose_message_classes()
+    pose = classes["Pose"](orientation=classes["Quaternion"](w=1.0))
+    assert flatten_numeric_protobuf(pose) == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+
+
+def test_flatten_numeric_protobuf_rejects_non_numeric_fields():
+    classes, pose = _sample_pose()
+    wrapped = classes["PoseInFrame"](frame_id="world", pose=pose)
+    assert flatten_numeric_protobuf(wrapped) is None
+
+
+def test_flatten_numeric_protobuf_rejects_repeated_fields():
+    classes, _ = _build_pose_message_classes()
+    assert flatten_numeric_protobuf(classes["Samples"](values=[1.0, 2.0])) is None
+
+
+def test_flatten_numeric_protobuf_ignores_non_protobuf_values():
+    assert flatten_numeric_protobuf({"x": 1.0}) is None
+    assert flatten_numeric_protobuf(np.zeros(3)) is None
+
+
+def test_to_numpy_flattens_numeric_protobuf_message():
+    _, pose = _sample_pose()
+    converted = to_numpy(pose)
+    assert isinstance(converted, np.ndarray)
+    assert converted.shape == (7,)
+    np.testing.assert_allclose(converted, [1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9])
+
+
+def test_to_numpy_passes_through_non_numeric_protobuf_message():
+    classes, pose = _sample_pose()
+    wrapped = classes["PoseInFrame"](frame_id="world", pose=pose)
+    assert to_numpy(wrapped) is wrapped
+
+
+# --------------------------------------------------------------------------
+# Malformed protobuf schema repair
+# --------------------------------------------------------------------------
+
+
+def test_repair_protobuf_schema_data_drops_trailing_bytes():
+    _, descriptor_bytes = _build_pose_message_classes()
+    corrupted = descriptor_bytes + b".mcap"
+    assert repair_protobuf_schema_data(corrupted) == descriptor_bytes
+
+
+def test_repair_protobuf_schema_data_gives_up_beyond_limit():
+    _, descriptor_bytes = _build_pose_message_classes()
+    corrupted = descriptor_bytes + b"x" * (MAX_TRAILING_SCHEMA_BYTES + 1)
+    assert repair_protobuf_schema_data(corrupted) is None
+
+
+def _make_schema(data: bytes):
+    from mcap.records import Schema
+
+    return Schema(id=7, data=data, encoding="protobuf", name="nctest.Pose")
+
+
+def test_tolerant_protobuf_factory_repairs_malformed_schema(caplog):
+    _, descriptor_bytes = _build_pose_message_classes()
+    _, pose = _sample_pose()
+    factory = TolerantProtobufDecoderFactory(logger=logging.getLogger(__name__))
+
+    with caplog.at_level(logging.WARNING):
+        decoder = factory.decoder_for(
+            "protobuf", _make_schema(descriptor_bytes + b"junk")
+        )
+
+    assert decoder is not None
+    decoded = decoder(pose.SerializeToString())
+    assert flatten_numeric_protobuf(decoded) == [1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 0.9]
+    assert "Repaired malformed MCAP protobuf schema" in caplog.text
+
+
+def test_tolerant_protobuf_factory_matches_upstream_on_valid_schema():
+    _, descriptor_bytes = _build_pose_message_classes()
+    factory = TolerantProtobufDecoderFactory()
+    assert factory.decoder_for("protobuf", _make_schema(descriptor_bytes)) is not None
+    assert factory.decoder_for("json", _make_schema(descriptor_bytes)) is None
+
+
+def test_tolerant_protobuf_factory_returns_none_when_unrepairable(caplog):
+    factory = TolerantProtobufDecoderFactory(logger=logging.getLogger(__name__))
+    with caplog.at_level(logging.WARNING):
+        assert factory.decoder_for("protobuf", _make_schema(b"\xff" * 32)) is None
+    assert "Falling back to raw bytes" in caplog.text
+
+
+def test_list_decoder_factories_uses_tolerant_protobuf_factory():
+    factories = list_decoder_factories()
+    assert any(isinstance(f, TolerantProtobufDecoderFactory) for f in factories)
+
+
+# --------------------------------------------------------------------------
+# H.264 image topics
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("h264", True),
+        ("H.264", True),
+        ("avc1", True),
+        ("h264; z_min_m=0.1; z_max_m=1.5", True),
+        ("png", False),
+        ("jpeg", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_h264_image_format(value, expected):
+    assert is_h264_image_format(value) is expected
+
+
+def _h264_packets(count: int = 4, width: int = 32, height: int = 16) -> list[bytes]:
+    """Encode `count` frames and return their Annex-B packet payloads."""
+    av = pytest.importorskip("av")
+    if "libx264" not in av.codecs_available:
+        pytest.skip("libx264 encoder unavailable in this PyAV build")
+    context = av.CodecContext.create("libx264", "w")
+    context.width, context.height, context.pix_fmt = width, height, "yuv420p"
+    context.options = {"tune": "zerolatency", "preset": "ultrafast"}
+    rng = np.random.default_rng(0)
+    packets: list[bytes] = []
+    for _ in range(count):
+        image = rng.integers(0, 255, (height, width, 3)).astype(np.uint8)
+        frame = av.VideoFrame.from_ndarray(image, format="rgb24").reformat(
+            format="yuv420p"
+        )
+        packets.extend(bytes(p) for p in context.encode(frame))
+    packets.extend(bytes(p) for p in context.encode(None))
+    return packets
+
+
+def test_h264_stream_decoder_decodes_every_frame():
+    packets = _h264_packets()
+    decoder = H264StreamDecoder()
+    frames = [decoder.decode(packet) for packet in packets]
+    assert all(frame is not None for frame in frames)
+    assert {frame.shape for frame in frames} == {(16, 32, 3)}
+    assert all(frame.dtype == np.uint8 for frame in frames)
+    assert decoder.skipped_before_keyframe == 0
+
+
+def test_h264_stream_decoder_skips_until_first_keyframe():
+    packets = _h264_packets()
+    decoder = H264StreamDecoder()
+    # Starting mid-stream: every packet before the first SPS is unusable.
+    assert decoder.decode(packets[1]) is None
+    assert decoder.decode(packets[2]) is None
+    assert decoder.skipped_before_keyframe == 2
+    assert decoder.decode(packets[0]) is not None
+
+
+def test_h264_stream_decoder_ignores_empty_payload():
+    assert H264StreamDecoder().decode(b"") is None
+
+
+def test_read_image_data_decodes_h264_with_context():
+    from neuracore.importer.mcap.utils import MCAPImageContext
+
+    packets = _h264_packets()
+    context = MCAPImageContext(topic="/cam/compressed", decoders={})
+    message = {"data": packets[0], "format": "h264"}
+    image = read_image_data(
+        DataType.RGB_IMAGES,
+        message["data"],
+        message,
+        logger=logging.getLogger(__name__),
+        image_context=context,
+    )
+    assert image.shape == (16, 32, 3)
+
+
+def test_h264_decode_raises_skip_before_keyframe():
+    from neuracore.importer.mcap.utils import MCAPImageContext, _decode_h264_image
+
+    packets = _h264_packets()
+    context = MCAPImageContext(topic="/cam/compressed", decoders={})
+    with pytest.raises(SkipMCAPMessage):
+        _decode_h264_image(
+            DataType.RGB_IMAGES,
+            packets[1],
+            logger=logging.getLogger(__name__),
+            image_context=context,
+        )
+    # A skip is not an import failure: ImportError must not match it.
+    assert not isinstance(SkipMCAPMessage("x"), ImportError)
+
+
+def test_read_image_data_h264_requires_a_decoder_registry():
+    packets = _h264_packets()
+    message = {"data": packets[0], "format": "h264"}
+    with pytest.raises(ImportError, match="video decoder registry"):
+        read_image_data(
+            DataType.RGB_IMAGES,
+            message["data"],
+            message,
+            logger=logging.getLogger(__name__),
+        )
+
+
+def test_read_image_data_rejects_h264_depth():
+    from neuracore.importer.mcap.utils import MCAPImageContext
+
+    packets = _h264_packets()
+    message = {"data": packets[0], "format": "h264"}
+    with pytest.raises(ImportError, match="only supported for RGB_IMAGES"):
+        read_image_data(
+            DataType.DEPTH_IMAGES,
+            message["data"],
+            message,
+            logger=logging.getLogger(__name__),
+            image_context=MCAPImageContext(topic="/cam", decoders={}),
+        )
+
+
+def _rgb_topic_map(names: list[str]):
+    mapping = [
+        _make_mapping_item(name, source_name="/cam/compressed") for name in names
+    ]
+    return build_topic_map(
+        dataset_config=_make_dataset_config(
+            {DataType.RGB_IMAGES: _make_import_config("", mapping)}
+        )
+    )
+
+
+def test_iter_mcap_source_events_skips_messages_before_keyframe():
+    packets = _h264_packets()
+    topic_map = _rgb_topic_map(["cam"])
+    decoders: dict = {}
+    logger = logging.getLogger(__name__)
+
+    def events(packet: bytes):
+        return list(
+            iter_mcap_source_events(
+                topic="/cam/compressed",
+                decoded_data={"data": packet, "format": "h264"},
+                topic_map=topic_map,
+                logger=logger,
+                timestamp=0.0,
+                video_decoders=decoders,
+            )
+        )
+
+    assert events(packets[1]) == []
+    assert len(events(packets[0])) == 1
+    assert len(events(packets[1])) == 1
+
+
+def test_iter_mcap_source_events_decodes_h264_once_per_message():
+    packets = _h264_packets()
+    topic_map = _rgb_topic_map(["cam_a", "cam_b"])
+    decoders: dict = {}
+    events = list(
+        iter_mcap_source_events(
+            topic="/cam/compressed",
+            decoded_data={"data": packets[0], "format": "h264"},
+            topic_map=topic_map,
+            logger=logging.getLogger(__name__),
+            timestamp=0.0,
+            video_decoders=decoders,
+        )
+    )
+    assert [event.item.name for event in events] == ["cam_a", "cam_b"]
+    # Both mapping entries must share the single decode of this packet; a second
+    # decode() call would advance the stream and corrupt later frames.
+    assert events[0].source_data is events[1].source_data
+
+
+def test_iter_mcap_source_events_applies_index_range_to_absolute_source():
+    from neuracore_types.importer.config import IndexRangeConfig
+
+    classes, pose = _sample_pose()
+    message = classes["PoseInFrame"](frame_id="world", pose=pose)
+    topic_map = build_topic_map(
+        dataset_config=_make_dataset_config({
+            DataType.CUSTOM_1D: _make_import_config(
+                "",
+                [
+                    _make_mapping_item(
+                        "position",
+                        source_name="/robot0/vio/eef_pose.pose",
+                        index_range=IndexRangeConfig(start=0, end=3),
+                    ),
+                    _make_mapping_item(
+                        "orientation",
+                        source_name="/robot0/vio/eef_pose.pose",
+                        index_range=IndexRangeConfig(start=3, end=7),
+                    ),
+                    _make_mapping_item(
+                        "height",
+                        source_name="/robot0/vio/eef_pose.pose.position",
+                        index=2,
+                    ),
+                ],
+            )
+        })
+    )
+    events = list(
+        iter_mcap_source_events(
+            topic="/robot0/vio/eef_pose",
+            decoded_data=message,
+            topic_map=topic_map,
+            logger=logging.getLogger(__name__),
+            timestamp=0.0,
+        )
+    )
+    by_name = {event.item.name: event.source_data for event in events}
+    np.testing.assert_allclose(by_name["position"], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(by_name["orientation"], [0.1, 0.2, 0.3, 0.9])
+    assert float(by_name["height"]) == 3.0
+
+
+def test_mcap_importer_resets_video_decoders_between_episodes(monkeypatch, tmp_path):
+    importer = _make_importer(monkeypatch, tmp_path)
+    importer._video_decoders["/cam"] = object()  # noqa: SLF001
+    assert importer.__getstate__()["_video_decoders"] == {}
+
+
+def test_das_ego_example_config_maps_every_das_topic():
+    config = DatasetImportConfig.from_file(
+        Path("neuracore/importer/config/mcap/example_das_ego.yaml")
+    )
+    topics = get_mcap_topics(topic_map=build_topic_map(dataset_config=config))
+    assert "/robot0/sensor/camera0/compressed" in topics
+    assert "/robot1/vio/eef_pose" in topics
+    assert "/robot2/sensor/magnetic_encoder" in topics
+    # robot0 = ego head, robot1 = left DAS Finger, robot2 = right DAS Finger.
+    assert len(topics) == 20

@@ -1,0 +1,123 @@
+# GenRobot DAS-Ego egocentric capture.
+# https://docs.genrobot.ai/guides/das-ego-data-introduction
+#
+# One merged ego+finger MCAP file = one episode. Device indices follow the
+# merge tool's layout: robot0 = DAS Ego head, robot1 = left DAS Finger,
+# robot2 = right DAS Finger.
+#
+# All image topics carry H.264 (`CompressedImage.format: 'h264'`), which the
+# MCAP importer decodes per topic with PyAV; packets before a stream's first
+# keyframe are dropped. Poses arrive as nested protobuf sub-messages and are
+# flattened in field order to [x, y, z, qx, qy, qz, qw].
+#
+# Nine 1600x1300 camera streams make the lossless archive expensive. To upload
+# lossy-only, run this once before importing (global, persists, irreversible
+# for episodes imported under it -- see docs/dataset_importer.md):
+#     nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)
+
+input_dataset_name: das_ego_dataset
+dataset_type: MCAP
+
+output_dataset:
+  name: das_ego_dataset
+  tags: [das, das-ego, egocentric, bimanual, genrobot]
+  description: >-
+    GenRobot DAS-Ego egocentric capture: six head cameras, two DAS Finger hand
+    cameras, VIO head/hand poses and gripper widths.
+
+robot:
+  name: das_ego
+  overwrite_existing: true
+
+# `frequency` is intentionally omitted: the MCAP importer takes per-message
+# timestamps from MCAP log time and ignores it (only LeRobot/RLDS use it).
+# DAS-Ego has no URDF, so `--robot-dir` may point at an empty directory.
+
+data_import_config:
+  RGB_IMAGES:
+    format:
+      image_convention: CHANNELS_LAST
+      order_of_channels: RGB
+    mapping:
+      # Six head cameras, 1600x1300, double-sphere ("ds") lenses.
+      - name: head_camera0
+        source_name: /robot0/sensor/camera0/compressed
+      - name: head_camera1
+        source_name: /robot0/sensor/camera1/compressed
+      - name: head_camera2
+        source_name: /robot0/sensor/camera2/compressed
+      - name: head_camera3
+        source_name: /robot0/sensor/camera3/compressed
+      - name: head_camera4
+        source_name: /robot0/sensor/camera4/compressed
+      - name: head_camera5
+        source_name: /robot0/sensor/camera5/compressed
+      # DAS Finger hand cameras.
+      - name: left_hand_camera
+        source_name: /robot1/sensor/camera0/compressed
+      - name: right_hand_camera
+        source_name: /robot2/sensor/camera0/compressed
+      # Finger-pose projection overlay rendered onto head camera 2.
+      - name: finger_pose_projection
+        source_name: /robot0/sensor/camera2/compressed_finger_pose_projection
+
+  END_EFFECTOR_POSES:
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+    mapping:
+      - name: left_hand
+        source_name: /robot1/vio/eef_pose.pose
+        index_range: {start: 0, end: 7}
+      - name: right_hand
+        source_name: /robot2/vio/eef_pose.pose
+        index_range: {start: 0, end: 7}
+
+  POSES:
+    format:
+      pose_type: POSITION_ORIENTATION
+      orientation:
+        type: QUATERNION
+        quaternion_order: XYZW
+    mapping:
+      # Head pose in the world frame anchored at the start of the capture.
+      - name: head
+        source_name: /robot0/vio/eef_pose.pose
+        index_range: {start: 0, end: 7}
+      # Body-frame poses relative to the t=0 baseline.
+      - name: head_relative
+        source_name: /robot0/vio/relative_eef_pose.pose
+        index_range: {start: 0, end: 7}
+      - name: left_hand_relative
+        source_name: /robot1/vio/relative_eef_pose.pose
+        index_range: {start: 0, end: 7}
+      - name: right_hand_relative
+        source_name: /robot2/vio/relative_eef_pose.pose
+        index_range: {start: 0, end: 7}
+
+  PARALLEL_GRIPPER_OPEN_AMOUNTS:
+    # magnetic_encoder.value is gripper width in metres
+    format:
+      normalize: {min: 0.0, max: 0.105}
+    mapping:
+      - name: left_gripper
+        source_name: /robot1/sensor/magnetic_encoder.value
+      - name: right_gripper
+        source_name: /robot2/sensor/magnetic_encoder.value
+
+  CUSTOM_1D:
+    mapping:
+      - name: head_angular_velocity
+        source_name: /robot0/sensor/imu.angular_velocity
+      - name: head_linear_acceleration
+        source_name: /robot0/sensor/imu.linear_acceleration
+      - name: left_hand_angular_velocity
+        source_name: /robot1/sensor/imu.angular_velocity
+      - name: left_hand_linear_acceleration
+        source_name: /robot1/sensor/imu.linear_acceleration
+      - name: right_hand_angular_velocity
+        source_name: /robot2/sensor/imu.angular_velocity
+      - name: right_hand_linear_acceleration
+        source_name: /robot2/sensor/imu.linear_acceleration

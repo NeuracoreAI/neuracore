@@ -53,6 +53,7 @@ castagnoli
 castshadow
 categoryarray
 categoryorder
+cbor
 cdef
 cdylib
 chdir
@@ -194,6 +195,7 @@ gdown
 geglu
 gelu
 genpts
+genrobot
 geomadr
 geomid
 geomnum
@@ -257,6 +259,7 @@ lecun
 lerobot
 LEROBOT
 levelname
+libav
 libavformat
 libc
 libclang
@@ -322,6 +325,7 @@ nccl
 ncdata
 NCHW
 ncon
+nctest
 ndarray
 neginf
 neuraco
@@ -458,6 +462,7 @@ setpriority
 setpts
 setsid
 setuptools
+SFIXED
 shadowsize
 siglip
 Siglip
@@ -570,4 +575,5 @@ xyzw
 ylabel
 yourdfpy
 ZBWs
+zerolatency
 znear

@@ -41,13 +41,17 @@ def import_dataset(
         file_okay=False,
         help="Path to the dataset directory.",
     ),
-    robot_dir: Path = typer.Option(
-        ...,
+    robot_dir: Path | None = typer.Option(
+        None,
         "--robot-dir",
         "-r",
         exists=True,
         file_okay=False,
-        help="Directory containing robot description files (.urdf/.xml/.mjcf).",
+        help=(
+            "Directory containing robot description files (.urdf/.xml/.mjcf). "
+            "Optional: omit it for datasets with no URDF/MJCF, and robot "
+            "information is left unpopulated."
+        ),
     ),
     overwrite: bool = typer.Option(
         False,

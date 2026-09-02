@@ -147,7 +147,7 @@ def _resolve_robot_descriptions(
 def _run_import(
     dataset_config: Path,
     dataset_dir: Path,
-    robot_dir: Path,
+    robot_dir: Path | None = None,
     overwrite: bool = False,
     shared: bool = False,
     dry_run: bool = False,
