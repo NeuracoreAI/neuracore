@@ -12,28 +12,11 @@ consumers.
 
 import logging
 from abc import ABC
-from dataclasses import dataclass
 
 import numpy as np
 from neuracore_types import CameraData, DataType, JointData, NCData, PointCloudData
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class DataRecordingContext:
-    """Context information needed for recording data to the daemon.
-
-    Contains all identifiers needed to associate recorded data with the
-    correct robot, dataset, and recording session.
-    """
-
-    recording_id: str
-    robot_id: str | None
-    robot_name: str
-    robot_instance: int
-    dataset_id: str | None
-    dataset_name: str | None
 
 
 class DataStream(ABC):
@@ -54,7 +37,6 @@ class DataStream(ABC):
             This must be kept lightweight and not perform any blocking operations.
         """
         self._recording = False
-        self._context: DataRecordingContext | None = None
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
@@ -65,21 +47,18 @@ class DataStream(ABC):
         """Get the data type of this stream."""
         return self._data_type
 
-    def start_recording(self, context: DataRecordingContext) -> None:
-        """Start recording data for this stream.
+    def start_recording(self) -> None:
+        """Arm the stream for a new recording.
 
-        Args:
-            context: Recording context containing identifiers for the recording
-                session, robot, and dataset.
+        The stream carries no recording identity — the daemon owns that. This
+        only marks a fresh timeline for :meth:`_enforce_monotonic_timestamp`.
         """
         self._recording = True
         self._last_logged_timestamp = None
-        self._context = context
 
     def stop_recording(self) -> None:
         """Stop recording data for this stream."""
         self._recording = False
-        self._context = None
 
     def is_recording(self) -> bool:
         """Check if recording is active.
@@ -96,10 +75,6 @@ class DataStream(ABC):
             Optional[NCData]: The most recently logged data item
         """
         return self._latest_data
-
-    def get_recording_context(self) -> DataRecordingContext | None:
-        """Return the active recording context for this stream, if present."""
-        return self._context
 
     def _enforce_monotonic_timestamp(self, timestamp: float) -> None:
         """Reject a timestamp that does not strictly increase within a recording.
