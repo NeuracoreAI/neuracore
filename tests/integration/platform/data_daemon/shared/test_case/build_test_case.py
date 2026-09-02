@@ -35,6 +35,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
     CONTROL_LOCAL,
     CONTROL_REMOTE,
+    CONTROL_SPLIT_PROCESS,
     DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
@@ -91,12 +92,22 @@ def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
 
 
 def _unsupported_recording_control(case: DataDaemonTestCase) -> str | None:
-    """Return why *case* cannot be driven remotely, or None if it can.
+    """Return why *case* cannot be driven as asked, or None if it can.
 
     A remotely-started window opens after the call returns, so the frames at
     the head of each recording are logged before any gate is open. Only a
-    producer that runs across the boundary can report that.
+    producer that runs across the boundary can report that. A split-control
+    window is opened here, so what it needs instead is a process of its own to
+    spawn the stopping peer in.
     """
+    if case.recording_control == CONTROL_SPLIT_PROCESS:
+        if case.parallel_contexts != 1:
+            return (
+                f"recording_control={CONTROL_SPLIT_PROCESS!r} needs contexts=1,"
+                f"got {case.parallel_contexts}: parallel contexts run in pool "
+                "workers, which cannot start the stopping peer"
+            )
+        return None
     if case.recording_control != CONTROL_REMOTE:
         return None
     if case.producer_channels not in (PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS):
@@ -304,7 +315,13 @@ class DataDaemonTestCase:
             (default) calls the SDK from the test process; ``"remote"`` calls
             the backend's own endpoints, so every process learns about the
             window over the notification stream. Needs the network, and a
-            producer that outlives its recordings.
+            producer that outlives its recordings. ``"split"`` keeps both calls
+            in the SDK but puts them in different processes: this process starts
+            every window and a peer makes the stop call, which it can only do
+            because the start was announced to it. The stop has to come back
+            round the same way before this process drains, so a recording ends
+            only if the notification stream works in both directions. Needs the
+            network, and ``parallel_contexts=1`` to spawn the peer in.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
