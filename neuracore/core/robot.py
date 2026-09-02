@@ -10,7 +10,6 @@ import io
 import logging
 import os
 import tempfile
-import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
@@ -24,7 +23,6 @@ from neuracore_types import DataType, RobotInstanceIdentifier
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon import bridge as recording_context
@@ -35,7 +33,6 @@ from .exceptions import RobotError, ValidationError
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
-    from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 
 logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
@@ -122,7 +119,7 @@ class Robot:
         )
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
-        self._recording_state_manager: "RecordingStateManager | None" = None
+        self._local_recording_handle: str | None = None
 
         self.org_id = org_id or get_current_org()
 
@@ -274,10 +271,11 @@ class Robot:
 
 
         Returns:
-            A local correlation handle. The daemon owns recording identity and
-            assigns the cloud recording id asynchronously, so there is nothing
-            authoritative to return at call time — see
-            :meth:`get_cloud_recording_id`.
+            A handle correlating this call with the frames logged after it. It
+            is local to this process — the daemon owns recording identity and
+            mints the cloud id asynchronously, so there is nothing
+            authoritative to return at call time; ask
+            :meth:`get_cloud_recording_id` once it exists.
 
         Raises:
             RobotError: If the robot is not initialized or if
@@ -287,17 +285,7 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         local_handle = str(uuid.uuid4())
-        # The recording window's lower bound, on the same clock the backend
-        # reports for it. Without an explicit timestamp the producer stamps
-        # wall-clock now, which is at or after this value, so notifications stay
-        # orderable against it.
-        start_time = timestamp if timestamp is not None else time.time()
-        get_recording_state_manager().recording_started(
-            robot_id=self.id,
-            instance=self.instance,
-            recording_id=local_handle,
-            start_time=start_time,
-        )
+        self._local_recording_handle = local_handle
         try:
             self._get_daemon_recording_context().start_recording(
                 robot_id=self.id,
@@ -308,10 +296,8 @@ class Robot:
                 timestamp=timestamp,
             )
         except Exception:
-            # The gate is open with no window behind it.
-            get_recording_state_manager().recording_stopped(
-                robot_id=self.id, instance=self.instance, recording_id=local_handle
-            )
+            self._local_recording_handle = None
+            self._stop_all_streams()
             raise
         return local_handle
 
@@ -346,68 +332,29 @@ class Robot:
         self,
         recording_id: str | None,
         timestamp: float | None = None,
-        notify_daemon: bool = True,
     ) -> None:
         """Stop all streams and send the recording-stopped IPC message to the daemon.
 
-        The local ``log_*`` gate closes in the instant between the window
-        closing and the writer's tail-chunk barrier. Closing
-        it before the notify would silently discard data the daemon would still
-        have accepted — the window is open until it receives the stop. Closing it
-        after the barrier instead leaves it open for as long as the writer's
-        backlog takes to drain (over a second under burst logging), publishing
-        data the daemon has already stopped accepting and simply throws away.
-
-        ``notify_daemon=False`` drains without publishing the stop — see
-        :meth:`_drain_for_remote_stop`.
+        Disarming sits between the stop and the writer's tail-chunk barrier.
+        Before the notify it would discard nothing the daemon still wants — the
+        window is open until it receives the stop — and after the barrier it
+        would stay armed for as long as the writer's backlog takes to drain
+        (over a second under burst logging).
         """
         try:
             self._stop_all_streams()
             context = self._get_daemon_recording_context()
             try:
-                if notify_daemon:
-                    context.stop_recording(timestamp=timestamp)
+                context.stop_recording(timestamp=timestamp)
             finally:
                 # Both run even if the notify failed.
-                self._close_local_recording_gate()
+                self._local_recording_handle = None
                 context.flush_source()
         except Exception:
             logger.exception(
                 "Failed to stop streams and notify daemon for recording_id=%s",
                 recording_id,
             )
-
-    def _drain_for_remote_stop(self, recording_id: str | None) -> None:
-        """Drain for a stop this process learned about over the notification stream.
-
-        The stop is not published: it names no recording on the wire and
-        arrives a hop late, so the daemon would apply it to whichever window is
-        live by then. The daemon reads the same stream and closes the named
-        recording itself.
-        """
-        self._drain_streams_and_notify_daemon(recording_id, notify_daemon=False)
-
-    def _close_local_recording_gate(self) -> None:
-        """Clear the local recording handle that gates ``log_*`` forwarding."""
-        if not self.id:
-            return
-        state = get_recording_state_manager()
-        state.recording_stopped(
-            robot_id=self.id,
-            instance=self.instance,
-            recording_id=state.get_current_recording_id(self.id, self.instance),
-        )
-
-    def _register_remote_stop_handler(self) -> None:
-        """Register a callback to drain streams when a remote stop arrives."""
-        assert self.id is not None
-        manager = get_recording_state_manager()
-        manager.register_remote_stop_handler(
-            robot_id=self.id,
-            instance=self.instance,
-            callback=self._drain_for_remote_stop,
-        )
-        self._recording_state_manager = manager
 
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
@@ -420,28 +367,43 @@ class Robot:
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
 
+        Asks the daemon, which owns recording state. It therefore answers the
+        same for a recording started here, in another process on this host, or
+        from the web — a process that started nothing still gets a true answer.
+
+        The window closes when the daemon processes the stop, roughly a holdback
+        behind :meth:`stop_recording` returning, so this can read ``True`` for a
+        moment after a local stop. That is the honest answer: the recording is
+        open until the daemon closes it.
+
         Returns:
             True if the robot is actively recording, False otherwise.
+
+        Raises:
+            RecordingStateUnavailableError: the daemon did not answer. Silence
+                is not "not recording" — what this process started says nothing
+                about a recording opened elsewhere.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        return get_recording_state_manager().is_recording(
-            robot_id=self.id, instance=self.instance
+        return (
+            recording_context.query_recording_state(self.id, self.instance) is not None
         )
 
     def get_current_recording_id(self) -> str | None:
-        """Get the ID of the current active recording session.
+        """Get the cloud ID of the current active recording session.
 
         Returns:
-            The current recording ID if the robot is recording, None otherwise.
-            This is a local correlation handle, not the cloud recording id —
-            use :meth:`get_cloud_recording_id` for that.
+            The cloud recording id of the open recording, or ``None`` when the
+            robot is not recording *or* the id has not been minted yet — it is
+            assigned asynchronously, and never at all for a recording made
+            offline. Use :meth:`is_recording` to ask whether a recording is
+            open, and :meth:`get_cloud_recording_id` to wait for the id.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        return get_recording_state_manager().get_current_recording_id(
-            robot_id=self.id, instance=self.instance
-        )
+        recording = recording_context.query_recording_state(self.id, self.instance)
+        return recording.recording_id if recording is not None else None
 
     def get_cloud_recording_id(
         self, timestamp_ns: int | None = None, timeout_s: float = 30.0
@@ -730,13 +692,8 @@ class Robot:
             raise RobotError("Robot not initialized. Call init() first.")
 
         self._stop_all_streams()
+        self._local_recording_handle = None
         self._get_daemon_recording_context().cancel_recording(timestamp=timestamp)
-        active_handle = get_recording_state_manager().get_current_recording_id(
-            self.id, self.instance
-        )
-        get_recording_state_manager().recording_stopped(
-            robot_id=self.id, instance=self.instance, recording_id=active_handle
-        )
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:
         """Return a reusable daemon recording context, creating it lazily."""
@@ -811,10 +768,6 @@ class Robot:
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()
-        manager = self._recording_state_manager
-        self._recording_state_manager = None
-        if self.id is not None and manager is not None:
-            manager.deregister_remote_stop_handler(self.id, self.instance)
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None

@@ -251,10 +251,14 @@ def _publish_video_to_p2p(
 
 
 def start_stream(robot: Robot, data_stream: DataStream) -> None:
-    """Arm a stream for the robot's current recording, if there is one.
+    """Arm a stream for a recording this process started, if there is one.
 
     Arming carries no recording identity into the stream — the daemon owns
     that. It only starts a fresh timeline for the monotonic-timestamp check.
+
+    Both reads are process-local: this is the log path, so it never asks the
+    daemon. A recording this process did not start leaves streams unarmed, and
+    the monotonic check simply stops enforcing for them.
 
     Args:
         robot: Robot instance
@@ -262,7 +266,7 @@ def start_stream(robot: Robot, data_stream: DataStream) -> None:
     """
     if data_stream.is_recording():
         return
-    if robot.is_recording():
+    if robot._local_recording_handle is not None:
         data_stream.start_recording()
 
 
@@ -283,7 +287,7 @@ def _get_or_create_joint_stream(
     ), "Expected stream to be instance of JointDataStream"
     # A joint logged for the first time part-way through a recording gets its
     # stream here, after `Robot.start_recording` armed the others.
-    if not joint_stream.is_recording() and robot.is_recording():
+    if not joint_stream.is_recording() and robot._local_recording_handle is not None:
         joint_stream.start_recording()
     return JointStreamBinding(
         stream_id=str_id,
