@@ -171,6 +171,7 @@ DATA_TYPE_BY_STREAM = {
 
 CAMERA_NAME_PREFIX = "camera_"
 DEPTH_CAMERA_NAME_PREFIX = "depth_camera_"
+JOINT_GROUP_NAME_PREFIX = "joints_"
 MARKER_NAME_PREFIX = "marker_"
 
 BASE_JOINT_NAMES = [
@@ -226,6 +227,32 @@ def joint_names_for_count(joint_count: int) -> list[str]:
     for index in range(len(BASE_JOINT_NAMES), joint_count):
         generated_names.append(f"synthetic_joint_{index:02d}")
     return generated_names
+
+
+def joint_group_name(index: int) -> str:
+    """Return the placement name of the joint group at *index*."""
+    return f"{JOINT_GROUP_NAME_PREFIX}{index}"
+
+
+def joint_name_groups(
+    joint_names: list[str], group_count: int
+) -> list[tuple[str, list[str]]]:
+    """Split *joint_names* into *group_count* contiguous groups.
+
+    Each group pairs the name the joints are addressed by — a device, as a
+    camera is — with the joints it owns; the remainder goes to the first groups.
+    Unsplit joints are one group, not a case of their own.
+    """
+    if not joint_names:
+        return []
+    base, remainder = divmod(len(joint_names), max(group_count, 1))
+    groups: list[tuple[str, list[str]]] = []
+    start = 0
+    for index in range(max(group_count, 1)):
+        size = base + (1 if index < remainder else 0)
+        groups.append((joint_group_name(index), joint_names[start : start + size]))
+        start += size
+    return groups
 
 
 def marker_name_for(channel_or_kind: str) -> str:

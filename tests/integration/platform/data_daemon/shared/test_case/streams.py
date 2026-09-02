@@ -29,6 +29,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DepthMode,
     camera_names,
     depth_camera_names,
+    joint_group_name,
+    joint_name_groups,
     joint_names_for_count,
     marker_name_for,
     trace_key_for,
@@ -74,6 +76,7 @@ class StreamPlan:
     # Per-thread streams hold one kind; the synchronous producer bundles all.
     joint_kinds: tuple[str, ...] = ()
     camera_indexes: tuple[int, ...] = ()
+    group_name: str | None = None
     # Sample dtype for depth streams; ignored by every other kind.
     depth_mode: DepthMode = "float32"
 
@@ -98,10 +101,11 @@ class StreamPlan:
 
     @property
     def placement_tokens(self) -> frozenset[str]:
-        """Names a producer placement may use to move this stream to a process."""
-        if self.is_video:
-            return frozenset({self.name, *self.channel_names})
-        return frozenset({self.name})
+        """Names a producer placement may use to move this stream to a process:
+        this stream's kind, and the device producing it — a camera for video, a
+        joint group for joints."""
+        devices = self.channel_names if self.is_video else (self.group_name,)
+        return frozenset({self.name, *devices})
 
     @property
     def trace_keys(self) -> list[str]:
@@ -180,8 +184,14 @@ def build_stream_plans(
     depth_mode: DepthMode,
     joint_fps: int,
     video_fps: int,
+    joint_process_groups: int = 1,
 ) -> list[StreamPlan]:
-    """Decompose a workload into one stream per camera and per joint data type."""
+    """Decompose a workload into one stream per camera and per joint data type.
+
+    *joint_process_groups* splits the joints first, so one data type is written
+    by several streams. Split, a marker is named after its group, keeping every
+    stream's trace keys disjoint.
+    """
     return [
         *_per_camera_plans(STREAM_RGB, camera_name_list, video_fps),
         *_per_camera_plans(
@@ -190,13 +200,18 @@ def build_stream_plans(
         *(
             StreamPlan(
                 name=kind,
-                marker_name=marker_name_for(kind),
+                marker_name=marker_name_for(
+                    kind if joint_process_groups < 2 else f"{group_name}_{kind}"
+                ),
                 fps=joint_fps,
-                channel_names=tuple(joint_names),
+                channel_names=tuple(group_joint_names),
                 joint_kinds=(kind,),
+                group_name=group_name,
+            )
+            for group_name, group_joint_names in joint_name_groups(
+                joint_names, joint_process_groups
             )
             for kind in JOINT_KINDS
-            if joint_names
         ),
     ]
 
@@ -222,6 +237,7 @@ def build_synchronous_stream_plans(
         fps=joint_fps,
         channel_names=tuple(joint_names),
         joint_kinds=JOINT_KINDS,
+        group_name=joint_group_name(0),
     )
     video_plan = _bundled_camera_plan(STREAM_RGB, camera_name_list, video_fps)
     depth_plan = _bundled_camera_plan(
@@ -240,6 +256,7 @@ def stream_plans_for_case(
     joint_fps: int,
     video_fps: int,
     marker_name: str,
+    joint_process_groups: int = 1,
 ) -> list[StreamPlan]:
     """Every stream the producer for *producer_channels* will actually run."""
     if producer_channels == PRODUCER_SYNCHRONOUS:
@@ -263,6 +280,7 @@ def stream_plans_for_case(
         depth_mode=depth_mode,
         joint_fps=joint_fps,
         video_fps=video_fps,
+        joint_process_groups=joint_process_groups,
     )
 
 
@@ -275,6 +293,7 @@ def case_stream_plans(case: DataDaemonTestCase) -> list[StreamPlan]:
         depth_mode=case.depth_mode,
         joint_fps=case.joint_fps,
         video_fps=case.video_fps,
+        joint_process_groups=case.joint_process_groups,
     )
 
 
