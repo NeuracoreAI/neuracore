@@ -27,6 +27,7 @@ from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
     case_id,
+    case_timeout_seconds,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_TYPE_RGB_IMAGES,
@@ -408,7 +409,11 @@ def run_case_contexts(
     # A late writer is reaped during the wait below, so observe across it.
     with latching_trace_write_observer() as observed:
         results = _run_context_specs(case, specs)
-        wait_for_all_traces_written(results=results, observed=observed)
+        wait_for_all_traces_written(
+            results=results,
+            observed=observed,
+            timeout_s=case_timeout_seconds(case),
+        )
     return results
 
 
