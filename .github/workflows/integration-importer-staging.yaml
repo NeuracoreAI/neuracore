@@ -129,6 +129,13 @@ jobs:
           )
           pytest "${pytest_args[@]}" "tests/integration/importer/test_${{ matrix.suite }}_dataset_import.py"
 
+      - name: Upload data-daemon diagnostics
+        if: always()
+        continue-on-error: true
+        uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+        with:
+          artifact-name: importer-staging-${{ matrix.suite }}-py${{ matrix.python-version }}
+
       - name: Show disk space after tests
         if: always()
         run: df -h /
