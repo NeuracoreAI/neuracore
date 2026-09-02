@@ -49,7 +49,9 @@ jobs:
       - name: Resolve latest release tag
         id: release-tag
         run: |
-          latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          # Exclude alpha pre-releases (vX.Y.ZaNNN, from workflow_dispatch alpha
+          # builds off arbitrary branches) -- only real releases should be published.
+          latest_release_tag="$(git tag --list 'v*' --sort=-v:refname | grep -Ev 'a[0-9]+$' | head -n 1)"
           if [ -z "$latest_release_tag" ]; then
             echo "::error::No release tag matching v* found"
             exit 1
