@@ -18,6 +18,7 @@ from neuracore.core.robot import JointInfo
 from neuracore.importer.core.base import ImportItem, NeuracoreDatasetImporter
 from neuracore.importer.core.exceptions import ImportError
 from neuracore.importer.mcap.utils import (
+    H264StreamDecoder,
     build_topic_map,
     clip_depth,
     convert_decoded_mcap_data,
@@ -85,6 +86,9 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         self.topic_map = build_topic_map(dataset_config=dataset_config)
         self.mcap_files = self._discover_mcap_files(dataset_dir=self.dataset_dir)
         self._decoder_factories: list[DecoderFactory] | None = None
+        # Per-episode H.264 decoders, keyed by topic. Video streams are
+        # inter-frame, so each topic needs one decoder held for the whole file.
+        self._video_decoders: dict[str, H264StreamDecoder] = {}
         self._init_runtime_components()
 
         self.logger.info(
@@ -100,6 +104,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         # so runtime decoder state is never stored on the importer before forking.
         state = self.__dict__.copy()
         state["_decoder_factories"] = None
+        state["_video_decoders"] = {}
         return state
 
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -170,6 +175,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 topic_map=self.topic_map,
                 logger=self.logger,
                 timestamp=timestamp,
+                video_decoders=self._video_decoders,
             ):
                 self._log_data(
                     data_type=event.data_type,
@@ -192,6 +198,8 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         source_start_timestamp: float | None = None
         recording_stop_timestamp = recording_start_timestamp
         message_count = 0
+        # Fresh video decoders per episode: state must never carry across files.
+        self._video_decoders = {}
 
         with episode_file_path.open("rb") as stream:
             reader = make_reader(stream=stream, decoder_factories=factories)
@@ -244,7 +252,22 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             total_steps=total,
             episode_label=label,
         )
+        self._log_video_decoder_summary(label=label)
+        self._video_decoders = {}
         return message_count, recording_stop_timestamp
+
+    def _log_video_decoder_summary(self, label: str) -> None:
+        """Report frames dropped before each video stream's first keyframe."""
+        dropped = {
+            topic: decoder.skipped_before_keyframe
+            for topic, decoder in self._video_decoders.items()
+            if decoder.skipped_before_keyframe
+        }
+        if dropped:
+            self.logger.info(
+                f"{label}: dropped leading frames before the first keyframe "
+                f"per video topic: {dropped}"
+            )
 
     def _log_transformed_data(
         self,
