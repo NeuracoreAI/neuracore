@@ -179,7 +179,9 @@ def _emit_and_record(
 ) -> None:
     """Log one frame, recording everything the test can observe about the call."""
     # Read before the call, to distinguish a refused frame from an admitted one.
-    handle = request.robot.get_current_recording_id()
+    # The process-local handle, never the daemon's answer: this runs per frame,
+    # and controllers maintain it — see `recording_control`.
+    handle = request.robot._local_recording_handle
     emitted_at = time.time()
     deadline_breaches = emitter.emit(frame_index, timestamp)
     report.record(
