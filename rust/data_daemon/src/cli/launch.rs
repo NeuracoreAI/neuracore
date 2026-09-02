@@ -389,25 +389,31 @@ fn run_daemon(
             // the next periodic tick. Order is also load-bearing for
             // ordered shutdown: dropping the dispatcher first guarantees
             // no new `TraceWritten` lands while the coordinators drain.
-            let cloud_handles = if config_for_runtime.offline.unwrap_or(false) {
+            // Offline, and whenever no API client can be built, the dispatcher
+            // gets no notification stream: every recording is then one a
+            // producer brackets itself, which needs no backend at all.
+            let (cloud_handles, notifications_rx) = if config_for_runtime.offline.unwrap_or(false) {
                 tracing::info!("offline mode — skipping cloud coordinator spawn");
-                None
+                (None, None)
             } else {
                 match build_api_client(&api_url, &config_path) {
-                    Ok(api_client) => Some(spawn_cloud_coordinators(
-                        state_store.clone(),
-                        trace_write_handle.clone(),
-                        event_bus.clone(),
-                        api_client,
-                        Arc::new(recordings_root.clone()),
-                        config_path.clone(),
-                        org_id.clone(),
-                        shutdown_tx.clone(),
-                        config_rx.clone(),
-                    )),
+                    Ok(api_client) => {
+                        let (handles, notifications_rx) = spawn_cloud_coordinators(
+                            state_store.clone(),
+                            trace_write_handle.clone(),
+                            event_bus.clone(),
+                            api_client,
+                            Arc::new(recordings_root.clone()),
+                            config_path.clone(),
+                            org_id.clone(),
+                            shutdown_tx.clone(),
+                            config_rx.clone(),
+                        );
+                        (Some(handles), Some(notifications_rx))
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "failed to build API client; cloud uploads disabled");
-                        None
+                        (None, None)
                     }
                 }
             };
@@ -428,6 +434,7 @@ fn run_daemon(
             let dispatcher_context = DispatcherContext {
                 event_bus: Some(event_bus.clone()),
                 config_refresh_tx: Some(config_refresh_tx),
+                notifications_rx,
             };
             let (dispatcher_tx, dispatcher_handle) = dispatcher::spawn_with_context(
                 state_store.clone(),

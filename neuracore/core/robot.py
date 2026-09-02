@@ -346,6 +346,7 @@ class Robot:
         self,
         recording_id: str | None,
         timestamp: float | None = None,
+        notify_daemon: bool = True,
     ) -> None:
         """Stop all streams and send the recording-stopped IPC message to the daemon.
 
@@ -356,12 +357,16 @@ class Robot:
         after the barrier instead leaves it open for as long as the writer's
         backlog takes to drain (over a second under burst logging), publishing
         data the daemon has already stopped accepting and simply throws away.
+
+        ``notify_daemon=False`` drains without publishing the stop, for a stop
+        this process only heard about — see :meth:`_drain_for_remote_stop`.
         """
         try:
             self._stop_all_streams()
             context = self._get_daemon_recording_context()
             try:
-                context.stop_recording(timestamp=timestamp)
+                if notify_daemon:
+                    context.stop_recording(timestamp=timestamp)
             finally:
                 # Both run even if the notify failed.
                 self._close_local_recording_gate()
@@ -371,6 +376,20 @@ class Robot:
                 "Failed to stop streams and notify daemon for recording_id=%s",
                 recording_id,
             )
+
+    def _drain_for_remote_stop(self, recording_id: str | None) -> None:
+        """Drain for a stop this process learned about over the notification stream.
+
+        Everything local still happens — streams stop, the ``log_*`` gate
+        closes, and the writer's tail chunks are sealed and announced. The stop
+        itself is not published: this process is not the one that ended the
+        recording, and its notification arrives a network hop behind the event.
+        A stop names no recording on the wire, so the daemon would apply that
+        late publish to whatever window is live on arrival — with back-to-back
+        recordings, the *next* one, truncating it to the hop's latency. The
+        daemon reads the same stream and closes the named recording itself.
+        """
+        self._drain_streams_and_notify_daemon(recording_id, notify_daemon=False)
 
     def _close_local_recording_gate(self) -> None:
         """Clear the local recording handle that gates ``log_*`` forwarding."""
@@ -390,41 +409,9 @@ class Robot:
         manager.register_remote_stop_handler(
             robot_id=self.id,
             instance=self.instance,
-            callback=self._drain_streams_and_notify_daemon,
+            callback=self._drain_for_remote_stop,
         )
         self._recording_state_manager = manager
-
-    def _notify_daemon_of_remote_start(
-        self, recording_id: str, dataset_id: str, start_time: float
-    ) -> None:
-        """Open the daemon window for a recording started from the web frontend.
-
-        Args:
-            recording_id: The cloud recording id the backend already minted.
-            dataset_id: Dataset the recording is being saved to.
-            start_time: The recording's capture start time (Unix seconds).
-        """
-        if not self.id:
-            return
-        self._get_daemon_recording_context().start_recording(
-            robot_id=self.id,
-            robot_instance=self.instance,
-            robot_name=self.name,
-            dataset_id=dataset_id,
-            dataset_name=None,
-            timestamp=start_time,
-            cloud_recording_id=recording_id,
-        )
-
-    def _register_remote_start_handler(self) -> None:
-        """Register a callback to notify the daemon of a remote start."""
-        assert self.id is not None
-        manager = get_recording_state_manager()
-        manager.register_remote_start_handler(
-            robot_id=self.id,
-            instance=self.instance,
-            callback=self._notify_daemon_of_remote_start,
-        )
 
     def _stop_all_streams(self) -> None:
         """Stop recording on all data streams for this robot instance."""
@@ -832,7 +819,6 @@ class Robot:
         self._recording_state_manager = None
         if self.id is not None and manager is not None:
             manager.deregister_remote_stop_handler(self.id, self.instance)
-            manager.deregister_remote_start_handler(self.id, self.instance)
         if self._temp_dir is not None:
             self._temp_dir.cleanup()
             self._temp_dir = None

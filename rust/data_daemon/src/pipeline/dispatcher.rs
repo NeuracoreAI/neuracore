@@ -139,7 +139,10 @@ impl DispatcherHandle {
 }
 
 /// Optional runtime context passed to the dispatcher.
-#[derive(Clone, Default)]
+///
+/// Not `Clone`: `notifications_rx` is the single consumer of the notification
+/// stream, and the dispatcher is its only owner.
+#[derive(Default)]
 pub struct DispatcherContext {
     /// Daemon event bus, used to publish recording/trace lifecycle events.
     pub event_bus: Option<crate::state::EventBus>,
@@ -148,6 +151,52 @@ pub struct DispatcherContext {
     /// `None` in tests / when no watcher is wired, where `RefreshConfig` is a
     /// no-op.
     pub config_refresh_tx: Option<tokio::sync::mpsc::Sender<crate::cloud::ConfigRefreshRequest>>,
+    /// Backend recording lifecycle, read off the notification stream by
+    /// [`crate::cloud::spawn_recording_notifications`]. `None` offline and in
+    /// tests that drive the dispatcher over the IPC bus alone.
+    pub notifications_rx: Option<mpsc::Receiver<RecordingCommand>>,
+}
+
+/// A recording the backend reports open for a source no local producer has
+/// opened a window for yet.
+#[derive(Debug, Clone)]
+struct PendingRemoteRecording {
+    cloud_recording_id: String,
+    dataset_id: Option<String>,
+    /// The recording's start on the backend's record (Unix nanoseconds), used
+    /// as the window's lower bound so data published before this daemon heard
+    /// about the recording still lands inside it.
+    start_timestamp_ns: i64,
+}
+
+/// A recording lifecycle event the *backend* originated, delivered over the
+/// daemon's notification stream rather than the IPC bus.
+///
+/// Producers announce the recordings they open and close themselves; these
+/// carry the ones nobody local brackets — a window started or stopped from the
+/// web. They name their recording by cloud id, so unlike an IPC lifecycle
+/// envelope they are never applied to "whatever is live": a notification can
+/// trail the recording it describes by the length of a network hop, by which
+/// time the next recording may already be open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingCommand {
+    /// The backend minted a recording for this source. Noted as intent; the
+    /// window opens only once data proves the source is on this host.
+    Open {
+        cloud_recording_id: String,
+        robot_id: String,
+        robot_instance: i64,
+        dataset_id: Option<String>,
+        /// The recording's start on the backend's record (Unix nanoseconds).
+        start_timestamp_ns: i64,
+    },
+    /// The named recording ended. Closes its window if it still owns one.
+    Close {
+        cloud_recording_id: String,
+        /// When the daemon learned of the stop (Unix nanoseconds). Used as the
+        /// recording's `end_time` only when nothing local already stopped it.
+        observed_at_ns: i64,
+    },
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -332,6 +381,13 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// Recordings the backend reports open, keyed by source, that no local
+    /// producer has opened a window for. Held as *intent*: the notification
+    /// stream is org-wide, so it names robots on every host, and only data
+    /// arriving for a source proves the robot is on this one. The window (and
+    /// its row) is materialised on that first datum — see
+    /// [`Dispatcher::adopt_remote_recording`].
+    pending_remote: HashMap<Source, PendingRemoteRecording>,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -354,6 +410,7 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            pending_remote: HashMap::new(),
             last_housekeep: Instant::now(),
         }
     }
@@ -367,6 +424,10 @@ impl Dispatcher {
             holdback_ms = self.holdback.as_millis(),
             "dispatcher started"
         );
+        // Taken out of the context so the select! arm can borrow it mutably
+        // alongside `self`. A closed (or absent) stream leaves the arm
+        // permanently pending, which `select!` handles as "never ready".
+        let mut notifications_rx = self.context.notifications_rx.take();
 
         loop {
             // When there is in-flight work, poll frequently for due releases /
@@ -389,6 +450,26 @@ impl Dispatcher {
                         break;
                     };
                     self.handle_inbound(envelope, Instant::now()).await;
+                }
+                // The notification stream is a liveness input, not a
+                // correctness one: it going away leaves producer-driven
+                // recordings working exactly as before, so drop the arm rather
+                // than tearing the dispatcher down.
+                command = async {
+                    match notifications_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match command {
+                        Some(command) => {
+                            self.handle_recording_command(command, Instant::now()).await;
+                        }
+                        None => {
+                            tracing::debug!("recording notification stream closed");
+                            notifications_rx = None;
+                        }
+                    }
                 }
                 _ = sleep(housekeep_after) => {}
             }
@@ -762,6 +843,234 @@ impl Dispatcher {
         }
     }
 
+    /// Apply one backend-originated recording lifecycle event.
+    ///
+    /// Both arms are keyed on the cloud recording id, so neither can act on a
+    /// recording other than the one the backend named. That is the whole point
+    /// of routing these here rather than as IPC lifecycle envelopes: a
+    /// notification arrives a network hop behind the event it describes, and
+    /// back-to-back recordings mean the window that is *live* on arrival is
+    /// routinely the successor of the one being described.
+    async fn handle_recording_command(&mut self, command: RecordingCommand, recv_at: Instant) {
+        match command {
+            RecordingCommand::Open {
+                cloud_recording_id,
+                robot_id,
+                robot_instance,
+                dataset_id,
+                start_timestamp_ns,
+            } => {
+                self.handle_remote_open(
+                    (robot_id, robot_instance),
+                    cloud_recording_id,
+                    dataset_id,
+                    start_timestamp_ns,
+                )
+                .await;
+            }
+            RecordingCommand::Close {
+                cloud_recording_id,
+                observed_at_ns,
+            } => {
+                self.handle_remote_close(cloud_recording_id, observed_at_ns, recv_at)
+                    .await;
+            }
+        }
+    }
+
+    /// Note a recording the backend started, without opening anything yet.
+    ///
+    /// The notification stream is org-wide: it names every robot in the
+    /// organisation, most of which are not on this host. Nothing here can tell
+    /// them apart — producers announce themselves to the daemon only by sending
+    /// data — so opening a window on the notification alone would mint rows for
+    /// other machines' recordings. The recording is held as intent instead and
+    /// adopted by [`Dispatcher::adopt_remote_recording`] when data actually
+    /// arrives for the source, which is the proof of locality the stream cannot
+    /// give.
+    ///
+    /// A recording some local process already opened needs nothing: it has a
+    /// window and a row, and this notification is that start echoing back.
+    async fn handle_remote_open(
+        &mut self,
+        source: Source,
+        cloud_recording_id: String,
+        dataset_id: Option<String>,
+        start_timestamp_ns: i64,
+    ) {
+        match self
+            .store
+            .recording_index_for_cloud_id(&cloud_recording_id)
+            .await
+        {
+            Ok(Some(existing_index)) => {
+                tracing::debug!(
+                    recording_index = existing_index,
+                    cloud_recording_id,
+                    robot_id = source.0,
+                    "recording already open for this cloud id; ignoring notification"
+                );
+                return;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    cloud_recording_id,
+                    robot_id = source.0,
+                    "failed to check for an existing recording; ignoring notification"
+                );
+                return;
+            }
+        }
+
+        tracing::debug!(
+            cloud_recording_id,
+            robot_id = source.0,
+            "backend reports a recording open; awaiting local data to adopt it"
+        );
+        self.pending_remote.insert(
+            source,
+            PendingRemoteRecording {
+                cloud_recording_id,
+                dataset_id,
+                start_timestamp_ns,
+            },
+        );
+    }
+
+    /// Open a window for a pending backend recording now that `source` has
+    /// proved local by publishing at `publish_ts`.
+    ///
+    /// The window's lower bound is the recording's own start rather than the
+    /// moment this datum arrived, so everything the producer published between
+    /// its gate opening and now lands inside. It is clamped to `publish_ts`
+    /// because a bound after the datum that triggered the adoption would
+    /// exclude it, and floored at any still-open predecessor's close so an
+    /// early bound cannot reach back and steal the previous recording's tail.
+    async fn adopt_remote_recording(&mut self, source: &Source, publish_ts: i64) {
+        let Some(pending) = self.pending_remote.remove(source) else {
+            return;
+        };
+        // A source with a live window has a producer bracketing its own
+        // recordings, so there is nothing here to adopt. The intent is dropped
+        // rather than kept: this notification described that same recording,
+        // reaching the daemon before its own `/recording/start` response
+        // stamped the row with the cloud id. Adopting it would open a second
+        // window for one recording and retire the producer's, truncating it to
+        // the round trip.
+        if self
+            .windows
+            .get(source)
+            .is_some_and(|entry| entry.live.is_some())
+        {
+            tracing::debug!(
+                cloud_recording_id = pending.cloud_recording_id,
+                robot_id = source.0,
+                "source already has a live window; not adopting"
+            );
+            return;
+        }
+        let mut window_open_ns = pending.start_timestamp_ns.min(publish_ts);
+        if let Some(entry) = self.windows.get(source) {
+            let predecessor_close_ns = entry
+                .closing
+                .iter()
+                .filter_map(|window| window.stopped_at_ns)
+                .max();
+            if let Some(predecessor_close_ns) = predecessor_close_ns {
+                window_open_ns = window_open_ns.max(predecessor_close_ns);
+            }
+        }
+        tracing::info!(
+            cloud_recording_id = pending.cloud_recording_id,
+            robot_id = source.0,
+            "adopting a backend-started recording for a source publishing here"
+        );
+        self.handle_start(
+            source.clone(),
+            pending.dataset_id,
+            Some(pending.cloud_recording_id),
+            window_open_ns,
+            pending.start_timestamp_ns,
+            Instant::now(),
+        )
+        .await;
+    }
+
+    /// Close the window the named recording owns, if it still owns one.
+    ///
+    /// A recording that already stopped needs nothing: the stop that closed it
+    /// carried a capture timestamp from the process that made it, which is
+    /// closer to the truth than this notification's arrival time.
+    async fn handle_remote_close(
+        &mut self,
+        cloud_recording_id: String,
+        observed_at_ns: i64,
+        recv_at: Instant,
+    ) {
+        // Drop any intent for this recording first: a recording that stopped
+        // before any local data arrived was never this host's to adopt, and
+        // leaving it pending would let a later datum open a window for a
+        // recording the backend has already closed.
+        self.pending_remote
+            .retain(|_, pending| pending.cloud_recording_id != cloud_recording_id);
+
+        let recording_index = match self
+            .store
+            .recording_index_for_cloud_id(&cloud_recording_id)
+            .await
+        {
+            Ok(Some(index)) => index,
+            Ok(None) => {
+                tracing::debug!(
+                    cloud_recording_id,
+                    "notification names a recording this daemon has no row for; ignoring"
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    cloud_recording_id,
+                    "failed to resolve the recording a notification names; ignoring"
+                );
+                return;
+            }
+        };
+
+        let Some((source, _)) = self
+            .windows
+            .iter()
+            .find(|(_, entry)| {
+                entry
+                    .live
+                    .as_ref()
+                    .is_some_and(|window| window.recording_index == recording_index)
+            })
+            .map(|(source, entry)| (source.clone(), entry))
+        else {
+            tracing::debug!(
+                recording_index,
+                cloud_recording_id,
+                "notification names a recording that owns no live window; ignoring"
+            );
+            return;
+        };
+
+        tracing::info!(
+            recording_index,
+            cloud_recording_id,
+            robot_id = source.0,
+            "closing a recording the backend reported stopped"
+        );
+        // The window closes on the publish clock, exactly as a producer stop
+        // closes it; `observed_at_ns` is this daemon's own wall clock, the same
+        // clock producers stamp their publishes on.
+        self.handle_stop(source, observed_at_ns, observed_at_ns, recv_at)
+            .await;
+    }
+
     async fn handle_stop(
         &mut self,
         source: Source,
@@ -1094,6 +1403,13 @@ impl Dispatcher {
     /// `publish_timestamp_ns` as the membership key.
     async fn route(&mut self, held: Held) {
         let publish_ts = held.publish_timestamp_ns;
+        // Data arriving for a source the backend says is recording is the proof
+        // of locality the org-wide notification stream cannot give, so this is
+        // where a backend-started recording becomes a real window. No-op for
+        // every source without one pending, which is the overwhelming majority.
+        if !self.pending_remote.is_empty() {
+            self.adopt_remote_recording(&held.source, publish_ts).await;
+        }
         match held.payload {
             HeldPayload::Data {
                 data_type,
@@ -1761,6 +2077,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: Some(refresh_tx),
+            notifications_rx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1800,6 +2117,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1825,6 +2143,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1930,6 +2249,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2547,6 +2867,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2600,6 +2921,7 @@ mod tests {
             DispatcherContext {
                 event_bus: Some(bus.clone()),
                 config_refresh_tx: None,
+                notifications_rx: None,
             },
         );
 

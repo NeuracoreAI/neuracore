@@ -14,10 +14,12 @@ use crate::api::auth::FileAuthProvider;
 use crate::api::client::{ApiClient, ApiClientOptions};
 use crate::cloud::{
     spawn_org_watcher, spawn_progress_reporter, spawn_recording_cancel_notifier,
-    spawn_recording_start_notifier, spawn_recording_stop_notifier, spawn_registration,
-    spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle, StatusUpdate,
+    spawn_recording_notifications, spawn_recording_start_notifier, spawn_recording_stop_notifier,
+    spawn_registration, spawn_status_updater, spawn_uploader, ConfigRx, OrgWatcherHandle,
+    RecordingNotificationsHandle, StatusUpdate,
 };
 use crate::connection::spawn_connection_monitor;
+use crate::pipeline::dispatcher::RecordingCommand;
 use crate::state::{EventBus, SqliteStateStore, TraceWriteHandle};
 
 /// Bundle of handles for the cloud coordinators.
@@ -31,6 +33,7 @@ pub(crate) struct CloudHandles {
     recording_start: crate::cloud::NotifierHandle,
     recording_stop: crate::cloud::NotifierHandle,
     recording_cancel: crate::cloud::NotifierHandle,
+    recording_notifications: RecordingNotificationsHandle,
 }
 
 impl CloudHandles {
@@ -48,6 +51,7 @@ impl CloudHandles {
         self.recording_start.join().await;
         self.recording_stop.join().await;
         self.recording_cancel.join().await;
+        self.recording_notifications.join().await;
     }
 }
 
@@ -72,7 +76,7 @@ pub(crate) fn spawn_cloud_coordinators(
     fallback_org_id: Option<String>,
     shutdown_tx: crate::lifecycle::shutdown::ShutdownBroadcaster,
     config_rx: ConfigRx,
-) -> CloudHandles {
+) -> (CloudHandles, tokio::sync::mpsc::Receiver<RecordingCommand>) {
     let (status_tx, status_rx) = tokio::sync::mpsc::unbounded_channel::<StatusUpdate>();
     // Watch the SDK config for the current org; every coordinator reads the
     // live value at the moment it POSTs rather than a value frozen onto the
@@ -138,19 +142,28 @@ pub(crate) fn spawn_cloud_coordinators(
         state_store,
         event_bus,
         Arc::clone(&client),
-        org_rx,
+        org_rx.clone(),
         shutdown_tx.subscribe(),
     );
+    // The one coordinator that feeds the dispatcher rather than the backend:
+    // it carries the recordings nobody local brackets (see
+    // `cloud::watchers::recording_notifications`).
+    let (notifications_rx, recording_notifications) =
+        spawn_recording_notifications(client, org_rx, shutdown_tx.subscribe());
 
-    CloudHandles {
-        connection,
-        org_watcher,
-        registration,
-        uploader,
-        status,
-        progress,
-        recording_start,
-        recording_stop,
-        recording_cancel,
-    }
+    (
+        CloudHandles {
+            connection,
+            org_watcher,
+            registration,
+            uploader,
+            status,
+            progress,
+            recording_start,
+            recording_stop,
+            recording_cancel,
+            recording_notifications,
+        },
+        notifications_rx,
+    )
 }

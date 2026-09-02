@@ -55,12 +55,10 @@ class TrackedRecording(NamedTuple):
             backend reports in ``RecordingStartPayload.start_time``. Orders
             notifications against each other: one describing a recording that
             began earlier than this belongs to an already-finished recording.
-        opened_locally: Whether the recording was started by the local client
     """
 
     recording_id: str
     start_time: float
-    opened_locally: bool
 
 
 def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
@@ -141,9 +139,6 @@ class RecordingStateManager(BaseSSEConsumer):
         self._recording_timers: dict[str, list[asyncio.TimerHandle]] = {}
         self.active_dataset_ids: dict[RobotInstanceIdentifier, str] = {}
         self._drain_callbacks: dict[RobotInstanceIdentifier, Callable[[str], None]] = {}
-        self._start_callbacks: dict[
-            RobotInstanceIdentifier, Callable[[str, str, float], None]
-        ] = {}
 
         self._logout_listener = self._on_logout
         self.auth.once(Auth.LOGOUT_EVENT, self._logout_listener)
@@ -181,7 +176,6 @@ class RecordingStateManager(BaseSSEConsumer):
             self._expired_recording_ids.clear()
             self.active_dataset_ids.clear()
             self._drain_callbacks.clear()
-            self._start_callbacks.clear()
             self._connected_robot_id = None
 
         if not self.loop.is_closed():
@@ -286,7 +280,6 @@ class RecordingStateManager(BaseSSEConsumer):
                 instance=instance,
                 recording_id=recording_id,
                 start_time=start_time,
-                opened_locally=True,
             )
         # After the state is visible, and outside the lock: this normally takes
         # a few milliseconds of filesystem work, which is long enough for a
@@ -312,7 +305,6 @@ class RecordingStateManager(BaseSSEConsumer):
         instance: int,
         recording_id: str,
         start_time: float,
-        opened_locally: bool,
     ) -> None:
         """Make ``recording_id`` this instance's tracked recording.
 
@@ -331,7 +323,6 @@ class RecordingStateManager(BaseSSEConsumer):
         self.recording_robot_instances[instance_key] = TrackedRecording(
             recording_id=recording_id,
             start_time=start_time,
-            opened_locally=opened_locally,
         )
         if previous_recording_id is not None:
             self._cancel_recording_timers(previous_recording_id)
@@ -503,20 +494,14 @@ class RecordingStateManager(BaseSSEConsumer):
                 recording_id,
             )
 
-            # Only open the window if no one else has already.
-            opened_locally = previous is not None and previous.opened_locally
-            if not opened_locally:
-                start_callback = self._start_callbacks.get(instance_key)
-                if start_callback is not None:
-                    start_callback(recording_id, dataset_id, details.start_time)
-                opened_locally = True
-
+            # Nothing to open: the daemon reads this same stream and opens the
+            # window itself, by recording id. This only has to make the
+            # recording visible to `log_*` and `is_recording`.
             self._track_recording_started(
                 robot_id=robot_id,
                 instance=instance,
                 recording_id=recording_id,
                 start_time=details.start_time,
-                opened_locally=opened_locally,
             )
         else:
             if previous_recording_id != recording_id:
@@ -555,21 +540,6 @@ class RecordingStateManager(BaseSSEConsumer):
         """Remove the drain callback for a robot instance."""
         key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
         self._drain_callbacks.pop(key, None)
-
-    def register_remote_start_handler(
-        self,
-        robot_id: str,
-        instance: int,
-        callback: Callable[[str, str, float], None],
-    ) -> None:
-        """Register a callback to open the daemon window for a web-initiated start."""
-        key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
-        self._start_callbacks[key] = callback
-
-    def deregister_remote_start_handler(self, robot_id: str, instance: int) -> None:
-        """Remove the remote-start callback for a robot instance."""
-        key = RobotInstanceIdentifier(robot_id=robot_id, robot_instance=instance)
-        self._start_callbacks.pop(key, None)
 
     def get_sse_client_config(self) -> EventSourceConfig:
         """Used to configure the event client to consume events from the server.
