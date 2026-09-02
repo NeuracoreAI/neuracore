@@ -15,3 +15,8 @@ Example: "This release adds support for multi-GPU training and improves streamin
 existing x86_64 and macOS ones, so pinning an exact version
 (`pip install neuracore==<version>`) works on 64-bit Arm Linux instead of
 resolving back to the last pure-Python release.
+
+Live-stream tracks are now registered with the server in one request for each
+group of sensors, instead of one request for each track. A robot that starts
+many sensors becomes visible to viewers sooner and puts much less load on the
+signalling service.
