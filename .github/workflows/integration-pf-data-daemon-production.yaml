@@ -96,7 +96,15 @@ jobs:
         tests/integration/platform/data_daemon/behavioural_correctness/
         tests/integration/platform/data_daemon/data_integrity/
 
+    - name: Upload data-daemon diagnostics
+      if: always()
+      continue-on-error: true
+      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      with:
+        artifact-name: data-daemon-production-functional-py${{ matrix.python-version }}
+
     - name: Show disk space after tests
+      if: always()
       run: df -h /
 
   performance:
@@ -156,5 +164,14 @@ jobs:
         --import-mode=importlib
         tests/integration/platform/data_daemon/performance/
 
+    - name: Upload data-daemon diagnostics and analytics
+      if: always()
+      continue-on-error: true
+      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      with:
+        artifact-name: data-daemon-production-performance-py${{ matrix.python-version }}
+        additional-paths: ${{ runner.temp }}/ncd-perf-events.jsonl
+
     - name: Show disk space after tests
+      if: always()
       run: df -h /

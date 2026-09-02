@@ -57,12 +57,15 @@ The command prints the exact output directory. Open
 The run directory also retains `daemon-phase-events.jsonl`, `pytest.log`, the
 daemon's `daemon.log`, JUnit XML, and one metrics JSON file per test case.
 
-The staging data-daemon workflow enables capture on scheduled runs and uploads
-`data-daemon-staging-<os>-py<version>-attempt<n>.html` directly from each matrix
-job. The unarchived artifact contains only the self-contained report and is
-linked from the job summary, so it can be downloaded and opened directly in a
-browser. Manual workflow dispatches expose a **performance-metrics** checkbox
-to turn capture off while still producing the standard Allure report.
+The staging data-daemon workflow enables capture on scheduled runs and publishes
+two artifacts from each matrix job. The unarchived HTML artifact contains only
+the self-contained report and can be opened directly in a browser. The
+diagnostics artifact contains the daemon logs and SQLite state that exist after
+pytest, along with the configured Allure results/report, JUnit XML, metrics JSON,
+and structured phase events. It uses explicit paths and does not upload raw
+recordings. Both artifacts are linked from the job summary and retained for 14
+days. Manual workflow dispatches expose a **performance-metrics** checkbox to
+turn structured capture off while still producing the standard Allure report.
 
 Phase totals sum per-trace work. Traces execute concurrently, so those totals
 can exceed wall time; use the exact timeline and maximum duration to find the

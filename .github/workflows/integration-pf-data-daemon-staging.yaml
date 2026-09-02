@@ -117,6 +117,7 @@ jobs:
 
     - name: Generate Allure performance report
       if: always()
+      continue-on-error: true
       run: |
         if find "$NCD_PERF_REPORT_DIR/allure-results" -type f -print -quit | grep -q .; then
           npx --yes allure@3.14.3 awesome \
@@ -134,8 +135,10 @@ jobs:
     - name: Upload HTML performance report
       id: upload-performance-report
       if: always()
+      continue-on-error: true
       uses: actions/upload-artifact@v7
       with:
+        name: data-daemon-staging-functional-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
         path: ${{ env.NCD_PERF_REPORT_HTML }}
         archive: false
         if-no-files-found: warn
@@ -143,6 +146,7 @@ jobs:
 
     - name: Add performance report to job summary
       if: always() && steps.upload-performance-report.outputs.artifact-url != ''
+      continue-on-error: true
       env:
         REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
       run: |
@@ -153,6 +157,19 @@ jobs:
           echo
           echo "Download the HTML file and open it directly in a browser."
         } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload data-daemon diagnostics and analytics
+      if: always()
+      continue-on-error: true
+      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      with:
+        artifact-name: data-daemon-staging-functional-py${{ matrix.python-version }}
+        additional-paths: |
+          ${{ env.NCD_PERF_REPORT_DIR }}/allure-results
+          ${{ env.NCD_PERF_REPORT_DIR }}/allure-report
+          ${{ env.NCD_PERF_REPORT_DIR }}/junit.xml
+          ${{ env.NCD_PERF_REPORT_DIR }}/metrics
+          ${{ env.NCD_PERF_EVENTS_PATH }}
 
     - name: Show disk space after tests
       if: always()
@@ -229,6 +246,7 @@ jobs:
 
     - name: Generate Allure performance report
       if: always()
+      continue-on-error: true
       run: |
         if find "$NCD_PERF_REPORT_DIR/allure-results" -type f -print -quit | grep -q .; then
           npx --yes allure@3.14.3 awesome \
@@ -246,8 +264,10 @@ jobs:
     - name: Upload HTML performance report
       id: upload-performance-report
       if: always()
+      continue-on-error: true
       uses: actions/upload-artifact@v7
       with:
+        name: data-daemon-staging-performance-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
         path: ${{ env.NCD_PERF_REPORT_HTML }}
         archive: false
         if-no-files-found: warn
@@ -255,6 +275,7 @@ jobs:
 
     - name: Add performance report to job summary
       if: always() && steps.upload-performance-report.outputs.artifact-url != ''
+      continue-on-error: true
       env:
         REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
       run: |
@@ -265,6 +286,19 @@ jobs:
           echo
           echo "Download the HTML file and open it directly in a browser."
         } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload data-daemon diagnostics and analytics
+      if: always()
+      continue-on-error: true
+      uses: NeuracoreAI/shared-workflows/actions/upload-data-daemon-diagnostics@main
+      with:
+        artifact-name: data-daemon-staging-performance-py${{ matrix.python-version }}
+        additional-paths: |
+          ${{ env.NCD_PERF_REPORT_DIR }}/allure-results
+          ${{ env.NCD_PERF_REPORT_DIR }}/allure-report
+          ${{ env.NCD_PERF_REPORT_DIR }}/junit.xml
+          ${{ env.NCD_PERF_REPORT_DIR }}/metrics
+          ${{ env.NCD_PERF_EVENTS_PATH }}
 
     - name: Show disk space after tests
       if: always()
