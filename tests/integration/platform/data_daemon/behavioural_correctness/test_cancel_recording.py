@@ -1,7 +1,7 @@
 """Behavioural correctness tests for cancel-recording flows.
 
 Verifies that cancelling a recording discards all logged data, and that a
-valid recording can follow immediately after a cancelled one.
+valid recording survives a cancel either side of it.
 """
 
 from __future__ import annotations
@@ -59,7 +59,6 @@ _CASES = DataDaemonTestBatch(
             video_count=1,
             image_width=64,
             image_height=64,
-            wait=True,
         ),
         Synchronous(
             duration_sec=5,
@@ -149,20 +148,28 @@ def test_cancel_recording_produces_no_data(
 
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
 @pytest.mark.parametrize("gap_s", [0, 10], ids=["no_gap", "10s_gap"])
-def test_cancel_then_start_new_recording(
+def test_cancel_either_side_of_a_valid_recording(
     gap_s: int,
     case: DataDaemonTestCase,
     clear_daemon_timer_stats,
     request: pytest.FixtureRequest,
     test_wall_timer: Callable[[], float],
 ) -> None:
-    """Verify a valid recording succeeds after cancelling a prior one.
+    """Verify a cancel discards its own window and neither of its neighbours.
 
     Two variants are tested: resuming immediately (gap_s=0) and after a 10s
     pause (gap_s=10) to cover both tight and relaxed timing paths. Under split
     control this is the sharper of the two cancel tests: a successor window
     opens right behind a cancelled one, which is exactly the shape that lets an
     unqualified control call reach the wrong recording.
+
+    A third window is then opened and cancelled behind the valid recording.
+    Stopping a recording does not finish it: the daemon retains its window while
+    the tail of its data drains, and a cancel arriving in that interval names
+    only the recording in progress. So the valid one must come through whole —
+    every frame, not merely present in the dataset — while the cancelled window
+    leaves nothing behind. That window logs nothing: an empty one is destroyed
+    exactly like a full one.
     """
     if not has_configured_org():
         pytest.skip(
@@ -223,6 +230,11 @@ def test_cancel_then_start_new_recording(
 
                 closed = controller.close(time.time())
                 wall_stopped_at = closed.settled_at
+
+                # --- cancelled window behind the valid recording ---
+                controller.open(time.time())
+                assert robot.get_current_recording_id() is not None
+                controller.cancel(time.time())
 
                 results = [
                     ContextResult(
