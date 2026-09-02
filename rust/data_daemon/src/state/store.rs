@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use data_daemon_shared::LiveRecording;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -309,6 +310,24 @@ pub trait StateStore: Send + Sync {
         robot_instance: i64,
         start_timestamp_ns: i64,
     ) -> Result<Option<String>, StateStoreError>;
+
+    /// The recording currently open for `(robot_id, robot_instance)`, if any.
+    ///
+    /// Backs the `recording_state` IPC service. "Open" is the absence of a
+    /// terminal stamp — `stopped_at` and `cancelled_at` both NULL — which is
+    /// true whichever way the recording began: a producer's own
+    /// `StartRecording`, or the backend notification the daemon adopted. That
+    /// is the point: an SDK process asking this gets the same answer for a
+    /// recording it started itself and one started from the web.
+    ///
+    /// A source has at most one such row in practice, but the newest wins
+    /// rather than erroring, so a row left unstamped by an earlier crash
+    /// cannot mask the live recording behind it.
+    async fn live_recording_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+    ) -> Result<Option<LiveRecording>, StateStoreError>;
 
     /// Atomically transition `progress_reported` for `recording_id`.
     ///
@@ -1340,6 +1359,30 @@ impl StateStore for SqliteStateStore {
         Ok(recording_id.flatten())
     }
 
+    async fn live_recording_for_source(
+        &self,
+        robot_id: &str,
+        robot_instance: i64,
+    ) -> Result<Option<LiveRecording>, StateStoreError> {
+        let row = sqlx::query_as::<_, (i64, Option<String>, Option<i64>)>(
+            "SELECT recording_index, recording_id, start_timestamp_ns FROM recordings \
+              WHERE robot_id = ?1 AND robot_instance = ?2 \
+                AND stopped_at IS NULL AND cancelled_at IS NULL \
+           ORDER BY recording_index DESC LIMIT 1",
+        )
+        .bind(robot_id)
+        .bind(robot_instance)
+        .fetch_optional(&self.read_pool)
+        .await?;
+        Ok(row.map(
+            |(recording_index, recording_id, start_timestamp_ns)| LiveRecording {
+                recording_index,
+                recording_id,
+                start_timestamp_ns,
+            },
+        ))
+    }
+
     async fn mark_recording_stop_notified(
         &self,
         recording_index: i64,
@@ -1668,6 +1711,86 @@ mod tests {
             .await
             .expect("create_recording")
             .recording_index
+    }
+
+    #[tokio::test]
+    async fn live_recording_is_the_source_s_unstamped_row() {
+        let (store, _tempdir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
+
+        // Local-only: the row exists before any cloud id is minted, and the
+        // SDK must still see the recording as live.
+        let live = store
+            .live_recording_for_source("robot-1", 0)
+            .await
+            .expect("query")
+            .expect("a live recording");
+        assert_eq!(live.recording_index, recording_index);
+        assert_eq!(live.recording_id, None);
+        assert_eq!(live.start_timestamp_ns, Some(1_700_000_000_000_000_000));
+
+        // Another instance of the same robot is a different source.
+        assert!(store
+            .live_recording_for_source("robot-1", 1)
+            .await
+            .expect("query")
+            .is_none());
+
+        store
+            .mark_recording_start_notified(recording_index, "cloud-1")
+            .await
+            .expect("notify start");
+        assert_eq!(
+            store
+                .live_recording_for_source("robot-1", 0)
+                .await
+                .expect("query")
+                .expect("still live")
+                .recording_id,
+            Some("cloud-1".to_string())
+        );
+
+        // A stop is what ends it — that transition is the edge the SDK drains
+        // and seals its tail chunks on.
+        store
+            .mark_recording_stopped(recording_index, 1_700_000_006_000_000_000)
+            .await
+            .expect("stop");
+        assert!(store
+            .live_recording_for_source("robot-1", 0)
+            .await
+            .expect("query")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recording_is_not_live_and_does_not_mask_its_successor() {
+        let (store, _tempdir) = open_store().await;
+        let cancelled = seed_recording(&store, 0).await;
+        store
+            .cancel_recording(cancelled, 1_700_000_001_000_000_000)
+            .await
+            .expect("cancel");
+        assert!(store
+            .live_recording_for_source("robot-1", 0)
+            .await
+            .expect("query")
+            .is_none());
+
+        // A row left unstamped by an earlier crash must not hide the recording
+        // that came after it: newest wins.
+        let stranded = seed_recording(&store, 0).await;
+        let successor = seed_recording(&store, 0).await;
+        assert_ne!(stranded, successor);
+        assert_eq!(
+            store
+                .live_recording_for_source("robot-1", 0)
+                .await
+                .expect("query")
+                .expect("a live recording")
+                .recording_index,
+            successor
+        );
     }
 
     #[tokio::test]

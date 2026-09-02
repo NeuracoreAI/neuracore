@@ -84,6 +84,26 @@ const HOLDBACK_ENV: &str = "NCD_HOLDBACK_MS";
 /// [`Envelope::SourceFlushed`] marker before being evicted anyway.
 const FLUSH_MARKER_WAIT_CAP: Duration = Duration::from_secs(30);
 
+/// How long a source must publish nothing at all before a stopped window owed
+/// a flush marker settles on that silence instead.
+///
+/// A recording ended from the web is closed here, from the notification stream
+/// — no local process publishes the stop, so none publishes a
+/// [`Envelope::SourceFlushed`] either, and the window would sit out the whole
+/// [`FLUSH_MARKER_WAIT_CAP`] waiting for a marker that is never coming.
+///
+/// Silence is the substitute proof. The producer's writer seals any chunk whose
+/// stream has gone quiet after
+/// [`VIDEO_CHUNK_MAX_OPEN_NS`](data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS),
+/// on a 250 ms sweep, and the announcement rides the holdback in. A source that
+/// has published *nothing* — no data, no chunk announcement — for longer than
+/// all of that put together has nothing left buffered for this window. The
+/// margin is deliberately generous: settling early drops a tail chunk, while
+/// settling late only delays the recording.
+const PRODUCER_QUIET_SETTLE: Duration = Duration::from_nanos(
+    data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS as u64 + 3_000_000_000,
+);
+
 /// A source silent (no data, no lifecycle) for this long has its open window
 /// force-closed as a crash backstop, so a producer that died without a Stop
 /// still finalises (or is swept). Distinct from the restart sweep, which
@@ -279,13 +299,25 @@ impl ActiveWindow {
     }
 
     /// Time elapsed since stop once this window may be evicted: retention has
-    /// passed *and* either every owed flush marker is in or
-    /// [`FLUSH_MARKER_WAIT_CAP`] has expired. `None` while it must be kept.
-    fn eviction_elapsed(&self, now: Instant, retention: Duration) -> Option<Duration> {
+    /// passed *and* the flush is settled. `None` while it must be kept.
+    ///
+    /// A flush settles three ways — every owed marker is in, the source has
+    /// been silent long enough that no marker can still be owed
+    /// ([`PRODUCER_QUIET_SETTLE`], measured by `source_quiet_for`), or the
+    /// window has waited out [`FLUSH_MARKER_WAIT_CAP`]. The middle one is what
+    /// keeps a recording ended from the web — which no producer stops, so none
+    /// flushes — from being held for the full cap.
+    fn eviction_elapsed(
+        &self,
+        now: Instant,
+        retention: Duration,
+        source_quiet_for: Option<Duration>,
+    ) -> Option<Duration> {
         let since_stop = self.stop_recv_at.map(|at| now.duration_since(at))?;
         let retained = since_stop >= retention;
         let flush_settled = !self.awaiting_flush
             || self.flush_markers_settled()
+            || source_quiet_for.is_some_and(|quiet| quiet >= PRODUCER_QUIET_SETTLE)
             || since_stop >= FLUSH_MARKER_WAIT_CAP;
         (retained && flush_settled).then_some(since_stop)
     }
@@ -1293,8 +1325,10 @@ impl Dispatcher {
         let mut closing_actors: Vec<TraceHandle> = Vec::new();
         let mut empty_sources: Vec<Source> = Vec::new();
         for (source, entry) in self.windows.iter_mut() {
+            let source_quiet_for = entry.last_seen.map(|at| now.duration_since(at));
             entry.closing.retain_mut(|window| {
-                let Some(elapsed) = window.eviction_elapsed(now, retention) else {
+                let Some(elapsed) = window.eviction_elapsed(now, retention, source_quiet_for)
+                else {
                     return true;
                 };
                 Self::finish_eviction(source, window, elapsed, retention, &mut closing_actors);
@@ -2506,6 +2540,68 @@ mod tests {
                 .all(|window| window.flush_markers_settled()),
             "both windows the producer's chunk reached must be settled by its \
              single marker"
+        );
+    }
+
+    /// A window stopped `stopped_ago` ago, still owed a marker from producer 7.
+    fn window_awaiting_a_flush(now: Instant, stopped_ago: Duration) -> ActiveWindow {
+        let mut window = test_window(1, 100);
+        window.stopped_at_ns = Some(150);
+        window.stop_recv_at = Some(now - stopped_ago);
+        window.awaiting_flush = true;
+        window.video_producers.insert(7);
+        window
+    }
+
+    #[test]
+    fn a_silent_source_settles_a_window_no_producer_will_flush() {
+        // A recording ended from the web is closed by the notification watcher.
+        // No local process publishes the stop, so none publishes a flush marker
+        // either — without the silence rule the window sits out the full
+        // 30-second cap before the recording can finalise.
+        let now = Instant::now();
+        let retention = Duration::from_secs(1);
+        let window = window_awaiting_a_flush(now, Duration::from_secs(2));
+
+        assert_eq!(
+            window.eviction_elapsed(now, retention, Some(PRODUCER_QUIET_SETTLE)),
+            Some(Duration::from_secs(2)),
+            "a source silent past the producer's own seal deadline has nothing \
+             left to send for this window"
+        );
+    }
+
+    #[test]
+    fn a_source_still_publishing_keeps_its_window_until_the_cap() {
+        // Silence is the whole proof. A source still publishing may be about to
+        // seal the chunk that carries this window's tail, so retiring on
+        // anything short of the cap would drop it as an orphan.
+        let now = Instant::now();
+        let retention = Duration::from_secs(1);
+        let window = window_awaiting_a_flush(now, Duration::from_secs(2));
+
+        assert_eq!(
+            window.eviction_elapsed(now, retention, Some(Duration::from_millis(10))),
+            None
+        );
+        assert_eq!(window.eviction_elapsed(now, retention, None), None);
+
+        // The cap still ends the wait for a source that never goes quiet.
+        let capped = window_awaiting_a_flush(now, FLUSH_MARKER_WAIT_CAP);
+        assert!(capped
+            .eviction_elapsed(now, retention, Some(Duration::from_millis(10)))
+            .is_some());
+    }
+
+    #[test]
+    fn silence_does_not_shortcut_the_retention_a_window_still_owes() {
+        // The two gates are independent: settling the flush says no more data is
+        // coming, not that the holdback has drained.
+        let now = Instant::now();
+        let window = window_awaiting_a_flush(now, Duration::from_millis(100));
+        assert_eq!(
+            window.eviction_elapsed(now, Duration::from_secs(1), Some(PRODUCER_QUIET_SETTLE)),
+            None
         );
     }
 
