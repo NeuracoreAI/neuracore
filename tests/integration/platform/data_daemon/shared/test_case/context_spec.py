@@ -86,6 +86,7 @@ class ContextCaseSpec:
     producer_pacing: str
     producer_process_streams: tuple[tuple[str, ...], ...]
     recording_control: str
+    joint_process_groups: int = 1
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -261,6 +262,7 @@ def build_context_specs(
                     producer_pacing=case.producer_pacing,
                     producer_process_streams=case.producer_process_streams,
                     recording_control=case.recording_control,
+                    joint_process_groups=case.joint_process_groups,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),

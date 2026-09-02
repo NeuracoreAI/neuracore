@@ -8,7 +8,7 @@ context-spec interpretation and recording workers live in
 ``test_case.context_spec`` and ``test_case.context_worker``.
 """
 
-# cspell:ignore vardur
+# cspell:ignore vardur jointgroups
 from __future__ import annotations
 
 import logging
@@ -38,7 +38,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
-    JOINT_KINDS,
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
@@ -61,6 +60,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     VideoDetail,
     camera_names,
     depth_camera_names,
+    joint_name_groups,
+    joint_names_for_count,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,23 @@ def _unsupported_process_placement(case: DataDaemonTestCase) -> str | None:
     )
 
     multi_process = case.producer_channels == PRODUCER_MULTI_PROCESS
+    if case.joint_process_groups < 1:
+        return (
+            f"joint_process_groups must be at least 1, got "
+            f"{case.joint_process_groups}"
+        )
+    if case.joint_process_groups > 1:
+        if not multi_process:
+            return (
+                "joint_process_groups only applies to "
+                f"producer_channels={PRODUCER_MULTI_PROCESS!r}, "
+                f"not {case.producer_channels!r}"
+            )
+        if case.joint_process_groups > case.joint_count:
+            return (
+                f"joint_process_groups={case.joint_process_groups} exceeds "
+                f"joint_count={case.joint_count}: a group would own no joints"
+            )
     if case.producer_process_streams and not multi_process:
         return (
             "producer_process_streams only applies to "
@@ -199,13 +217,17 @@ class DataDaemonTestCase:
         CHANNELS: How producer threads are allocated and how long they live — a
             class attribute, not a field, chosen by constructing the matching
             subclass (:class:`PerThread`, :class:`OldPerThread`,
-            :class:`SeparateProcessPerCamera`).
+            :class:`ProcessPerCamera`).
         producer_process_streams: One entry per extra producer process, naming
-            the streams (a kind, or a single camera's channel) that run there;
-            streams not named stay with the recording-owning process. Only
-            :class:`SeparateProcessPerCamera` and its subclasses may set it;
-            left empty they take that class's
+            the streams (a kind, a single camera's channel, or a joint group)
+            that run there; streams not named stay with the recording-owning
+            process. Only :class:`ProcessPerCamera` and its subclasses
+            may set it; left empty they take that class's
             :meth:`default_process_streams`.
+        joint_process_groups: How many groups the joints are split into, each
+            addressed by its own placement name. Above ``1`` the same joint data
+            type is written by more than one stream, so placing the groups apart
+            gives one robot two joint-writing processes.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -319,6 +341,7 @@ class DataDaemonTestCase:
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_DEADLINE
     producer_process_streams: tuple[tuple[str, ...], ...] = ()
+    joint_process_groups: int = 1
     recording_control: RecordingControl = CONTROL_LOCAL
 
     def __post_init__(self) -> None:
@@ -413,24 +436,38 @@ class PerThread(DataDaemonTestCase):
 
 
 @dataclass(frozen=True)
-class SeparateProcessPerCamera(PerThread):
-    """:class:`PerThread`, with every camera in an OS process of its own, so
-    ``max(video_count, depth_count)`` decides how many producer children there are.
+class SeparateProcessStartStop(PerThread):
+    """:class:`PerThread`, with every stream produced in one OS process of its
+    own, so the original process does nothing but start and stop the recording.
 
-    A camera here is a *device*: index ``i``'s RGB and depth streams are the two
-    outputs of one RGBD sensor, so they share a process the way one driver reads
-    both. The data model already couples them — a depth camera reuses the RGB
-    resolution, frame rate, and timestamp schedule (see ``depth_count``) — and
-    splitting them would model two sensors that happen to be synchronised.
+    A robot driver logging alongside an application that brackets the windows:
+    every trace is written by a process that learns its window second-hand.
+    Subclasses keep that and split the producing further.
     """
 
     CHANNELS: ClassVar[ProducerChannels] = PRODUCER_MULTI_PROCESS
 
-    def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
-        """One child per camera device, named by channel so no two children share.
+    def joint_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """One entry per joint group, each owning every kind of its own joints.
 
-        Indexes past the shorter count are a device with only that one output, so
-        an unequal ``video_count``/``depth_count`` still places every stream.
+        A group is a limb rather than a data type. A case with no joints yields
+        none.
+        """
+        return tuple(
+            (group_name,)
+            for group_name, _ in joint_name_groups(
+                joint_names_for_count(self.joint_count), self.joint_process_groups
+            )
+        )
+
+    def camera_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """One entry per camera device, named by channel so no two children share.
+
+        A camera here is a *device*: index ``i``'s RGB and depth streams are the
+        two outputs of one RGBD sensor, so they belong together the way one
+        driver reads both. Indexes past the shorter count are a device with only
+        that one output, so an unequal ``video_count``/``depth_count`` still
+        places every stream.
         """
         return tuple(
             tuple(name for name in pair if name is not None)
@@ -440,23 +477,39 @@ class SeparateProcessPerCamera(PerThread):
             )
         )
 
+    def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """Every device in one child: the split is between bracketing a
+        recording and producing into it, not between producers."""
+        together = tuple(
+            name
+            for entry in (*self.joint_process_streams(), *self.camera_process_streams())
+            for name in entry
+        )
+        return (together,) if together else ()
+
 
 @dataclass(frozen=True)
-class SeparateProcessJoints(SeparateProcessPerCamera):
-    """:class:`SeparateProcessPerCamera`, with the joint streams in a child of
-    their own, so the recording owner logs nothing at all.
-
-    The owner is then a pure recording controller: every trace is written by a
-    process that learns the window second-hand.
-    """
+class ProcessPerCamera(SeparateProcessStartStop):
+    """:class:`SeparateProcessStartStop`, with the producing split per camera,
+    so ``max(video_count, depth_count)`` decides how many camera children there
+    are and the joints keep a child of their own."""
 
     def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
-        """The joint kinds as one child, then a child per camera device.
+        """A child per joint group, then a child per camera device."""
+        return (*self.joint_process_streams(), *self.camera_process_streams())
 
-        One child, not three: the joint kinds are the one sensor's outputs.
-        """
-        joints = (JOINT_KINDS,) if self.joint_count else ()
-        return (*joints, *super().default_process_streams())
+
+@dataclass(frozen=True)
+class ProcessPerLimbPerCamera(ProcessPerCamera):
+    """:class:`ProcessPerCamera`, with the joints split across a child per limb
+    instead of one child holding all of them.
+
+    Each of the ``joint_process_groups`` limbs writes every kind of the joints it
+    owns, so the same data type reaches the daemon from two processes at once —
+    which no camera split does, a camera child owning a channel of its own.
+    """
+
+    joint_process_groups: int = 2
 
 
 @dataclass(frozen=True)
@@ -559,6 +612,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append(f"{case.parallel_contexts}ctx")
         parts.append(mode_short)
     parts.append(f"{case.joint_count}joints")
+    if case.joint_process_groups != default.joint_process_groups:
+        parts.append(f"{case.joint_process_groups}jointgroups")
     if case.joint_fps != default.joint_fps:
         parts.append(f"{case.joint_fps}hz")
     if case.has_video:
