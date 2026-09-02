@@ -367,7 +367,7 @@ jobs:
     permissions:
       contents: write
     outputs:
-      new_version: ${{ needs.generate-changelog.outputs.new_version }}
+      commit_sha: ${{ steps.commit_and_push.outputs.commit_sha }}
 
     steps:
     - name: Generate GitHub App Token
@@ -422,6 +422,7 @@ jobs:
         echo "Reset pending changelog to template"
 
     - name: Commit and push version bump
+      id: commit_and_push
       run: |
         NEW_VERSION="${{ needs.generate-changelog.outputs.new_version }}"
 
@@ -429,17 +430,49 @@ jobs:
         git commit -m "Bump version to ${NEW_VERSION} [skip ci]"
 
         if [ "${{ inputs.alpha_release }}" = "true" ]; then
-          echo "Alpha release: version bump kept local, only the tag is pushed"
+          # Alpha pushes no branch, so the later jobs have no way to fetch this
+          # commit. One reused scratch ref, always overwritten, keeps it
+          # reachable without adding a branch or tag.
+          git push --force origin "HEAD:refs/release-tmp/alpha"
+          echo "Alpha release: version bump kept local, commit pushed to scratch ref"
         else
           TARGET_BRANCH="${{ inputs.emergency_deploy && github.ref_name || 'main' }}"
           git push origin "HEAD:${TARGET_BRANCH}"
           echo "Pushed version bump to ${TARGET_BRANCH}"
         fi
 
+        echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  # Tag and publish the GitHub Release only after PyPI publish has succeeded,
+  # so consumers never see the tag before the version exists on PyPI.
+  finalize-release:
+    needs: [generate-changelog, release, build-release-wheels, publish]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+    - name: Generate GitHub App Token
+      id: generate-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ vars.NC_VERSION_BUMPER_APP_ID }}
+        private-key: ${{ secrets.NC_VERSION_BUMPER_PRIVATE_KEY }}
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: ${{ needs.release.outputs.commit_sha }}
+        token: ${{ steps.generate-token.outputs.token }}
+        fetch-depth: 0
+
     - name: Create git tag
       run: |
         VERSION="${{ needs.generate-changelog.outputs.new_version }}"
         TAG_NAME="v${VERSION}"
+
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git config user.name "github-actions[bot]"
 
         if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
           echo "Tag $TAG_NAME already exists, skipping"
@@ -500,7 +533,7 @@ jobs:
             ? `- Alpha version built from \`${alphaBranch}\`, no version bump pushed\n`
             : `- Version bumped and pushed to \`main\`\n`;
           summary += `- Git tag \`v${version}\` created\n`;
-          summary += `- Platform wheels (linux x86_64/aarch64 + macOS arm64/x86_64, cp310-cp314) publishing to PyPI (see publish job)\n`;
+          summary += `- Platform wheels (linux x86_64/aarch64 + macOS arm64/x86_64, cp310-cp314) published to PyPI\n`;
           summary += `- GitHub Release created\n\n`;
           summary += `### Links\n\n`;
           summary += `- [PyPI Package](https://pypi.org/project/neuracore/${version}/)\n`;
@@ -511,13 +544,15 @@ jobs:
 
   # Build the merged `neuracore` wheels (Python SDK + Rust extension + bundled
   # daemon binary) for every supported platform × Python minor by re-running
-  # build-wheels.yaml against the just-pushed tag, so each wheel carries the
-  # bumped version.
+  # build-wheels.yaml against the version-bump commit, so each wheel carries
+  # the bumped version. Built from the commit rather than the release tag,
+  # since the tag isn't created until after PyPI publish succeeds (see
+  # finalize-release).
   build-release-wheels:
     needs: release
     uses: ./.github/workflows/build-wheels.yaml
     with:
-      ref: v${{ needs.release.outputs.new_version }}
+      ref: ${{ needs.release.outputs.commit_sha }}
 
   # Publish ALL wheels in one job, only after every platform leg has built and
   # smoke-tested. A version can never be half-published: if any leg fails,

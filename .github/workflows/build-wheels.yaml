@@ -26,7 +26,7 @@ on:
   workflow_call:
     inputs:
       ref:
-        description: Git ref to check out and build (e.g. a release tag)
+        description: Git ref to check out and build (e.g. a commit SHA or tag)
         required: false
         type: string
         default: ''
