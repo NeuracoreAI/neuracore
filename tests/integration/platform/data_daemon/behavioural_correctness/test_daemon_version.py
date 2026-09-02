@@ -42,7 +42,9 @@ def test_running_daemon_reports_the_installed_neuracore_version() -> None:
     with online_daemon_running():
         sdk_version = daemon_control._sdk_version()
         reported_version = _query_daemon_version()
-        assert reported_version == sdk_version, (
+        assert reported_version is not None and (
+            daemon_control._pep440(reported_version) == sdk_version
+        ), (
             f"Daemon reported neuracore version {reported_version!r}, "
             f"expected the installed version {sdk_version!r}"
         )
