@@ -955,6 +955,18 @@ class NeuracoreDatasetImporter(ABC):
             urdf_packages_dir = os.path.dirname(self.urdf_path)
             self.robot_utils = RobotUtils(self.urdf_path, urdf_packages_dir)
 
+    def validate_work_items(self, items: Sequence[ImportItem]) -> None:
+        """Validate the selected work items before any episode is imported.
+
+        Run in the parent process once the item list is final, so a dataset level
+        problem is reported before workers start. The base implementation accepts
+        every item.
+
+        Args:
+            items: The work items selected for import.
+        """
+        return None
+
     def import_all(self) -> None:
         """Run imports across workers while aggregating errors.
 
@@ -1001,6 +1013,8 @@ class NeuracoreDatasetImporter(ABC):
                 n,
                 original_count,
             )
+
+        self.validate_work_items(items)
 
         # Pre-check: dry run to check for errors
         precheck_items = [random.choice(items)]
