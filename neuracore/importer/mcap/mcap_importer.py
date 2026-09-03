@@ -30,6 +30,7 @@ from neuracore.importer.mcap.utils import (
     log_mcap_summary_details,
     read_mcap_header,
     read_mcap_summary,
+    topic_schema_names,
     validate_channel_decoder_support,
     validate_requested_topics,
 )
@@ -107,6 +108,63 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             ImportItem(index=i, description=path.name, metadata={"path": str(path)})
             for i, path in enumerate(self.mcap_files)
         ]
+
+    def validate_work_items(self, items: Sequence[ImportItem]) -> None:
+        """Reject a dataset whose episodes record different types on one topic.
+
+        Compare every episode against the first on the message type of each
+        mapped topic, reading only the summary section. Schema ids are file
+        local and are deliberately not compared.
+
+        Args:
+            items: The work items selected for import.
+
+        Raises:
+            ImportError: If two episodes disagree on a mapped topic's type.
+        """
+        topics = get_mcap_topics(topic_map=self.topic_map)
+        if not topics:
+            return
+
+        baseline: dict[str, str] = {}
+        baseline_label = ""
+        mismatches: list[str] = []
+
+        for item in items:
+            file_path_raw = (item.metadata or {}).get("path")
+            if not file_path_raw:
+                continue
+            file_path = Path(file_path_raw)
+            if not file_path.exists():
+                continue
+            with file_path.open("rb") as stream:
+                summary = read_mcap_summary(reader=make_reader(stream=stream))
+            schema_names = topic_schema_names(summary=summary, topics=topics)
+            if not schema_names:
+                continue
+            if not baseline:
+                baseline = schema_names
+                baseline_label = file_path.name
+                continue
+            for topic in sorted(schema_names):
+                expected = baseline.get(topic)
+                if expected is not None and expected != schema_names[topic]:
+                    mismatches.append(
+                        f"  {topic}: '{expected}' in {baseline_label}, "
+                        f"'{schema_names[topic]}' in {file_path.name}"
+                    )
+
+        if mismatches:
+            raise ImportError(
+                f"MCAP episodes disagree on the message type of "
+                f"{len(mismatches)} topic(s). Every episode must record the same "
+                "message type on a given topic:\n" + "\n".join(mismatches)
+            )
+
+        self.logger.debug(
+            f"Schema check passed across {len(items)} MCAP episode(s) "
+            f"for {len(topics)} topic(s)."
+        )
 
     def import_item(self, item: ImportItem) -> None:
         """Import one MCAP file."""

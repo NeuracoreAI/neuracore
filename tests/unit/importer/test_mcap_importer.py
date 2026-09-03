@@ -10,6 +10,7 @@ from typing import cast
 import numpy as np
 import pytest
 from google.protobuf import descriptor_pb2
+from mcap.reader import make_reader
 from mcap.writer import Writer
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
@@ -37,12 +38,14 @@ from neuracore.importer.mcap.utils import (
     iter_mcap_source_events,
     list_decoder_factories,
     read_image_data,
+    read_mcap_summary,
     repair_protobuf_schema_data,
     resolve_path,
     resolve_timestamp_ns,
     split_topic_path,
     to_numpy,
     to_python_types,
+    topic_schema_names,
     validate_requested_topics,
 )
 
@@ -1126,14 +1129,21 @@ _MCAP_TEST_TYPES = {
 }
 
 
-def _write_protobuf_mcap(path: Path, registration_order: list[str]) -> None:
-    """Write a two topic protobuf MCAP, assigning schema ids in the given order."""
+def _write_protobuf_mcap(
+    path: Path, registration_order: list[str], *, swap_types: bool = False
+) -> None:
+    """Write a two topic protobuf MCAP, assigning schema ids in the given order.
+
+    Set swap_types to record each topic with the other topic's message type.
+    """
+    other = {"/cam": "/jnt", "/jnt": "/cam"}
     with path.open("wb") as handle:
         writer = Writer(handle)
         writer.start()
         schema_ids = {}
         for topic in registration_order:
-            message_name, file_name, fields, _payload = _MCAP_TEST_TYPES[topic]
+            source = other[topic] if swap_types else topic
+            message_name, file_name, fields, _payload = _MCAP_TEST_TYPES[source]
             schema_ids[topic] = writer.register_schema(
                 name=f"demo.{message_name}",
                 encoding="protobuf",
@@ -1145,10 +1155,11 @@ def _write_protobuf_mcap(path: Path, registration_order: list[str]) -> None:
                 message_encoding="protobuf",
                 schema_id=schema_ids[topic],
             )
+            payload_topic = other[topic] if swap_types else topic
             writer.add_message(
                 channel_id,
                 log_time=log_time,
-                data=_MCAP_TEST_TYPES[topic][3],
+                data=_MCAP_TEST_TYPES[payload_topic][3],
                 publish_time=log_time,
             )
         writer.finish()
@@ -1188,3 +1199,71 @@ def test_stream_episode_file_decodes_each_file_with_its_own_schema_ids(
     expected = {"/cam": "demo.CompressedImage", "/jnt": "demo.JointState"}
     assert dict(decoded[:2]) == expected
     assert dict(decoded[2:]) == expected
+
+
+def test_topic_schema_names_reads_types_without_decoding(tmp_path: Path):
+    path = tmp_path / "ep.mcap"
+    _write_protobuf_mcap(path, ["/cam", "/jnt"])
+    with path.open("rb") as stream:
+        summary = read_mcap_summary(reader=make_reader(stream=stream))
+
+    assert topic_schema_names(summary=summary, topics=["/cam", "/jnt"]) == {
+        "/cam": "demo.CompressedImage",
+        "/jnt": "demo.JointState",
+    }
+
+
+def test_topic_schema_names_ignores_unrequested_topics(tmp_path: Path):
+    path = tmp_path / "ep.mcap"
+    _write_protobuf_mcap(path, ["/cam", "/jnt"])
+    with path.open("rb") as stream:
+        summary = read_mcap_summary(reader=make_reader(stream=stream))
+
+    assert topic_schema_names(summary=summary, topics=["/cam"]) == {
+        "/cam": "demo.CompressedImage"
+    }
+
+
+def _work_items(paths: list[Path]) -> list[ImportItem]:
+    return [
+        ImportItem(index=i, description=path.name, metadata={"path": str(path)})
+        for i, path in enumerate(paths)
+    ]
+
+
+def test_validate_work_items_accepts_permuted_schema_ids(monkeypatch, tmp_path: Path):
+    first = tmp_path / "ep1.mcap"
+    second = tmp_path / "ep2.mcap"
+    _write_protobuf_mcap(first, ["/cam", "/jnt"])
+    _write_protobuf_mcap(second, ["/jnt", "/cam"])
+
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: ["/cam", "/jnt"],
+    )
+
+    importer.validate_work_items(_work_items([first, second]))
+
+
+def test_validate_work_items_raises_on_topic_type_change(monkeypatch, tmp_path: Path):
+    first = tmp_path / "ep1.mcap"
+    second = tmp_path / "ep2.mcap"
+    _write_protobuf_mcap(first, ["/cam", "/jnt"])
+    _write_protobuf_mcap(second, ["/cam", "/jnt"], swap_types=True)
+
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: ["/cam", "/jnt"],
+    )
+
+    with pytest.raises(ImportError) as excinfo:
+        importer.validate_work_items(_work_items([first, second]))
+
+    message = str(excinfo.value)
+    assert "/cam" in message
+    assert "demo.CompressedImage" in message
+    assert "demo.JointState" in message
+    assert "ep1.mcap" in message
+    assert "ep2.mcap" in message
