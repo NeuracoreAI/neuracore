@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from mcap.decoder import DecoderFactory
 from mcap.reader import make_reader
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
@@ -85,11 +84,9 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         self.dataset_dir = Path(dataset_dir)
         self.topic_map = build_topic_map(dataset_config=dataset_config)
         self.mcap_files = self._discover_mcap_files(dataset_dir=self.dataset_dir)
-        self._decoder_factories: list[DecoderFactory] | None = None
         # Per-episode H.264 decoders, keyed by topic. Video streams are
         # inter-frame, so each topic needs one decoder held for the whole file.
         self._video_decoders: dict[str, H264StreamDecoder] = {}
-        self._init_runtime_components()
 
         self.logger.info(
             f"Initialized MCAP importer for '{self.dataset_name}' "
@@ -99,11 +96,8 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         )
 
     def __getstate__(self) -> dict[str, Any]:
-        """Return picklable state with decoder factories cleared."""
-        # TODO: Replace this with lazy worker-local decoder factory initialization
-        # so runtime decoder state is never stored on the importer before forking.
+        """Return picklable state with runtime decoder state cleared."""
         state = self.__dict__.copy()
-        state["_decoder_factories"] = None
         state["_video_decoders"] = {}
         return state
 
@@ -114,18 +108,8 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             for i, path in enumerate(self.mcap_files)
         ]
 
-    def prepare_worker(
-        self,
-        worker_id: int,
-        chunk: Sequence[ImportItem] | None = None,
-    ) -> None:
-        """Initialize per-worker decoder factories after forking."""
-        super().prepare_worker(worker_id=worker_id, chunk=chunk)
-        self._init_runtime_components()
-
     def import_item(self, item: ImportItem) -> None:
         """Import one MCAP file."""
-        self._ensure_runtime_components()
         self._reset_episode_state()
 
         file_path_raw = (item.metadata or {}).get("path")
@@ -194,7 +178,10 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
     ) -> tuple[int, float]:
         """Stream messages from one MCAP episode file."""
         topics = get_mcap_topics(topic_map=self.topic_map)
-        factories = list(self._decoder_factories or [])
+        # Fresh decoder factories per episode. mcap decoder factories cache
+        # generated message classes by schema id, and schema ids are file local,
+        # so a factory reused across files decodes with the wrong class.
+        factories = list_decoder_factories(logger=self.logger)
         source_start_timestamp_ns: int | None = None
         recording_stop_timestamp = recording_start_timestamp
         message_count = 0
@@ -289,13 +276,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             extrinsics=extrinsics,
             intrinsics=intrinsics,
         )
-
-    def _init_runtime_components(self) -> None:
-        self._decoder_factories = list_decoder_factories(logger=self.logger)
-
-    def _ensure_runtime_components(self) -> None:
-        if self._decoder_factories is None:
-            self._init_runtime_components()
 
     @staticmethod
     def _discover_mcap_files(dataset_dir: Path) -> list[Path]:
