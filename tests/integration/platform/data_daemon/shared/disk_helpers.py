@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import subprocess
@@ -736,6 +737,42 @@ def assert_video_artifacts(
             )
 
 
+@functools.cache
+def _passthrough_frame_sync_arg(ffmpeg: str) -> str:
+    """Return the option *ffmpeg* accepts to select passthrough frame timing.
+
+    ``-fps_mode`` replaced ``-vsync`` in ffmpeg 5.1 and is the only spelling
+    accepted from ffmpeg 8 onwards, which dropped ``-vsync`` entirely.
+    Mirrors ``data_daemon_shared::ffmpeg::passthrough_frame_sync_arg`` on the
+    Rust side of this same compatibility gap.
+    """
+    probe = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "yuv420p",
+            "-video_size",
+            "16x16",
+            "-i",
+            "-",
+            "-fps_mode",
+            "passthrough",
+            "-f",
+            "null",
+            "-",
+        ],
+        input=bytes(16 * 16 * 3 // 2),
+        capture_output=True,
+        check=False,
+    )
+    return "-vsync" if b"Unrecognized option" in probe.stderr else "-fps_mode"
+
+
 def _decode_frame_codes(video_path: Path) -> list[int] | None:
     """Return the code painted into every frame of *video_path*, in stream order.
 
@@ -756,7 +793,7 @@ def _decode_frame_codes(video_path: Path) -> list[int] | None:
             "-nostdin",
             "-i",
             str(video_path),
-            "-vsync",
+            _passthrough_frame_sync_arg(ffmpeg),
             "passthrough",
             "-vf",
             f"crop={FRAME_GRID_SIZE}:{FRAME_GRID_SIZE}:0:0",
