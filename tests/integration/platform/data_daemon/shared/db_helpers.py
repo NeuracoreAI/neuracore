@@ -17,9 +17,7 @@ Contents:
   :func:`fetch_recording_online_verification_stats`,
   :func:`fetch_recording_trace_upload_stats`.
 - **Wait helpers** — :func:`wait_for_dataset_ready`,
-  :func:`wait_for_recording_to_exist_in_db`,
   :func:`wait_for_offline_db_ready`, :func:`wait_for_all_traces_written`,
-    :func:`wait_for_upload_complete_in_db`.
 """
 
 from __future__ import annotations
@@ -27,9 +25,10 @@ from __future__ import annotations
 import dataclasses
 import logging
 import sqlite3
+import threading
 import time
-from collections.abc import Callable, Iterable
-from contextlib import closing
+from collections.abc import Callable, Generator, Iterable
+from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -92,15 +91,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _recording_correlation_column() -> str:
-    """Return the recordings/traces correlation column.
-
-    Recordings are keyed by the local INTEGER ``recording_index``; the cloud
-    ``recording_id`` is a separate, nullable column.
-    """
-    return COLUMN_RECORDING_INDEX
 
 
 class DaemonDbStore:
@@ -171,7 +161,7 @@ class DaemonDbStore:
         ``recording_key`` is the daemon's correlation key: the local INTEGER
         ``recording_index``.
         """
-        correlation_column = _recording_correlation_column()
+        correlation_column = COLUMN_RECORDING_INDEX
         with closing(self.connect()) as conn:
             row = conn.execute(
                 f"SELECT * FROM {RECORDINGS_TABLE} " f"WHERE {correlation_column} = ?",
@@ -211,7 +201,7 @@ class DaemonDbStore:
         Traces join to recordings on the correlation column, the integer
         ``recording_index``.
         """
-        correlation_column = _recording_correlation_column()
+        correlation_column = COLUMN_RECORDING_INDEX
         with closing(self.connect_read_only()) as conn:
             if not self.table_exists(conn, TRACES_TABLE):
                 return []
@@ -384,15 +374,14 @@ def resolve_cloud_recording_ids(
     results: list[ContextResult],
     *,
     timeout_s: float = 60.0,
+    observed: ObservedRecordingUploads | None = None,
 ) -> list[ContextResult]:
     """Return copies of *results* with cloud ``recording_ids`` resolved.
 
     The cloud ``recording_id`` is populated asynchronously by the
     start-notifier once the daemon is online, so the captured ids may have been
-    NULL at record time. This reads the daemon DB directly by ``recording_index``
-    (which the recording worker already captured) and waits until each row's
-    cloud ``recording_id`` is filled in, so cloud verification (which matches the
-    dataset's ``recording.id``) has the correct ids.
+    NULL at record time; observed ids from :func:`latching_upload_observer`
+    are preferred since the reaper can delete a row before this reads it.
 
     Resolving from the DB rather than ``nc.get_cloud_recording_id`` is required
     here: recordings are made in worker subprocesses, so the verifying process
@@ -406,9 +395,11 @@ def resolve_cloud_recording_ids(
     for result in results:
         cloud_ids: list[str] = []
         for recording_index in result.recording_indexes:
-            cloud_id = _wait_for_cloud_recording_id(
-                recording_index, timeout_s=timeout_s
-            )
+            cloud_id = observed.get_cloud_id(recording_index) if observed else None
+            if not cloud_id:
+                cloud_id = _wait_for_cloud_recording_id(
+                    recording_index, timeout_s=timeout_s
+                )
             assert cloud_id, (
                 f"Cloud recording_id never populated for recording_index "
                 f"{recording_index} (robot {result.robot_name!r}) within "
@@ -910,6 +901,7 @@ def wait_for_all_traces_written(
     timeout_s: float = 120.0,
     *,
     results: list,
+    observed: ObservedTraceWrites | None = None,
 ) -> None:
     """Block until every trace for every recording in *results* has been written.
 
@@ -930,6 +922,8 @@ def wait_for_all_traces_written(
         timeout_s: Maximum seconds to wait before raising.
         results: List of :class:`~build_test_case_context.ContextResult` objects
             whose recording keys scope the check.
+        observed: Writes latched by :func:`latching_trace_write_observer`; a
+            latched recording is dropped from the poll so this survives a reap.
 
     Raises:
         AssertionError: If the condition is not met within ``timeout_s``.
@@ -966,10 +960,17 @@ def wait_for_all_traces_written(
         expected_recording_keys=expected_keys,
     )
     while time.monotonic() < deadline:
-        recording_keys = expected_keys or list_keys_on_disk()
-        if not recording_keys:
+        all_keys = expected_keys or list_keys_on_disk()
+        if not all_keys:
             _sleep_for_next_poll(progress_made=False)
             continue
+
+        # Latched keys are dropped here: reaped rows can never satisfy a poll.
+        recording_keys = all_keys - (
+            observed.written_keys() if observed is not None else set()
+        )
+        if not recording_keys:
+            return
 
         try:
             recordings = {
@@ -1029,7 +1030,8 @@ def wait_for_all_traces_written(
             return
         _sleep_for_next_poll(progress_made=progress_made)
 
-    recording_keys = expected_keys or list_keys_on_disk()
+    latched_keys = observed.written_keys() if observed is not None else set()
+    recording_keys = (expected_keys or list_keys_on_disk()) - latched_keys
     try:
         recordings = fetch_all_rows(RECORDINGS_TABLE)
         traces = fetch_all_rows(TRACES_TABLE)
@@ -1062,6 +1064,9 @@ def wait_for_all_traces_written(
     duplicate_keys = sorted({key for key in raw_keys if raw_keys.count(key) > 1})
     raise AssertionError(
         f"Daemon did not finish writing all traces within {timeout_s}s.\n"
+        f"  Latched as written during the run (not awaited):"
+        f" {len(latched_keys)}\n"
+        f"  Still awaited: {sorted(recording_keys)}\n"
         f"  Duplicate recording keys across contexts: {duplicate_keys}\n"
         f"  Recording keys on disk with no DB row: {missing_in_db}\n"
         f"  Recordings not yet stopped (stopped_at is NULL): {not_stopped}\n"
@@ -1154,6 +1159,221 @@ def assert_recording_db_statuses(
         f"({len(non_uploaded)}/{len(traces)}):\n"
         + "\n".join(f"  {t}" for t in non_uploaded)
     )
+
+
+class ObservedRecordingUploads:
+    """Terminal upload states latched while the daemon still held the rows."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._completed: set[int | str] = set()
+        self._cloud_ids: dict[int | str, str] = {}
+
+    def record_complete(self, recording_key: int | str) -> None:
+        """Latch ``recording_key`` as having reached upload completion."""
+        with self._lock:
+            self._completed.add(recording_key)
+
+    def record_cloud_id(self, recording_key: int | str, cloud_id: str) -> None:
+        """Latch the cloud ``recording_id`` seen for ``recording_key``."""
+        with self._lock:
+            self._cloud_ids[recording_key] = cloud_id
+
+    def is_complete(self, recording_key: int | str) -> bool:
+        """Return ``True`` when upload completion was observed for this key."""
+        with self._lock:
+            return recording_key in self._completed
+
+    def get_cloud_id(self, recording_key: int | str) -> str | None:
+        """Return the cloud ``recording_id`` observed for this key, if any."""
+        with self._lock:
+            return self._cloud_ids.get(recording_key)
+
+    def wait_for_all_complete(
+        self,
+        recording_keys: Iterable[int | str],
+        *,
+        timeout_s: float = 30.0,
+        poll_interval_s: float = 0.05,
+    ) -> None:
+        """Block until every key in *recording_keys* has latched as complete."""
+        deadline = time.monotonic() + timeout_s
+        pending = set(recording_keys)
+        while True:
+            with self._lock:
+                pending -= self._completed
+            if not pending:
+                return
+            if time.monotonic() >= deadline:
+                raise AssertionError(
+                    "Upload completion not observed for recording_index(es) "
+                    f"{sorted(pending, key=str)} within {timeout_s}s"
+                )
+            time.sleep(poll_interval_s)
+
+
+@contextmanager
+def latching_upload_observer(
+    poll_interval_s: float = 0.5,
+) -> Generator[ObservedRecordingUploads]:
+    """Latch each recording's terminal upload state as it happens.
+
+    Samples live, since a reclaimed recording's rows are gone by the time
+    verification would otherwise check them.
+
+    Args:
+        poll_interval_s: A recording whose uploaded-to-reaped window is
+            shorter than one tick is missed.
+
+    Yields:
+        The :class:`ObservedRecordingUploads` being populated.
+    """
+    observed = ObservedRecordingUploads()
+    stop_observing = threading.Event()
+    correlation_column = COLUMN_RECORDING_INDEX
+
+    def _observe() -> None:
+        while not stop_observing.is_set():
+            try:
+                recording_rows = fetch_all_rows(RECORDINGS_TABLE)
+                for row in recording_rows:
+                    recording_key = row[correlation_column]
+                    cloud_id = row.get(COLUMN_RECORDING_ID)
+                    if cloud_id:
+                        observed.record_cloud_id(recording_key, str(cloud_id))
+                    if observed.is_complete(recording_key):
+                        continue
+                    if _is_online_upload_complete(
+                        fetch_recording_online_verification_stats(recording_key)
+                    ):
+                        observed.record_complete(recording_key)
+            except sqlite3.OperationalError:
+                # Daemon has not created the DB file or schema yet; retry.
+                pass
+            stop_observing.wait(poll_interval_s)
+
+    thread = threading.Thread(
+        target=_observe, name="upload-completion-observer", daemon=True
+    )
+    thread.start()
+    try:
+        yield observed
+    finally:
+        stop_observing.set()
+        thread.join(timeout=5.0)
+
+
+class ObservedTraceWrites:
+    """Recordings latched as finished writing while the daemon still held them."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._written: set[int] = set()
+
+    def record_written(self, recording_key: int) -> None:
+        """Latch ``recording_key`` as having finished writing every trace."""
+        with self._lock:
+            self._written.add(recording_key)
+
+    def is_written(self, recording_key: int) -> bool:
+        """Return ``True`` when this key was observed with all traces written."""
+        with self._lock:
+            return recording_key in self._written
+
+    def written_keys(self) -> set[int]:
+        """Return a snapshot of every key latched so far."""
+        with self._lock:
+            return set(self._written)
+
+
+def _recording_traces_all_written(
+    recording_row: dict[str, Any] | None,
+    trace_rows: list[dict[str, Any]],
+) -> bool:
+    """Whether one recording has finished writing, per the daemon's own rows.
+
+    The three conditions :func:`wait_for_all_traces_written` blocks on, applied
+    to a single recording so the observer thread and the post-run wait cannot
+    drift apart on what "written" means.
+    """
+    if recording_row is None or recording_row[COLUMN_STOPPED_AT] is None:
+        return False
+    if not trace_rows:
+        return False
+    return all(
+        trace[COLUMN_WRITE_STATUS] == TRACE_WRITE_WRITTEN for trace in trace_rows
+    )
+
+
+def _recording_trace_set_is_final(
+    recording_row: dict[str, Any],
+    trace_rows: list[dict[str, Any]],
+) -> bool:
+    """Whether the daemon has certified this recording's trace set as complete.
+
+    ``expected_trace_count`` is the daemon's own settling point: the progress
+    reporter sets it only once every trace is terminal, and the reaper won't
+    reclaim until it matches the trace row count — so it always lands before
+    the reap it guards against.
+    """
+    expected = recording_row.get(COLUMN_EXPECTED_TRACE_COUNT)
+    return isinstance(expected, int) and expected == len(trace_rows)
+
+
+@contextmanager
+def latching_trace_write_observer(
+    poll_interval_s: float = 0.5,
+) -> Generator[ObservedTraceWrites]:
+    """Latch each recording's finished-writing state while its rows still exist.
+
+    The reaper drops a reclaimed recording's ``recordings`` and ``traces``
+    rows in one transaction, so "wrote everything and was reclaimed" and
+    "never wrote anything" are the same observation afterwards — only live
+    sampling can tell them apart.
+
+    Args:
+        poll_interval_s: Seconds between sweeps of the recordings and traces
+            tables.
+
+    Yields:
+        The :class:`ObservedTraceWrites` being populated.
+    """
+    observed = ObservedTraceWrites()
+    stop_observing = threading.Event()
+    correlation_column = COLUMN_RECORDING_INDEX
+
+    def _observe() -> None:
+        while not stop_observing.is_set():
+            try:
+                recordings = {
+                    row[correlation_column]: row
+                    for row in fetch_all_rows(RECORDINGS_TABLE)
+                }
+                traces_by_recording: dict[Any, list[dict[str, Any]]] = {}
+                for trace in fetch_all_rows(TRACES_TABLE):
+                    traces_by_recording.setdefault(
+                        trace[correlation_column], []
+                    ).append(trace)
+                for recording_key, row in recordings.items():
+                    if observed.is_written(recording_key):
+                        continue
+                    trace_rows = traces_by_recording.get(recording_key, [])
+                    if _recording_traces_all_written(
+                        row, trace_rows
+                    ) and _recording_trace_set_is_final(row, trace_rows):
+                        observed.record_written(recording_key)
+            except sqlite3.OperationalError:
+                # Daemon has not created the DB file or schema yet; retry.
+                pass
+            stop_observing.wait(poll_interval_s)
+
+    thread = threading.Thread(target=_observe, name="trace-write-observer", daemon=True)
+    thread.start()
+    try:
+        yield observed
+    finally:
+        stop_observing.set()
+        thread.join(timeout=5.0)
 
 
 def wait_for_upload_complete_in_db(
