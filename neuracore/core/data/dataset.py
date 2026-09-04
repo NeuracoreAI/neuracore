@@ -213,6 +213,27 @@ class Dataset:
             self._recordings_cache.extend(wrapped)
             return wrapped
 
+    def _find_recordings_by_name(
+        self, recording_name: str, limit: int = 2
+    ) -> list[Recording]:
+        """Return recordings whose name exactly matches."""
+        session = thread_local_session()
+        query_params: dict[str, str | int] = {
+            "limit": limit,
+            "is_shared": self.is_shared,
+            "recording_name": recording_name,
+        }
+        response = session.post(
+            f"{API_URL}/org/{self.org_id}/recording/by-dataset/{self.id}",
+            headers=get_auth().get_headers(),
+            params=query_params,
+            json=None,
+        )
+        response.raise_for_status()
+        return [
+            self._wrap_raw_recording(raw) for raw in response.json().get("data", [])
+        ]
+
     def _recordings_generator(self) -> Generator[Recording, None, None]:
         """A generator yielding Recordings for this dataset.
 
@@ -488,9 +509,10 @@ class Dataset:
             # An ID can be sent to the API without loading the dataset first.
             resolved_recording_id = recording_id
         else:
-            # Load all recordings so we can find the right name.
-            recordings = list(self)
-            matches = [r for r in recordings if r.name == recording_name]
+            # Ask the API for at most two exact matches. Two are enough to detect
+            # an ambiguous name without downloading the whole dataset.
+            assert recording_name is not None
+            matches = self._find_recordings_by_name(recording_name)
             if not matches:
                 raise DatasetError(
                     f"Recording {recording_name!r} not found in dataset {self.name!r}."
@@ -510,7 +532,7 @@ class Dataset:
             f"{resolved_recording_id}",
             headers=get_auth().get_headers(),
         )
-        if response.status_code == 404:
+        if response.status_code in (400, 404):
             raise DatasetError(
                 f"Recording {recording_name or recording_id!r} not found in dataset "
                 f"{self.name!r}."

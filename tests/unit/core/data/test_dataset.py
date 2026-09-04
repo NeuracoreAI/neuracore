@@ -825,8 +825,7 @@ class TestDatasetIndexingAndSlicing:
 
         assert mock_data_requests.request_history[0].url == endpoint
         assert not any(
-            request.method == "POST"
-            and "/recording/by-dataset/" in request.url
+            request.method == "POST" and "/recording/by-dataset/" in request.url
             for request in mock_data_requests.request_history
         )
         assert dataset.size_bytes == 512
@@ -841,6 +840,11 @@ class TestDatasetIndexingAndSlicing:
             f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/rec1"
         )
         mock_data_requests.delete(endpoint, status_code=204)
+        mock_data_requests.post(
+            f"{API_URL}/org/{dataset.org_id}/recording/by-dataset/{dataset.id}",
+            json={"data": [recordings_list[0]], "total": 1},
+            status_code=200,
+        )
         dataset_response = DatasetModel(
             id=dataset.id,
             name=dataset.name,
@@ -858,10 +862,13 @@ class TestDatasetIndexingAndSlicing:
 
         dataset.delete_recording(recording_name="first episode")
 
-        assert any(
-            request.url == endpoint
-            for request in mock_data_requests.request_history
-        )
+        lookup_request = mock_data_requests.request_history[0]
+        assert lookup_request.qs == {
+            "limit": ["2"],
+            "is_shared": ["false"],
+            "recording_name": ["first episode"],
+        }
+        assert mock_data_requests.request_history[1].url == endpoint
 
     def test_delete_recording_rejects_unknown_recording(
         self, dataset_dict, recordings_list, mock_data_requests
@@ -874,6 +881,18 @@ class TestDatasetIndexingAndSlicing:
 
         with pytest.raises(DatasetError, match="Recording 'missing' not found"):
             dataset.delete_recording(recording_id="missing")
+
+    def test_delete_recording_maps_not_in_dataset_to_dataset_error(
+        self, dataset_dict, recordings_list, mock_data_requests
+    ):
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        mock_data_requests.delete(
+            f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/rec1",
+            status_code=400,
+        )
+
+        with pytest.raises(DatasetError, match="Recording 'rec1' not found"):
+            dataset.delete_recording(recording_id="rec1")
 
     def test_delete_recording_succeeds_when_metadata_refresh_fails(
         self, dataset_dict, recordings_list, mock_data_requests, caplog
@@ -896,14 +915,44 @@ class TestDatasetIndexingAndSlicing:
         assert dataset._num_recordings is None
 
     def test_delete_recording_rejects_ambiguous_name(
-        self, dataset_dict, recordings_list
+        self, dataset_dict, recordings_list, mock_data_requests
     ):
         for recording in recordings_list:
             recording["metadata"]["name"] = "duplicate"
         dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        mock_data_requests.post(
+            f"{API_URL}/org/{dataset.org_id}/recording/by-dataset/{dataset.id}",
+            json={"data": recordings_list, "total": 2},
+            status_code=200,
+        )
 
         with pytest.raises(DatasetError, match="Multiple recordings named 'duplicate'"):
             dataset.delete_recording(recording_name="duplicate")
+
+    def test_iteration_loads_fresh_recordings_after_deletion(
+        self, dataset_dict, recordings_list, dataset_response, mock_data_requests
+    ):
+        dataset = Dataset(**dataset_dict, recordings=recordings_list)
+        remaining_recordings = [recordings_list[1]]
+        mock_data_requests.delete(
+            f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/rec1",
+            status_code=204,
+        )
+        dataset_response.id = dataset.id
+        dataset_response.num_demonstrations = 1
+        mock_data_requests.get(
+            f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}",
+            json=dataset_response.model_dump(mode="json"),
+        )
+        mock_data_requests.post(
+            f"{API_URL}/org/{dataset.org_id}/recording/by-dataset/{dataset.id}",
+            json={"data": remaining_recordings, "total": 1},
+            status_code=200,
+        )
+
+        dataset.delete_recording(recording_id="rec1")
+
+        assert [recording.id for recording in dataset] == ["rec2"]
 
     @pytest.mark.parametrize(
         "kwargs",
