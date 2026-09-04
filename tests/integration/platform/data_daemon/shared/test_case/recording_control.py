@@ -2,14 +2,18 @@
 
 A case's producer decides what is logged; this decides who brackets it. Both
 report on the same wall clock, so the boundary classifier reads one vocabulary
-whichever combination ran.
+whichever combination ran — including across processes, where a controller may
+make its calls from a peer.
 """
 
 from __future__ import annotations
 
+import queue
 import time
+import traceback
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 import neuracore as nc
 from neuracore.core.auth import get_auth
@@ -17,14 +21,20 @@ from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.const import API_URL
 from neuracore.core.utils.http_session import thread_local_session
 from neuracore.data_daemon.bridge import RecordingStateUnavailableError
+from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import Timer
+from tests.integration.platform.data_daemon.shared.test_case.child_process import (
+    ChildProcess,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CONTROL_REMOTE,
+    CONTROL_SPLIT_PROCESS,
     MAX_TIME_TO_START_S,
     REMOTE_CONTROL_REQUEST_TIMEOUT_S,
     REMOTE_GATE_POLL_INTERVAL_S,
     REMOTE_START_ANNOUNCEMENT_SLA_S,
     REMOTE_STOP_PROPAGATION_SLA_S,
+    SPLIT_CONTROL_ACK_POLL_S,
     STOP_PUBLISH_SKEW_S,
 )
 from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
@@ -50,6 +60,42 @@ class ControlBracket:
     handle: str | None
 
 
+def await_gate(
+    robot: object,
+    *,
+    open_gate: bool,
+    deadline: float,
+    label: str,
+    overdue: str,
+    assert_deadline: bool,
+) -> float:
+    """Wait for *robot*'s gate in this process to reach *open_gate* by *deadline*.
+
+    The gate flips when the SDK's notification consumer applies the event, so
+    this returns when the announcement became visible to a client. The deadline
+    only bounds the blocking; how late is late is the caller's judgement, since
+    only it knows what the wait should be measured from.
+    """
+    with Timer(
+        max(deadline - time.time(), 0.0),
+        label=label,
+        always_log=True,
+        assert_deadline=assert_deadline,
+    ):
+        while time.time() < deadline:
+            try:
+                handle = robot.get_current_recording_id()  # type: ignore[attr-defined]
+            except RecordingStateUnavailableError:
+                # A busy daemon answers nothing rather than "not recording";
+                # the gate has not moved, so poll again.
+                time.sleep(REMOTE_GATE_POLL_INTERVAL_S)
+                continue
+            if (handle is not None) == open_gate:
+                return time.time()
+            time.sleep(REMOTE_GATE_POLL_INTERVAL_S)
+        raise AssertionError(overdue)
+
+
 class RecordingController(ABC):
     """Opens and closes one context's recordings, however they are triggered."""
 
@@ -64,6 +110,9 @@ class RecordingController(ABC):
     @abstractmethod
     def close(self, capture_stop_s: float) -> ControlBracket:
         """Close the current window and return once it is known to be closed."""
+
+    def shutdown(self) -> None:
+        """Release whatever this controller holds past the last recording."""
 
 
 class LocalRecordingController(RecordingController):
@@ -167,10 +216,12 @@ class RemoteRecordingController(RecordingController):
             )
         self._cloud_recording_id = str(pending["id"])
         announced_start_s = float(pending["start_time"])
-        settled_at = self._await_gate(
+        settled_at = await_gate(
+            self.robot,
             open_gate=True,
             deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
-            label="start",
+            label="remote.start_gate_wait",
+            assert_deadline=self.spec.assert_deadline,
             overdue=(
                 f"the start of recording {self._cloud_recording_id} never reached "
                 f"this process: nothing arrived in "
@@ -211,10 +262,12 @@ class RemoteRecordingController(RecordingController):
                     "end_time": capture_stop_s,
                 },
             )
-        settled_at = self._await_gate(
+        settled_at = await_gate(
+            self.robot,
             open_gate=False,
             deadline=time.time() + REMOTE_STOP_PROPAGATION_SLA_S,
-            label="stop",
+            label="remote.stop_gate_wait",
+            assert_deadline=self.spec.assert_deadline,
             overdue=(
                 f"the stop of recording {self._cloud_recording_id} did not reach "
                 f"this process within {REMOTE_STOP_PROPAGATION_SLA_S}s"
@@ -223,31 +276,270 @@ class RemoteRecordingController(RecordingController):
         self._cloud_recording_id = None
         return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
 
-    def _await_gate(
-        self, *, open_gate: bool, deadline: float, label: str, overdue: str
-    ) -> float:
-        """Wait for this process's gate to reach the expected state by *deadline*.
 
-        The gate flips when the SDK's notification consumer applies the event,
-        so this returns when the announcement became visible to a client. How
-        late is late is the caller's judgement.
+_PEER_AWAIT_OPEN = "await-open"
+_PEER_STOP = "stop"
+
+
+@dataclass(frozen=True, slots=True)
+class ControlProcessSpec:
+    """What the stopping peer needs, in picklable form — a controller holds a
+    live robot handle and a spec full of them, neither picklable."""
+
+    robot_name: str
+    wait: bool
+    stop_sla_s: float
+    assert_deadline: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _OpenAck:
+    """When the peer learned a window it did not open had opened."""
+
+    gate_opened_at: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StopAck:
+    """When the peer's stop call returned, so the wait for that stop to come
+    back round to this process is measured from the right instant."""
+
+    returned_at: float
+
+
+def _peer_control_process(
+    spec: ControlProcessSpec,
+    ready_event: Any,
+    commands: Any,
+    acks: Any,
+    result_queue: Any,
+) -> None:
+    """Stop recordings this process never started, in its own OS process.
+
+    Logs nothing and starts nothing. It connects — which subscribes it to the
+    notification stream — waits to be told a window opened, and closes it with
+    the SDK's own call. Every order is answered, so a caller blocked on one
+    learns of a failure from the reaped traceback rather than a timeout.
+    """
+    robot = None
+    try:
+        ensure_login()
+        robot = nc.connect_robot(spec.robot_name, overwrite=False)
+        ready_event.set()
+        while True:
+            command = commands.get()
+            if command is None:
+                break
+            order, timestamp = command
+            if order == _PEER_AWAIT_OPEN:
+                acks.put(_await_peer_open(spec, robot, announced_start_s=timestamp))
+            else:
+                acks.put(_stop_from_peer(spec, robot, capture_stop_s=timestamp))
+        result_queue.put(
+            {
+                "ok": True,
+                "timer_stats": {label: dict(v) for label, v in Timer._stats.items()},
+            }
+        )
+    except BaseException:  # noqa: BLE001
+        result_queue.put(
+            {
+                "ok": False,
+                "traceback": traceback.format_exc(),
+                "timer_stats": {label: dict(v) for label, v in Timer._stats.items()},
+            }
+        )
+    finally:
+        if robot is not None:
+            robot.close()
+
+
+def _await_peer_open(
+    spec: ControlProcessSpec, robot: object, *, announced_start_s: float
+) -> _OpenAck:
+    """Wait until the announcement of a window opened elsewhere lands here.
+
+    ``nc.stop_recording`` refuses — silently — in a process whose gate never
+    opened, so this wait is what lets the peer close anything at all. It also
+    brings the peer's daemon channel up, the notification handler publishing
+    the start.
+    """
+    return _OpenAck(
+        gate_opened_at=await_gate(
+            robot,
+            open_gate=True,
+            deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+            label="peer.start_gate_wait",
+            assert_deadline=spec.assert_deadline,
+            overdue=(
+                f"a recording started at {announced_start_s} never reached the "
+                f"stopping peer: nothing arrived in "
+                f"{REMOTE_CONTROL_REQUEST_TIMEOUT_S}s"
+            ),
+        )
+    )
+
+
+def _stop_from_peer(
+    spec: ControlProcessSpec, robot: object, *, capture_stop_s: float
+) -> _StopAck:
+    """Make the SDK's own stop call for a window this process never opened."""
+    with Timer(
+        spec.stop_sla_s,
+        label="peer.stop_recording",
+        always_log=True,
+        assert_deadline=spec.assert_deadline,
+    ):
+        nc.stop_recording(
+            robot_name=spec.robot_name, wait=spec.wait, timestamp=capture_stop_s
+        )
+    assert robot.get_current_recording_id() is None, (  # type: ignore[attr-defined]
+        "the stopping peer's nc.stop_recording left its gate open, so the call "
+        "was refused before it reached the daemon at all"
+    )
+    return _StopAck(returned_at=time.time())
+
+
+class SplitProcessRecordingController(RecordingController):
+    """This process starts every window; a peer process makes the stop call.
+
+    An application opening a recording and something else — an operator tool, a
+    supervisor, the next node along — closing it. Nothing routes the stop back
+    by hand: the peer learns the window exists because the backend announced it,
+    and this process learns it closed the same way, so both directions of the
+    notification stream have to work for one recording to end.
+    """
+
+    def __init__(self, spec: ContextSpec, robot: object) -> None:
+        super().__init__(spec, robot)
+        self._peer = ChildProcess(f"peer-control-{spec.context_index}")
+        self._commands = self._peer.queue()
+        self._acks = self._peer.queue()
+        self._peer_retired = False
+        self._window_start_s = 0.0
+        self._peer.start(
+            _peer_control_process,
+            (
+                ControlProcessSpec(
+                    robot_name=spec.robot_name,
+                    wait=spec.case.wait,
+                    stop_sla_s=spec.case.stop_recording_sla_s,
+                    assert_deadline=spec.assert_deadline,
+                ),
+                self._peer.ready_event,
+                self._commands,
+                self._acks,
+                self._peer.result_queue,
+            ),
+        )
+        if not self._peer.await_ready():
+            failure = self._peer.collect().failure or (
+                f"still connecting after {MAX_TIME_TO_START_S}s"
+            )
+            raise RuntimeError(f"the stopping peer never connected: {failure}")
+
+    def open(self, capture_start_s: float) -> ControlBracket:
+        """Start the recording here, and set the peer waiting to hear of it.
+
+        The peer's wait is not collected until :meth:`close`: this process's
+        gate is open the moment the call returns, so blocking on a second
+        process learning that would only postpone frames already inside.
         """
+        called_at = time.time()
         with Timer(
-            max(deadline - time.time(), 0.0),
-            label=f"remote.{label}_gate_wait",
+            MAX_TIME_TO_START_S,
+            label="nc.start_recording",
             always_log=True,
             assert_deadline=self.spec.assert_deadline,
         ):
-            while time.time() < deadline:
-                try:
-                    if (self.robot.get_current_recording_id() is not None) == open_gate:
-                        return time.time()
-                except RecordingStateUnavailableError:
-                    # A busy daemon answers nothing rather than "not
-                    # recording"; the gate has not moved, so poll again.
-                    pass
-                time.sleep(REMOTE_GATE_POLL_INTERVAL_S)
-            raise AssertionError(overdue)
+            nc.start_recording(
+                robot_name=self.spec.robot_name, timestamp=capture_start_s
+            )
+        self._window_start_s = capture_start_s
+        self._commands.put((_PEER_AWAIT_OPEN, capture_start_s))
+        return ControlBracket(
+            called_at=called_at,
+            settled_at=time.time(),
+            handle=self.robot.get_current_recording_id(),
+        )
+
+    def close(self, capture_stop_s: float) -> ControlBracket:
+        """Have the peer stop the recording, then wait to be told it did.
+
+        This process makes no stop call to stamp the bound, so the gate
+        transition is the only thing that settles the close and is always
+        waited for.
+        """
+        opened: _OpenAck = self._await_ack(
+            _PEER_AWAIT_OPEN,
+            _OpenAck,
+            deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+        )
+        peer_start_lag_s = opened.gate_opened_at - self._window_start_s
+        assert peer_start_lag_s <= REMOTE_START_ANNOUNCEMENT_SLA_S, (
+            f"the window opened at {self._window_start_s} reached the stopping "
+            f"peer {peer_start_lag_s:.3f}s later, over the "
+            f"{REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
+        )
+        called_at = time.time()
+        handle = self.robot.get_current_recording_id()
+        self._commands.put((_PEER_STOP, capture_stop_s))
+        stopped: _StopAck = self._await_ack(
+            _PEER_STOP,
+            _StopAck,
+            deadline=time.time()
+            + self.spec.case.stop_recording_sla_s
+            + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+        )
+        settled_at = await_gate(
+            self.robot,
+            open_gate=False,
+            deadline=stopped.returned_at + REMOTE_STOP_PROPAGATION_SLA_S,
+            label="split.stop_gate_wait",
+            assert_deadline=self.spec.assert_deadline,
+            overdue=(
+                "the peer's stop never came back round to this process: its own "
+                f"gate was still open {REMOTE_STOP_PROPAGATION_SLA_S}s after the "
+                "peer's call returned, so its streams were never drained. A "
+                "peer stop whose daemon publish failed reads exactly like this "
+                "— Robot._drain_streams_and_notify_daemon logs it and returns, "
+                "so check the peer's stderr for a failed publish"
+            ),
+        )
+        return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+
+    def shutdown(self) -> None:
+        """Retire the peer and surface anything it raised."""
+        if self._peer_retired:
+            return
+        self._peer_retired = True
+        self._commands.put(None)
+        failure = self._peer.collect().failure
+        if failure:
+            raise RuntimeError(f"the stopping peer failed:\n{failure}")
+
+    def _await_ack(self, order: str, kind: type, *, deadline: float) -> Any:
+        """Take the peer's answer to *order*, or say why none came.
+
+        Polls rather than blocking outright so a peer that died mid-order is
+        reaped for its own traceback. Both answers arrive on one channel, so
+        the kind is checked rather than assumed.
+        """
+        while time.time() < deadline:
+            try:
+                ack = self._acks.get(timeout=SPLIT_CONTROL_ACK_POLL_S)
+            except queue.Empty:
+                if not self._peer.is_alive:
+                    break
+                continue
+            assert isinstance(ack, kind), (
+                f"the stopping peer answered {order!r} with {ack!r}, so its "
+                "orders and answers have drifted out of step"
+            )
+            return ack
+        failure = self._peer.collect().failure or "it is still running"
+        self._peer_retired = True
+        raise AssertionError(f"the stopping peer never answered {order!r}:\n{failure}")
 
 
 def make_recording_controller(
@@ -256,4 +548,6 @@ def make_recording_controller(
     """Build the controller a case asked for."""
     if spec.case.recording_control == CONTROL_REMOTE:
         return RemoteRecordingController(spec, robot)
+    if spec.case.recording_control == CONTROL_SPLIT_PROCESS:
+        return SplitProcessRecordingController(spec, robot)
     return LocalRecordingController(spec, robot)

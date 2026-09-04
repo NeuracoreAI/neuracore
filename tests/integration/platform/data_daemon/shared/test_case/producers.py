@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import multiprocessing
-import queue
 import random
 import threading
 import time
@@ -22,6 +20,9 @@ from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     TraceClassification,
     _classify_boundary_frames,
 )
+from tests.integration.platform.data_daemon.shared.test_case.child_process import (
+    ChildProcess,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DETAIL_REALISTIC,
     MAX_TIME_TO_START_S,
@@ -29,10 +30,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PRODUCER_MULTI_PROCESS,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
-    PRODUCER_PROCESS_JOIN_TIMEOUT_S,
-    PRODUCER_PROCESS_READY_POLL_S,
-    PRODUCER_PROCESS_REPORT_TIMEOUT_S,
-    PRODUCER_PROCESS_TERMINATE_TIMEOUT_S,
     camera_names,
     depth_camera_names,
     joint_names_for_count,
@@ -568,12 +565,10 @@ def _producer_process(
 
 @dataclass(slots=True)
 class _ChildProducer:
-    """One spawned producer child and the primitives that drive it."""
+    """One spawned producer child and the flag that stops it."""
 
-    process: Any
-    ready_event: Any
+    process: ChildProcess
     stop_event: Any
-    result_queue: Any
 
 
 class MultiProcessProducerSession(ProducerSession):
@@ -629,29 +624,24 @@ class MultiProcessProducerSession(ProducerSession):
         """Spawn every child and wait for it to connect, then start locally:
         children must already be logging before the first ``start_recording``,
         or the boundary proves nothing."""
-        spawn_ctx = multiprocessing.get_context("spawn")
         for process_index, child_plans in enumerate(self._child_plan_groups):
-            child = _ChildProducer(
-                process=None,
-                ready_event=spawn_ctx.Event(),
-                stop_event=spawn_ctx.Event(),
-                result_queue=spawn_ctx.Queue(),
+            process = ChildProcess(
+                f"producer-{self.spec.context_index}-{process_index}"
             )
-            child.process = spawn_ctx.Process(
-                name=f"producer-{self.spec.context_index}-{process_index}",
-                target=_producer_process,
-                args=(
+            child = _ChildProducer(process=process, stop_event=process.event())
+            process.start(
+                _producer_process,
+                (
                     self._child_spec(child_plans),
-                    child.ready_event,
+                    process.ready_event,
                     child.stop_event,
-                    child.result_queue,
+                    process.result_queue,
                 ),
             )
-            child.process.start()
             self._children.append(child)
 
         for process_index, child in enumerate(self._children):
-            if not self._await_child_ready(child):
+            if not child.process.await_ready():
                 # finish() still reaps the other children already in self._children.
                 failure = self._collect_child(child) or (
                     f"still running after {MAX_TIME_TO_START_S}s"
@@ -661,18 +651,6 @@ class MultiProcessProducerSession(ProducerSession):
                     f"{failure}"
                 )
         self._local.start()
-
-    def _await_child_ready(self, child: _ChildProducer) -> bool:
-        """Whether *child* began logging within :data:`MAX_TIME_TO_START_S`,
-        giving up early if the process dies so its own traceback can be
-        reported."""
-        deadline = time.time() + MAX_TIME_TO_START_S
-        while time.time() < deadline:
-            if child.ready_event.wait(timeout=PRODUCER_PROCESS_READY_POLL_S):
-                return True
-            if not child.process.is_alive():
-                return False
-        return False
 
     def run_recording(self, recording_ordinal: int) -> None:
         """Hold the window open: every producer is already running."""
@@ -696,34 +674,11 @@ class MultiProcessProducerSession(ProducerSession):
             )
 
     def _collect_child(self, child: _ChildProducer) -> str:
-        """Fold *child*'s report in and reap it. Returns its failure, or ``""``.
-
-        The queue is drained before the join — joining first can deadlock,
-        since a process won't exit until its queued item clears the pipe.
-        """
-        try:
-            outcome = child.result_queue.get(timeout=PRODUCER_PROCESS_REPORT_TIMEOUT_S)
-        except queue.Empty:
-            outcome = None
-        if outcome is not None:
-            Timer.merge_stats(outcome.get("timer_stats", {}))
-        child.process.join(timeout=PRODUCER_PROCESS_JOIN_TIMEOUT_S)
-        if child.process.is_alive():
-            child.process.terminate()
-            child.process.join(timeout=PRODUCER_PROCESS_TERMINATE_TIMEOUT_S)
-            return f"child {child.process.name} did not exit and was terminated"
-        if outcome is None:
-            return f"child {child.process.name} exited without reporting"
-        if not outcome.get("ok"):
-            return f"child {child.process.name} raised:\n{outcome.get('traceback')}"
-        if child.process.exitcode != 0:
-            return (
-                f"child {child.process.name} exited with code "
-                f"{child.process.exitcode}"
-            )
-        # Trace keys are disjoint across producers, so no trace is interleaved.
-        self._child_frames.update(outcome["report"])
-        return ""
+        """Fold *child*'s report in and reap it. Returns its failure, or ``""``."""
+        outcome = child.process.collect()
+        if outcome.payload is not None:
+            self._child_frames.update(outcome.payload["report"])
+        return outcome.failure
 
     def report(self) -> dict[str, list[EmittedFrame]]:
         """Every frame logged, by this process and by every child."""
