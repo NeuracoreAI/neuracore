@@ -15,9 +15,12 @@ import neuracore as nc
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     Timer,
-    init_worker_logging,
+    init_worker_reporting,
+    merge_unreturned_worker_stats,
+    publish_timer_stats,
     relayed_worker_logs,
     surface_worker_errors,
+    worker_timer_stats_sink,
 )
 from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     EmittedFrame,
@@ -191,7 +194,10 @@ def _subprocess_context_worker(spec: ContextSpec) -> ContextResult:
     multiprocessing.current_process().name = f"ctx-{spec.context_index}"
     Timer._stats.clear()
     ensure_login()
-    return context_worker(spec)
+    try:
+        return context_worker(spec)
+    finally:
+        publish_timer_stats(spec.context_index)
 
 
 def context_worker(spec: ContextSpec) -> ContextResult:
@@ -308,6 +314,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                     stop_settled_at=gate_closed_at.result,
                 )
                 ordinal_by_disk_key[disk_recording_key] = recording_ordinal
+                publish_timer_stats(spec.context_index)
         finally:
             # A surviving producer thread breaks the cleanup assertions.
             session.finish()
@@ -482,16 +489,28 @@ def _run_context_specs(
         return [context_worker(specs[0])]
 
     process_context = multiprocessing.get_context("spawn")
-    with relayed_worker_logs(process_context) as log_queue:
-        with process_context.Pool(
-            case.parallel_contexts,
-            initializer=init_worker_logging,
-            initargs=(log_queue, logging.getLogger().getEffectiveLevel()),
-        ) as pool:
-            results: list[ContextResult] = []
-            for result in pool.imap_unordered(_subprocess_context_worker, specs):
-                Timer.merge_stats(result.timer_stats)
-                results.append(result)
+    with (
+        relayed_worker_logs(process_context) as log_queue,
+        worker_timer_stats_sink() as stats_sink,
+    ):
+        results: list[ContextResult] = []
+        try:
+            with process_context.Pool(
+                case.parallel_contexts,
+                initializer=init_worker_reporting,
+                initargs=(
+                    log_queue,
+                    logging.getLogger().getEffectiveLevel(),
+                    stats_sink,
+                ),
+            ) as pool:
+                for result in pool.imap_unordered(_subprocess_context_worker, specs):
+                    Timer.merge_stats(result.timer_stats)
+                    results.append(result)
+        finally:
+            merge_unreturned_worker_stats(
+                stats_sink, {result.context_index for result in results}
+            )
     return results
 
 
