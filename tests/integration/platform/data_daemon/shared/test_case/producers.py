@@ -2,25 +2,40 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import queue
 import random
 import threading
 import time
+import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from typing import Any, ClassVar
 
+import neuracore as nc
+from tests.integration.platform.data_daemon.shared.auth import ensure_login
+from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     EmittedFrame,
+    RecordingControlBounds,
+    TraceClassification,
+    _classify_boundary_frames,
 )
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_REALISTIC,
+    MAX_TIME_TO_START_S,
+    PER_THREAD_LOGGING_TAIL_S,
+    PRODUCER_MULTI_PROCESS,
+    PRODUCER_OLD_PER_THREAD,
+    PRODUCER_PER_THREAD,
+    PRODUCER_PROCESS_JOIN_TIMEOUT_S,
+    PRODUCER_PROCESS_READY_POLL_S,
+    PRODUCER_PROCESS_REPORT_TIMEOUT_S,
+    PRODUCER_PROCESS_TERMINATE_TIMEOUT_S,
     camera_names,
     depth_camera_names,
     joint_names_for_count,
-)
-from tests.integration.platform.data_daemon.shared.test_case.constants import (
-    PER_THREAD_LOGGING_TAIL_S,
-    PRODUCER_OLD_PER_THREAD,
-    PRODUCER_PER_THREAD,
     random_phase_jitter_window,
 )
 from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
@@ -29,6 +44,9 @@ from tests.integration.platform.data_daemon.shared.test_case.context_spec import
     ContextSpec,
     recording_timestamps,
     stream_phase_seed,
+)
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    prewarm_frame_bank,
 )
 from tests.integration.platform.data_daemon.shared.test_case.pacing import (
     StreamPacer,
@@ -257,28 +275,15 @@ def run_threaded_logging(request: ProducerRequest) -> dict[str, list[EmittedFram
 class ProducerSession(ABC):
     """Runs a case's producer, whatever its lifetime, behind one interface.
 
-    Lifetime is the only thing that differs at the call site: a producer scoped
-    to a recording runs *inside* the window, while one that outlives every
-    recording has to be started before the first and stopped after the last.
-    Both are driven the same way here, so a caller states the recording
-    protocol once and the case's ``producer_channels`` decides nothing about
-    the shape of that code::
-
-        session = make_producer_session(spec, robot=robot, marker_name=...)
-        session.start()
-        try:
-            for ordinal in range(recordings):
-                nc.start_recording(...)
-                session.run_recording(ordinal)
-                nc.stop_recording(...)
-        finally:
-            session.finish()
-        report = session.report()
-
-    The report is uniform too: every producer reports every frame it logged
-    with the wall-clock brackets around the call, so one classification decides
-    which recording owns which frame (see :func:`_classify_boundary_frames`).
+    A caller states the start/run/stop protocol once; ``producer_channels``
+    decides nothing about that code's shape. Every producer reports every
+    frame with wall-clock brackets, so one classification decides which
+    recording owns which (see :meth:`classify`).
     """
+
+    needs_stop_gate_bracket: ClassVar[bool] = False
+    """Whether :meth:`classify` needs ``stop_settled_at`` measured, not assumed
+    — costs a polling thread inside every ``stop_recording`` call."""
 
     def __init__(
         self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
@@ -337,6 +342,19 @@ class ProducerSession(ABC):
     @abstractmethod
     def report(self) -> dict[str, list[EmittedFrame]]:
         """Return every frame logged so far, keyed by trace."""
+
+    def classify(
+        self,
+        trace_key: str,
+        frames: list[EmittedFrame],
+        bounds: RecordingControlBounds,
+    ) -> TraceClassification:
+        """Return what a recording requires of one trace's frames.
+
+        Cross-process sessions override this where the local handle rule does
+        not apply.
+        """
+        return _classify_boundary_frames(frames, bounds)
 
 
 class BoundedProducerSession(ProducerSession):
@@ -454,6 +472,280 @@ class LifetimeProducerSession(ProducerSession):
         return self._frames
 
 
+def partition_plans(
+    plans: list[StreamPlan], process_streams: tuple[tuple[str, ...], ...]
+) -> tuple[list[StreamPlan], list[list[StreamPlan]]]:
+    """Split *plans* into the ones this process runs and one group per child;
+    every plan lands in exactly one group, since the case already rejected
+    duplicates."""
+    groups = [frozenset(group) for group in process_streams]
+    local: list[StreamPlan] = []
+    children: list[list[StreamPlan]] = [[] for _ in process_streams]
+    for plan in plans:
+        for index, group in enumerate(groups):
+            if plan.placement_tokens & group:
+                children[index].append(plan)
+                break
+        else:
+            local.append(plan)
+    return local, children
+
+
+@dataclass(frozen=True, slots=True)
+class ProducerProcessSpec:
+    """What one producer child needs, in picklable form — :class:`ProducerRequest`
+    holds a live handle and ``threading.Event``, neither picklable."""
+
+    robot_name: str
+    dataset_name: str
+    plans: tuple[StreamPlan, ...]
+    image_width: int | None
+    image_height: int | None
+    video_detail: str
+    timestamp_start_s: float
+    random_phase: bool
+    pacing: str
+    context_index: int
+    assert_deadline: bool
+
+
+def _producer_process(
+    spec: ProducerProcessSpec,
+    ready_event: Any,
+    stop_event: Any,
+    result_queue: Any,
+) -> None:
+    """Run the lifetime producer for *spec*'s streams in its own OS process.
+
+    Never calls ``start_recording`` and never seals its own chunks — it logs
+    continuously and unconditionally, and the daemon alone decides what is
+    kept, by routing each published sample against its own window state.
+    ``ready_event``/``stop_event``/``result_queue`` are ``multiprocessing``
+    primitives from a ``"spawn"`` context.
+    """
+    robot = None
+    try:
+        ensure_login()
+        nc.get_dataset(spec.dataset_name)
+        robot = nc.connect_robot(spec.robot_name, overwrite=False)
+        if (
+            any(plan.is_video for plan in spec.plans)
+            and spec.video_detail == DETAIL_REALISTIC
+        ):
+            # A lazy build inside the camera thread would cost seconds.
+            prewarm_frame_bank(spec.video_detail, spec.image_width, spec.image_height)
+        ready_event.set()
+        report = run_threaded_logging(
+            ProducerRequest(
+                robot=robot,
+                robot_name=spec.robot_name,
+                context_index=spec.context_index,
+                recording_index=0,
+                seed_ordinal=0,
+                plans=spec.plans,
+                image_width=spec.image_width,
+                image_height=spec.image_height,
+                video_detail=spec.video_detail,
+                timestamp_start_s=spec.timestamp_start_s,
+                random_phase=spec.random_phase,
+                duration_sec=None,
+                pacing=spec.pacing,
+                stop_event=stop_event,
+                assert_deadline=spec.assert_deadline,
+            )
+        )
+        result_queue.put({
+            "ok": True,
+            "report": report,
+            "timer_stats": {label: dict(v) for label, v in Timer._stats.items()},
+        })
+    except BaseException:  # noqa: BLE001 - propagate full child traceback
+        result_queue.put({"ok": False, "traceback": traceback.format_exc()})
+    finally:
+        if robot is not None:
+            robot.close()
+
+
+@dataclass(slots=True)
+class _ChildProducer:
+    """One spawned producer child and the primitives that drive it."""
+
+    process: Any
+    ready_event: Any
+    stop_event: Any
+    result_queue: Any
+
+
+class MultiProcessProducerSession(ProducerSession):
+    """A lifetime producer whose streams are split across OS processes:
+    children never call ``start_recording`` and log unconditionally — the
+    daemon alone decides what lands in the recording, by routing each
+    published sample against its own window state — the topology a real
+    deployment has when camera and recording owner are separate, and it needs
+    no cloud."""
+
+    needs_stop_gate_bracket: ClassVar[bool] = True
+
+    def __init__(
+        self,
+        spec: ContextSpec,
+        robot: object,
+        plans: list[StreamPlan],
+        local_plans: list[StreamPlan],
+        child_plan_groups: list[list[StreamPlan]],
+    ) -> None:
+        super().__init__(spec, robot, plans)
+        self._child_plan_groups = child_plan_groups
+        self._local = LifetimeProducerSession(spec, robot, local_plans)
+        self._children: list[_ChildProducer] = []
+        self._child_frames: dict[str, list[EmittedFrame]] = {}
+        # Precomputed: only needed by classify(), which runs after finish().
+        self._child_trace_keys = frozenset(
+            key
+            for group in child_plan_groups
+            for plan in group
+            for key in plan.trace_keys
+        )
+
+    def frame_code_recording_index(self, recording_ordinal: int) -> int:
+        """Always ``0``: every producer here numbers frames session-wide."""
+        return 0
+
+    def _child_spec(self, child_plans: list[StreamPlan]) -> ProducerProcessSpec:
+        case = self.spec.case
+        return ProducerProcessSpec(
+            robot_name=self.spec.robot_name,
+            dataset_name=self.spec.dataset_name,
+            plans=tuple(child_plans),
+            image_width=case.image_width,
+            image_height=case.image_height,
+            video_detail=case.video_detail,
+            timestamp_start_s=self.spec.timestamp_start_s,
+            random_phase=case.random_phase,
+            pacing=case.producer_pacing,
+            context_index=self.spec.context_index,
+            assert_deadline=self.spec.assert_deadline,
+        )
+
+    def start(self) -> None:
+        """Spawn every child and wait for it to connect, then start locally:
+        children must already be logging before the first ``start_recording``,
+        or the boundary proves nothing."""
+        spawn_ctx = multiprocessing.get_context("spawn")
+        for process_index, child_plans in enumerate(self._child_plan_groups):
+            child = _ChildProducer(
+                process=None,
+                ready_event=spawn_ctx.Event(),
+                stop_event=spawn_ctx.Event(),
+                result_queue=spawn_ctx.Queue(),
+            )
+            child.process = spawn_ctx.Process(
+                name=f"producer-{self.spec.context_index}-{process_index}",
+                target=_producer_process,
+                args=(
+                    self._child_spec(child_plans),
+                    child.ready_event,
+                    child.stop_event,
+                    child.result_queue,
+                ),
+            )
+            child.process.start()
+            self._children.append(child)
+
+        for process_index, child in enumerate(self._children):
+            if not self._await_child_ready(child):
+                # finish() still reaps the other children already in self._children.
+                failure = self._collect_child(child) or (
+                    f"still running after {MAX_TIME_TO_START_S}s"
+                )
+                raise RuntimeError(
+                    f"producer child {process_index} never started logging: "
+                    f"{failure}"
+                )
+        self._local.start()
+
+    def _await_child_ready(self, child: _ChildProducer) -> bool:
+        """Whether *child* began logging within :data:`MAX_TIME_TO_START_S`,
+        giving up early if the process dies so its own traceback can be
+        reported."""
+        deadline = time.time() + MAX_TIME_TO_START_S
+        while time.time() < deadline:
+            if child.ready_event.wait(timeout=PRODUCER_PROCESS_READY_POLL_S):
+                return True
+            if not child.process.is_alive():
+                return False
+        return False
+
+    def run_recording(self, recording_ordinal: int) -> None:
+        """Hold the window open: every producer is already running."""
+        self._local.run_recording(recording_ordinal)
+
+    def finish(self) -> None:
+        """Stop the local streams, then every child: the local tail wait runs
+        first, giving children the same window of post-stop logging."""
+        try:
+            self._local.finish()
+        finally:
+            for child in self._children:
+                child.stop_event.set()
+            failures = [self._collect_child(child) for child in self._children]
+            self._children = []
+        errors = [failure for failure in failures if failure]
+        if errors:
+            raise RuntimeError(
+                f"{len(errors)} producer child process(es) failed:\n"
+                + "\n".join(errors)
+            )
+
+    def _collect_child(self, child: _ChildProducer) -> str:
+        """Fold *child*'s report in and reap it. Returns its failure, or ``""``.
+
+        The queue is drained before the join — joining first can deadlock,
+        since a process won't exit until its queued item clears the pipe.
+        """
+        try:
+            outcome = child.result_queue.get(timeout=PRODUCER_PROCESS_REPORT_TIMEOUT_S)
+        except queue.Empty:
+            outcome = None
+        child.process.join(timeout=PRODUCER_PROCESS_JOIN_TIMEOUT_S)
+        if child.process.is_alive():
+            child.process.terminate()
+            child.process.join(timeout=PRODUCER_PROCESS_TERMINATE_TIMEOUT_S)
+            return f"child {child.process.name} did not exit and was terminated"
+        if outcome is None:
+            return f"child {child.process.name} exited without reporting"
+        if not outcome.get("ok"):
+            return f"child {child.process.name} raised:\n{outcome.get('traceback')}"
+        if child.process.exitcode != 0:
+            return (
+                f"child {child.process.name} exited with code "
+                f"{child.process.exitcode}"
+            )
+        # Trace keys are disjoint across producers, so no trace is interleaved.
+        self._child_frames.update(outcome["report"])
+        Timer.merge_stats(outcome.get("timer_stats", {}))
+        return ""
+
+    def report(self) -> dict[str, list[EmittedFrame]]:
+        """Every frame logged, by this process and by every child."""
+        frames = dict(self._local.report())
+        frames.update(self._child_frames)
+        return frames
+
+    def classify(
+        self,
+        trace_key: str,
+        frames: list[EmittedFrame],
+        bounds: RecordingControlBounds,
+    ) -> TraceClassification:
+        """Use the cross-process rule for traces a child wrote — a child's own
+        handle value would make the in-process rule condemn frames the window
+        accepted."""
+        if trace_key not in self._child_trace_keys:
+            return super().classify(trace_key, frames, bounds)
+        return _classify_boundary_frames(frames, bounds)
+
+
 def make_producer_session(
     spec: ContextSpec, *, robot: object, marker_name: str
 ) -> ProducerSession:
@@ -472,6 +764,13 @@ def make_producer_session(
         video_fps=case.video_fps,
         marker_name=marker_name,
     )
+    if case.producer_channels == PRODUCER_MULTI_PROCESS:
+        local_plans, child_groups = partition_plans(
+            plans, case.producer_process_streams
+        )
+        return MultiProcessProducerSession(
+            spec, robot, plans, local_plans, child_groups
+        )
     if case.producer_channels == PRODUCER_PER_THREAD:
         return LifetimeProducerSession(spec, robot, plans)
     engine = (
