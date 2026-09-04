@@ -139,7 +139,10 @@ impl DispatcherHandle {
 }
 
 /// Optional runtime context passed to the dispatcher.
-#[derive(Clone, Default)]
+///
+/// Not `Clone`: `notifications_rx` is the single consumer of the notification
+/// stream, and the dispatcher is its only owner.
+#[derive(Default)]
 pub struct DispatcherContext {
     /// Daemon event bus, used to publish recording/trace lifecycle events.
     pub event_bus: Option<crate::state::EventBus>,
@@ -148,6 +151,56 @@ pub struct DispatcherContext {
     /// `None` in tests / when no watcher is wired, where `RefreshConfig` is a
     /// no-op.
     pub config_refresh_tx: Option<tokio::sync::mpsc::Sender<crate::cloud::ConfigRefreshRequest>>,
+    /// Backend recording lifecycle, read off the notification stream by
+    /// [`crate::cloud::spawn_recording_notifications`]. `None` offline.
+    pub notifications_rx: Option<mpsc::Receiver<RecordingCommand>>,
+}
+
+/// A recording a source has been told to make.
+///
+/// Written the same way whichever end announced it. Kept until the recording
+/// stops, so a stop that names a cloud id can be matched against what the
+/// source actually has open. One announced for a robot publishing to another
+/// host costs a map entry and never mints a row.
+#[derive(Debug, Clone)]
+struct AnnouncedRecording {
+    /// The backend's id, when the announcement carried one.
+    cloud_recording_id: Option<String>,
+    dataset_id: Option<String>,
+    /// The window's lower bound on the publish clock.
+    open_at_ns: i64,
+    /// The recording's own capture-clock start → the row's `start_timestamp_ns`.
+    start_timestamp_ns: i64,
+    /// The recording this announcement opened, once it has.
+    opened_index: Option<i64>,
+}
+
+/// A recording lifecycle event the *backend* originated, delivered over the
+/// daemon's notification stream rather than the IPC bus.
+///
+/// These carry the recordings nobody local brackets — started or stopped from
+/// the web. They are applied through the same two entry points a producer's
+/// envelopes use; the only thing the stream needs of its own is the cloud id,
+/// which says whether a stop that trailed its recording by a network hop still
+/// names the recording this source has open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordingCommand {
+    /// The backend minted a recording for this source.
+    Open {
+        cloud_recording_id: String,
+        robot_id: String,
+        robot_instance: i64,
+        dataset_id: Option<String>,
+        /// The recording's start on the backend's record (Unix nanoseconds).
+        start_timestamp_ns: i64,
+    },
+    /// The named recording ended.
+    Close {
+        cloud_recording_id: String,
+        /// When the daemon learned of the stop (Unix nanoseconds). Used as the
+        /// recording's `end_time` only when nothing local already stopped it.
+        observed_at_ns: i64,
+    },
 }
 
 /// Spawn the dispatcher task and return its inbound `mpsc::Sender`.
@@ -332,6 +385,9 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
+    /// What each source has been told to record, announced but not yet proved
+    /// local. Data is that proof — see [`Dispatcher::open_announced_window`].
+    announced: HashMap<Source, AnnouncedRecording>,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -354,6 +410,7 @@ impl Dispatcher {
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
+            announced: HashMap::new(),
             last_housekeep: Instant::now(),
         }
     }
@@ -367,6 +424,7 @@ impl Dispatcher {
             holdback_ms = self.holdback.as_millis(),
             "dispatcher started"
         );
+        let mut notifications_rx = self.context.notifications_rx.take();
 
         loop {
             // When there is in-flight work, poll frequently for due releases /
@@ -389,6 +447,22 @@ impl Dispatcher {
                         break;
                     };
                     self.handle_inbound(envelope, Instant::now()).await;
+                }
+                command = async {
+                    match notifications_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match command {
+                        Some(command) => {
+                            self.handle_recording_command(command, Instant::now()).await;
+                        }
+                        None => {
+                            tracing::debug!("recording notification stream closed");
+                            notifications_rx = None;
+                        }
+                    }
                 }
                 _ = sleep(housekeep_after) => {}
             }
@@ -419,15 +493,20 @@ impl Dispatcher {
                 cloud_recording_id,
                 ..
             } => {
-                self.handle_start(
-                    (robot_id, robot_instance),
+                let source = (robot_id, robot_instance);
+                self.announce_recording(
+                    source.clone(),
                     dataset_id,
                     cloud_recording_id,
                     publish_timestamp_ns,
                     timestamp_ns,
-                    recv_at,
                 )
                 .await;
+                // The envelope came over local IPC, so the producer that sent
+                // it is here: this start is itself the proof an announcement
+                // off the notification stream has to wait for data to get.
+                self.open_announced_window(&source, publish_timestamp_ns, recv_at)
+                    .await;
             }
             Envelope::StopRecording {
                 robot_id,
@@ -607,21 +686,25 @@ impl Dispatcher {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    async fn handle_start(
+    /// Announce a recording for `source`. The window opens when the source is
+    /// known to be here — see [`Dispatcher::open_announced_window`].
+    ///
+    /// Both origins land here unchanged: a producer's `StartRecording` envelope
+    /// and the backend's notification stream.
+    async fn announce_recording(
         &mut self,
         source: Source,
         dataset_id: Option<String>,
         cloud_recording_id: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
-        recv_at: Instant,
     ) {
-        // A `StartRecording` carrying a known cloud id can reach this daemon
-        // more than once for the very same recording: every local process
+        // The same recording is announced more than once: every local process
         // connected to the source learns about a web-started recording
-        // independently, and each may try to open it. Only the first must
-        // create a row and open a window.
+        // independently, and the notification stream echoes back a recording
+        // this daemon opened itself. An id already on a row belongs to a
+        // recording past announcing — keep the id, drop the echo. Holding the
+        // id is what lets a stop from the web name this recording later.
         if let Some(cloud_recording_id) = cloud_recording_id.as_deref() {
             match self
                 .store
@@ -629,6 +712,11 @@ impl Dispatcher {
                 .await
             {
                 Ok(Some(existing_index)) => {
+                    if let Some(announcement) = self.announced.get_mut(&source) {
+                        if announcement.opened_index == Some(existing_index) {
+                            announcement.cloud_recording_id = Some(cloud_recording_id.to_string());
+                        }
+                    }
                     tracing::debug!(
                         recording_index = existing_index,
                         cloud_recording_id,
@@ -649,6 +737,62 @@ impl Dispatcher {
             }
         }
 
+        let announced = AnnouncedRecording {
+            cloud_recording_id,
+            dataset_id,
+            open_at_ns: publish_timestamp_ns,
+            start_timestamp_ns: timestamp_ns,
+            opened_index: None,
+        };
+        tracing::debug!(robot_id = source.0, "recording announced");
+        self.announced.insert(source, announced);
+    }
+
+    /// Open the window for `source`'s announced recording, now that it has
+    /// published at `publish_ts`.
+    ///
+    /// The lower bound is the recording's own start, so what the producer
+    /// published before this datum still lands inside. It is clamped to
+    /// `publish_ts` so the triggering datum is not excluded, and floored at any
+    /// predecessor's close so it cannot steal that recording's tail.
+    async fn open_announced_window(&mut self, source: &Source, publish_ts: i64, recv_at: Instant) {
+        let Some(announced) = self.announced.get(source) else {
+            return;
+        };
+        if announced.opened_index.is_some() {
+            return;
+        }
+        let announced = announced.clone();
+        let mut open_at_ns = announced.open_at_ns.min(publish_ts);
+        // Catching up on a recording that began before this datum: floor the
+        // window at any predecessor's close so it cannot claim that
+        // recording's tail. A start opening its own window at its own publish
+        // time spans no such gap, and keeps the boundary its envelope set.
+        if publish_ts > announced.open_at_ns {
+            if let Some(entry) = self.windows.get(source) {
+                let predecessor_close_ns = entry
+                    .closing
+                    .iter()
+                    .filter_map(|window| window.stopped_at_ns)
+                    .filter(|stopped_at_ns| *stopped_at_ns != i64::MAX)
+                    .max();
+                if let Some(predecessor_close_ns) = predecessor_close_ns {
+                    open_at_ns = open_at_ns.max(predecessor_close_ns);
+                }
+            }
+        }
+        self.open_window(source.clone(), announced, open_at_ns, recv_at)
+            .await;
+    }
+
+    /// Create the recording row and open its window.cial case, no code change to the local path.
+    async fn open_window(
+        &mut self,
+        source: Source,
+        announced: AnnouncedRecording,
+        publish_timestamp_ns: i64,
+        recv_at: Instant,
+    ) {
         // Insert the recording row synchronously: cloud notifiers react to the
         // `RecordingStarted` event by reading this row, and `cancel_recording`
         // burns it by index, so the row must exist before either runs. After the
@@ -660,8 +804,8 @@ impl Dispatcher {
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
-            dataset_id: dataset_id.as_deref(),
-            start_timestamp_ns: timestamp_ns,
+            dataset_id: announced.dataset_id.as_deref(),
+            start_timestamp_ns: announced.start_timestamp_ns,
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -671,6 +815,9 @@ impl Dispatcher {
             }
         };
         tracing::info!(recording_index, robot_id = source.0, "recording started");
+        if let Some(announcement) = self.announced.get_mut(&source) {
+            announcement.opened_index = Some(recording_index);
+        }
 
         let entry = self.windows.entry(source).or_default();
         entry.last_seen = Some(recv_at);
@@ -734,7 +881,7 @@ impl Dispatcher {
             }
         }
 
-        match cloud_recording_id {
+        match announced.cloud_recording_id {
             None => {
                 if let Some(bus) = self.context.event_bus.as_ref() {
                     bus.publish(DaemonEvent::RecordingStarted { recording_index });
@@ -762,6 +909,80 @@ impl Dispatcher {
         }
     }
 
+    /// Apply one backend-originated recording lifecycle event, through the same
+    /// two entry points a producer's envelopes use.
+    async fn handle_recording_command(&mut self, command: RecordingCommand, recv_at: Instant) {
+        match command {
+            RecordingCommand::Open {
+                cloud_recording_id,
+                robot_id,
+                robot_instance,
+                dataset_id,
+                start_timestamp_ns,
+            } => {
+                self.announce_recording(
+                    (robot_id, robot_instance),
+                    dataset_id,
+                    Some(cloud_recording_id),
+                    start_timestamp_ns,
+                    start_timestamp_ns,
+                )
+                .await;
+            }
+            RecordingCommand::Close {
+                cloud_recording_id,
+                observed_at_ns,
+            } => {
+                let Some(source) = self.source_recording(&cloud_recording_id).await else {
+                    tracing::debug!(
+                        cloud_recording_id,
+                        "notification names no recording open here; ignoring"
+                    );
+                    return;
+                };
+                tracing::info!(
+                    cloud_recording_id,
+                    robot_id = source.0,
+                    "closing a recording the backend reported stopped"
+                );
+                self.handle_stop(source, observed_at_ns, observed_at_ns, recv_at)
+                    .await;
+            }
+        }
+    }
+
+    /// The source whose current recording is `cloud_recording_id`.
+    ///
+    /// `None` when no source has that recording open — including a stop that
+    /// trailed its successor's start, which retired the recording already, and
+    /// every recording belonging to another host.
+    async fn source_recording(&self, cloud_recording_id: &str) -> Option<Source> {
+        let announced = self.announced.iter().find(|(_, announcement)| {
+            announcement.cloud_recording_id.as_deref() == Some(cloud_recording_id)
+        });
+        if let Some((source, _)) = announced {
+            return Some(source.clone());
+        }
+        // The id was minted after the announcement — a recording started here
+        // and stopped from the web, whose START notification never taught us
+        // its id — so fall back to the row it was written to.
+        let recording_index = self
+            .store
+            .recording_index_for_cloud_id(cloud_recording_id)
+            .await
+            .ok()
+            .flatten()?;
+        self.windows
+            .iter()
+            .find(|(_, entry)| {
+                entry
+                    .live
+                    .as_ref()
+                    .is_some_and(|window| window.recording_index == recording_index)
+            })
+            .map(|(source, _)| source.clone())
+    }
+
     async fn handle_stop(
         &mut self,
         source: Source,
@@ -769,6 +990,8 @@ impl Dispatcher {
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
+        self.announced.remove(&source);
+
         let Some(entry) = self.windows.get_mut(&source) else {
             tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
             return;
@@ -777,7 +1000,7 @@ impl Dispatcher {
 
         // A stop whose publish time falls inside the live window closes the live
         // recording normally. A stop that predates the live window is a delayed
-        // stop for a recording `handle_start` already retired (an inverted
+        // stop for a recording `open_window` already retired (an inverted
         // start/stop pair) — it is matched against the closing windows instead.
         // Both paths converge on the shared post-persist tail below, so a
         // retired recording also becomes notifiable (fires `RecordingStopped`).
@@ -818,7 +1041,7 @@ impl Dispatcher {
             let window = &mut entry.closing[position];
             let recording_index = window.recording_index;
             // Deliberately DO NOT narrow the window's in-memory `stopped_at_ns`
-            // to this true (earlier) stop. `handle_start` set it to the
+            // to this true (earlier) stop. `open_window` set it to the
             // successor recording's start time so the two consecutive windows
             // tile the publish-clock line with no gap. Rewinding it to the real
             // stop would re-open a no-window interval `(true stop, successor
@@ -840,7 +1063,7 @@ impl Dispatcher {
                 "stop arrived after a later recording started; refining the retired recording's stop"
             );
             // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
-            // this true capture stop. `handle_start` already marked the row with
+            // this true capture stop. `open_window` already marked the row with
             // the successor start's time, and `mark_recording_stopped` is
             // COALESCE-idempotent, so a plain re-mark would no-op — a forced
             // overwrite is required, and correct because `stop < successor
@@ -884,6 +1107,7 @@ impl Dispatcher {
     }
 
     async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
+        self.announced.remove(&source);
         let Some(entry) = self.windows.get_mut(&source) else {
             return;
         };
@@ -1082,6 +1306,10 @@ impl Dispatcher {
     /// `publish_timestamp_ns` as the membership key.
     async fn route(&mut self, held: Held) {
         let publish_ts = held.publish_timestamp_ns;
+        if !self.announced.is_empty() {
+            self.open_announced_window(&held.source, publish_ts, Instant::now())
+                .await;
+        }
         match held.payload {
             HeldPayload::Data {
                 data_type,
@@ -1629,7 +1857,7 @@ mod tests {
     use tokio::sync::{broadcast, mpsc};
     use tokio::time::{timeout, Duration};
 
-    /// A live window for a source, as `handle_start` would have built it.
+    /// A live window for a source, as `open_window` would have built it.
     fn test_window(recording_index: i64, started_at_ns: i64) -> ActiveWindow {
         ActiveWindow {
             recording_index,
@@ -1749,6 +1977,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: Some(refresh_tx),
+            notifications_rx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1788,6 +2017,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: None,
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -1813,6 +2043,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -1918,6 +2149,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2340,7 +2572,7 @@ mod tests {
         // The chunk opens inside the window and its frames run past the stop.
         let stop_ns = 150 + 25 * 1_000;
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
@@ -2384,7 +2616,7 @@ mod tests {
         let opened_at = Instant::now();
         let stop_ns = 150 + 25 * 1_000;
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
@@ -2535,6 +2767,7 @@ mod tests {
         let dispatcher_context = DispatcherContext {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
+            notifications_rx: None,
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2569,6 +2802,126 @@ mod tests {
             }
         }
         assert!(saw_cancel, "RecordingCancelled must be published");
+    }
+
+    /// The backend announcing a recording, as the notification watcher relays it.
+    fn announced(robot: &str, cloud_recording_id: &str, start_ns: i64) -> RecordingCommand {
+        RecordingCommand::Open {
+            cloud_recording_id: cloud_recording_id.into(),
+            robot_id: robot.into(),
+            robot_instance: 0,
+            dataset_id: None,
+            start_timestamp_ns: start_ns,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_recording_announced_for_a_silent_source_creates_nothing() {
+        // The notification stream is org-wide: most of what it carries belongs
+        // to robots on other hosts. Announcing one must not mint a row here —
+        // this daemon would then report its own idle-reap to the backend as
+        // that recording's stop.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        dispatcher
+            .handle_recording_command(announced("robot-9", "rec-elsewhere", 100), Instant::now())
+            .await;
+
+        assert!(store
+            .recordings_for_source("robot-9", 0)
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(
+            dispatcher.windows.is_empty(),
+            "no window for a silent source"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_publishing_here_opens_the_recording_announced_for_it() {
+        // Data is the proof the announcement lacks. The window opens at the
+        // recording's own start, not at the datum that proved it.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        assert_eq!(recordings[0].recording_id, Some("rec-a".to_string()));
+        assert_eq!(
+            dispatcher.windows[&("robot-1".to_string(), 0)]
+                .live
+                .as_ref()
+                .unwrap()
+                .started_at_ns,
+            100,
+            "the window opens at the recording's start, not at the first datum"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_remote_stop_does_not_close_the_next_recording() {
+        // A stop notification trails the stop it describes by a network hop,
+        // by which time the source can have started its next recording. It
+        // names its recording, so it closes that one or nothing.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+        dispatcher.handle_inbound(stop("robot-1", 120), now).await;
+        dispatcher.handle_inbound(start("robot-1", 130), now).await;
+
+        // A's stop, arriving after B is already live.
+        dispatcher
+            .handle_recording_command(
+                RecordingCommand::Close {
+                    cloud_recording_id: "rec-a".into(),
+                    observed_at_ns: 150,
+                },
+                now,
+            )
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+        assert!(recordings[0].stopped_at.is_some(), "A was stopped locally");
+        assert!(
+            recordings[1].stopped_at.is_none(),
+            "B must survive a stop naming its predecessor"
+        );
+        assert!(
+            dispatcher.windows[&("robot-1".to_string(), 0)]
+                .live
+                .is_some(),
+            "B's window must still be live"
+        );
     }
 
     #[tokio::test]
@@ -2636,13 +2989,14 @@ mod tests {
             DispatcherContext {
                 event_bus: Some(bus.clone()),
                 config_refresh_tx: None,
+                notifications_rx: None,
             },
         );
 
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         assert!(dispatcher.windows.get(&source).unwrap().live.is_some());
 
@@ -2690,7 +3044,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
 
         // Only a short time has passed — well within the idle horizon.
@@ -2720,7 +3074,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2762,7 +3116,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2808,7 +3162,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
@@ -2853,7 +3207,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
 
         // The camera process claims the source as it logs, before any chunk.
@@ -2924,7 +3278,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
             .handle_stop(source.clone(), 200, 200, opened_at)
@@ -2961,7 +3315,7 @@ mod tests {
         let source = ("robot-1".to_string(), 0);
         let opened_at = Instant::now();
         dispatcher
-            .handle_start(source.clone(), None, None, 100, 100, opened_at)
+            .handle_inbound(start("robot-1", 100), opened_at)
             .await;
 
         // Producer A seals a chunk mid-recording, so the window knows of it.
