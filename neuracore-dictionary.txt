@@ -461,6 +461,7 @@ sencode
 seqlen
 serde
 sess
+sessionfinish
 setpriority
 setpts
 setsid
