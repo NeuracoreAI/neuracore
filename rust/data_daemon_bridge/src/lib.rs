@@ -467,6 +467,33 @@ fn cancel_recording(
     })
 }
 
+/// Relay a backend `DISCARDED` notification to the daemon.
+///
+/// The SDK consumes the org-wide notification stream and the daemon does not,
+/// so the side that hears the cancel is not the side still uploading. Keyed by
+/// cloud `recording_id` rather than by source because a discard usually arrives
+/// after the recording stopped, when `cancel_recording` has no window left to
+/// act on. Fire-and-forget; the daemon ignores an id it does not hold.
+#[pyfunction]
+#[pyo3(signature = (recording_id, timestamp_ns = None))]
+fn discard_recording(
+    py: Python<'_>,
+    recording_id: &str,
+    timestamp_ns: Option<i64>,
+) -> PyResult<()> {
+    if recording_id.is_empty() {
+        return Err(PyValueError::new_err("recording_id must not be empty"));
+    }
+    let recording_id = recording_id.to_string();
+    py.detach(|| -> PyResult<()> {
+        publish(&Envelope::DiscardRecording {
+            recording_id,
+            timestamp_ns: timestamp_ns.unwrap_or_else(now_ns),
+        })?;
+        Ok(())
+    })
+}
+
 /// Parse a NumPy dtype label and validate it against the declared video type.
 ///
 /// RGB frames must use `uint8`; depth frames must use `float16` or `float32`.
@@ -572,6 +599,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
+    module.add_function(wrap_pyfunction!(discard_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;

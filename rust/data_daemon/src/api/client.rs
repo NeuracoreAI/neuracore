@@ -90,6 +90,14 @@ impl ApiClientError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
     }
+
+    /// True when the backend responded `403 Forbidden`.
+    ///
+    /// Permanent: the caller is neither the recording's owner nor an org
+    /// manager, so retrying cannot change the answer.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::FORBIDDEN)
+    }
 }
 
 /// Upload connection-pool tuning for [`build_upload_client`]. Sized together for

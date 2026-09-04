@@ -43,6 +43,17 @@ def _load_native() -> ModuleType:
     return _DATA_BRIDGE_MODULE
 
 
+def native_loaded() -> bool:
+    """Whether this process has already loaded the daemon bridge.
+
+    Distinguishes a producer from a bystander without turning the latter into
+    one: publishing an envelope initialises producer IPC state and waits
+    several seconds for a daemon subscriber, and only a process that has
+    recorded has work worth cancelling.
+    """
+    return _DATA_BRIDGE_MODULE is not None
+
+
 class LoggingStalledError(RuntimeError):
     """The daemon is not draining its spool backlog fast enough to admit a frame."""
 

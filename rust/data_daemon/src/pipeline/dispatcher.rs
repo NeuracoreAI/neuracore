@@ -451,6 +451,12 @@ impl Dispatcher {
                 self.handle_cancel((robot_id, robot_instance), timestamp_ns)
                     .await;
             }
+            Envelope::DiscardRecording {
+                recording_id,
+                timestamp_ns,
+            } => {
+                self.handle_discard(&recording_id, timestamp_ns).await;
+            }
             Envelope::Data {
                 robot_id,
                 robot_instance,
@@ -898,37 +904,103 @@ impl Dispatcher {
         windows.append(&mut entry.closing);
 
         for window in windows {
-            let recording_index = window.recording_index;
-            for (_, handle) in window.traces {
-                let _ = handle.sender.send(TraceActorMessage::Cancel).await;
+            self.discard_window(window, timestamp_ns).await;
+        }
+    }
+
+    /// Relay of a backend `DISCARDED`, keyed by the cloud `recording_id`.
+    ///
+    /// Unlike [`handle_cancel`](Self::handle_cancel) this routinely arrives for
+    /// a recording with no window left — stopped a while ago, still uploading —
+    /// and then burning the rows and announcing it is the whole job. Idempotent,
+    /// and a no-op for an id this daemon never held (the notification is
+    /// broadcast org-wide).
+    async fn handle_discard(&mut self, recording_id: &str, timestamp_ns: i64) {
+        let recording_index = match self.store.recording_index_for_cloud_id(recording_id).await {
+            Ok(Some(index)) => index,
+            Ok(None) => {
+                tracing::debug!(
+                    recording_id,
+                    "discard notification for a recording this daemon does not hold; ignoring"
+                );
+                return;
             }
-            // Purge any not-yet-flushed trace creates for this recording before
-            // burning its rows, so a late batch can't insert an orphan row for
-            // a recording that's already cancelled.
-            self.actor_context
-                .trace_writer
-                .drop_recording(recording_index)
-                .await;
-            // The cancel's capture timestamp becomes the row's
-            // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
-            match self
-                .store
-                .cancel_recording(recording_index, timestamp_ns)
-                .await
+            Err(error) => {
+                tracing::warn!(%error, recording_id, "failed to resolve discarded recording");
+                return;
+            }
+        };
+        match self.take_window(recording_index) {
+            // Still open: tear it down or its trace actors keep writing.
+            Some((source, window)) => {
+                self.held.retain(|held| held.source != source);
+                self.discard_window(window, timestamp_ns).await;
+            }
+            None => self.burn_recording(recording_index, timestamp_ns).await,
+        }
+    }
+
+    /// Remove the window owning `recording_index` from whichever source holds
+    /// it — a discard is keyed by cloud id, so the source is not known up
+    /// front. `None` once no window is left, the common case for a discard.
+    fn take_window(&mut self, recording_index: i64) -> Option<(Source, ActiveWindow)> {
+        for (source, entry) in self.windows.iter_mut() {
+            if entry
+                .live
+                .as_ref()
+                .is_some_and(|window| window.recording_index == recording_index)
             {
-                Ok((_, touched)) => {
-                    tracing::info!(
-                        recording_index,
-                        trace_rows_touched = touched,
-                        "recording cancelled"
-                    );
-                    if let Some(bus) = self.context.event_bus.as_ref() {
-                        bus.publish(DaemonEvent::RecordingCancelled { recording_index });
-                    }
+                return entry.live.take().map(|window| (source.clone(), window));
+            }
+            if let Some(position) = entry
+                .closing
+                .iter()
+                .position(|window| window.recording_index == recording_index)
+            {
+                return Some((source.clone(), entry.closing.remove(position)));
+            }
+        }
+        None
+    }
+
+    /// Tear one window down: stop its trace actors, then burn the recording.
+    async fn discard_window(&mut self, window: ActiveWindow, timestamp_ns: i64) {
+        let recording_index = window.recording_index;
+        for (_, handle) in window.traces {
+            let _ = handle.sender.send(TraceActorMessage::Cancel).await;
+        }
+        self.burn_recording(recording_index, timestamp_ns).await;
+    }
+
+    /// Stamp a recording cancelled — burning every non-terminal trace row —
+    /// and announce it so the uploader abandons its work. Idempotent.
+    async fn burn_recording(&mut self, recording_index: i64, timestamp_ns: i64) {
+        // Purge unflushed trace creates *before* burning the rows: a create
+        // still in the write-behind batcher would otherwise commit afterwards
+        // as a non-terminal row and be uploaded for a recording that is gone.
+        self.actor_context
+            .trace_writer
+            .drop_recording(recording_index)
+            .await;
+        // The cancel's capture timestamp becomes the row's
+        // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
+        match self
+            .store
+            .cancel_recording(recording_index, timestamp_ns)
+            .await
+        {
+            Ok((_, touched)) => {
+                tracing::info!(
+                    recording_index,
+                    trace_rows_touched = touched,
+                    "recording cancelled"
+                );
+                if let Some(bus) = self.context.event_bus.as_ref() {
+                    bus.publish(DaemonEvent::RecordingCancelled { recording_index });
                 }
-                Err(error) => {
-                    tracing::warn!(%error, recording_index, "failed to mark recording cancelled");
-                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to mark recording cancelled");
             }
         }
     }
@@ -2529,6 +2601,216 @@ mod tests {
 
         let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
         assert!(recordings.is_empty(), "no recording should be created");
+    }
+
+    /// The case a cancel cannot reach: a recording that already stopped and is
+    /// still uploading, so no window is left to key off.
+    #[tokio::test]
+    async fn discard_burns_a_stopped_recording_with_no_window_left() {
+        let (store, dir) = open_store().await;
+        // The state a recording is in while the daemon drains it after the
+        // producer has gone.
+        let row = store
+            .create_recording(crate::state::NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                start_timestamp_ns: 100,
+                ..crate::state::NewRecording::default()
+            })
+            .await
+            .expect("create recording");
+        let recording_index = row.recording_index;
+        store
+            .mark_recording_start_notified(recording_index, "cloud-rec-1")
+            .await
+            .expect("stamp cloud id");
+        store
+            .mark_recording_stopped(recording_index, 200)
+            .await
+            .expect("stop");
+        store
+            .create_trace(
+                recording_index,
+                "trace-1",
+                Some("JOINT_POSITIONS"),
+                Some("arm"),
+            )
+            .await
+            .expect("create trace");
+
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let mut sub = bus.subscribe();
+        let dispatcher_context = DispatcherContext {
+            event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(Envelope::DiscardRecording {
+            recording_id: "cloud-rec-1".into(),
+            timestamp_ns: 300,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recording = store
+            .get_recording(recording_index)
+            .await
+            .unwrap()
+            .expect("recording exists");
+        assert!(
+            recording.cancelled_at.is_some(),
+            "a discard must burn the recording even with no window open"
+        );
+        let traces = store
+            .list_traces_for_recording(recording_index)
+            .await
+            .unwrap();
+        assert_eq!(
+            traces[0].upload_status,
+            crate::state::TraceUploadStatus::Failed,
+            "queued upload work must be dropped"
+        );
+
+        // The announcement is what aborts the uploads already in flight.
+        let mut saw_cancel = false;
+        while let Ok(event) = sub.try_recv() {
+            if matches!(
+                event,
+                DaemonEvent::RecordingCancelled {
+                    recording_index: index
+                } if index == recording_index
+            ) {
+                saw_cancel = true;
+            }
+        }
+        assert!(saw_cancel, "RecordingCancelled must be published");
+    }
+
+    /// A discard must purge the write-behind batcher too, not just the rows it
+    /// can see: a queued create would otherwise commit after the burn and
+    /// resurrect uploadable work.
+    #[tokio::test]
+    async fn discard_purges_unflushed_trace_creates() {
+        let (store, dir) = open_store().await;
+        let row = store
+            .create_recording(crate::state::NewRecording {
+                robot_id: Some("robot-1"),
+                robot_instance: Some(0),
+                start_timestamp_ns: 100,
+                ..crate::state::NewRecording::default()
+            })
+            .await
+            .expect("create recording");
+        let recording_index = row.recording_index;
+        store
+            .mark_recording_start_notified(recording_index, "cloud-rec-1")
+            .await
+            .expect("stamp cloud id");
+        store
+            .mark_recording_stopped(recording_index, 200)
+            .await
+            .expect("stop");
+
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        // Unflushed, the way a still-finalising trace sits mid-drain.
+        context
+            .trace_writer
+            .create("late-trace", recording_index, Some("JOINT_POSITIONS"), None);
+
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let dispatcher_context = DispatcherContext {
+            event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(Envelope::DiscardRecording {
+            recording_id: "cloud-rec-1".into(),
+            timestamp_ns: 300,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        // Whether the create was purged or had already committed and was then
+        // burned depends on whether the batcher's flush tick beat the discard,
+        // so assert the invariant both orderings must satisfy.
+        let traces = store
+            .list_traces_for_recording(recording_index)
+            .await
+            .unwrap();
+        for trace in &traces {
+            assert_eq!(
+                trace.upload_status,
+                crate::state::TraceUploadStatus::Failed,
+                "a surviving row must be terminal, found {trace:?}"
+            );
+        }
+        assert!(
+            store.traces_ready_for_upload().await.unwrap().is_empty(),
+            "nothing may be left uploadable for a discarded recording"
+        );
+    }
+
+    /// `DISCARDED` is broadcast to the whole org, so most arrive for recordings
+    /// this daemon never held.
+    #[tokio::test]
+    async fn discard_of_an_unknown_recording_is_ignored() {
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let bus = crate::state::EventBus::new();
+        let mut sub = bus.subscribe();
+        let dispatcher_context = DispatcherContext {
+            event_bus: Some(bus.clone()),
+            config_refresh_tx: None,
+        };
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            dispatcher_context,
+            shutdown_rx,
+        );
+
+        tx.send(Envelope::DiscardRecording {
+            recording_id: "someone-elses-recording".into(),
+            timestamp_ns: 300,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        assert!(
+            !matches!(sub.try_recv(), Ok(DaemonEvent::RecordingCancelled { .. })),
+            "an unknown recording id must not cancel anything"
+        );
     }
 
     #[tokio::test]

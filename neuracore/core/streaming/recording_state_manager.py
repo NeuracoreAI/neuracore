@@ -83,6 +83,37 @@ def _notify_data_bridge_of_expiry(robot_id: str, instance: int) -> None:
         )
 
 
+def _notify_data_bridge_of_discard(recording_id: str) -> None:
+    """Relay a backend ``DISCARDED`` to the daemon so it stops uploading.
+
+    Flipping ``is_recording`` off stops capture; the uploads are what the server
+    waits on before deleting the recording's bytes about a minute later.
+
+    Relayed for any discarded recording, not just one this process cancelled —
+    the notification is broadcast org-wide and the daemon ignores an id it does
+    not hold. Runs on its own thread because publishing waits for the daemon to
+    acknowledge, which must not stall the notification stream.
+    """
+    if not _recording_context.native_loaded():
+        # A process that never recorded has no uploads to stop.
+        return
+
+    def relay() -> None:
+        try:
+            _recording_context._load_native().discard_recording(recording_id)
+        except Exception:
+            logger.exception(
+                "Failed to notify data bridge that recording %s was discarded",
+                recording_id,
+            )
+
+    threading.Thread(
+        target=relay,
+        daemon=True,
+        name=f"discard-{recording_id[:8]}",
+    ).start()
+
+
 class RecordingStateManager(BaseSSEConsumer):
     """Manages recording state across robot instances with real-time notifications.
 
@@ -642,6 +673,10 @@ class RecordingStateManager(BaseSSEConsumer):
             RecordingNotificationType.EXPIRED,
         ):
             self.updated_recording_state(is_recording=False, details=message.payload)
+            if message.type == RecordingNotificationType.DISCARDED:
+                # Unconditional, unlike the state update above: this process
+                # may be uploading a recording it never tracked.
+                _notify_data_bridge_of_discard(message.payload.recording_id)
         elif message.type == RecordingNotificationType.INIT:
             for recording in message.payload:
                 self.updated_recording_state(is_recording=True, details=recording)

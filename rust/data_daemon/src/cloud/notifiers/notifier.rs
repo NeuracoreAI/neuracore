@@ -292,6 +292,18 @@ pub async fn notify_recording_lifecycle(
         // closed, or reaped as an abandoned pending recording. That is the
         // post-condition we wanted, so record it rather than re-sweeping.
         Err(error) if error.is_not_found() => mark_notified(kind, store, recording_index).await,
+        // 403 is permanent, unlike a transport or 5xx failure. Left unstamped
+        // it would re-POST on every startup sweep and, since the reaper only
+        // reclaims a notified recording, pin the row and its artefacts forever.
+        Err(error) if error.is_forbidden() => {
+            tracing::error!(
+                %error,
+                recording_index,
+                recording_id,
+                "not permitted to {action} this recording; giving up on the backend notify"
+            );
+            mark_notified(kind, store, recording_index).await
+        }
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, "failed to notify backend of recording {action}");
             return;

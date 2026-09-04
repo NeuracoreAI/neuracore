@@ -151,7 +151,9 @@ mod tests {
             .and(body_partial_json(
                 serde_json::json!({ "recording_id": "rec-cancel-1" }),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            // 204 No Content: a successful cancel carries no body at all, so any
+            // attempt to parse one would turn success into a reported failure.
+            .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
 
@@ -196,7 +198,9 @@ mod tests {
             .and(body_partial_json(
                 serde_json::json!({ "recording_id": "rec-offline-cancel" }),
             ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            // 204 No Content: a successful cancel carries no body at all, so any
+            // attempt to parse one would turn success into a reported failure.
+            .respond_with(ResponseTemplate::new(204))
             .mount(&server)
             .await;
 
@@ -339,6 +343,68 @@ mod tests {
         assert!(
             received.is_empty(),
             "no backend POST expected when recording has no cloud id"
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn treats_backend_403_as_terminal() {
+        // 403 means this caller is neither the recording's owner nor an org
+        // manager. That can never change, so the notify must be stamped rather
+        // than retried: an unstamped row is re-POSTed by every startup sweep
+        // and, because the reaper only reclaims a recording whose cancel is
+        // notified, pins the row and its artefacts on disk forever.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/cancel"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(serde_json::json!({ "detail": "Not permitted." })),
+            )
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_cancelled_recording_with_cloud_id(&store, "rec-forbidden").await;
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_cancel_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let row = store
+                    .get_recording(index)
+                    .await
+                    .expect("get")
+                    .expect("exists");
+                if row.backend_cancel_notified_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a 403 must still stamp backend_cancel_notified_at within 3s");
+
+        // Nothing left for a sweep to pick up.
+        assert!(
+            store
+                .recordings_pending_cancel_notify()
+                .await
+                .expect("pending")
+                .is_empty(),
+            "a 403 must not leave the recording pending a re-post"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);

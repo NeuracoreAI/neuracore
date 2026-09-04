@@ -627,6 +627,23 @@ pub enum Envelope {
         /// [`Envelope::SourceFlushed`] reports under.
         producer_pid: u32,
     },
+    /// The backend discarded a recording: the SDK saw a `DISCARDED`
+    /// notification on the org-wide stream and is relaying it, because the
+    /// daemon does not consume that stream.
+    ///
+    /// Keyed by cloud `recording_id` rather than by source like
+    /// [`Envelope::CancelRecording`]: a discard can name any recording in the
+    /// org and usually arrives after it stopped, when no window remains to
+    /// resolve it. The daemon burns its rows and aborts its in-flight uploads
+    /// before the server deletes the bytes ~60s later. Idempotent; an id this
+    /// daemon does not hold is ignored.
+    DiscardRecording {
+        /// Cloud recording id from the notification payload.
+        recording_id: String,
+        /// Wall-clock time (Unix nanoseconds) the discard was observed. Stored
+        /// as the row's `stop_timestamp_ns`, exactly as a cancel does.
+        timestamp_ns: i64,
+    },
 }
 
 /// Original pixel/sample representation of one video-family frame.
@@ -714,6 +731,7 @@ impl Envelope {
             Envelope::RefreshConfig {} => "refresh_config",
             Envelope::SourceFlushed { .. } => "source_flushed",
             Envelope::VideoProducerActive { .. } => "video_producer_active",
+            Envelope::DiscardRecording { .. } => "discard_recording",
         }
     }
 

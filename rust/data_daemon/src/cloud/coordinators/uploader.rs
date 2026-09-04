@@ -18,7 +18,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
 use super::status::StatusUpdate;
-use super::upload_transfer::{upload_one_file, UploadFileOutcome};
+use super::upload_transfer::{upload_one_file, UploadFileError, UploadFileOutcome};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::content_type_for_filename;
 use crate::cloud::OrgIdRx;
@@ -263,20 +263,83 @@ fn spawn_upload_task(
     let org_rx = org_rx.clone();
     let status_tx = status_tx.clone();
     in_flight.spawn(async move {
-        upload_single(
-            &store,
-            &trace_writer,
-            &bus,
-            &client,
-            &recordings_root,
-            &org_rx,
-            &status_tx,
-            &trace_id,
-        )
-        .await;
+        // Subscribe before the upload starts so a cancel racing start-up is seen.
+        let cancel_rx = bus.subscribe();
+        tokio::select! {
+            () = upload_single(
+                &store,
+                &trace_writer,
+                &bus,
+                &client,
+                &recordings_root,
+                &org_rx,
+                &status_tx,
+                &trace_id,
+            ) => {}
+            // Dropping the upload future aborts the in-flight PUT mid-chunk,
+            // which is the point. The cancel already burned the trace rows, so
+            // there is nothing to unwind.
+            () = recording_discarded(cancel_rx, &store, &trace_id) => {
+                tracing::info!(
+                    trace_id,
+                    "recording discarded; aborted in-flight upload"
+                );
+            }
+        }
         drop(permit);
         trace_id
     });
+}
+
+/// Resolve once the recording owning `trace_id` has been discarded.
+///
+/// The losing arm of a `select!` against an upload: every path that cannot
+/// answer must park forever rather than return, which would abort a good
+/// upload.
+async fn recording_discarded(
+    mut bus_rx: broadcast::Receiver<DaemonEvent>,
+    store: &Arc<SqliteStateStore>,
+    trace_id: &str,
+) {
+    let Ok(Some(trace)) = store.get_trace(trace_id).await else {
+        // No recording to attribute the trace to; never abort on that.
+        return std::future::pending().await;
+    };
+    let recording_index = trace.recording_index;
+    // A cancel that committed before we subscribed reached no receiver.
+    if is_cancelled(store, recording_index).await {
+        return;
+    }
+    loop {
+        match bus_rx.recv().await {
+            Ok(DaemonEvent::RecordingCancelled {
+                recording_index: cancelled,
+            }) if cancelled == recording_index => return,
+            Ok(_) => {}
+            // The cancel may have been among the dropped events.
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                tracing::warn!(
+                    skipped,
+                    trace_id,
+                    "upload cancel-watch missed bus events; re-reading recording state"
+                );
+                if is_cancelled(store, recording_index).await {
+                    return;
+                }
+            }
+            // Shutdown, not a cancel — let shutdown drain the upload.
+            Err(broadcast::error::RecvError::Closed) => return std::future::pending().await,
+        }
+    }
+}
+
+/// True when the recording row is stamped cancelled. A failed read answers
+/// `false` — an unreadable store must not abort a live upload.
+async fn is_cancelled(store: &Arc<SqliteStateStore>, recording_index: i64) -> bool {
+    matches!(
+        store.get_recording(recording_index).await,
+        Ok(Some(row)) if row.cancelled_at.is_some()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,7 +503,29 @@ async fn upload_single(
                     persist_session_uris(store, trace_id, &session_uris).await;
                 }
             }
-            Err(error) => {
+            Err(UploadFileError::RecordingGone) => {
+                crate::perf_events::emit(
+                    "upload",
+                    "failed",
+                    Some(trace.recording_index),
+                    Some(trace_id),
+                    Some(upload_started.elapsed()),
+                    serde_json::json!({
+                        "outcome": "error",
+                        "reason": "recording_discarded",
+                        "filename": file_basename(&filename),
+                        "bytes_uploaded": total_uploaded,
+                    }),
+                );
+                // Burn the whole recording, not just this trace: every sibling
+                // would 404 the same way.
+                super::discard_recording_locally(store, bus, trace.recording_index).await;
+                // Report this trace terminal so the progress reporter and
+                // status updater stop waiting on it.
+                mark_failed_and_emit(store, bus, status_tx, &trace, "recording discarded").await;
+                return;
+            }
+            Err(UploadFileError::Retry(error)) => {
                 tracing::warn!(%error, trace_id, "upload failed; rolling back to retrying");
                 crate::perf_events::emit(
                     "upload",
@@ -616,6 +701,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+    use tokio::time::{sleep, timeout};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -822,6 +908,78 @@ mod tests {
             count += 1;
         }
         assert!(count >= 1);
+    }
+
+    #[tokio::test]
+    async fn session_uri_refetch_404_ends_upload_without_retrying() {
+        // Re-acquiring a session URI for a cancelled recording 404s. That must
+        // end the upload, never roll back to `retrying` for the rescan.
+        let server = MockServer::start().await;
+        let payload = b"discarded-payload";
+
+        Mock::given(method("PUT"))
+            .and(path("/upload/dead"))
+            .respond_with(ResponseTemplate::new(410))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "detail": "Recording not found." })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let dead_uri = format!("{}/upload/dead", server.uri());
+        let (recording_index, _) = seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &dead_uri,
+            payload,
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let mut events = bus.subscribe();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+
+        run_upload_single(&store, recordings_root, &api, &bus, &status_tx, "trace-1").await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(
+            trace.upload_status,
+            TraceUploadStatus::Failed,
+            "a 404 must be terminal, not retryable"
+        );
+        // The whole recording is burned, not just this trace.
+        let row = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(
+            row.cancelled_at.is_some(),
+            "the discarded recording must be stamped cancelled"
+        );
+        // And announced, so sibling uploads still in flight abort too.
+        let mut announced = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(
+                event,
+                DaemonEvent::RecordingCancelled {
+                    recording_index: index
+                } if index == recording_index
+            ) {
+                announced = true;
+            }
+        }
+        assert!(announced, "RecordingCancelled must be published");
     }
 
     #[tokio::test]
@@ -1171,6 +1329,99 @@ mod tests {
             Ok(DaemonEvent::UploadComplete { .. })
         ));
         assert!(status_rx.try_recv().unwrap().completed);
+    }
+
+    /// A discard must cut an in-flight PUT short, including for a recording
+    /// this process did not cancel.
+    #[tokio::test]
+    async fn discard_aborts_an_in_flight_upload() {
+        let server = MockServer::start().await;
+        let payload = b"bytes-the-server-is-about-to-delete";
+        // Never realistically returns, so an upload that is not aborted times
+        // out rather than passing by luck.
+        Mock::given(method("PUT"))
+            .and(path("/upload/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let slow_uri = format!("{}/upload/slow", server.uri());
+        let (recording_index, _) = seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &slow_uri,
+            payload,
+        )
+        .await;
+
+        let api = client(&server);
+        let bus = EventBus::new();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let store_arc = Arc::new(store.clone());
+        let (trace_writer, _owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS));
+        let mut in_flight: JoinSet<String> = JoinSet::new();
+        let mut in_flight_ids: HashSet<String> = HashSet::new();
+
+        spawn_upload_task(
+            &store_arc,
+            &trace_writer,
+            &bus,
+            &api,
+            &Arc::new(recordings_root),
+            &org_rx(Some("org-1")),
+            &status_tx,
+            &semaphore,
+            &mut in_flight,
+            &mut in_flight_ids,
+            "trace-1".to_string(),
+        );
+
+        // Wait until the PUT is in flight, so the abort has something to cut.
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if received
+                    .iter()
+                    .any(|request| request.url.path() == "/upload/slow")
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the upload PUT must be in flight within 10s");
+
+        // A cancel from elsewhere: the dispatcher burned the rows and
+        // announced it; this process never asked for it.
+        store
+            .cancel_recording(recording_index, 0)
+            .await
+            .expect("burn rows");
+        bus.publish(DaemonEvent::RecordingCancelled { recording_index });
+
+        let joined = timeout(Duration::from_secs(10), in_flight.join_next())
+            .await
+            .expect("the discard must abort the upload well inside the 120s PUT");
+        assert!(
+            matches!(joined, Some(Ok(trace_id)) if trace_id == "trace-1"),
+            "the aborted task must unwind cleanly"
+        );
+        // Never marked uploaded — the bytes were abandoned, not completed.
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_ne!(
+            trace.upload_status,
+            TraceUploadStatus::Uploaded,
+            "an aborted upload must not be recorded as complete"
+        );
     }
 
     #[tokio::test]

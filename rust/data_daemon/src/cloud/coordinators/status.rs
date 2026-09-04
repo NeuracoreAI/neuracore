@@ -363,6 +363,16 @@ async fn flush_batch(
                 tracing::warn!(%error, recording_index, "could not stamp completion_reported_at");
             }
         }
+        // A cancelled recording 404s everywhere: nothing to update, nothing
+        // to retry.
+        Err(error) if error.is_not_found() => {
+            tracing::debug!(
+                recording_index,
+                recording_id,
+                count = updates_payload.len(),
+                "recording no longer exists; discarding its status updates"
+            );
+        }
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, count = updates_payload.len(), "status batch update failed");
         }

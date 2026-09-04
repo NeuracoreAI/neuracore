@@ -116,6 +116,7 @@ pub(crate) fn spawn_cloud_coordinators(
     );
     let progress = spawn_progress_reporter(
         state_store.clone(),
+        event_bus.clone(),
         Arc::clone(&client),
         org_rx.clone(),
         shutdown_tx.subscribe(),
