@@ -28,7 +28,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     PER_THREAD_LOGGING_TAIL_S,
     PRODUCER_MULTI_PROCESS,
-    PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     camera_names,
     depth_camera_names,
@@ -730,9 +729,4 @@ def make_producer_session(
         )
     if case.producer_channels == PRODUCER_PER_THREAD:
         return LifetimeProducerSession(spec, robot, plans)
-    engine = (
-        run_threaded_logging
-        if case.producer_channels == PRODUCER_OLD_PER_THREAD
-        else run_synchronous_logging
-    )
-    return BoundedProducerSession(spec, robot, plans, engine)
+    return BoundedProducerSession(spec, robot, plans, run_synchronous_logging)
