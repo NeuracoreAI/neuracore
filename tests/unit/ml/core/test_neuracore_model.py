@@ -1,5 +1,5 @@
 import pytest
-from neuracore_types import BatchedNCData, DataType, ModelInitDescription
+from neuracore_types import BatchedNCData, DataType, GPUType, ModelInitDescription
 
 from neuracore.ml import (
     BatchedInferenceInputs,
@@ -10,6 +10,10 @@ from neuracore.ml import (
 
 
 class DummyModel(NeuracoreModel):
+    @staticmethod
+    def get_supported_gpus() -> frozenset[GPUType]:
+        return frozenset({GPUType.NVIDIA_TESLA_V100})
+
     @staticmethod
     def get_supported_input_data_types() -> set[DataType]:
         return {DataType.JOINT_POSITIONS}
