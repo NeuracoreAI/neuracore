@@ -13,7 +13,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     PerThread,
     ProcessPerCamera,
     ProcessPerLimbPerCamera,
-    SeparateProcessStartStop,
+    SeparateProcessRecordingControl,
     Synchronous,
     case_id,
 )
@@ -466,7 +466,8 @@ def test_split_joints_can_still_be_placed_by_kind() -> None:
 
 
 @pytest.mark.parametrize(
-    "variant", [SeparateProcessStartStop, ProcessPerCamera, ProcessPerLimbPerCamera]
+    "variant",
+    [SeparateProcessRecordingControl, ProcessPerCamera, ProcessPerLimbPerCamera],
 )
 def test_every_trace_starts_late_whatever_the_owner_splits(variant) -> None:
     """The owner only holds the window in all of them, however many children
