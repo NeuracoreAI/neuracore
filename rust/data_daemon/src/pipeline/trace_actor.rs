@@ -1630,14 +1630,23 @@ mod tests {
         let budget = Arc::new(StorageBudget::new(root, policy));
         let (trace_writer, _writer_owner) = crate::state::trace_event_database_writer::spawn(store);
         let (json_writer, _json_owner) = crate::pipeline::json_writer::spawn();
-        Arc::new(TraceActorContext::with_ffmpeg_permits(
-            root.to_path_buf(),
-            budget,
-            VideoEncoder::new(),
-            ffmpeg_permits,
-            trace_writer,
-            json_writer,
-        ))
+        // Most actor tests assert the legacy lossless artifacts directly, so make
+        // that fixture choice explicit now that production defaults to lossy.
+        let (_config_tx, config_rx) = watch::channel(DaemonConfig {
+            video_codec: Some("h264_lossless".to_string()),
+            ..DaemonConfig::default()
+        });
+        Arc::new(
+            TraceActorContext::with_ffmpeg_permits(
+                root.to_path_buf(),
+                budget,
+                VideoEncoder::new(),
+                ffmpeg_permits,
+                trace_writer,
+                json_writer,
+            )
+            .with_config_rx(config_rx),
+        )
     }
 
     fn identity(recording_index: i64, trace_id: &str, data_type: &str) -> TraceIdentity {
