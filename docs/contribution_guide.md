@@ -239,16 +239,16 @@ class MyCustomAlgorithm(NeuracoreModel):
         return {DataType.JOINT_TARGET_POSITIONS}
 
     @staticmethod
-    def get_supported_gpus() -> list[GPUType]:
+    def get_supported_gpus() -> frozenset[GPUType]:
         """Return the GPU types supported for cloud training.
 
         Returns:
-            list[GPUType]: GPU types that can train this model
+            frozenset[GPUType]: GPU types that can train this model
         """
-        return [
+        return frozenset({
             GPUType.NVIDIA_A100_80GB,
             GPUType.NVIDIA_TESLA_V100,
-        ]
+        })
 ```
 
 ### Step 2: Required Methods
@@ -263,8 +263,8 @@ Your model must implement these methods:
 6. **`get_supported_output_data_types`**: Declare what output data types your model can produce
 7. **`get_supported_gpus`**: Declare which GPU types can train your model in the cloud
 
-`get_supported_gpus` must be a static method that returns a literal list, set, or
-tuple of `GPUType` members. The supported values are:
+`get_supported_gpus` must be a static method that returns a `frozenset` of
+`GPUType` members. The supported values are:
 
 - `GPUType.NVIDIA_H100_80GB`
 - `GPUType.NVIDIA_A100_80GB`
@@ -352,7 +352,7 @@ If you encounter issues with your algorithm:
 - Verify that your model correctly handles the batch structure
 - Check that your model returns outputs in the expected format
 - Ensure all tensor dimensions match what Neuracore expects
-- Ensure `get_supported_gpus` is a static method returning a literal collection of
+- Ensure `get_supported_gpus` is a static method returning a `frozenset` of
   `GPUType` members
 - If a training run reports that its GPU is unsupported, select one returned by
   `get_supported_gpus` or update and re-upload the algorithm after testing it

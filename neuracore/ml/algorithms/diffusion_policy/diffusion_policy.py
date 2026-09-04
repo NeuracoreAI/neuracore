@@ -878,10 +878,10 @@ class DiffusionPolicy(NeuracoreModel):
         }
 
     @staticmethod
-    def get_supported_gpus() -> list[GPUType]:
+    def get_supported_gpus() -> frozenset[GPUType]:
         """Get the GPU types recommended for training this model."""
-        return [
+        return frozenset({
             GPUType.NVIDIA_H100_80GB,
             GPUType.NVIDIA_A100_80GB,
             GPUType.NVIDIA_TESLA_V100,
-        ]
+        })

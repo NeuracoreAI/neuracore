@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
-from neuracore_types import BatchedNCData, DataType, ModelInitDescription
+from neuracore_types import BatchedNCData, DataType, GPUType, ModelInitDescription
 
 from .ml_types import (
     BatchedInferenceInputs,
@@ -225,5 +225,15 @@ class NeuracoreModel(nn.Module, ABC):
 
         Returns:
             Set of supported output data types
+        """
+        pass
+
+    @staticmethod
+    @abstractmethod
+    def get_supported_gpus() -> frozenset[GPUType]:
+        """Get the GPU types supported for training this model.
+
+        Returns:
+            Frozen set of supported GPU types
         """
         pass

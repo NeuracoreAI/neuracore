@@ -3,7 +3,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from neuracore_types import DataType, ModelInitDescription
+from neuracore_types import DataType, GPUType, ModelInitDescription
 
 from neuracore.ml import (
     BatchedInferenceInputs,
@@ -80,6 +80,10 @@ class AllTypesModel(NeuracoreModel):
             DataType.LANGUAGE,
             DataType.CUSTOM_1D,
         }
+
+    @staticmethod
+    def get_supported_gpus() -> frozenset[GPUType]:
+        return frozenset({GPUType.NVIDIA_TESLA_V100})
 
     def forward(self, batch: BatchedInferenceInputs) -> dict:
         """y = x: return inputs unchanged."""
