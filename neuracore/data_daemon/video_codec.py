@@ -32,7 +32,7 @@ def set_active_profile_video_codec(codec: str) -> None:
 
     Args:
         codec: The codec identifier to store (e.g. ``"h264_medium"`` or the
-            ``"h264_lossless"`` default).
+            explicit ``"h264_lossless"`` option).
 
     Raises:
         RuntimeError: If the profile could not be written.

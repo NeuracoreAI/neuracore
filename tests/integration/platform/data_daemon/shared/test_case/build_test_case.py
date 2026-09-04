@@ -163,11 +163,11 @@ class DataDaemonTestCase:
             in the suite (documented and discoverable) without running.  A
             batch with ``skip=True`` forces every case to skip regardless of
             this per-case value.
-        video_codec: When set (e.g. ``"h264_medium"``), the case selects that
-            global video codec via ``nc.set_video_encoding_options`` before
-            recording, so RGB cameras upload a single lossy CRF-23 video and the
-            lossless archive is dropped.  ``None`` keeps the default
-            lossless+lossy behaviour.
+        video_codec: When set, the case selects that global video codec via
+            ``nc.set_video_encoding_options`` before recording. ``None`` makes
+            the integration harness explicitly select ``h264_lossless`` to
+            preserve its exact-pixel baseline; it does not exercise the daemon's
+            lossy default.
         depth_count: Number of depth camera streams to log per recording. A
             value of ``0`` disables depth entirely. Depth cameras are
             independent streams from RGB cameras (distinct trace identities,
