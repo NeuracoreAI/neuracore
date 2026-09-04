@@ -115,7 +115,7 @@ def _validate_gpu_to_algorithm(
             f"Algorithm {algorithm_name} does not declare any supported GPUs."
         )
     if gpu not in supported_gpus:
-        valid_gpus = ", ".join(sorted(value.value for value in supported_gpus))
+        valid_gpus = ", ".join(sorted(supported.value for supported in supported_gpus))
         raise ValueError(
             f"GPU {gpu.value} is not supported by algorithm {algorithm_name}. "
             f"Supported GPUs: {valid_gpus}."
