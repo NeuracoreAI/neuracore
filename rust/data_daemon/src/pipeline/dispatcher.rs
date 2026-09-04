@@ -884,51 +884,44 @@ impl Dispatcher {
     }
 
     async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
-        let Some(mut entry) = self.windows.remove(&source) else {
+        let Some(entry) = self.windows.get_mut(&source) else {
             return;
         };
-        // Drop any held data for this source — a cancelled recording's data
-        // must never reach an actor.
-        self.held.retain(|held| held.source != source);
+        let Some(window) = entry.live.take() else {
+            tracing::debug!(robot_id = source.0, "cancel with no live window; ignoring");
+            return;
+        };
+        let cancelled_from_ns = window.started_at_ns;
+        self.held
+            .retain(|held| held.source != source || held.publish_timestamp_ns < cancelled_from_ns);
 
-        let mut windows: Vec<ActiveWindow> = Vec::new();
-        if let Some(live) = entry.live.take() {
-            windows.push(live);
+        let recording_index = window.recording_index;
+        for (_, handle) in window.traces {
+            let _ = handle.sender.send(TraceActorMessage::Cancel).await;
         }
-        windows.append(&mut entry.closing);
-
-        for window in windows {
-            let recording_index = window.recording_index;
-            for (_, handle) in window.traces {
-                let _ = handle.sender.send(TraceActorMessage::Cancel).await;
+        self.actor_context
+            .trace_writer
+            .drop_recording(recording_index)
+            .await;
+        // The cancel's capture timestamp becomes the row's
+        // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
+        match self
+            .store
+            .cancel_recording(recording_index, timestamp_ns)
+            .await
+        {
+            Ok((_, touched)) => {
+                tracing::info!(
+                    recording_index,
+                    trace_rows_touched = touched,
+                    "recording cancelled"
+                );
+                if let Some(bus) = self.context.event_bus.as_ref() {
+                    bus.publish(DaemonEvent::RecordingCancelled { recording_index });
+                }
             }
-            // Purge any not-yet-flushed trace creates for this recording before
-            // burning its rows, so a late batch can't insert an orphan row for
-            // a recording that's already cancelled.
-            self.actor_context
-                .trace_writer
-                .drop_recording(recording_index)
-                .await;
-            // The cancel's capture timestamp becomes the row's
-            // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
-            match self
-                .store
-                .cancel_recording(recording_index, timestamp_ns)
-                .await
-            {
-                Ok((_, touched)) => {
-                    tracing::info!(
-                        recording_index,
-                        trace_rows_touched = touched,
-                        "recording cancelled"
-                    );
-                    if let Some(bus) = self.context.event_bus.as_ref() {
-                        bus.publish(DaemonEvent::RecordingCancelled { recording_index });
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, recording_index, "failed to mark recording cancelled");
-                }
+            Err(error) => {
+                tracing::warn!(%error, recording_index, "failed to mark recording cancelled");
             }
         }
     }
@@ -2576,6 +2569,54 @@ mod tests {
             }
         }
         assert!(saw_cancel, "RecordingCancelled must be published");
+    }
+
+    #[tokio::test]
+    async fn cancel_spares_a_recording_already_draining() {
+        // A cancel takes the live window only: the recording stopped just
+        // before it is still draining, and keeps both its stop and its data.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn_with_context(
+            store.clone(),
+            context.clone(),
+            DispatcherContext::default(),
+            shutdown_rx,
+        );
+
+        tx.send(start("robot-1", 100)).await.unwrap();
+        tx.send(datum("robot-1", 110, 1)).await.unwrap();
+        tx.send(stop("robot-1", 120)).await.unwrap();
+        tx.send(start("robot-1", 130)).await.unwrap();
+        tx.send(datum("robot-1", 140, 2)).await.unwrap();
+        tx.send(Envelope::CancelRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            timestamp_ns: 150,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 2);
+        assert!(
+            recordings[0].cancelled_at.is_none() && recordings[0].stopped_at.is_some(),
+            "the draining recording must keep its own stop"
+        );
+        assert!(recordings[1].cancelled_at.is_some());
+
+        let traces = store
+            .list_traces_for_recording(recordings[0].recording_index)
+            .await
+            .unwrap();
+        assert!(!traces.is_empty(), "the draining recording keeps its data");
     }
 
     #[tokio::test]
