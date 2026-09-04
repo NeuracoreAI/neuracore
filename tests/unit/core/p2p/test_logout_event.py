@@ -6,21 +6,15 @@ from concurrent.futures import Future
 from unittest.mock import MagicMock, patch
 
 import pytest
-from neuracore_types import RobotInstanceIdentifier
 from pyee import EventEmitter
 
 from neuracore.core.auth import Auth
 from neuracore.core.exceptions import AuthenticationError
-from neuracore.core.streaming import recording_state_manager as recording_module
 from neuracore.core.streaming.p2p.consumer import org_nodes_manager as org_module
 from neuracore.core.streaming.p2p.consumer.org_nodes_manager import OrgNodesManager
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
-)
-from neuracore.core.streaming.recording_state_manager import (
-    RecordingStateManager,
-    TrackedRecording,
 )
 from neuracore.core.utils.singleton_metaclass import SingletonMetaclass
 
@@ -230,96 +224,9 @@ def test_signalling_http_401_tears_down_orchestrator(nc_loop, caplog) -> None:
     )
 
 
-def test_recording_manager_tears_down_owned_state(nc_loop) -> None:
-    auth = FakeAuth()
-    session = FakeSession()
-    enabled = EnabledManager(True, loop=nc_loop)
-    with patch(
-        "neuracore.core.streaming.base_sse_consumer.ClientSession",
-        return_value=session,
-    ):
-        manager = RecordingStateManager(
-            org_id="org-1",
-            loop=nc_loop,
-            enabled_manager=enabled,
-            auth=auth,
-        )
-
-    key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
-    manager.recording_robot_instances[key] = TrackedRecording("recording-1", 1.0)
-    manager._drain_callbacks[key] = MagicMock()
-    timer = MagicMock()
-    manager._recording_timers["recording-1"] = [timer]
-
-    manager_future: Future[RecordingStateManager] = Future()
-    manager_future.set_result(manager)
-    recording_module._recording_manager = manager_future
-
-    auth.emit(Auth.LOGOUT_EVENT)
-    assert recording_module._recording_manager is None
-
-    assert session.closed_event.wait(timeout=2)
-    assert enabled.is_disabled()
-    assert manager.signalling_stream_future.cancelled()
-    timer.cancel.assert_called_once_with()
-    assert manager.recording_robot_instances == {}
-    assert manager._drain_callbacks == {}
-    assert auth.listeners(Auth.LOGOUT_EVENT) == []
-
-    auth.emit(Auth.LOGOUT_EVENT)
-
-
-def test_recording_manager_keeps_owned_state_when_the_stream_cannot_authenticate(
-    nc_loop,
-) -> None:
-    """A rejected notification stream must not discard a local recording.
-
-    `nc.stop_recording` reads this state to decide there is anything to stop, so
-    clearing it on a stream failure leaves the stop unpublished and the daemon's
-    window open. Contrast `test_recording_manager_tears_down_owned_state`, where
-    an explicit logout clears it — that says the session is over, this does not.
-    """
-    auth = UnauthenticatedAuth()
-    session = FakeSession()
-    enabled = EnabledManager(True, loop=nc_loop)
-    with patch(
-        "neuracore.core.streaming.base_sse_consumer.ClientSession",
-        return_value=session,
-    ):
-        manager = RecordingStateManager(
-            org_id="org-1",
-            loop=nc_loop,
-            enabled_manager=enabled,
-            auth=auth,
-        )
-
-    key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
-    manager.recording_robot_instances[key] = TrackedRecording("recording-1", 1.0)
-
-    manager_future: Future[RecordingStateManager] = Future()
-    manager_future.set_result(manager)
-    recording_module._recording_manager = manager_future
-    try:
-        # The consumer loop returns once it gives up on the stream.
-        manager.signalling_stream_future.result(timeout=2)
-
-        assert manager.get_current_recording_id("robot-1", 0) == "recording-1"
-        assert manager.is_recording("robot-1", 0)
-        assert enabled.is_enabled()
-        assert recording_module._recording_manager is manager_future
-
-        # Logout is still the statement that clears it.
-        auth.emit(Auth.LOGOUT_EVENT)
-        assert session.closed_event.wait(timeout=2)
-        assert manager.recording_robot_instances == {}
-        assert recording_module._recording_manager is None
-    finally:
-        recording_module._recording_manager = None
-
-
 @pytest.mark.parametrize(
     "manager_type",
-    [StreamManagerOrchestrator, OrgNodesManager, RecordingStateManager],
+    [StreamManagerOrchestrator, OrgNodesManager],
 )
 def test_closed_loop_logout_does_not_leak_listener(manager_type) -> None:
     """One-shot listeners detach even when their manager loop is already closed."""

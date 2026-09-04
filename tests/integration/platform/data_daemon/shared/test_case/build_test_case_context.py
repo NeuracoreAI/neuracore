@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import neuracore as nc
-from neuracore.core.streaming.recording_state_manager import RecordingStateManager
 from neuracore.core.utils.depth_utils import MAX_DEPTH
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
@@ -53,6 +52,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_GRID_SIZE,
     FRAME_HALF_DIVISOR,
     FRAME_MAX_COLOR_VALUE,
+    MAX_RECORDING_DURATION_S,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
     PRODUCER_PER_THREAD,
@@ -453,7 +453,7 @@ def build_context_specs(
                             DURATION_VARIABLE_MIN_FACTOR, DURATION_VARIABLE_MAX_FACTOR
                         )
                     ),
-                    RecordingStateManager.MAX_RECORDING_DURATION_S,
+                    MAX_RECORDING_DURATION_S,
                 ),
             )
         else:
