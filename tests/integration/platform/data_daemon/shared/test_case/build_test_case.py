@@ -5,7 +5,7 @@ grouping cases with shared infrastructure parameters, utility functions, and
 analysis/reporting helpers.  Per-suite case lists live in each suite's
 ``test_cases.py``;
 context-spec interpretation and recording workers live in
-``build_test_case_context.py``.
+``test_case.context_spec`` and ``test_case.context_worker``.
 """
 
 # cspell:ignore vardur
@@ -19,7 +19,7 @@ from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
     )
 
