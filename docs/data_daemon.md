@@ -202,7 +202,7 @@ These are the supported settings:
 | `offline` | If enabled, uploading is disabled and data is only stored locally. |
 | `api_key` | API key used for authenticating the daemon. |
 | `current_org_id` | Which organisation the daemon should operate under. |
-| `video_codec` |  Video encoding for RGB cameras. `h264_lossless` (default)/ `h264_medium` . |
+| `video_codec` | Video encoding for RGB cameras. `h264_medium` (default) / `h264_lossless`. |
 
 ---
 
@@ -306,25 +306,23 @@ export NEURACORE_DAEMON_RECORDINGS_ROOT=/workspaces/neuracore/recordings
 
 ## Video encoding options
 
-By default every RGB camera is uploaded twice: a **lossless** archive
-(`lossless.mp4`, used for training) and a small **lossy** preview
-(`lossy.mp4`). For long recordings the lossless archive dominates upload size,
-disk, and CPU.
+By default every RGB camera is uploaded as a single full-resolution
+**libx264 CRF 23** video (`lossy.mp4`). That video is used for both preview and
+training, trading a little image fidelity for much smaller uploads. Select the
+`h264_lossless` codec to also upload a lossless archive (`lossless.mp4`) for
+training plus a small lossy preview. For long recordings the lossless archive
+substantially increases upload size, disk use, and CPU. Depth cameras always
+keep their lossless storage (their lossy proxy is a visualisation, not precise
+depth).
 
-Selecting the `h264_medium` codec switches RGB cameras to a single
-full-resolution **libx264 CRF 23** video (`lossy.mp4`) and **drops the lossless
-archive**. That one video is used for both preview and training, trading a
-little image fidelity for much smaller uploads. Depth cameras always keep their
-lossless storage (their lossy proxy is a visualisation, not precise depth).
-
-This is **irreversible for recordings made under it**: the lossless archive is
-never written, so switching back to `h264_lossless` only affects *future*
+The lossy default is **irreversible for recordings made under it**: a lossless
+archive is never written, so selecting `h264_lossless` only affects *future*
 recordings — it cannot restore lossless data for episodes already captured in
 lossy-only mode.
 
 The setting is **global** (it applies to every camera) and lives in the daemon
 profile, so it persists and is picked up for the next recording. The two codecs
-are `h264_lossless` (the default) and `h264_medium` (lossy-only). Set it three
+are `h264_medium` (the lossy-only default) and `h264_lossless`. Set it three
 ways, exactly like the other profile options:
 
 - **From the SDK** (writes the active profile):
@@ -332,12 +330,12 @@ ways, exactly like the other profile options:
   ```python
   import neuracore as nc
 
-  nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)    # lossy-only
+  nc.set_video_encoding_options(codec=nc.Codec.H264_MEDIUM)    # lossy-only default
   nc.start_recording()
   # ... log frames ...
   nc.stop_recording()
 
-  nc.set_video_encoding_options(codec=nc.Codec.H264_LOSSLESS)  # back to default
+  nc.set_video_encoding_options(codec=nc.Codec.H264_LOSSLESS)  # opt in to lossless
   ```
 
 - **With the CLI**, via `profile update`:
@@ -388,7 +386,7 @@ Example:
 ```bash
 neuracore data-daemon profile update laptop --storage-limit 2gb --offline
 neuracore data-daemon profile update laptop --video-codec h264_medium  # lossy-only uploads
-neuracore data-daemon profile update laptop --video-codec h264_lossless # back to the default
+neuracore data-daemon profile update laptop --video-codec h264_lossless # opt in to lossless
 ```
 
 ### `neuracore data-daemon profile get`

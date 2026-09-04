@@ -197,10 +197,12 @@ mod tests {
             registered("RGB_IMAGES", Some("h264_medium")),
             vec!["RGB_IMAGES/cam/lossy.mp4", "RGB_IMAGES/cam/trace.json"]
         );
-        // RGB default and depth-under-lossy both still register the lossless.
-        assert!(registered("RGB_IMAGES", None)
-            .iter()
-            .any(|path| path.ends_with("lossless.mp4")));
+        // RGB defaults to lossy-only, while depth-under-lossy still registers
+        // the lossless archive.
+        assert_eq!(
+            registered("RGB_IMAGES", None),
+            vec!["RGB_IMAGES/cam/lossy.mp4", "RGB_IMAGES/cam/trace.json"]
+        );
         assert!(registered("DEPTH_IMAGES", Some("h264_medium"))
             .iter()
             .any(|path| path.ends_with("lossless.mp4")));

@@ -19,17 +19,16 @@ def test_h264_medium_resolves_and_maps_to_crf_23_medium() -> None:
     }
 
 
-def test_h264_lossless_resolves_but_uses_default_encoders() -> None:
-    # H264_LOSSLESS is a recognised codec (no warning) that maps to the default
-    # lossless+lossy encoders, so it is the explicit "switch back" value.
+def test_h264_lossless_resolves_and_uses_lossless_encoders() -> None:
+    # H264_LOSSLESS is the explicit opt-in to lossless+lossy encoding.
     assert resolve_codec("h264_lossless") is Codec.H264_LOSSLESS
     assert codec_option_overrides("h264_lossless") is None
 
 
-def test_unset_and_unknown_resolve_to_default() -> None:
+def test_unset_and_unknown_resolve_to_default_lossy_options() -> None:
     for value in (None, "", "not-a-codec"):
         assert resolve_codec(value) is None
-        assert codec_option_overrides(value) is None
+        assert codec_option_overrides(value) == {"crf": "23", "preset": "medium"}
 
 
 def test_options_are_a_fresh_copy_each_call() -> None:
@@ -54,8 +53,8 @@ def test_unknown_codec_logs_a_warning(caplog: pytest.LogCaptureFixture) -> None:
 def test_known_and_unset_codecs_do_not_warn(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    # The explicit default and unset/empty values are silent — only a genuinely
-    # unrecognised value warns.
+    # Known and unset/empty values are silent — only a genuinely unrecognised
+    # value warns.
     with caplog.at_level(logging.WARNING, logger=_MODULE_LOGGER):
         resolve_codec("h264_lossless")
         resolve_codec("h264_medium")

@@ -109,38 +109,39 @@ const LOSSY_PREVIEW_MAX_HEIGHT: u32 = 480;
 /// Lossy RGB video codec selection for a trace, resolved once at the trace's
 /// first chunk (and by the registration coordinator, from the same source).
 ///
-/// The default produces the lossless archive plus a downscaled lossy preview.
-/// `H264MediumLossyOnly` (the SDK's `nc.Codec.H264_MEDIUM`) instead produces a
-/// single full-resolution `libx264 -crf 23 -preset medium` video and skips the
-/// lossless archive — smaller uploads, with that one video used for training.
+/// The default, `H264MediumLossyOnly` (the SDK's `nc.Codec.H264_MEDIUM`),
+/// produces a single full-resolution `libx264 -crf 23 -preset medium` video and
+/// skips the lossless archive — smaller uploads, with that one video used for
+/// training. `LosslessPlusPreview` is the explicit opt-in to a lossless archive
+/// plus a downscaled lossy preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LossyVideoCodec {
-    /// Default: lossless archive (`libx264rgb -qp 0`) plus a preview-resolution
-    /// lossy proxy (`libx264 -qp 23`). Both outputs are produced.
-    #[default]
+    /// Lossless archive (`libx264rgb -qp 0`) plus a preview-resolution lossy
+    /// proxy (`libx264 -qp 23`). Both outputs are produced.
     LosslessPlusPreview,
-    /// `nc.Codec.H264_MEDIUM`: one full-resolution `libx264 -crf 23 -preset
-    /// medium` video; no lossless archive, no preview downscale.
+    /// Default (`nc.Codec.H264_MEDIUM`): one full-resolution `libx264 -crf 23
+    /// -preset medium` video; no lossless archive, no preview downscale.
+    #[default]
     H264MediumLossyOnly,
 }
 
 impl LossyVideoCodec {
-    /// Resolve a codec from a config/env string. Only `"h264_medium"` selects
-    /// lossy-only; `"h264_lossless"` and unset/empty keep the default silently.
-    /// An unrecognised value also keeps the default but logs a warning (parity
-    /// with the SDK's `resolve_codec`), so a typo can't silently change codecs.
+    /// Resolve a codec from a config/env string. `"h264_lossless"` explicitly
+    /// selects lossless-plus-preview; `"h264_medium"` and unset/empty select the
+    /// lossy-only default silently. An unrecognised value also keeps the default
+    /// but logs a warning (parity with the SDK's `resolve_codec`).
     /// Callers gate this to RGB traces — depth always keeps lossless storage.
     pub fn from_config_str(value: Option<&str>) -> Self {
         match value {
-            Some("h264_medium") => Self::H264MediumLossyOnly,
-            None | Some("") | Some("h264_lossless") => Self::LosslessPlusPreview,
+            Some("h264_lossless") => Self::LosslessPlusPreview,
+            None | Some("") | Some("h264_medium") => Self::H264MediumLossyOnly,
             Some(other) => {
                 tracing::warn!(
                     codec = other,
                     "Ignoring unknown video codec; expected one of: \
                      h264_lossless, h264_medium"
                 );
-                Self::LosslessPlusPreview
+                Self::H264MediumLossyOnly
             }
         }
     }
@@ -151,7 +152,7 @@ impl LossyVideoCodec {
     ///
     /// Only RGB cameras honour the selection — a depth trace's lossy proxy is a
     /// visualisation, not precise depth, so depth (and every non-RGB stream)
-    /// always keeps the default lossless archive. This RGB-only gate is
+    /// always keeps a lossless archive. This RGB-only gate is
     /// deliberately narrower than the video-family predicate in
     /// [`crate::cloud::cloud_files`] (which includes depth). Kept pure (the
     /// config string is passed in, not read here) so the encoder path and the
@@ -1803,6 +1804,9 @@ mod tests {
                 "-of",
                 "default=nokey=1:noprint_wrappers=1",
             ]);
+            if entries.starts_with("frame=") {
+                command.arg("-show_frames");
+            }
             if let Some(intervals) = intervals {
                 command.args(["-read_intervals", intervals]);
             }
@@ -1838,9 +1842,13 @@ mod tests {
         // The synthetic NUT is 1 fps, so the kept run starts at 3 s in the
         // source; `setpts` has to bring it back to zero.
         for output in [&lossy, &lossless] {
+            // Read the complete short stream: packet-limited intervals can stop
+            // before ffprobe has decoded its first frame on some H.264 builds.
+            let pts = probe(output, "frame=pts", None);
+            let first_pts = pts.lines().find_map(|value| value.parse::<i64>().ok());
             assert_eq!(
-                probe(output, "frame=pts_time", Some("%+#1")),
-                "0.000000",
+                first_pts,
+                Some(0),
                 "the first kept frame must be rebased to PTS 0"
             );
         }
@@ -2138,15 +2146,23 @@ mod tests {
             LossyVideoCodec::H264MediumLossyOnly
         );
         assert!(LossyVideoCodec::from_config_str(Some("h264_medium")).is_lossy_only());
-        // h264_lossless is the explicit default; unset/unknown also default.
-        for value in [None, Some(""), Some("unknown"), Some("h264_lossless")] {
+        // Unset/unknown values use the h264_medium lossy-only default.
+        for value in [None, Some(""), Some("unknown")] {
             assert_eq!(
                 LossyVideoCodec::from_config_str(value),
-                LossyVideoCodec::LosslessPlusPreview,
+                LossyVideoCodec::H264MediumLossyOnly,
                 "{value:?} should map to the default codec"
             );
-            assert!(!LossyVideoCodec::from_config_str(value).is_lossy_only());
+            assert!(LossyVideoCodec::from_config_str(value).is_lossy_only());
         }
+        assert_eq!(
+            LossyVideoCodec::from_config_str(Some("h264_lossless")),
+            LossyVideoCodec::LosslessPlusPreview
+        );
+        assert_eq!(
+            LossyVideoCodec::default(),
+            LossyVideoCodec::H264MediumLossyOnly
+        );
     }
 
     #[test]
@@ -2167,13 +2183,17 @@ mod tests {
             );
             assert!(!LossyVideoCodec::for_trace(data_type, Some("h264_medium")).is_lossy_only());
         }
-        // RGB with the default/unset codec stays on the lossless+preview path.
-        for value in [None, Some(""), Some("h264_lossless")] {
+        // RGB with the default/unset codec uses the lossy-only path.
+        for value in [None, Some(""), Some("h264_medium")] {
             assert_eq!(
                 LossyVideoCodec::for_trace("RGB_IMAGES", value),
-                LossyVideoCodec::LosslessPlusPreview
+                LossyVideoCodec::H264MediumLossyOnly
             );
         }
+        assert_eq!(
+            LossyVideoCodec::for_trace("RGB_IMAGES", Some("h264_lossless")),
+            LossyVideoCodec::LosslessPlusPreview
+        );
     }
 
     #[test]
