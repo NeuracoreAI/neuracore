@@ -57,7 +57,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use data_daemon_shared::{video_boundary, BatchedDataItem, Envelope, FrameDtype};
+use dashmap::DashMap;
+use data_daemon_shared::{video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -83,6 +84,20 @@ const HOLDBACK_ENV: &str = "NCD_HOLDBACK_MS";
 /// Hard bound on how long a stopped window waits for its producer's
 /// [`Envelope::SourceFlushed`] marker before being evicted anyway.
 const FLUSH_MARKER_WAIT_CAP: Duration = Duration::from_secs(30);
+
+/// How long a source must publish nothing at all before a stopped window owed
+/// a flush marker settles on that silence instead.
+///
+/// A recording ended from the web has no local stop, so no producer publishes
+/// an [`Envelope::SourceFlushed`] and the window would sit out the whole
+/// [`FLUSH_MARKER_WAIT_CAP`]. Silence is the substitute proof: a source that
+/// has published nothing for longer than the producer's own seal deadline
+/// ([`VIDEO_CHUNK_MAX_OPEN_NS`](data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS)),
+/// its sweep, and the holdback has nothing left for this window. Generous by
+/// design — settling early drops a tail chunk, late only delays the recording.
+const PRODUCER_QUIET_SETTLE: Duration = Duration::from_nanos(
+    data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS as u64 + 3_000_000_000,
+);
 
 /// A source silent (no data, no lifecycle) for this long has its open window
 /// force-closed as a crash backstop, so a producer that died without a Stop
@@ -154,6 +169,30 @@ pub struct DispatcherContext {
     /// Backend recording lifecycle, read off the notification stream by
     /// [`crate::cloud::spawn_recording_notifications`]. `None` offline.
     pub notifications_rx: Option<mpsc::Receiver<RecordingCommand>>,
+    /// The recording state this dispatcher writes and the IPC listener reads.
+    pub recording_state: RecordingState,
+}
+
+/// The recording state the daemon owns, shared read-only with the IPC
+/// listener so a process can ask what its source has open.
+///
+/// The dispatcher is the only writer. It answers for a recording the backend
+/// announced but nothing local has opened yet, which is what lets a node that
+/// has logged nothing still know it is recording.
+#[derive(Clone, Default)]
+pub struct RecordingState(Arc<DashMap<Source, AnnouncedRecording>>);
+
+impl RecordingState {
+    /// What `(robot_id, robot_instance)` currently has open, if anything.
+    pub fn live(&self, robot_id: &str, robot_instance: i64) -> Option<LiveRecording> {
+        self.0
+            .get(&(robot_id.to_string(), robot_instance))
+            .map(|announced| LiveRecording {
+                recording_index: announced.opened_index,
+                recording_id: announced.cloud_recording_id.clone(),
+                start_timestamp_ns: Some(announced.start_timestamp_ns),
+            })
+    }
 }
 
 /// A recording a source has been told to make.
@@ -283,13 +322,23 @@ impl ActiveWindow {
     }
 
     /// Time elapsed since stop once this window may be evicted: retention has
-    /// passed *and* either every owed flush marker is in or
-    /// [`FLUSH_MARKER_WAIT_CAP`] has expired. `None` while it must be kept.
-    fn eviction_elapsed(&self, now: Instant, retention: Duration) -> Option<Duration> {
+    /// passed *and* the flush is settled. `None` while it must be kept.
+    ///
+    /// A flush settles three ways: every owed marker is in, the source has been
+    /// silent for [`PRODUCER_QUIET_SETTLE`] (`source_quiet_for`), or the window
+    /// has waited out [`FLUSH_MARKER_WAIT_CAP`]. The middle one is what keeps a
+    /// recording ended from the web off the full cap.
+    fn eviction_elapsed(
+        &self,
+        now: Instant,
+        retention: Duration,
+        source_quiet_for: Option<Duration>,
+    ) -> Option<Duration> {
         let since_stop = self.stop_recv_at.map(|at| now.duration_since(at))?;
         let retained = since_stop >= retention;
         let flush_settled = !self.awaiting_flush
             || self.flush_markers_settled()
+            || source_quiet_for.is_some_and(|quiet| quiet >= PRODUCER_QUIET_SETTLE)
             || since_stop >= FLUSH_MARKER_WAIT_CAP;
         (retained && flush_settled).then_some(since_stop)
     }
@@ -385,9 +434,9 @@ struct Dispatcher {
     actor_handles: Vec<JoinHandle<()>>,
     /// Rate-limited orphan-drop counter (data outside any window).
     orphan_drops: u64,
-    /// What each source has been told to record, announced but not yet proved
-    /// local. Data is that proof — see [`Dispatcher::open_announced_window`].
-    announced: HashMap<Source, AnnouncedRecording>,
+    /// What each source has been told to record. Shared with the IPC listener,
+    /// which answers `recording_state` queries from it.
+    announced: RecordingState,
     /// When the eviction + idle-reap scans last ran. Those scans are throttled
     /// to [`HOUSEKEEP_INTERVAL`] so a data stream arriving faster than that
     /// doesn't re-run the two full window scans (and their `Vec` allocations)
@@ -404,13 +453,13 @@ impl Dispatcher {
         Self {
             store,
             actor_context,
+            announced: context.recording_state.clone(),
             context,
             holdback: configured_holdback(),
             windows: HashMap::new(),
             held: VecDeque::new(),
             actor_handles: Vec::new(),
             orphan_drops: 0,
-            announced: HashMap::new(),
             last_housekeep: Instant::now(),
         }
     }
@@ -712,7 +761,7 @@ impl Dispatcher {
                 .await
             {
                 Ok(Some(existing_index)) => {
-                    if let Some(announcement) = self.announced.get_mut(&source) {
+                    if let Some(mut announcement) = self.announced.0.get_mut(&source) {
                         if announcement.opened_index == Some(existing_index) {
                             announcement.cloud_recording_id = Some(cloud_recording_id.to_string());
                         }
@@ -745,7 +794,7 @@ impl Dispatcher {
             opened_index: None,
         };
         tracing::debug!(robot_id = source.0, "recording announced");
-        self.announced.insert(source, announced);
+        self.announced.0.insert(source, announced);
     }
 
     /// Open the window for `source`'s announced recording, now that it has
@@ -756,13 +805,13 @@ impl Dispatcher {
     /// `publish_ts` so the triggering datum is not excluded, and floored at any
     /// predecessor's close so it cannot steal that recording's tail.
     async fn open_announced_window(&mut self, source: &Source, publish_ts: i64, recv_at: Instant) {
-        let Some(announced) = self.announced.get(source) else {
+        let announced = self.announced.0.get(source).map(|entry| entry.clone());
+        let Some(announced) = announced else {
             return;
         };
         if announced.opened_index.is_some() {
             return;
         }
-        let announced = announced.clone();
         let mut open_at_ns = announced.open_at_ns.min(publish_ts);
         // Catching up on a recording that began before this datum: floor the
         // window at any predecessor's close so it cannot claim that
@@ -815,7 +864,7 @@ impl Dispatcher {
             }
         };
         tracing::info!(recording_index, robot_id = source.0, "recording started");
-        if let Some(announcement) = self.announced.get_mut(&source) {
+        if let Some(mut announcement) = self.announced.0.get_mut(&source) {
             announcement.opened_index = Some(recording_index);
         }
 
@@ -957,11 +1006,14 @@ impl Dispatcher {
     /// trailed its successor's start, which retired the recording already, and
     /// every recording belonging to another host.
     async fn source_recording(&self, cloud_recording_id: &str) -> Option<Source> {
-        let announced = self.announced.iter().find(|(_, announcement)| {
-            announcement.cloud_recording_id.as_deref() == Some(cloud_recording_id)
-        });
-        if let Some((source, _)) = announced {
-            return Some(source.clone());
+        let announced = self
+            .announced
+            .0
+            .iter()
+            .find(|entry| entry.value().cloud_recording_id.as_deref() == Some(cloud_recording_id))
+            .map(|entry| entry.key().clone());
+        if let Some(source) = announced {
+            return Some(source);
         }
         // The id was minted after the announcement — a recording started here
         // and stopped from the web, whose START notification never taught us
@@ -990,7 +1042,7 @@ impl Dispatcher {
         timestamp_ns: i64,
         recv_at: Instant,
     ) {
-        self.announced.remove(&source);
+        self.announced.0.remove(&source);
 
         let Some(entry) = self.windows.get_mut(&source) else {
             tracing::debug!(robot_id = source.0, "stop for unknown source; ignoring");
@@ -1107,7 +1159,7 @@ impl Dispatcher {
     }
 
     async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
-        self.announced.remove(&source);
+        self.announced.0.remove(&source);
         let Some(entry) = self.windows.get_mut(&source) else {
             return;
         };
@@ -1196,8 +1248,10 @@ impl Dispatcher {
         let mut closing_actors: Vec<TraceHandle> = Vec::new();
         let mut empty_sources: Vec<Source> = Vec::new();
         for (source, entry) in self.windows.iter_mut() {
+            let source_quiet_for = entry.last_seen.map(|at| now.duration_since(at));
             entry.closing.retain_mut(|window| {
-                let Some(elapsed) = window.eviction_elapsed(now, retention) else {
+                let Some(elapsed) = window.eviction_elapsed(now, retention, source_quiet_for)
+                else {
                     return true;
                 };
                 Self::finish_eviction(source, window, elapsed, retention, &mut closing_actors);
@@ -1279,6 +1333,7 @@ impl Dispatcher {
             let Some(mut window) = entry.live.take() else {
                 continue;
             };
+            self.announced.0.remove(&source);
             // The producer crashed without a Stop, so there is no next
             // recording to partition against — keep the window's publish upper
             // bound open (`i64::MAX`) to catch any straggler data before
@@ -1306,7 +1361,7 @@ impl Dispatcher {
     /// `publish_timestamp_ns` as the membership key.
     async fn route(&mut self, held: Held) {
         let publish_ts = held.publish_timestamp_ns;
-        if !self.announced.is_empty() {
+        if !self.announced.0.is_empty() {
             self.open_announced_window(&held.source, publish_ts, Instant::now())
                 .await;
         }
@@ -1978,6 +2033,7 @@ mod tests {
             event_bus: None,
             config_refresh_tx: Some(refresh_tx),
             notifications_rx: None,
+            recording_state: RecordingState::default(),
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -2018,6 +2074,7 @@ mod tests {
             event_bus: None,
             config_refresh_tx: None,
             notifications_rx: None,
+            recording_state: RecordingState::default(),
         };
         let (tx, handle) =
             spawn_with_context(store.clone(), context, dispatcher_context, shutdown_rx);
@@ -2044,6 +2101,7 @@ mod tests {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
             notifications_rx: None,
+            recording_state: RecordingState::default(),
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2150,6 +2208,7 @@ mod tests {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
             notifications_rx: None,
+            recording_state: RecordingState::default(),
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2406,6 +2465,58 @@ mod tests {
                 .all(|window| window.flush_markers_settled()),
             "both windows the producer's chunk reached must be settled by its \
              single marker"
+        );
+    }
+
+    /// A window stopped `stopped_ago` ago, still owed a marker from producer 7.
+    fn window_awaiting_a_flush(now: Instant, stopped_ago: Duration) -> ActiveWindow {
+        let mut window = test_window(1, 100);
+        window.stopped_at_ns = Some(150);
+        window.stop_recv_at = Some(now - stopped_ago);
+        window.awaiting_flush = true;
+        window.video_producers.insert(7);
+        window
+    }
+
+    #[test]
+    fn a_silent_source_settles_a_window_no_producer_will_flush() {
+        let now = Instant::now();
+        let retention = Duration::from_secs(1);
+        let window = window_awaiting_a_flush(now, Duration::from_secs(2));
+
+        assert_eq!(
+            window.eviction_elapsed(now, retention, Some(PRODUCER_QUIET_SETTLE)),
+            Some(Duration::from_secs(2)),
+            "a source silent past the producer's own seal deadline has nothing \
+             left to send for this window"
+        );
+    }
+
+    #[test]
+    fn a_source_still_publishing_keeps_its_window_until_the_cap() {
+        let now = Instant::now();
+        let retention = Duration::from_secs(1);
+        let window = window_awaiting_a_flush(now, Duration::from_secs(2));
+
+        assert_eq!(
+            window.eviction_elapsed(now, retention, Some(Duration::from_millis(10))),
+            None
+        );
+        assert_eq!(window.eviction_elapsed(now, retention, None), None);
+
+        let capped = window_awaiting_a_flush(now, FLUSH_MARKER_WAIT_CAP);
+        assert!(capped
+            .eviction_elapsed(now, retention, Some(Duration::from_millis(10)))
+            .is_some());
+    }
+
+    #[test]
+    fn silence_does_not_shortcut_the_retention_a_window_still_owes() {
+        let now = Instant::now();
+        let window = window_awaiting_a_flush(now, Duration::from_millis(100));
+        assert_eq!(
+            window.eviction_elapsed(now, Duration::from_secs(1), Some(PRODUCER_QUIET_SETTLE)),
+            None
         );
     }
 
@@ -2768,6 +2879,7 @@ mod tests {
             event_bus: Some(bus.clone()),
             config_refresh_tx: None,
             notifications_rx: None,
+            recording_state: RecordingState::default(),
         };
         let (tx, handle) = spawn_with_context(
             store.clone(),
@@ -2872,6 +2984,59 @@ mod tests {
                 .started_at_ns,
             100,
             "the window opens at the recording's start, not at the first datum"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_that_has_published_nothing_still_reads_its_recording_as_open() {
+        // Started on another machine: this daemon learns the recording from the
+        // notification stream alone. A process here must read "recording"
+        // before anything local publishes — there is no row to read yet, which
+        // is why the answer comes from the dispatcher and not the store.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let recording_state = RecordingState::default();
+        let mut dispatcher = Dispatcher::new(
+            store.clone(),
+            context,
+            DispatcherContext {
+                recording_state: recording_state.clone(),
+                ..Default::default()
+            },
+        );
+
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+
+        let live = recording_state
+            .live("robot-1", 0)
+            .expect("the recording the backend announced");
+        assert_eq!(live.recording_id, Some("rec-a".to_string()));
+        assert_eq!(
+            live.recording_index, None,
+            "no row exists until data opens the window"
+        );
+
+        // Once the source publishes, the same answer carries the row's index.
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+        assert!(recording_state
+            .live("robot-1", 0)
+            .expect("still open")
+            .recording_index
+            .is_some());
+
+        dispatcher.handle_inbound(stop("robot-1", 120), now).await;
+        assert!(
+            recording_state.live("robot-1", 0).is_none(),
+            "a stopped recording is not open"
         );
     }
 
@@ -2990,6 +3155,7 @@ mod tests {
                 event_bus: Some(bus.clone()),
                 config_refresh_tx: None,
                 notifications_rx: None,
+                recording_state: RecordingState::default(),
             },
         );
 

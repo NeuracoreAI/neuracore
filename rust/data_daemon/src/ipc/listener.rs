@@ -19,8 +19,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, VersionReply,
-    VersionRequest,
+    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, RecordingStateQuery,
+    RecordingStateReply, VersionReply, VersionRequest,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -31,6 +31,7 @@ use tokio::time::sleep;
 
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
+use crate::pipeline::dispatcher::RecordingState;
 use crate::state::{SqliteStateStore, StateStore};
 
 /// Poll cadence while envelopes are actively flowing.
@@ -70,11 +71,13 @@ pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
     store: Arc<SqliteStateStore>,
+    recording_state: RecordingState,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
         commands = data_daemon_shared::service_name::COMMANDS,
         recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
+        recording_state = data_daemon_shared::service_name::RECORDING_STATE,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
         "ipc listener started"
@@ -129,6 +132,11 @@ pub async fn run(
         // borrow makes this future `!Send`, which is fine: `run` is awaited
         // inline under `block_on`, never `tokio::spawn`'d.
         serve_recording_id_queries(transport.recording_id_server(), &store).await;
+
+        // -- Answer recording-state queries --------------------------------------
+        // Every process on this host reads its recording state from here
+        // rather than from its own subscription to the backend.
+        serve_recording_state_queries(transport.recording_state_server(), &recording_state).await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -294,6 +302,57 @@ async fn serve_recording_id_queries(
                 Err(error) => tracing::warn!(%error, "failed to loan recording-id reply sample"),
             },
             Err(error) => tracing::warn!(%error, "failed to encode recording-id reply"),
+        }
+    }
+}
+
+/// Drain every pending recording-state query, answering each from the
+/// dispatcher's own state.
+///
+/// The dispatcher owns what a source is recording: it holds the recordings
+/// local producers bracket *and* the ones the backend announced over the
+/// notification stream, which it alone subscribes to. So a process that
+/// started nothing — on a node that has logged nothing — still gets the true
+/// answer, and it never depends on a row existing yet.
+///
+/// Bounded per tick on the same grounds as [`serve_recording_id_queries`]: each
+/// client keeps one request in flight.
+async fn serve_recording_state_queries(
+    server: &Server<ipc::Service, [u8], (), [u8], ()>,
+    recording_state: &RecordingState,
+) {
+    loop {
+        let active = match server.receive() {
+            Ok(Some(active)) => active,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "recording-state server receive failed");
+                return;
+            }
+        };
+
+        let query = match RecordingStateQuery::decode(active.payload()) {
+            Ok(query) => query,
+            Err(error) => {
+                tracing::warn!(%error, "dropping malformed recording-state query");
+                continue;
+            }
+        };
+
+        let reply = RecordingStateReply {
+            recording: recording_state.live(&query.robot_id, query.robot_instance),
+        };
+        match reply.encode() {
+            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
+                Ok(response) => {
+                    let response = response.write_from_slice(&bytes);
+                    if let Err(error) = response.send() {
+                        tracing::warn!(%error, "failed to send recording-state reply");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "failed to loan recording-state reply sample"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to encode recording-state reply"),
         }
     }
 }

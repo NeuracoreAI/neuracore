@@ -428,7 +428,9 @@ fn run_daemon(
                     spawn_wakelock(event_bus.clone(), shutdown_tx.subscribe())
                 });
 
+            let recording_state = dispatcher::RecordingState::default();
             let dispatcher_context = DispatcherContext {
+                recording_state: recording_state.clone(),
                 event_bus: Some(event_bus.clone()),
                 config_refresh_tx: Some(config_refresh_tx),
                 notifications_rx,
@@ -484,6 +486,7 @@ fn run_daemon(
                 transport,
                 dispatcher_tx.clone(),
                 Arc::new(state_store.clone()),
+                recording_state,
                 shutdown_tx.subscribe(),
             )
             .await;

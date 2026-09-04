@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from importlib import import_module
 from types import ModuleType
+from typing import NamedTuple
 
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
@@ -41,6 +42,67 @@ def _load_native() -> ModuleType:
         except ImportError as error:
             raise RuntimeError(_DATA_BRIDGE_IMPORT_HINT) from error
     return _DATA_BRIDGE_MODULE
+
+
+class LiveRecording(NamedTuple):
+    """The recording a source has open, as the daemon reports it.
+
+    Attributes:
+        recording_index: The daemon's own primary key, once data has opened the
+            recording's window. It exists before the cloud id does, so it is
+            what tells two consecutive recordings of one source apart. ``None``
+            for a recording the backend started that this host has not yet
+            published for.
+        recording_id: The cloud handle, once ``/recording/start`` has been
+            notified. ``None`` while the recording is still local-only.
+        start_timestamp_ns: The recording's capture-clock start marker, as
+            returned by :meth:`RecordingContext.start_recording`.
+    """
+
+    recording_index: int | None
+    recording_id: str | None
+    start_timestamp_ns: int | None
+
+
+class RecordingStateUnavailableError(RuntimeError):
+    """The daemon did not answer a recording-state query in time."""
+
+
+def query_recording_state(
+    robot_id: str, robot_instance: int, timeout_s: float = 0.1
+) -> LiveRecording | None:
+    """Ask the daemon which recording, if any, a source currently has open.
+
+    The daemon owns recording state — including the recordings the backend
+    started, which it alone subscribes to — so this is how a process learns
+    about a recording it did not itself start or stop.
+
+    Returns:
+        The open recording, or ``None`` when the source has none.
+
+    Raises:
+        RecordingStateUnavailableError: nothing answered within ``timeout_s``.
+            Silence is not "not recording", and callers must not read it as
+            such.
+
+    Blocks for up to ``timeout_s``, which bounds a caller's stall. The daemon
+    polls its IPC inbox every 25 ms once idle, so a timeout near that raises
+    against a healthy daemon.
+    """
+    reply = _load_native().recording_state(robot_id, robot_instance, timeout_s)
+    if reply is None:
+        raise RecordingStateUnavailableError(
+            f"the daemon did not answer within {timeout_s}s "
+            f"for {robot_id} instance {robot_instance}"
+        )
+    live = reply["recording"]
+    if live is None:
+        return None
+    return LiveRecording(
+        recording_index=live["recording_index"],
+        recording_id=live["recording_id"],
+        start_timestamp_ns=live["start_timestamp_ns"],
+    )
 
 
 class LoggingStalledError(RuntimeError):
@@ -100,7 +162,7 @@ class RecordingContext:
         dataset_name: str | None = None,
         timestamp: float | None = None,
         cloud_recording_id: str | None = None,
-    ) -> None:
+    ) -> int:
         """Announce a recording to the daemon for a source.
 
         Publishes one ``StartRecording`` envelope tagged with the source
@@ -113,6 +175,11 @@ class RecordingContext:
         stored and reported as such, and returned as the marker that resolves the
         cloud id (:meth:`get_recording_id`). It does **not** bound the recording
         window, which the daemon takes from a publish stamp inside this call.
+
+        Returns:
+            The capture marker the daemon stored as this recording's
+            ``start_timestamp_ns``, which tells it apart from its predecessor
+            before either has a cloud id.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
@@ -127,6 +194,7 @@ class RecordingContext:
             timestamp_ns,
             cloud_recording_id,
         )
+        return self._recording_marker_ns
 
     def log_joints(
         self,
