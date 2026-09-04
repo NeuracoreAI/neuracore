@@ -31,7 +31,7 @@ from neuracore.data_daemon import bridge as recording_context
 
 from .auth import Auth, get_auth
 from .const import API_URL, MAX_DATA_STREAMS
-from .exceptions import RobotError, ValidationError
+from .exceptions import AuthenticationError, RobotError, ValidationError
 
 if TYPE_CHECKING:
     from neuracore.api.logging import JointStreamBinding, ResolvedJointGroup
@@ -948,6 +948,7 @@ def update_robot_name(
         The resolved robot ID.
 
     Raises:
+        AuthenticationError: If the user is not authenticated.
         RobotError: If the update request fails.
         ValueError: If the robot key or new name is empty.
     """
@@ -956,7 +957,7 @@ def update_robot_name(
     if not new_robot_name:
         raise ValueError("New robot name cannot be empty.")
     if not get_auth().is_authenticated:
-        raise RobotError("Not authenticated. Please call nc.login() first.")
+        raise AuthenticationError("Not authenticated. Please call nc.login() first.")
 
     resolved_org_id = get_current_org()
     if not resolved_org_id:
