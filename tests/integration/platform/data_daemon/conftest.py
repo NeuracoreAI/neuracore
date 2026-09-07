@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 import neuracore as nc
-from neuracore.data_daemon.const import active_profile_name
 from tests.integration.platform.data_daemon.shared.assertions import (
     clear_daemon_timer_stats as _clear_daemon_timer_stats,
 )
@@ -20,7 +19,8 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 )
 from tests.integration.platform.data_daemon.shared.profiles import (
     cleanup_test_profiles,
-    profile_path,
+    preserved_active_profile,
+    scoped_default_profile,
 )
 from tests.integration.platform.data_daemon.shared.reporting import (
     PerformanceReportContext,
@@ -123,30 +123,21 @@ def cleanup_profiles():
 
 
 @pytest.fixture(autouse=True)
-def reset_video_codec():
-    """Restore the active daemon profile to its exact pre-test state.
+def case_video_codec(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Select the case's video codec before any daemon starts.
 
-    The codec is a persistent daemon-profile setting, so a case selecting a
-    lossy codec must not leak into a later test or the developer's real profile.
-    Offline cases write an ephemeral profile (removed by ``cleanup_profiles``),
-    but online cases write the default profile. Snapshot the active profile file
-    and restore it byte-for-byte (or delete it if it did not exist), rather than
-    forcing a literal ``h264_lossless`` — which would otherwise leave a residual
-    ``video_codec`` key on a developer's default profile that had none. Only
-    writes when the test actually changed the file, so non-video tests are free.
+    Defaults to lossless; the daemon's own default is lossy and smears the frame
+    codes embedded in test video.
     """
-    active_path = profile_path(active_profile_name())
-    original_bytes = active_path.read_bytes() if active_path.exists() else None
-    try:
+    case = request.getfixturevalue("case") if "case" in request.fixturenames else None
+    codec = (
+        nc.Codec(case.video_codec)
+        if case is not None and case.video_codec
+        else nc.Codec.H264_LOSSLESS
+    )
+    with scoped_default_profile(), preserved_active_profile():
+        nc.set_video_encoding_options(codec)
         yield
-    finally:
-        current_bytes = active_path.read_bytes() if active_path.exists() else None
-        if current_bytes == original_bytes:
-            return
-        if original_bytes is not None:
-            active_path.write_bytes(original_bytes)
-        elif active_path.exists():
-            active_path.unlink()
 
 
 @pytest.fixture(autouse=True)
