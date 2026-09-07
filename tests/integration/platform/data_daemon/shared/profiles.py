@@ -1,8 +1,8 @@
 """Daemon profile and environment context managers for integration tests.
 
-Manages temporary offline YAML profiles and online-mode env overrides.
-No process control and no assertions — composes with :mod:`process_control`
-and :mod:`runners`.
+Manages temporary offline YAML profiles, online-mode env overrides, and
+restoration of profiles a test writes.  No process control and no assertions —
+composes with :mod:`process_control` and :mod:`runners`.
 """
 
 from __future__ import annotations
@@ -12,6 +12,10 @@ import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
+
+import yaml
+
+from neuracore.data_daemon.const import active_profile_name
 
 TEST_PROFILE_PATHS: set[Path] = set()
 """Tracks daemon profile files created by tests for cleanup on teardown."""
@@ -39,6 +43,44 @@ def cleanup_test_profiles() -> None:
 
 
 @contextmanager
+def scoped_default_profile() -> Generator[None]:
+    """Clear ``NEURACORE_DAEMON_PROFILE`` so the default profile is active.
+
+    Yields:
+        ``None`` — the default profile is active while the body executes.
+    """
+    previous_profile = os.environ.pop("NEURACORE_DAEMON_PROFILE", None)
+    try:
+        yield
+    finally:
+        if previous_profile is not None:
+            os.environ["NEURACORE_DAEMON_PROFILE"] = previous_profile
+
+
+@contextmanager
+def preserved_active_profile() -> Generator[None]:
+    """Restore the profile active on entry, deleting it if the block created it.
+
+    Enter after whatever selects the profile.
+
+    Yields:
+        ``None``.
+    """
+    active_path = profile_path(active_profile_name())
+    original_bytes = active_path.read_bytes() if active_path.exists() else None
+    try:
+        yield
+    finally:
+        current_bytes = active_path.read_bytes() if active_path.exists() else None
+        if current_bytes == original_bytes:
+            return
+        if original_bytes is not None:
+            active_path.write_bytes(original_bytes)
+        elif active_path.exists():
+            active_path.unlink()
+
+
+@contextmanager
 def scoped_offline_profile() -> Generator[None]:
     """Activate a temporary offline daemon profile for the duration of the block.
 
@@ -47,6 +89,9 @@ def scoped_offline_profile() -> Generator[None]:
     ``NEURACORE_DAEMON_PROFILE`` at it, then restores the previous value on
     exit.  The profile path is added to :data:`TEST_PROFILE_PATHS` so that
     :func:`cleanup_test_profiles` can remove it at teardown.
+
+    A named profile is resolved standalone, never merged over the default, so
+    the active profile's ``video_codec`` is copied in.
 
     Does **not** start, stop, or clean up any daemon processes or storage.
 
@@ -57,7 +102,14 @@ def scoped_offline_profile() -> Generator[None]:
     profile_name = f"offline_profile_{uuid.uuid4().hex[:8]}"
     offline_profile_path = profile_path(profile_name)
     offline_profile_path.parent.mkdir(parents=True, exist_ok=True)
-    offline_profile_path.write_text("offline: true\n", encoding="utf-8")
+    contents = "offline: true\n"
+    active_profile = profile_path(active_profile_name())
+    if active_profile.exists():
+        active = yaml.safe_load(active_profile.read_text(encoding="utf-8")) or {}
+        codec = active.get("video_codec")
+        if codec:
+            contents += f"video_codec: {codec}\n"
+    offline_profile_path.write_text(contents, encoding="utf-8")
     TEST_PROFILE_PATHS.add(offline_profile_path)
 
     previous_profile = os.environ.get("NEURACORE_DAEMON_PROFILE")
