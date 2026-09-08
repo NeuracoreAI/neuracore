@@ -458,3 +458,17 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         nc.stop_recording(wait=True, wait_timeout_s=1.0)
 
     assert poll_count == 1
+
+
+def test_version_check_sends_sdk_and_types_versions():
+    """Send both package versions using the backend query parameter names."""
+    from neuracore_types import __version__ as types_version
+
+    with requests_mock.Mocker() as mock:
+        request = mock.get(f"{API_URL}/auth/verify-version", status_code=200)
+        get_auth().validate_version()
+
+    assert request.last_request.qs == {
+        "neuracore_types_version": [types_version.lower()],
+        "neuracore_version": [nc.__version__.lower()],
+    }
