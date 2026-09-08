@@ -96,6 +96,32 @@ def get_algorithm(algorithm_id: str) -> dict:
     return response.json()
 
 
+def _validate_gpu_to_algorithm(
+    gpu: GPUType,
+    algorithm_name: str,
+    algorithm_jsons: list[dict],
+) -> None:
+    """Validate that an algorithm supports the selected GPU."""
+    supported_gpus: set[GPUType] = set()
+    for algorithm in algorithm_jsons:
+        if algorithm.get("name") == algorithm_name:
+            supported_gpus = {
+                GPUType(value) for value in algorithm.get("supported_gpus", [])
+            }
+            break
+
+    if not supported_gpus:
+        raise ValueError(
+            f"Algorithm {algorithm_name} does not declare any supported GPUs."
+        )
+    if gpu not in supported_gpus:
+        valid_gpus = ", ".join(sorted(supported.value for supported in supported_gpus))
+        raise ValueError(
+            f"GPU {gpu.value} is not supported by algorithm {algorithm_name}. "
+            f"Supported GPUs: {valid_gpus}."
+        )
+
+
 def start_training_run(
     name: str,
     dataset_name: str,
@@ -113,7 +139,7 @@ def start_training_run(
     disk_size_gb: int = 500,
     resume_from_job_id: str | None = None,
 ) -> dict:
-    """Start a new training run.
+    """Start a new training run on the cloud.
 
     Args:
         name: Name of the training run
@@ -163,6 +189,12 @@ def start_training_run(
             algorithm_name=algorithm_name,
             algorithm_jsons=algorithm_jsons,
         )
+    )
+
+    _validate_gpu_to_algorithm(
+        GPUType(gpu_type),
+        algorithm_name,
+        algorithm_jsons,
     )
 
     # Validate that the machine size is large enough for the dataset.

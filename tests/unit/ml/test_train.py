@@ -23,6 +23,7 @@ from neuracore_types import (
     CrossEmbodimentUnion,
     DataItemStats,
     DataType,
+    GPUType,
     JointDataStats,
     ModelInitDescription,
 )
@@ -451,6 +452,10 @@ def model_init_description() -> ModelInitDescription:
 @pytest.fixture
 def mock_model_class() -> NeuracoreModel:
     class MockModel(NeuracoreModel):
+        @staticmethod
+        def get_supported_gpus() -> frozenset[GPUType]:
+            return frozenset({GPUType.NVIDIA_TESLA_V100})
+
         def __init__(self, model_init_description, **kwargs):
             super().__init__(model_init_description)
             self.kwargs = kwargs
