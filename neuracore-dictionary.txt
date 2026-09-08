@@ -189,6 +189,7 @@ frombuffer
 fromlist
 frontleft
 frontright
+frozenset
 fspath
 ftruncate
 gdown

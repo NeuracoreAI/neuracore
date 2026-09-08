@@ -3,7 +3,7 @@ import requests
 from neuracore_types import Dataset, DataType, GPUType
 
 import neuracore as nc
-from neuracore.api.training import _resolve_next_name
+from neuracore.api.training import _resolve_next_name, _validate_gpu_to_algorithm
 from neuracore.core.const import API_URL
 
 TEST_ROBOT_ID = "20a621b7-2f9b-4699-a08e-7d080488a5a3"
@@ -43,6 +43,43 @@ def test_resolve_next_name_ignores_unrelated_names():
     assert _resolve_next_name("foo", {"foo", "foo_1"}) == "foo_2"
 
 
+def test_validate_gpu_to_algorithm_accepts_supported_gpu():
+    """A GPU declared by the algorithm is accepted."""
+    _validate_gpu_to_algorithm(
+        GPUType.NVIDIA_A100_80GB,
+        "ACT",
+        [{
+            "name": "ACT",
+            "supported_gpus": [
+                "NVIDIA_A100_80GB",
+                "NVIDIA_TESLA_V100",
+            ],
+        }],
+    )
+
+
+def test_validate_gpu_to_algorithm_rejects_unsupported_gpu():
+    """An unsupported GPU is rejected with the valid choices."""
+    with pytest.raises(
+        ValueError,
+        match=(
+            "GPU NVIDIA_TESLA_T4 is not supported by algorithm Pi05.*"
+            "NVIDIA_A100_80GB, NVIDIA_H100_80GB"
+        ),
+    ):
+        _validate_gpu_to_algorithm(
+            GPUType.NVIDIA_TESLA_T4,
+            "Pi05",
+            [{
+                "name": "Pi05",
+                "supported_gpus": [
+                    "NVIDIA_H100_80GB",
+                    "NVIDIA_A100_80GB",
+                ],
+            }],
+        )
+
+
 @pytest.fixture
 def training_job_response():
     """Create a mock training job response."""
@@ -71,6 +108,7 @@ def algorithm_list_response():
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
+            "supported_gpus": [GPUType.NVIDIA_TESLA_T4],
         },
         {
             "id": "algo_456",
@@ -82,6 +120,7 @@ def algorithm_list_response():
                 DataType.JOINT_POSITIONS,
             ],
             "supported_output_data_types": [DataType.JOINT_TARGET_POSITIONS],
+            "supported_gpus": [GPUType.NVIDIA_TESLA_T4],
         },
     ]
 
