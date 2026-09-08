@@ -1,27 +1,38 @@
-//! Depth-to-RGB24 storage conversion for the producer's video path.
+//! Depth-to-RGB24 conversion for the producer's video path.
 //!
 //! The NUT/PNG pipeline ([`crate::nut_writer`]) only ever accepts packed
 //! RGB24. A depth frame is therefore converted into that representation
-//! *before* compression, mirroring the Python reference algorithm in
-//! `neuracore.core.utils.depth_utils.depth_to_rgb_storage` bit-for-bit:
+//! *before* compression. There are two conversions, matching the Python
+//! reference in `neuracore.core.utils.depth_utils`:
 //!
-//! 1. Clip depth values (metres) to `[0, MAX_DEPTH]`.
-//! 2. Normalize to `[0, 1]`.
-//! 3. Scale to 24-bit range (`0..=2^24 - 1`).
-//! 4. Floor and split the 24-bit value into R, G, B bytes (most-significant
-//!    byte first).
+//! - [`depth_to_rgb24`] / storage — 24-bit packing for the lossless archive
+//!   (`depth_to_rgb_storage`). Matching this exactly is what lets
+//!   `rgb_to_depth_storage` (Python) decode a Rust-converted depth frame
+//!   correctly.
+//! - [`depth_to_rgb_visualization`] — inferno colormap for the lossy preview
+//!   (`depth_to_rgb_visualization`), normalised to
+//!   `1.5 ×` the first-frame max depth of the stream.
 //!
-//! Matching this exactly is what lets `rgb_to_depth_storage` (Python) decode a
-//! Rust-converted depth frame correctly.
+//! [`depth_to_storage_and_viz`] runs both from one decode pass so the
+//! compression worker does not walk the raw depth buffer twice.
 
 use data_daemon_shared::FrameDtype;
+
+/// Inferno LUT used by the visualization path.
+mod inferno_cmap {
+    include!("inferno_cmap.rs");
+}
 
 /// Maximum depth value (metres) the canonical storage encoding represents.
 /// Must match `neuracore.core.utils.depth_utils.MAX_DEPTH` — this Rust
 /// conversion and the Python decoder are two implementations of the same wire
 /// contract, so a drift here would silently corrupt every depth recording's
 /// decoded values without either side raising an error.
-const MAX_DEPTH: f32 = 10.0;
+pub(crate) const MAX_DEPTH: f32 = 10.0;
+
+/// Multiplier applied to the stream's first-frame max depth for visualization.
+/// Must match `neuracore.core.utils.depth_utils.MAX_DEPTH_VISUALIZATION_MULTIPLIER`.
+pub(crate) const MAX_DEPTH_VISUALIZATION_MULTIPLIER: f32 = 1.5;
 
 /// 24-bit maximum value depth is scaled into, as `f32`: `2^24 - 1`.
 const MAX_24_BIT: f32 = 16_777_215.0;
@@ -92,6 +103,30 @@ fn decode_meters(dtype: FrameDtype, chunk: &[u8]) -> f32 {
     }
 }
 
+/// Assert `raw` has exactly `width * height * dtype.bytes_per_pixel()` bytes
+/// and return the pixel count. Shared by the storage / visualization converters.
+fn expect_depth_pixel_count(dtype: FrameDtype, width: u32, height: u32, raw: &[u8]) -> usize {
+    debug_assert!(
+        matches!(dtype, FrameDtype::DepthF16 | FrameDtype::DepthF32),
+        "depth converter called with {dtype:?}, expected a depth dtype"
+    );
+    let bytes_per_pixel = dtype.bytes_per_pixel();
+    let pixel_count = (width as usize)
+        .checked_mul(height as usize)
+        .expect("width * height overflows usize");
+    let expected_len = pixel_count
+        .checked_mul(bytes_per_pixel)
+        .expect("width * height * bytes_per_pixel overflows usize");
+    assert!(
+        raw.len() == expected_len,
+        "depth converter: buffer is {} bytes; expected exactly {expected_len} bytes for a \
+         {width}x{height} {dtype:?} frame. The caller must validate frame size before \
+         calling — this is an internal invariant violation, not user input.",
+        raw.len(),
+    );
+    pixel_count
+}
+
 /// Convert one raw depth frame (`dtype` is [`FrameDtype::DepthF16`] or
 /// [`FrameDtype::DepthF32`]) into packed RGB24 storage bytes, matching
 /// `depth_to_rgb_storage` exactly.
@@ -112,54 +147,139 @@ fn decode_meters(dtype: FrameDtype, chunk: &[u8]) -> f32 {
 /// must surface immediately rather than silently degrade to zero-depth
 /// pixels for the missing samples.
 pub fn depth_to_rgb24(dtype: FrameDtype, width: u32, height: u32, raw: &[u8]) -> Vec<u8> {
-    debug_assert!(
-        matches!(dtype, FrameDtype::DepthF16 | FrameDtype::DepthF32),
-        "depth_to_rgb24 called with {dtype:?}, expected a depth dtype"
-    );
-    let bytes_per_pixel = dtype.bytes_per_pixel();
-    let pixel_count = (width as usize)
-        .checked_mul(height as usize)
-        .expect("width * height overflows usize");
-    let expected_len = pixel_count
-        .checked_mul(bytes_per_pixel)
-        .expect("width * height * bytes_per_pixel overflows usize");
-    assert!(
-        raw.len() == expected_len,
-        "depth_to_rgb24: buffer is {} bytes; expected exactly {expected_len} bytes for a \
-         {width}x{height} {dtype:?} frame. The caller must validate frame size before \
-         calling — this is an internal invariant violation, not user input.",
-        raw.len(),
-    );
-
+    let pixel_count = expect_depth_pixel_count(dtype, width, height, raw);
     let mut rgb = Vec::with_capacity(pixel_count * 3);
-    // Branch on `dtype` once, here, rather than re-deciding it for every
-    // pixel: each arm below calls `decode_meters` with a compile-time
-    // literal `FrameDtype` (not the runtime `dtype` binding), so the
-    // function's internal `match` collapses to straight-line code once
-    // inlined — there is no per-pixel dtype decision left at runtime.
+    for_each_depth_sample(dtype, raw, |meters| {
+        push_storage_pixel(&mut rgb, meters);
+    });
+    rgb
+}
+
+/// Convert one raw depth frame into an inferno-coloured RGB24 visualization,
+/// matching `depth_to_rgb_visualization`.
+///
+/// `max_depth` is the stream's first-frame maximum (metres), before the
+/// `1.5×` headroom multiplier applied inside this function. Zero / invalid
+/// samples (including NaN, treated as zero) render as black.
+///
+/// Always returns exactly `width * height * 3` bytes.
+///
+/// # Panics
+///
+/// Same buffer-length contract as [`depth_to_rgb24`].
+pub fn depth_to_rgb_visualization(
+    dtype: FrameDtype,
+    width: u32,
+    height: u32,
+    raw: &[u8],
+    max_depth: f32,
+) -> Vec<u8> {
+    let pixel_count = expect_depth_pixel_count(dtype, width, height, raw);
+    let mut rgb = Vec::with_capacity(pixel_count * 3);
+    let scale = visualization_scale(max_depth);
+    for_each_depth_sample(dtype, raw, |meters| {
+        push_viz_pixel(&mut rgb, meters, scale);
+    });
+    rgb
+}
+
+/// Convert one raw depth frame into both storage and visualization RGB24.
+/// Returns `(storage, visualization)`.
+///
+/// # Panics
+///
+/// Same buffer-length contract as [`depth_to_rgb24`].
+pub fn depth_to_storage_and_viz(
+    dtype: FrameDtype,
+    width: u32,
+    height: u32,
+    raw: &[u8],
+    max_depth: f32,
+) -> (Vec<u8>, Vec<u8>) {
+    (
+        depth_to_rgb24(dtype, width, height, raw),
+        depth_to_rgb_visualization(dtype, width, height, raw, max_depth),
+    )
+}
+
+/// Maximum finite depth sample in `raw` after clipping to [`MAX_DEPTH`].
+/// Used to seed a stream's first-frame visualization scale.
+///
+/// # Panics
+///
+/// Same buffer-length contract as [`depth_to_rgb24`].
+pub fn max_depth_meters(dtype: FrameDtype, width: u32, height: u32, raw: &[u8]) -> f32 {
+    let _ = expect_depth_pixel_count(dtype, width, height, raw);
+    let mut max = 0.0f32;
+    for_each_depth_sample(dtype, raw, |meters| {
+        let clipped = clip_depth_meters(meters);
+        if clipped > max {
+            max = clipped;
+        }
+    });
+    max
+}
+
+/// Effective visualization clip range: `1.5 × max_depth`, or `0` when the
+/// first-frame max was zero (all-black preview).
+fn visualization_scale(max_depth: f32) -> f32 {
+    if max_depth <= 0.0 || !max_depth.is_finite() {
+        0.0
+    } else {
+        MAX_DEPTH_VISUALIZATION_MULTIPLIER * max_depth
+    }
+}
+
+/// Walk every depth sample in `raw`, invoking `on_sample` with the decoded
+/// metres value. Branches on `dtype` once so the per-pixel path is straight-line.
+fn for_each_depth_sample(dtype: FrameDtype, raw: &[u8], mut on_sample: impl FnMut(f32)) {
+    let bytes_per_pixel = dtype.bytes_per_pixel();
     match dtype {
         FrameDtype::DepthF16 => {
             for chunk in raw.chunks_exact(bytes_per_pixel) {
-                push_pixel(&mut rgb, decode_meters(FrameDtype::DepthF16, chunk));
+                on_sample(decode_meters(FrameDtype::DepthF16, chunk));
             }
         }
         FrameDtype::DepthF32 => {
             for chunk in raw.chunks_exact(bytes_per_pixel) {
-                push_pixel(&mut rgb, decode_meters(FrameDtype::DepthF32, chunk));
+                on_sample(decode_meters(FrameDtype::DepthF32, chunk));
             }
         }
-        FrameDtype::Rgb8 => unreachable!("depth_to_rgb24 called with Rgb8"),
+        FrameDtype::Rgb8 => unreachable!("depth converter called with Rgb8"),
     }
-    rgb
 }
 
 /// Clip, quantize, and append one decoded depth sample's 24-bit storage
 /// value to `rgb` as three bytes (R, G, B — most-significant byte first).
-fn push_pixel(rgb: &mut Vec<u8>, meters: f32) {
+fn push_storage_pixel(rgb: &mut Vec<u8>, meters: f32) {
     let value = depth_meters_to_24bit(clip_depth_meters(meters));
     rgb.push((value >> 16) as u8);
     rgb.push(((value >> 8) & 0xFF) as u8);
     rgb.push((value & 0xFF) as u8);
+}
+
+/// Append one inferno-mapped visualization pixel. Zero / NaN samples are black.
+/// `scale` is the already-multiplied clip range (`1.5 ×` first-frame max).
+fn push_viz_pixel(rgb: &mut Vec<u8>, meters: f32, scale: f32) {
+    // Match the Python producer: nan_to_num → 0 before the zero-mask check.
+    let meters = if meters.is_nan() { 0.0 } else { meters };
+    if meters == 0.0 || scale <= 0.0 {
+        rgb.extend_from_slice(&[0, 0, 0]);
+        return;
+    }
+    let clipped = if meters.is_infinite() && meters.is_sign_positive() {
+        scale
+    } else if meters.is_sign_negative() {
+        0.0
+    } else {
+        meters.clamp(0.0, scale)
+    };
+    // Invert so nearer depths are brighter, matching Python.
+    let normalized = 1.0 - (clipped / scale);
+    let index = (normalized * 255.0) as i32;
+    let index = index.clamp(0, 255) as usize;
+    let colour = inferno_cmap::INFERNO_CMAP[index];
+    rgb.extend_from_slice(&colour);
 }
 
 #[cfg(test)]
@@ -180,6 +300,12 @@ mod tests {
     fn single_pixel(dtype: FrameDtype, meters: f32) -> [u8; 3] {
         let raw = encode_meters(dtype, meters);
         let rgb = depth_to_rgb24(dtype, 1, 1, &raw);
+        [rgb[0], rgb[1], rgb[2]]
+    }
+
+    fn single_viz_pixel(dtype: FrameDtype, meters: f32, max_depth: f32) -> [u8; 3] {
+        let raw = encode_meters(dtype, meters);
+        let rgb = depth_to_rgb_visualization(dtype, 1, 1, &raw, max_depth);
         [rgb[0], rgb[1], rgb[2]]
     }
 
@@ -315,5 +441,86 @@ mod tests {
         let rgb = depth_to_rgb24(FrameDtype::DepthF32, 2, 1, &raw);
         assert_eq!(&rgb[0..3], &[0, 0, 0]);
         assert_eq!(&rgb[3..6], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn visualization_zero_is_black_even_when_scale_is_nonzero() {
+        assert_eq!(
+            single_viz_pixel(FrameDtype::DepthF32, 0.0, 10.0),
+            [0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn visualization_matches_python_golden_at_half_depth() {
+        // max_depth=10 → scale=15; 5m indexes inferno[169] under f32 arithmetic.
+        assert_eq!(
+            single_viz_pixel(FrameDtype::DepthF32, 5.0, 10.0),
+            [236, 103, 38]
+        );
+    }
+
+    #[test]
+    fn visualization_matches_python_golden_row() {
+        let meters = [0.0f32, 0.01, 5.0, 10.0];
+        let mut raw = Vec::new();
+        for m in meters {
+            raw.extend_from_slice(&m.to_le_bytes());
+        }
+        let rgb = depth_to_rgb_visualization(FrameDtype::DepthF32, 4, 1, &raw, 10.0);
+        assert_eq!(&rgb[0..3], &[0, 0, 0]);
+        assert_eq!(&rgb[3..6], &[250, 253, 160]);
+        assert_eq!(&rgb[6..9], &[236, 103, 38]);
+        assert_eq!(&rgb[9..12], &[118, 27, 109]);
+    }
+
+    #[test]
+    fn visualization_uses_first_frame_max_scale() {
+        // max_depth=4 → scale=6; values above 6 clip to the far end of inferno.
+        let meters = [0.0f32, 2.0, 4.0, 8.0];
+        let mut raw = Vec::new();
+        for m in meters {
+            raw.extend_from_slice(&m.to_le_bytes());
+        }
+        let rgb = depth_to_rgb_visualization(FrameDtype::DepthF32, 4, 1, &raw, 4.0);
+        assert_eq!(&rgb[0..3], &[0, 0, 0]);
+        assert_eq!(&rgb[3..6], &[236, 103, 38]);
+        assert_eq!(&rgb[6..9], &[118, 27, 109]);
+        assert_eq!(&rgb[9..12], &[0, 0, 3]);
+    }
+
+    #[test]
+    fn visualization_all_black_when_first_frame_max_is_zero() {
+        assert_eq!(
+            single_viz_pixel(FrameDtype::DepthF32, 5.0, 0.0),
+            [0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn dual_convert_matches_separate_paths() {
+        let mut raw = Vec::new();
+        for m in [0.0f32, 2.5, 5.0, 10.0] {
+            raw.extend_from_slice(&m.to_le_bytes());
+        }
+        let (storage, viz) =
+            depth_to_storage_and_viz(FrameDtype::DepthF32, 4, 1, &raw, 10.0);
+        assert_eq!(storage, depth_to_rgb24(FrameDtype::DepthF32, 4, 1, &raw));
+        assert_eq!(
+            viz,
+            depth_to_rgb_visualization(FrameDtype::DepthF32, 4, 1, &raw, 10.0)
+        );
+    }
+
+    #[test]
+    fn max_depth_meters_ignores_nan_and_clips() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&f32::NAN.to_le_bytes());
+        raw.extend_from_slice(&3.0f32.to_le_bytes());
+        raw.extend_from_slice(&100.0f32.to_le_bytes());
+        assert_eq!(
+            max_depth_meters(FrameDtype::DepthF32, 3, 1, &raw),
+            MAX_DEPTH
+        );
     }
 }

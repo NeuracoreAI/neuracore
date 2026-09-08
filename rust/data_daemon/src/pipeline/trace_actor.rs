@@ -308,6 +308,10 @@ pub enum TraceActorMessage {
         chunk_index: u32,
         /// Producer-spooled source NUT to relink into this trace's chunks dir.
         spool_nut: PathBuf,
+        /// Optional depth visualization sibling NUT (`chunk_*_viz.nut`). When
+        /// present, the lossy encode consumes it while lossless keeps
+        /// [`Self::Video::spool_nut`]'s storage pixels.
+        viz_spool_nut: Option<PathBuf>,
         /// Frame width in pixels (constant across a trace).
         width: u32,
         /// Frame height in pixels.
@@ -385,6 +389,8 @@ struct QueuedChunk {
     /// Producer-spooled source NUT, relinked into the trace's chunks dir when
     /// its batch starts encoding.
     spool_nut: PathBuf,
+    /// Optional depth visualization sibling NUT for the lossy encode.
+    viz_spool_nut: Option<PathBuf>,
     /// Size of the spooled NUT file in bytes.
     byte_count: u64,
     /// Number of frames of the chunk this recording owns, counted from
@@ -473,6 +479,7 @@ pub async fn run(
             TraceActorMessage::Video {
                 chunk_index,
                 spool_nut,
+                viz_spool_nut,
                 width,
                 height,
                 byte_count,
@@ -486,6 +493,7 @@ pub async fn run(
                         &context,
                         chunk_index,
                         spool_nut,
+                        viz_spool_nut,
                         width,
                         height,
                         byte_count,
@@ -703,6 +711,7 @@ impl ActorState {
         context: &Arc<TraceActorContext>,
         chunk_index: u32,
         spool_nut: PathBuf,
+        viz_spool_nut: Option<PathBuf>,
         width: u32,
         height: u32,
         byte_count: u64,
@@ -790,6 +799,7 @@ impl ActorState {
             .push_back(QueuedChunk {
                 chunk_index,
                 spool_nut,
+                viz_spool_nut,
                 byte_count,
                 frame_count,
                 skip_frames,
@@ -1319,6 +1329,15 @@ impl EncodeWorker {
                     .join(paths::chunk_filename(chunk.chunk_index))
             })
             .collect();
+        let viz_nuts: Vec<Option<PathBuf>> = batch
+            .iter()
+            .map(|chunk| {
+                chunk.viz_spool_nut.as_ref().map(|_| {
+                    self.chunks_dir
+                        .join(paths::chunk_viz_filename(chunk.chunk_index))
+                })
+            })
+            .collect();
 
         // Relink every producer-spooled NUT into the recording's chunks dir
         // here rather than on the dispatcher's routing path. The `rename`
@@ -1326,12 +1345,23 @@ impl EncodeWorker {
         // ext4 journal commit on the shared spool, so we run them on a
         // blocking thread — off both the dispatcher and the runtime workers.
         let relink = {
-            let spools: Vec<PathBuf> = batch.iter().map(|chunk| chunk.spool_nut.clone()).collect();
-            let destinations = raw_nuts.clone();
+            let spools: Vec<(PathBuf, Option<PathBuf>)> = batch
+                .iter()
+                .map(|chunk| (chunk.spool_nut.clone(), chunk.viz_spool_nut.clone()))
+                .collect();
+            let destinations: Vec<(PathBuf, Option<PathBuf>)> = raw_nuts
+                .iter()
+                .cloned()
+                .zip(viz_nuts.iter().cloned())
+                .collect();
             let chunks_dir = self.chunks_dir.clone();
             tokio::task::spawn_blocking(move || -> Result<(), (PathBuf, std::io::Error)> {
-                for (spool, dest) in spools.into_iter().zip(&destinations) {
-                    relink_nut(&spool, &chunks_dir, dest).map_err(|source| (spool, source))?;
+                for ((spool, viz_spool), (dest, viz_dest)) in spools.into_iter().zip(destinations) {
+                    relink_nut(&spool, &chunks_dir, &dest).map_err(|source| (spool, source))?;
+                    if let (Some(viz_spool), Some(viz_dest)) = (viz_spool, viz_dest) {
+                        relink_nut(&viz_spool, &chunks_dir, &viz_dest)
+                            .map_err(|source| (viz_spool, source))?;
+                    }
                 }
                 Ok(())
             })
@@ -1383,9 +1413,11 @@ impl EncodeWorker {
         let inputs: Vec<BatchNutInput> = batch
             .iter()
             .zip(&raw_nuts)
+            .zip(&viz_nuts)
             .enumerate()
-            .map(|(position, (chunk, raw_nut))| BatchNutInput {
+            .map(|(position, ((chunk, raw_nut), viz_nut))| BatchNutInput {
                 raw_nut: raw_nut.clone(),
+                viz_nut: viz_nut.clone(),
                 // One entry per non-last chunk, so the last gets no line.
                 span_to_next_us: spans_to_next_us.get(position).copied(),
                 frame_count: chunk.frame_count,
@@ -1429,6 +1461,18 @@ impl EncodeWorker {
                                 trace_id = %self.trace_id,
                                 path = %raw_nut.display(),
                                 "failed to remove source NUT chunk after encode"
+                            );
+                        }
+                    }
+                }
+                for viz_nut in viz_nuts.iter().flatten() {
+                    if let Err(error) = std::fs::remove_file(viz_nut) {
+                        if error.kind() != std::io::ErrorKind::NotFound {
+                            tracing::warn!(
+                                %error,
+                                trace_id = %self.trace_id,
+                                path = %viz_nut.display(),
+                                "failed to remove depth visualization NUT after encode"
                             );
                         }
                     }
@@ -1859,6 +1903,7 @@ mod tests {
                     &context,
                     chunk_index,
                     spool_nut,
+                    None,
                     16,
                     16,
                     byte_count,
@@ -1960,6 +2005,7 @@ mod tests {
                     &context,
                     chunk_index,
                     spool_nut,
+                    None,
                     16,
                     16,
                     byte_count,
@@ -2191,6 +2237,7 @@ mod tests {
                 context,
                 chunk_index,
                 spool_nut,
+                None,
                 16,
                 16,
                 byte_count,
@@ -2228,6 +2275,7 @@ mod tests {
             QueuedChunk {
                 chunk_index,
                 spool_nut: PathBuf::from("unused.nut"),
+                viz_spool_nut: None,
                 byte_count: 0,
                 frame_count: 1,
                 skip_frames: 0,
@@ -2272,6 +2320,7 @@ mod tests {
             QueuedChunk {
                 chunk_index,
                 spool_nut: PathBuf::from("unused.nut"),
+                viz_spool_nut: None,
                 byte_count: 0,
                 frame_count: 1,
                 skip_frames,
@@ -2309,6 +2358,7 @@ mod tests {
             QueuedChunk {
                 chunk_index,
                 spool_nut: PathBuf::from("unused.nut"),
+                viz_spool_nut: None,
                 byte_count: 0,
                 frame_count: frame_capture_us.len() as u32,
                 skip_frames: 0,
@@ -2639,6 +2689,7 @@ mod tests {
                 &context,
                 1,
                 corrupt_nut,
+                None,
                 16,
                 16,
                 19,

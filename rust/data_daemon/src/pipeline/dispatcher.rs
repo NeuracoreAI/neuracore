@@ -1312,9 +1312,18 @@ impl Dispatcher {
             publish_ts,
             thread_id,
         );
+        // Depth chunks also spool an inferno visualization sibling for the
+        // lossy preview. RGB has no sibling; missing viz on depth falls back
+        // to encoding storage pixels for both outputs.
+        let viz_spool_nut = match dtype {
+            FrameDtype::DepthF16 | FrameDtype::DepthF32 => {
+                paths::spool_viz_sibling(&spool_nut).filter(|path| path.exists())
+            }
+            FrameDtype::Rgb8 => None,
+        };
 
         let Some(entry) = self.windows.get_mut(source) else {
-            remove_spool_nut(&spool_nut);
+            remove_spool_pair(&spool_nut, viz_spool_nut.as_deref());
             self.note_orphan();
             return;
         };
@@ -1329,7 +1338,7 @@ impl Dispatcher {
                 frame_count,
                 "video chunk has no frame published inside any window; dropping it"
             );
-            remove_spool_nut(&spool_nut);
+            remove_spool_pair(&spool_nut, viz_spool_nut.as_deref());
             self.note_orphan();
             return;
         }
@@ -1338,14 +1347,23 @@ impl Dispatcher {
         // of the source to relink and unlink. Hard links keep that to a metadata
         // op and one inode; the last claim consumes the spool file itself.
         let sources = claim_sources(&spool_nut, claims.len());
+        let viz_sources = match &viz_spool_nut {
+            Some(viz) => claim_sources(viz, claims.len()),
+            None => vec![None; claims.len()],
+        };
 
-        for (claim, source_nut) in claims.iter().zip(sources) {
+        for (claim, (source_nut, viz_source_nut)) in
+            claims.iter().zip(sources.into_iter().zip(viz_sources))
+        {
             let Some(source_nut) = source_nut else {
                 // Could not give this claim its own name; the others still route.
+                if let Some(viz) = viz_source_nut {
+                    remove_spool_nut(&viz);
+                }
                 continue;
             };
             let Some(window) = Self::window_at_mut(entry, claim.slot) else {
-                remove_spool_nut(&source_nut);
+                remove_spool_pair(&source_nut, viz_source_nut.as_deref());
                 continue;
             };
             window.video_producers.insert(producer_pid);
@@ -1381,6 +1399,7 @@ impl Dispatcher {
                 .send(TraceActorMessage::Video {
                     chunk_index,
                     spool_nut: source_nut.clone(),
+                    viz_spool_nut: viz_source_nut.clone(),
                     width,
                     height,
                     byte_count,
@@ -1396,7 +1415,7 @@ impl Dispatcher {
                     recording_index,
                     "video trace actor inbox closed; dropping chunk"
                 );
-                remove_spool_nut(&source_nut);
+                remove_spool_pair(&source_nut, viz_source_nut.as_deref());
             }
         }
     }
@@ -1620,6 +1639,13 @@ fn remove_spool_nut(path: &std::path::Path) {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::debug!(%error, path = %path.display(), "failed to remove orphan spool NUT");
         }
+    }
+}
+
+fn remove_spool_pair(storage: &std::path::Path, viz: Option<&std::path::Path>) {
+    remove_spool_nut(storage);
+    if let Some(viz) = viz {
+        remove_spool_nut(viz);
     }
 }
 

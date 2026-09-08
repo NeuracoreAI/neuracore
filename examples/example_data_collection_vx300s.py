@@ -9,6 +9,17 @@ from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH, make_sim_env
 
 import neuracore as nc
+from neuracore.core.utils.depth_utils import MAX_DEPTH
+
+
+def depth_for_logging(depth: np.ndarray) -> np.ndarray:
+    """Prepare MuJoCo depth for ``nc.log_depth``.
+
+    MuJoCo returns camera-space metres, but empty / far-plane pixels can exceed
+    Neuracore's ``MAX_DEPTH`` (10 m). Those samples are treated as invalid (0).
+    """
+    depth = np.asarray(depth, dtype=np.float32)
+    return np.where((depth > 0.0) & (depth <= MAX_DEPTH), depth, np.float32(0.0))
 
 
 def main(args):
@@ -61,6 +72,11 @@ def main(args):
                 timestamp=t,
             )
             nc.log_rgb(CAM_NAME, obs.cameras[CAM_NAME].rgb, timestamp=t)
+            nc.log_depth(
+                CAM_NAME,
+                depth_for_logging(obs.cameras[CAM_NAME].depth),
+                timestamp=t,
+            )
 
             # Execute action trajectory while logging
             for action in action_traj:
@@ -79,6 +95,11 @@ def main(args):
                     timestamp=t,
                 )
                 nc.log_rgb(name=CAM_NAME, rgb=obs.cameras[CAM_NAME].rgb, timestamp=t)
+                nc.log_depth(
+                    name=CAM_NAME,
+                    depth=depth_for_logging(obs.cameras[CAM_NAME].depth),
+                    timestamp=t,
+                )
 
             # Stop recording if enabled
             if record:

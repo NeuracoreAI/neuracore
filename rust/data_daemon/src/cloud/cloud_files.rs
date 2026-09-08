@@ -37,9 +37,9 @@ enum ContentKind {
 ///
 /// This is the video-family artefact predicate; it is deliberately broader than
 /// the lossy-codec predicate ([`crate::encoding::video_encoder::LossyVideoCodec::for_trace`]),
-/// which is RGB-only (depth is video-family but never lossy-eligible). Any new
-/// video-family type added here must be considered there too, or it could lose
-/// its lossless archive.
+/// which is RGB-only (depth keeps a lossless archive and must never be
+/// lossy-only). Any new video-family type added here must be considered there
+/// too, or it could lose its lossless archive.
 fn content_type_for(data_type: &str) -> ContentKind {
     match data_type {
         "RGB_IMAGES" | "DEPTH_IMAGES" => ContentKind::Rgb,

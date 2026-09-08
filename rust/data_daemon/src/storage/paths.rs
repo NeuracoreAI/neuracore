@@ -68,6 +68,32 @@ pub fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
     format!("chunk_{publish_ns}_{thread_id}.nut")
 }
 
+/// Sibling spool filename for a depth chunk's inferno visualization NUT.
+///
+/// Must match the producer's `paths::spool_chunk_viz_filename`. Derived by
+/// the daemon from the storage NUT path when routing a depth chunk so the
+/// lossy encode can consume visualization pixels while lossless keeps the
+/// 24-bit storage packing.
+#[cfg(test)]
+pub fn spool_chunk_viz_filename(publish_ns: i64, thread_id: i64) -> String {
+    format!("chunk_{publish_ns}_{thread_id}_viz.nut")
+}
+
+/// Derive the visualization sibling path from a storage spool NUT path.
+///
+/// `chunk_{ns}_{tid}.nut` → `chunk_{ns}_{tid}_viz.nut`. Returns `None` when
+/// the path has no file name. Must agree with the producer's
+/// `spool_chunk_viz_filename` naming.
+pub fn spool_viz_sibling(storage_nut: &Path) -> Option<PathBuf> {
+    let stem = storage_nut.file_stem()?.to_str()?;
+    Some(storage_nut.with_file_name(format!("{stem}_viz.nut")))
+}
+
+/// Relinked visualization chunk filename: `chunk_NNNN_viz.nut`.
+pub fn chunk_viz_filename(chunk_index: u32) -> String {
+    format!("chunk_{chunk_index:04}_viz.nut")
+}
+
 /// Resolve the full spool path for one spooled chunk.
 pub fn spool_chunk_path(
     recordings_root: &Path,
@@ -238,6 +264,17 @@ mod tests {
         assert_eq!(chunk_filename(1234), "chunk_1234.nut");
         assert_eq!(chunk_lossy_filename(5), "chunk_0005_lossy.mp4");
         assert_eq!(chunk_lossless_filename(5), "chunk_0005_lossless.mp4");
+        assert_eq!(chunk_viz_filename(5), "chunk_0005_viz.nut");
+    }
+
+    #[test]
+    fn spool_viz_sibling_derives_from_storage_filename() {
+        let storage = PathBuf::from("/spool/chunk_100_7.nut");
+        assert_eq!(
+            spool_viz_sibling(&storage).as_deref(),
+            Some(Path::new("/spool/chunk_100_7_viz.nut"))
+        );
+        assert_eq!(spool_chunk_viz_filename(100, 7), "chunk_100_7_viz.nut");
     }
 
     #[test]

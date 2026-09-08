@@ -101,3 +101,13 @@ pub(crate) fn spool_root() -> Option<PathBuf> {
 pub(crate) fn spool_chunk_filename(publish_ns: i64, thread_id: i64) -> String {
     format!("chunk_{publish_ns}_{thread_id}.nut")
 }
+
+/// Sibling spool filename for a depth chunk's inferno visualization NUT —
+/// must match `storage::paths::spool_chunk_viz_filename`.
+///
+/// Depth chunks write storage pixels to [`spool_chunk_filename`] (lossless)
+/// and visualization pixels here (lossy preview). The daemon derives this
+/// path by convention from the storage NUT when `dtype` is depth.
+pub(crate) fn spool_chunk_viz_filename(publish_ns: i64, thread_id: i64) -> String {
+    format!("chunk_{publish_ns}_{thread_id}_viz.nut")
+}

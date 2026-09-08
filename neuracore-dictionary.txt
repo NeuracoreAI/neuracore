@@ -76,6 +76,7 @@ CNNMLPP
 colab
 Colab
 colcon
+colormap
 Colormaps
 colorspace
 colwise

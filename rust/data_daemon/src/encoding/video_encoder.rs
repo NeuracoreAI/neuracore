@@ -150,9 +150,9 @@ impl LossyVideoCodec {
     /// codec string (the resolved `NCD_VIDEO_CODEC` / active-profile
     /// `video_codec`).
     ///
-    /// Only RGB cameras honour the selection — a depth trace's lossy proxy is a
-    /// visualisation, not precise depth, so depth (and every non-RGB stream)
-    /// always keeps a lossless archive. This RGB-only gate is
+    /// Only RGB cameras honour the selection — a depth trace's lossy preview is
+    /// an inferno visualisation (not precise depth), so depth (and every
+    /// non-RGB stream) always keeps a lossless archive. This RGB-only gate is
     /// deliberately narrower than the video-family predicate in
     /// [`crate::cloud::cloud_files`] (which includes depth). Kept pure (the
     /// config string is passed in, not read here) so the encoder path and the
@@ -194,8 +194,12 @@ impl Serialize for LossyVideoCodec {
 /// Inputs to one single-entry transcode invocation.
 #[derive(Debug, Clone)]
 pub struct ChunkEncodeRequest {
-    /// Source NUT chunk file produced by the producer.
+    /// Source NUT chunk file produced by the producer (storage / lossless pixels).
     pub raw_nut: PathBuf,
+    /// Optional depth visualization sibling NUT. When set (and the codec is
+    /// not lossy-only), the lossy output is encoded from this file while
+    /// [`Self::raw_nut`] feeds the lossless archive.
+    pub viz_nut: Option<PathBuf>,
     /// Destination for the lossy mp4 segment of this entry.
     pub lossy_out: PathBuf,
     /// Destination for the lossless mp4 segment of this entry. Unused in
@@ -219,6 +223,8 @@ pub struct ChunkEncodeRequest {
 pub struct BatchNutInput {
     /// Source NUT chunk file, already relinked into the trace's chunks dir.
     pub raw_nut: PathBuf,
+    /// Optional depth visualization sibling, already relinked beside `raw_nut`.
+    pub viz_nut: Option<PathBuf>,
     /// Declared capture span to the next chunk's first frame, in
     /// microseconds. `None` on the batch's last entry, which gets no
     /// `duration` line.
@@ -630,6 +636,15 @@ impl VideoEncoder {
             .arg("+genpts")
             .arg("-i")
             .arg(&request.raw_nut);
+        // Depth traces may supply a visualization sibling as a second input;
+        // the lossy preview maps from it while lossless keeps storage pixels.
+        let viz_input = request
+            .viz_nut
+            .as_ref()
+            .filter(|_| !request.codec.is_lossy_only());
+        if let Some(viz_nut) = viz_input {
+            command.arg("-i").arg(viz_nut);
+        }
         append_encode_output_args(
             &mut command,
             request.codec,
@@ -639,6 +654,7 @@ impl VideoEncoder {
             request.skip_frames,
             &request.lossy_out,
             &request.lossless_out,
+            viz_input.is_some(),
         );
         let lossless_out =
             (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
@@ -661,6 +677,7 @@ impl VideoEncoder {
                 .encode_chunk(
                     &ChunkEncodeRequest {
                         raw_nut: single.raw_nut.clone(),
+                        viz_nut: single.viz_nut.clone(),
                         lossy_out: request.lossy_out.clone(),
                         lossless_out: request.lossless_out.clone(),
                         codec: request.codec,
@@ -678,6 +695,9 @@ impl VideoEncoder {
         // front so a corrupt chunk fails the batch instead of truncating it.
         for input in &request.inputs {
             verify_nut_header(&input.raw_nut)?;
+            if let Some(viz) = &input.viz_nut {
+                verify_nut_header(viz)?;
+            }
         }
 
         ensure_parent_dirs(&request.lossy_out)?;
@@ -686,7 +706,21 @@ impl VideoEncoder {
         }
 
         let list_path = list_file_for(&request.lossy_out);
-        write_batch_concat_list(&list_path, &request.inputs)?;
+        write_batch_concat_list(&list_path, &request.inputs, /* viz */ false)?;
+        let use_viz = !request.codec.is_lossy_only()
+            && request.inputs.iter().all(|input| input.viz_nut.is_some());
+        let viz_list_path = use_viz.then(|| {
+            let path = list_file_for_viz(&request.lossy_out);
+            write_batch_concat_list(&path, &request.inputs, /* viz */ true).map(|_| path)
+        });
+        let viz_list_path = match viz_list_path {
+            Some(Ok(path)) => Some(path),
+            Some(Err(error)) => {
+                let _ = std::fs::remove_file(&list_path);
+                return Err(error);
+            }
+            None => None,
+        };
 
         let mut command = Command::new(&self.binary);
         command
@@ -704,6 +738,15 @@ impl VideoEncoder {
             .arg("0")
             .arg("-i")
             .arg(&list_path);
+        if let Some(viz_list) = &viz_list_path {
+            command
+                .arg("-f")
+                .arg("concat")
+                .arg("-safe")
+                .arg("0")
+                .arg("-i")
+                .arg(viz_list);
+        }
         append_encode_output_args(
             &mut command,
             request.codec,
@@ -717,6 +760,7 @@ impl VideoEncoder {
             0,
             &request.lossy_out,
             &request.lossless_out,
+            viz_list_path.is_some(),
         );
         let lossless_out =
             (!request.codec.is_lossy_only()).then_some(request.lossless_out.as_path());
@@ -724,6 +768,9 @@ impl VideoEncoder {
             .run_encode_command(command, &request.lossy_out, lossless_out)
             .await;
         let _ = std::fs::remove_file(&list_path);
+        if let Some(viz_list) = &viz_list_path {
+            let _ = std::fs::remove_file(viz_list);
+        }
         result
     }
 
@@ -864,6 +911,10 @@ impl VideoEncoder {
 /// [`VideoEncoder::encode_chunk`] and [`VideoEncoder::encode_chunk_batch`] so
 /// both invocations keep the same output shape (see `encode_chunk` for the
 /// rationale behind each knob).
+///
+/// When `lossy_from_second_input` is true, the caller supplied a second `-i`
+/// (depth visualization NUT / concat list) and the lossy preview maps from
+/// `1:v` while lossless keeps `0:v` storage pixels.
 #[allow(clippy::too_many_arguments)]
 fn append_encode_output_args(
     command: &mut Command,
@@ -874,6 +925,7 @@ fn append_encode_output_args(
     skip_frames: u32,
     lossy_out: &Path,
     lossless_out: &Path,
+    lossy_from_second_input: bool,
 ) {
     let encode_threads = encode_threads.to_string();
     let enc_time_base = format!("1:{VIDEO_SPOOL_TICKS_PER_SECOND}");
@@ -884,9 +936,14 @@ fn append_encode_output_args(
     // Head cut (see [`ChunkEncodeRequest::skip_frames`]). `-frames:v` counts
     // frames *after* the graph, so the cap above still bounds the tail.
     let head_skip = (skip_frames > 0).then(|| head_skip_filter(skip_frames));
+    let lossy_map = if lossy_from_second_input {
+        "1:v"
+    } else {
+        "0:v"
+    };
     command
         .arg("-map")
-        .arg("0:v")
+        .arg(lossy_map)
         .arg(frame_sync_arg)
         .arg("passthrough");
     if codec.is_lossy_only() {
@@ -1176,6 +1233,19 @@ fn list_file_for(out: &Path) -> PathBuf {
     }
 }
 
+/// Sibling concat list for a depth visualization input stream.
+fn list_file_for_viz(out: &Path) -> PathBuf {
+    let mut name = out
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_else(|| OsString::from("concat_list"));
+    name.push(".viz.concat.txt");
+    match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(name),
+        _ => PathBuf::from(name),
+    }
+}
+
 /// Render the ffmpeg `concat` list-file format: one `file '...'` entry per
 /// segment, single-quoted with escaped embedded single quotes per the
 /// demuxer's own escape rule (`'` → `'\''`). Every entry except the last is
@@ -1242,7 +1312,14 @@ fn concat_file_line(segment: &Path) -> Result<String, VideoEncodeError> {
 /// for every entry except the last, by its declared `duration`. The demuxer
 /// stacks inputs by declared duration, which is what lands each frame on
 /// its capture timestamp. A single-entry list carries no `duration` line.
-fn write_batch_concat_list(path: &Path, inputs: &[BatchNutInput]) -> Result<(), VideoEncodeError> {
+///
+/// When `viz` is true, each entry's visualization sibling is listed instead
+/// of the storage NUT (every input must carry a `viz_nut`).
+fn write_batch_concat_list(
+    path: &Path,
+    inputs: &[BatchNutInput],
+    viz: bool,
+) -> Result<(), VideoEncodeError> {
     let mut file = std::fs::File::create(path).map_err(|source| VideoEncodeError::Io {
         path: path.to_path_buf(),
         source,
@@ -1252,7 +1329,18 @@ fn write_batch_concat_list(path: &Path, inputs: &[BatchNutInput]) -> Result<(), 
         source,
     };
     for input in inputs {
-        let line = concat_file_line(&input.raw_nut)?;
+        let nut = if viz {
+            input.viz_nut.as_ref().ok_or_else(|| VideoEncodeError::Io {
+                path: path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "batch viz concat requested but an entry has no viz_nut",
+                ),
+            })?
+        } else {
+            &input.raw_nut
+        };
+        let line = concat_file_line(nut)?;
         writeln!(file, "{line}").map_err(write_error)?;
         if let Some(span_us) = input.span_to_next_us {
             writeln!(file, "duration {}", duration_directive(span_us)).map_err(write_error)?;
@@ -1584,6 +1672,7 @@ mod tests {
         let encoder = VideoEncoder::new();
         let request = ChunkEncodeRequest {
             raw_nut: raw.clone(),
+            viz_nut: None,
             lossy_out: lossy.clone(),
             lossless_out: lossless.clone(),
             codec: LossyVideoCodec::LosslessPlusPreview,
@@ -1652,6 +1741,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw,
+                    viz_nut: None,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
@@ -1738,6 +1828,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw,
+                    viz_nut: None,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
@@ -1823,6 +1914,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw.clone(),
+                    viz_nut: None,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
@@ -1861,6 +1953,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw,
+                    viz_nut: None,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
@@ -1901,6 +1994,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw,
+                    viz_nut: None,
                     lossy_out: lossy.clone(),
                     lossless_out: lossless.clone(),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
@@ -1989,6 +2083,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw.clone(),
+                    viz_nut: None,
                     lossy_out: split_lossy.clone(),
                     lossless_out: split_lossless.clone(),
                     codec: LossyVideoCodec::LosslessPlusPreview,
@@ -2004,6 +2099,7 @@ mod tests {
             .encode_chunk(
                 &ChunkEncodeRequest {
                     raw_nut: raw,
+                    viz_nut: None,
                     lossy_out: single_lossy.clone(),
                     lossless_out: tempdir.path().join("unused_lossless.mp4"),
                     codec: LossyVideoCodec::H264MediumLossyOnly,
@@ -2110,6 +2206,7 @@ mod tests {
                 .encode_chunk(
                     &ChunkEncodeRequest {
                         raw_nut: raw,
+                        viz_nut: None,
                         lossy_out: lossy.clone(),
                         lossless_out: tempdir
                             .path()
@@ -2255,6 +2352,7 @@ mod tests {
                 .encode_chunk(
                     &ChunkEncodeRequest {
                         raw_nut: raw,
+                        viz_nut: None,
                         lossy_out: lossy.clone(),
                         lossless_out: lossless,
                         codec: LossyVideoCodec::LosslessPlusPreview,
@@ -2391,6 +2489,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let request = ChunkEncodeRequest {
             raw_nut: tempdir.path().join("does-not-exist.nut"),
+            viz_nut: None,
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
@@ -2415,6 +2514,7 @@ mod tests {
         std::fs::write(&raw, [0u8; 16]).unwrap();
         let request = ChunkEncodeRequest {
             raw_nut: raw,
+            viz_nut: None,
             lossy_out: tempdir.path().join("lossy.mp4"),
             lossless_out: tempdir.path().join("lossless.mp4"),
             codec: LossyVideoCodec::LosslessPlusPreview,
@@ -2626,24 +2726,27 @@ mod tests {
         let inputs = vec![
             BatchNutInput {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0000.nut"),
+                viz_nut: None,
                 span_to_next_us: Some(16_683),
                 frame_count: 2,
                 skip_frames: 0,
             },
             BatchNutInput {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0001.nut"),
+                viz_nut: None,
                 span_to_next_us: Some(MAX_BOUNDARY_DELTA_US),
                 frame_count: 2,
                 skip_frames: 0,
             },
             BatchNutInput {
                 raw_nut: PathBuf::from("/data/trace/chunks/chunk_0002.nut"),
+                viz_nut: None,
                 span_to_next_us: None,
                 frame_count: 2,
                 skip_frames: 0,
             },
         ];
-        write_batch_concat_list(&list, &inputs).expect("write list");
+        write_batch_concat_list(&list, &inputs, false).expect("write list");
         let contents = std::fs::read_to_string(&list).unwrap();
         assert_eq!(
             contents,
@@ -2684,6 +2787,7 @@ mod tests {
                 let chunk_timestamps_s: Vec<f64> = chunk.iter().map(|us| capture_s(*us)).collect();
                 inputs.push(BatchNutInput {
                     raw_nut,
+                    viz_nut: None,
                     span_to_next_us: chunk_capture_us.get(index + 1).map(|next| {
                         declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0]))
                     }),
@@ -2795,6 +2899,7 @@ mod tests {
                 .encode_chunk(
                     &ChunkEncodeRequest {
                         raw_nut: raw.clone(),
+                        viz_nut: None,
                         lossy_out: single_lossy.clone(),
                         lossless_out: single_lossless.clone(),
                         codec,
@@ -2813,6 +2918,7 @@ mod tests {
                     &BatchEncodeRequest {
                         inputs: vec![BatchNutInput {
                             raw_nut: raw.clone(),
+                            viz_nut: None,
                             span_to_next_us: None,
                             frame_count: 4,
                             skip_frames: 0,
@@ -2864,6 +2970,7 @@ mod tests {
             write_nut_chunk(&raw_nut, &[0, 16_683]);
             inputs.push(BatchNutInput {
                 raw_nut,
+                viz_nut: None,
                 span_to_next_us: (index < 2).then_some(33_366),
                 frame_count: 2,
                 skip_frames: 0,
@@ -2922,6 +3029,7 @@ mod tests {
                     inputs: vec![
                         BatchNutInput {
                             raw_nut: chunk_a,
+                            viz_nut: None,
                             span_to_next_us: Some(33_366),
                             frame_count: 2,
                             skip_frames: 0,
@@ -2930,6 +3038,7 @@ mod tests {
                         // belongs to this recording.
                         BatchNutInput {
                             raw_nut: chunk_b,
+                            viz_nut: None,
                             span_to_next_us: None,
                             frame_count: 1,
                             skip_frames: 0,
@@ -2978,12 +3087,14 @@ mod tests {
                     inputs: vec![
                         BatchNutInput {
                             raw_nut: good_nut,
+                            viz_nut: None,
                             span_to_next_us: Some(33_366),
                             frame_count: 2,
                             skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: corrupt_nut.clone(),
+                            viz_nut: None,
                             span_to_next_us: None,
                             frame_count: 2,
                             skip_frames: 0,
@@ -3039,12 +3150,14 @@ mod tests {
                     inputs: vec![
                         BatchNutInput {
                             raw_nut: chunk_a,
+                            viz_nut: None,
                             span_to_next_us: Some(span_us),
                             frame_count: 2,
                             skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: chunk_b,
+                            viz_nut: None,
                             span_to_next_us: None,
                             frame_count: 2,
                             skip_frames: 0,
@@ -3103,12 +3216,14 @@ mod tests {
                         inputs: vec![
                             BatchNutInput {
                                 raw_nut: chunk_a,
+                                viz_nut: None,
                                 span_to_next_us: Some(span_us),
                                 frame_count: 3,
                                 skip_frames: 0,
                             },
                             BatchNutInput {
                                 raw_nut: chunk_b,
+                                viz_nut: None,
                                 span_to_next_us: None,
                                 frame_count: 2,
                                 skip_frames: 0,
@@ -3174,12 +3289,14 @@ mod tests {
                     inputs: vec![
                         BatchNutInput {
                             raw_nut: chunk_a,
+                            viz_nut: None,
                             span_to_next_us: Some(span_us),
                             frame_count: 3,
                             skip_frames: 0,
                         },
                         BatchNutInput {
                             raw_nut: chunk_b,
+                            viz_nut: None,
                             span_to_next_us: None,
                             frame_count: 2,
                             skip_frames: 0,
@@ -3256,6 +3373,7 @@ mod tests {
                 }
                 inputs.push(BatchNutInput {
                     raw_nut,
+                    viz_nut: None,
                     span_to_next_us,
                     frame_count: chunk.len() as u32,
                     skip_frames: 0,

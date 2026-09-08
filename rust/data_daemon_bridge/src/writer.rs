@@ -67,7 +67,10 @@ use data_daemon_shared::video_boundary::publish_offset_us;
 use data_daemon_shared::{Envelope, FrameDtype};
 
 use crate::nut_writer::{NutVideoConfig, NutWriter};
-use crate::paths::{source_prefix, split_stream_key, spool_chunk_filename, spool_dir, stream_key};
+use crate::paths::{
+    source_prefix, split_stream_key, spool_chunk_filename, spool_chunk_viz_filename, spool_dir,
+    stream_key,
+};
 use crate::publisher::{now_ns, publisher_tx, ProducerError, PublishMsg};
 
 /// Bytes after which the producer rotates to a fresh NUT chunk file.
@@ -224,6 +227,10 @@ struct VideoChunkState {
     spool_dir: PathBuf,
     /// Active NUT writer for the in-progress chunk. `None` between chunks.
     nut_writer: Option<NutWriter>,
+    /// Parallel NUT writer for a depth chunk's inferno visualization frames.
+    /// `None` for RGB streams and between chunks. The daemon encodes this
+    /// sibling into `lossy.mp4` while [`Self::nut_writer`] feeds `lossless.mp4`.
+    viz_nut_writer: Option<NutWriter>,
     /// `publish_timestamp_ns` of the in-progress chunk — captured with
     /// `chunk_thread_id` when the chunk opened (its first frame). Keys both the
     /// spool filename `chunk_{publish_ns}_{thread_id}.nut` and the window
@@ -288,6 +295,15 @@ static VIDEO_CHUNKS: LazyLock<Mutex<VideoChunkRegistry>> = LazyLock::new(|| {
     })
 });
 
+/// First-frame max depth (metres) per `(source, sensor)` stream, used to
+/// scale the inferno visualization for every subsequent depth frame.
+///
+/// Lives outside [`VideoChunkState`] so the compression pool can read it
+/// before the stream's first NUT is opened. Cleared on cancel / fork heal
+/// alongside the chunk registry.
+static DEPTH_VIZ_MAX: LazyLock<Mutex<HashMap<String, f32>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
 /// Lock the video chunk registry and run `operation` against it.
 ///
 /// Heals on fork: when the stored `owner_pid` no longer matches the current
@@ -302,6 +318,11 @@ fn with_video_registry<R>(operation: impl FnOnce(&mut VideoChunkRegistry) -> R) 
         registry.streams.clear();
         // A forked child is a different pid, so it owes its own claim.
         registry.claims.clear();
+        // Inherited first-frame depth scales belong to the parent process.
+        DEPTH_VIZ_MAX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
         registry.owner_pid = pid;
     }
     operation(&mut registry)
@@ -698,13 +719,23 @@ fn compress_pool_size() -> usize {
         .unwrap_or(2)
 }
 
-/// One-shot slot a pool worker fills with a frame's compressed PNG and the
+/// One-shot slot a pool worker fills with a frame's compressed PNG(s) and the
 /// writer thread collects, in submission order. Hand-rolled (Mutex + Condvar)
 /// rather than a channel so the writer can both block on the next frame and poll
 /// whether it is ready yet.
 struct FrameResult {
-    png: Mutex<Option<Vec<u8>>>,
+    png: Mutex<Option<CompressedFrame>>,
     ready: Condvar,
+}
+
+/// Compressed PNG payload(s) for one frame. RGB produces only `storage`; depth
+/// also produces an inferno `viz` sibling for the lossy encode path.
+#[derive(Debug, PartialEq, Eq)]
+struct CompressedFrame {
+    /// Lossless / storage pixels (RGB passthrough, or 24-bit packed depth).
+    storage: Vec<u8>,
+    /// Inferno visualization PNG for depth; `None` for RGB.
+    viz: Option<Vec<u8>>,
 }
 
 impl FrameResult {
@@ -716,18 +747,18 @@ impl FrameResult {
     }
 
     /// Store the compressed frame and wake a writer blocked in [`wait`](Self::wait).
-    fn set(&self, png: Vec<u8>) {
+    fn set(&self, png: CompressedFrame) {
         *self.png.lock().unwrap_or_else(|p| p.into_inner()) = Some(png);
         self.ready.notify_one();
     }
 
     /// Take the compressed frame if the worker has finished, without blocking.
-    fn try_take(&self) -> Option<Vec<u8>> {
+    fn try_take(&self) -> Option<CompressedFrame> {
         self.png.lock().unwrap_or_else(|p| p.into_inner()).take()
     }
 
     /// Block until the worker has compressed the frame, then take it.
-    fn wait(&self) -> Vec<u8> {
+    fn wait(&self) -> CompressedFrame {
         let mut guard = self.png.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             if let Some(png) = guard.take() {
@@ -746,6 +777,8 @@ struct CompressJob {
     width: u32,
     height: u32,
     dtype: FrameDtype,
+    /// First-frame max depth for visualization; `None` for RGB.
+    depth_max: Option<f32>,
     raw: Vec<u8>,
     result: Arc<FrameResult>,
 }
@@ -785,13 +818,14 @@ impl CompressPool {
 
 /// Compression worker: pull frames FIFO and compress each to PNG, publishing the
 /// result into its one-shot slot. Compression (and, for depth, the RGB24
-/// conversion ahead of it) is stateless per frame, so any worker can take any
-/// frame — the writer restores per-stream order on collect.
+/// conversion ahead of it) is otherwise stateless per frame — depth's first-frame
+/// max is resolved on the writer thread and passed in on the job — so any worker
+/// can take any frame; the writer restores per-stream order on collect.
 ///
 /// RGB frames are already packed RGB24 and pass straight to the PNG encoder,
-/// leaving the existing RGB/NUT path unchanged. Depth frames are numerically
-/// converted to RGB24 storage bytes first (see [`crate::depth::depth_to_rgb24`])
-/// — `encode_png_frame` must never see raw depth bytes.
+/// leaving the existing RGB/NUT path unchanged. Depth frames produce *two*
+/// PNG payloads: 24-bit storage for the lossless archive and an inferno
+/// visualization for the lossy preview (see [`crate::depth`]).
 fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
     let (lock, cond) = work;
     loop {
@@ -804,14 +838,35 @@ fn compress_worker(work: &(Mutex<VecDeque<CompressJob>>, Condvar)) {
                 queue = cond.wait(queue).unwrap_or_else(|p| p.into_inner());
             }
         };
-        let rgb = match job.dtype {
-            FrameDtype::Rgb8 => job.raw,
+        let compressed = match job.dtype {
+            FrameDtype::Rgb8 => CompressedFrame {
+                storage: crate::nut_writer::encode_png_frame(job.width, job.height, &job.raw),
+                viz: None,
+            },
             FrameDtype::DepthF16 | FrameDtype::DepthF32 => {
-                crate::depth::depth_to_rgb24(job.dtype, job.width, job.height, &job.raw)
+                let depth_max = job.depth_max.unwrap_or(0.0);
+                let (storage_rgb, viz_rgb) = crate::depth::depth_to_storage_and_viz(
+                    job.dtype,
+                    job.width,
+                    job.height,
+                    &job.raw,
+                    depth_max,
+                );
+                CompressedFrame {
+                    storage: crate::nut_writer::encode_png_frame(
+                        job.width,
+                        job.height,
+                        &storage_rgb,
+                    ),
+                    viz: Some(crate::nut_writer::encode_png_frame(
+                        job.width,
+                        job.height,
+                        &viz_rgb,
+                    )),
+                }
             }
         };
-        let png = crate::nut_writer::encode_png_frame(job.width, job.height, &rgb);
-        job.result.set(png);
+        job.result.set(compressed);
     }
 }
 
@@ -851,6 +906,12 @@ fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut
         );
         return;
     }
+    let depth_max = match job.dtype {
+        FrameDtype::DepthF16 | FrameDtype::DepthF32 => {
+            Some(depth_viz_max_for_stream(&job))
+        }
+        FrameDtype::Rgb8 => None,
+    };
     let result = FrameResult::new();
     // Move the raw sample bytes into the compression job; the pending frame
     // keeps only the routing metadata (its `data` is now empty and never read
@@ -860,14 +921,32 @@ fn submit_frame(pool: &CompressPool, in_flight: &mut VecDeque<PendingFrame>, mut
         width: job.width,
         height: job.height,
         dtype: job.dtype,
+        depth_max,
         raw,
         result: result.clone(),
     });
     in_flight.push_back(PendingFrame { job, result });
 }
 
+/// Resolve (and on first sighting, seed) the stream's first-frame max depth
+/// used to scale the inferno visualization.
+fn depth_viz_max_for_stream(job: &FrameJob) -> f32 {
+    let key = stream_key(
+        &job.robot_id,
+        job.robot_instance,
+        &job.data_type,
+        &job.sensor_name,
+    );
+    let mut map = DEPTH_VIZ_MAX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *map.entry(key).or_insert_with(|| {
+        crate::depth::max_depth_meters(job.dtype, job.width, job.height, &job.data)
+    })
+}
+
 /// Mux one already-compressed pending frame into its chunk (writer thread).
-fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
+fn write_pending_frame(pending: PendingFrame, compressed: CompressedFrame) {
     if let Err(error) = record_video_frame(
         &pending.job.robot_id,
         pending.job.robot_instance,
@@ -876,7 +955,8 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
         pending.job.width,
         pending.job.height,
         pending.job.dtype,
-        &png,
+        &compressed.storage,
+        compressed.viz.as_deref(),
         pending.job.publish_ns,
         pending.job.timestamp_ns,
         pending.job.timestamp_s,
@@ -890,9 +970,9 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
 fn drain_ready(in_flight: &mut VecDeque<PendingFrame>) {
     while let Some(front) = in_flight.front() {
         match front.result.try_take() {
-            Some(png) => {
+            Some(compressed) => {
                 let pending = in_flight.pop_front().expect("front just observed");
-                write_pending_frame(pending, png);
+                write_pending_frame(pending, compressed);
             }
             None => break,
         }
@@ -903,8 +983,8 @@ fn drain_ready(in_flight: &mut VecDeque<PendingFrame>) {
 /// when the pipeline is full and to drain it fully at a stop/cancel barrier.
 fn write_front(in_flight: &mut VecDeque<PendingFrame>) {
     if let Some(pending) = in_flight.pop_front() {
-        let png = pending.result.wait();
-        write_pending_frame(pending, png);
+        let compressed = pending.result.wait();
+        write_pending_frame(pending, compressed);
     }
 }
 
@@ -972,6 +1052,10 @@ fn writer_loop(queue: &FrameQueue, pool: &CompressPool) {
                 with_video_chunks(|streams| {
                     streams.retain(|key, _| !key.starts_with(&prefix));
                 });
+                DEPTH_VIZ_MAX
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .retain(|key, _| !key.starts_with(&prefix));
                 let _ = ack.send(());
             }
             // pop_timeout elapsed with no message: fall through to the sweeps.
@@ -1055,6 +1139,7 @@ fn should_flush_chunk(logical_chunk_bytes: u64, frame_count: u32, open_ns: i64) 
 ///
 /// `png_payload` is the frame already compressed to a per-frame PNG by a pool
 /// worker (see [`submit_frame`]); this only muxes it into the chunk.
+/// `viz_png_payload` is the optional inferno visualization PNG for depth.
 #[allow(clippy::too_many_arguments)]
 fn record_video_frame(
     robot_id: &str,
@@ -1065,6 +1150,7 @@ fn record_video_frame(
     height: u32,
     dtype: FrameDtype,
     png_payload: &[u8],
+    viz_png_payload: Option<&[u8]>,
     publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
@@ -1088,6 +1174,7 @@ fn record_video_frame(
             dtype,
             spool_dir: spool,
             nut_writer: None,
+            viz_nut_writer: None,
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
             chunk_thread_id: 0,
@@ -1130,6 +1217,7 @@ fn record_video_frame(
             height,
             dtype,
             png_payload,
+            viz_png_payload,
             publish_ns,
             timestamp_ns,
             timestamp_s,
@@ -1154,7 +1242,8 @@ fn record_video_frame(
 /// Best-effort: a NUT open/write error logs and drops the frame.
 ///
 /// `png_payload` is the frame already compressed to a per-frame PNG; this muxes
-/// it straight into the chunk.
+/// it straight into the chunk. `viz_png_payload` is the optional depth
+/// visualization sibling written to a parallel NUT.
 #[allow(clippy::too_many_arguments)]
 fn append_frame_locked(
     state: &mut VideoChunkState,
@@ -1166,6 +1255,7 @@ fn append_frame_locked(
     height: u32,
     dtype: FrameDtype,
     png_payload: &[u8],
+    viz_png_payload: Option<&[u8]>,
     publish_ns: i64,
     timestamp_ns: i64,
     timestamp_s: f64,
@@ -1298,6 +1388,28 @@ fn append_frame_locked(
                 return announcements;
             }
         }
+        // Depth also opens a parallel visualization NUT; RGB leaves it closed.
+        if matches!(dtype, FrameDtype::DepthF16 | FrameDtype::DepthF32) {
+            let viz_path = state.spool_dir.join(spool_chunk_viz_filename(
+                state.chunk_publish_ns,
+                state.chunk_thread_id,
+            ));
+            match NutWriter::create(&viz_path, config) {
+                Ok(writer) => state.viz_nut_writer = Some(writer),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        sensor_name,
+                        path = %viz_path.display(),
+                        "failed to open depth visualization NUT; \
+                         lossy preview will fall back to storage pixels"
+                    );
+                    state.viz_nut_writer = None;
+                }
+            }
+        } else {
+            state.viz_nut_writer = None;
+        }
     }
 
     // Roll on decoded-equivalent volume, not the on-disk byte count — see
@@ -1314,6 +1426,17 @@ fn append_frame_locked(
         }
         writer.logical_bytes()
     };
+    if let (Some(viz_png), Some(viz_writer)) = (viz_png_payload, state.viz_nut_writer.as_mut()) {
+        if let Err(error) = viz_writer.write_frame_precompressed(pts, viz_png) {
+            tracing::warn!(
+                %error,
+                sensor_name,
+                "failed to write depth visualization frame; continuing with storage only"
+            );
+            // Drop the viz writer so we stop trying for the rest of this chunk.
+            let _ = state.viz_nut_writer.take();
+        }
+    }
     state.last_pts_us = Some(pts);
     // Set after the write, so a dropped frame never reads as progress.
     state.appended_since_sweep = true;
@@ -1345,6 +1468,16 @@ fn flush_chunk_locked(
     state: &mut VideoChunkState,
 ) -> Option<Envelope> {
     let writer = state.nut_writer.take()?;
+    if let Some(viz_writer) = state.viz_nut_writer.take() {
+        if let Err(error) = viz_writer.finish() {
+            tracing::warn!(
+                %error,
+                sensor_name,
+                "failed to finalise depth visualization NUT; \
+                 lossy preview may fall back to storage pixels"
+            );
+        }
+    }
     let byte_count = match writer.finish() {
         Ok(bytes) => bytes,
         Err(error) => {
@@ -1606,8 +1739,17 @@ mod tests {
     fn frame_result_is_ready_only_after_set_and_taken_once() {
         let result = FrameResult::new();
         assert!(result.try_take().is_none(), "empty slot must not be ready");
-        result.set(vec![1, 2, 3]);
-        assert_eq!(result.try_take(), Some(vec![1, 2, 3]));
+        result.set(CompressedFrame {
+            storage: vec![1, 2, 3],
+            viz: None,
+        });
+        assert_eq!(
+            result.try_take(),
+            Some(CompressedFrame {
+                storage: vec![1, 2, 3],
+                viz: None,
+            })
+        );
         assert!(
             result.try_take().is_none(),
             "the compressed frame is collected exactly once"
@@ -1622,9 +1764,18 @@ mod tests {
         let worker = result.clone();
         let handle = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            worker.set(vec![7, 7, 7]);
+            worker.set(CompressedFrame {
+                storage: vec![7, 7, 7],
+                viz: None,
+            });
         });
-        assert_eq!(result.wait(), vec![7, 7, 7]);
+        assert_eq!(
+            result.wait(),
+            CompressedFrame {
+                storage: vec![7, 7, 7],
+                viz: None,
+            }
+        );
         handle.join().unwrap();
     }
 
@@ -1651,6 +1802,7 @@ mod tests {
             dtype: FrameDtype::Rgb8,
             spool_dir,
             nut_writer: None,
+            viz_nut_writer: None,
             chunk_publish_ns: 0,
             last_chunk_publish_ns: 0,
             chunk_thread_id: 0,
@@ -1687,6 +1839,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame,
+            None,
             logged_at,
             1_000,
             0.0,
@@ -1731,6 +1884,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+            None,
                 publish_ns,
                 timestamp_ns,
                 timestamp_s,
@@ -1776,6 +1930,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &[0u8; 2 * 2 * 3],
+            None,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
@@ -1807,6 +1962,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame,
+            None,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
@@ -1823,6 +1979,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame,
+            None,
             TEST_PUBLISH_NS + CHUNK_MAX_OPEN_NS,
             2_000,
             0.001,
@@ -1868,6 +2025,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame,
+            None,
             repeated,
             1_000,
             0.0,
@@ -1885,6 +2043,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame,
+            None,
             repeated,
             2_000,
             0.001,
@@ -1919,6 +2078,7 @@ mod tests {
             2,
             FrameDtype::Rgb8,
             &frame_2x2,
+            None,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
@@ -1942,6 +2102,7 @@ mod tests {
             4,
             FrameDtype::Rgb8,
             &frame_4x4,
+            None,
             TEST_PUBLISH_NS,
             2_000,
             0.001,
@@ -1997,6 +2158,7 @@ mod tests {
             2,
             FrameDtype::DepthF16,
             &png_payload,
+            None,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
@@ -2016,6 +2178,7 @@ mod tests {
             2,
             FrameDtype::DepthF32,
             &png_payload,
+            None,
             TEST_PUBLISH_NS,
             2_000,
             0.001,
@@ -2063,6 +2226,7 @@ mod tests {
             2,
             FrameDtype::DepthF32,
             &frame,
+            None,
             TEST_PUBLISH_NS,
             1_000,
             0.0,
@@ -2113,6 +2277,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+            None,
                 TEST_PUBLISH_NS,
                 timestamp_ns,
                 timestamp_s,
@@ -2176,6 +2341,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+            None,
                 TEST_PUBLISH_NS + index as i64 * 33_333_333,
                 capture_ns,
                 capture_ns as f64 / 1e9,
@@ -2231,6 +2397,7 @@ mod tests {
                 2,
                 FrameDtype::Rgb8,
                 &frame,
+            None,
                 TEST_PUBLISH_NS,
                 timestamp_ns,
                 0.0,
@@ -2391,6 +2558,7 @@ mod tests {
             4096,
             FrameDtype::Rgb8,
             &[0u8; 4],
+            None,
             TEST_PUBLISH_NS + timestamp_us * 1_000,
             timestamp_us * 1_000,
             timestamp_us as f64 / 1e6,
