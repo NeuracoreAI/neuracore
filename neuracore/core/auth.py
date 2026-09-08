@@ -177,11 +177,16 @@ class Auth(EventEmitter, metaclass=SingletonMetaclass):
         """
         from neuracore_types import __version__ as nc_types_version
 
+        from neuracore import __version__ as neuracore_version
+
         try:
             session = thread_local_session(retry_transient=True)
             response = session.get(
                 f"{API_URL}/auth/verify-version",
-                params={"version": nc_types_version},
+                params={
+                    "neuracore_types_version": nc_types_version,
+                    "neuracore_version": neuracore_version,
+                },
             )
             response.raise_for_status()
         except requests.exceptions.HTTPError as exc:
