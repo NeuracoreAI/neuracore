@@ -72,6 +72,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
+        robot_id: str | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -93,6 +94,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector poses for debugging.
+            robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -109,6 +111,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             storage_limit=storage_limit,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
+            robot_id=robot_id,
         )
         self.dataset_name = input_dataset_name
         self.builder_dir = self._resolve_builder_dir()
@@ -579,6 +582,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
+        robot_id: str | None = None,
     ):
         """Initialize the RLDS/TFDS dataset importer.
 
@@ -600,6 +604,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector poses for debugging.
+            robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         super().__init__(
             input_dataset_name=input_dataset_name,
@@ -617,6 +622,7 @@ class RLDSDatasetImporter(RLDSAndTFDSDatasetImporterBase):
             storage_limit=storage_limit,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
+            robot_id=robot_id,
         )
 
 

@@ -14,6 +14,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+import neuracore as nc
+from neuracore.core.config.get_current_org import get_current_org
+from neuracore.core.robot import Robot, list_organization_robots
 from tests.integration.importer.conftest import ROBOTS_REPO_COMMIT, ROBOTS_REPO_URL
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     has_configured_org,
@@ -62,6 +65,7 @@ class ImporterRunContext:
     robot_dir: Path
     patched_config_path: Path
     dataset_name: str
+    robot_name: str
 
 
 def skip_without_configured_org() -> None:
@@ -74,6 +78,50 @@ def skip_without_configured_org() -> None:
 
 def run_checked(command: list[str], *, cwd: Path | None = None) -> None:
     subprocess.run(command, cwd=str(cwd) if cwd else None, check=True)
+
+
+def find_org_robot_by_name(
+    robot_name: str,
+    *,
+    mode: str = "mixed",
+    is_shared: bool = False,
+) -> dict | None:
+    """Return the org robot dict with the given name, or None if missing."""
+    nc.login()
+    org_id = get_current_org()
+    robots = list_organization_robots(org_id, is_shared=is_shared, mode=mode)
+    for robot in robots:
+        if robot.get("name") == robot_name:
+            return robot
+    return None
+
+
+def delete_importer_test_robot(robot_name: str, *, is_shared: bool = False) -> None:
+    """Best-effort delete of a robot created by an importer integration test."""
+    robot = find_org_robot_by_name(robot_name, mode="mixed", is_shared=is_shared)
+    if robot is None:
+        return
+    cloud_robot = Robot(robot_name, instance=0, shared=is_shared)
+    cloud_robot.id = robot["id"]
+    cloud_robot.delete()
+
+
+def assert_no_high_robot_instances(
+    robot_name: str,
+    *,
+    is_shared: bool = False,
+    floor: int = 100_000,
+) -> None:
+    """Assert importer worker instance IDs (>= floor) were cleaned up."""
+    robot_doc = find_org_robot_by_name(robot_name, mode="mixed", is_shared=is_shared)
+    assert robot_doc is not None, f"Expected robot '{robot_name}' to exist."
+    cloud_robot = Robot(robot_name, instance=0, shared=is_shared)
+    cloud_robot.id = robot_doc["id"]
+    leftover = [i for i in cloud_robot.list_instance_ids() if i >= floor]
+    assert not leftover, (
+        f"Expected importer worker instances (>= {floor}) to be removed for "
+        f"'{robot_name}', found {leftover}."
+    )
 
 
 def find_robot_urdf(robot_repo_dir: Path, robot_keyword: str) -> Path:
@@ -244,6 +292,7 @@ def prepare_importer_run(
     kind: ImporterIntegrationKind,
     *,
     name_suffix: str,
+    unique_robot_name: bool = True,
 ) -> ImporterRunContext:
     dataset_case_name = case["name"]
     dataset_path = resolve_cached_dataset_path(
@@ -262,11 +311,19 @@ def prepare_importer_run(
     with source_config_path.open("r", encoding="utf-8") as source_config_file:
         importer_config = yaml.safe_load(source_config_file)
 
-    dataset_name = (
-        f"{dataset_case_name}_{kind.format_tag}_{name_suffix}_{uuid.uuid4().hex[:8]}"
-    )
+    run_id = uuid.uuid4().hex[:8]
+    dataset_name = f"{dataset_case_name}_{kind.format_tag}_{name_suffix}_{run_id}"
     importer_config["output_dataset"]["name"] = dataset_name
     importer_config["robot"]["urdf_path"] = str(robot_urdf_path)
+    base_robot_name = importer_config["robot"]["name"]
+    # Unique names ensure the importer treats the robot as newly created so
+    # dry-run delete / live archive cleanup runs. Shared imports skip cleanup,
+    # so keep the config name to avoid littering the shared org.
+    if unique_robot_name:
+        robot_name = f"{base_robot_name}_{name_suffix}_{run_id}"
+        importer_config["robot"]["name"] = robot_name
+    else:
+        robot_name = base_robot_name
     if kind.patch_config is not None:
         kind.patch_config(importer_config)
 
@@ -281,6 +338,7 @@ def prepare_importer_run(
         robot_dir=robot_dir,
         patched_config_path=patched_config_path,
         dataset_name=dataset_name,
+        robot_name=robot_name,
     )
 
 
