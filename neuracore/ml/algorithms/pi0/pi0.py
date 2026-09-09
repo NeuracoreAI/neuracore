@@ -806,4 +806,5 @@ class Pi0(NeuracoreModel):
         return frozenset({
             GPUType.NVIDIA_H100_80GB,
             GPUType.NVIDIA_A100_80GB,
+            GPUType.NVIDIA_TESLA_V100,
         })
