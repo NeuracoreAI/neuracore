@@ -23,3 +23,8 @@ algorithm on incompatible hardware.
 
 Existing custom algorithms must add `get_supported_gpus()` and be uploaded again
 before they can start new cloud training runs.
+
+Live-stream tracks are now registered with the server in one request for each
+group of sensors, instead of one request for each track. A robot that starts
+many sensors becomes visible to viewers sooner and puts much less load on the
+signalling service.
