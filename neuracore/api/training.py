@@ -96,12 +96,33 @@ def get_algorithm(algorithm_id: str) -> dict:
     return response.json()
 
 
+# Test-scale variants of the large vision language models fit on any GPU. They
+# exist to keep integration tests cheap, so the hardware a full-size model needs
+# does not apply to them.
+_SMALL_MODEL_CONFIG_MARKERS: frozenset[tuple[str, Any]] = frozenset({
+    ("paligemma_variant", "gemma_tiny"),
+    ("action_expert_variant", "gemma_tiny"),
+    ("use_tiny_vlm", True),
+})
+
+
+def _is_small_model(algorithm_config: dict[str, Any]) -> bool:
+    """Check whether a config selects a test-scale variant of a large model."""
+    return any(
+        algorithm_config.get(key) == value for key, value in _SMALL_MODEL_CONFIG_MARKERS
+    )
+
+
 def _validate_gpu_to_algorithm(
     gpu: GPUType,
     algorithm_name: str,
     algorithm_jsons: list[dict],
+    algorithm_config: dict[str, Any],
 ) -> None:
     """Validate that an algorithm supports the selected GPU."""
+    if _is_small_model(algorithm_config):
+        return
+
     supported_gpus: set[GPUType] = set()
     for algorithm in algorithm_jsons:
         if algorithm.get("name") == algorithm_name:
@@ -195,6 +216,7 @@ def start_training_run(
         GPUType(gpu_type),
         algorithm_name,
         algorithm_jsons,
+        algorithm_config,
     )
 
     # Validate that the machine size is large enough for the dataset.
