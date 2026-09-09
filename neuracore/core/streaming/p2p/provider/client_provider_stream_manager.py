@@ -35,6 +35,9 @@ from .video_source import DepthVideoSource, VideoSource
 
 logger = logging.getLogger(__name__)
 
+TRACK_BATCH_MAX_SIZE = 100
+TRACK_BATCH_MAX_WAIT_S = 0.05
+
 
 class ClientProviderStreamManager(BaseP2PStreamManager):
     """Manages WebRTC streaming connections for robot sensor data.
@@ -87,6 +90,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.event_source_cache: dict[str, JSONSource] = {}
         self.tracks: list[VideoSource] = []
         self.track_metadata: dict[str, RobotStreamTrack] = {}
+        self._pending_tracks: list[RobotStreamTrack] = []
 
     @property
     def enabled_manager(self) -> EnabledManager:
@@ -191,29 +195,43 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         )
         self.track_metadata[track.id] = track
 
-        await self._post_track(track)
+        if not self._pending_tracks:
+            self.background_tracker.submit_background_coroutine(
+                self._flush_pending_tracks()
+            )
+        self._pending_tracks.append(track)
 
-    async def _post_track(self, track: RobotStreamTrack) -> None:
+    async def _flush_pending_tracks(self) -> None:
+        """Submit the tracks collected since this flush was scheduled."""
+        await asyncio.sleep(TRACK_BATCH_MAX_WAIT_S)
+        pending, self._pending_tracks = self._pending_tracks, []
+        if not pending or self.streaming.is_disabled():
+            return
+        await self._post_track_batch(pending)
+
+    async def _post_track_batch(self, tracks: list[RobotStreamTrack]) -> None:
         """Submit track metadata to the signalling server.
 
         Args:
-            track: The track metadata to submit.
+            tracks: The track metadata to submit.
         """
-        await self.client_session.post(
-            f"{STREAM_API_URL}/org/{self.org_id}/signalling/track",
-            headers=self.auth.get_headers(),
-            json=track.model_dump(mode="json"),
-        )
+        for start in range(0, len(tracks), TRACK_BATCH_MAX_SIZE):
+            chunk = tracks[start : start + TRACK_BATCH_MAX_SIZE]
+            await self.client_session.post(
+                f"{STREAM_API_URL}/org/{self.org_id}/signalling/track/batch",
+                headers=self.auth.get_headers(),
+                json={"tracks": [track.model_dump(mode="json") for track in chunk]},
+            )
 
     async def on_stream_resurrected(self) -> None:
         """Resubmit tracks to the signaling server."""
-        results = await asyncio.gather(
-            *(self._post_track(track) for track in self.track_metadata.values()),
-            return_exceptions=True,
-        )
-        for track, result in zip(self.track_metadata.values(), results):
-            if isinstance(result, BaseException):
-                logger.warning("Failed to resubmit track %s: %s", track.id, result)
+        tracks = list(self.track_metadata.values())
+        if not tracks:
+            return
+        try:
+            await self._post_track_batch(tracks)
+        except Exception:
+            logger.warning("Failed to resubmit %d tracks", len(tracks), exc_info=True)
 
     async def create_new_connection(
         self,
@@ -298,3 +316,4 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
         self.video_tracks_cache.clear()
         self.event_source_cache.clear()
         self.track_metadata.clear()
+        self._pending_tracks.clear()
