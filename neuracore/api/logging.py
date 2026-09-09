@@ -32,7 +32,6 @@ from neuracore.api.core import _get_robot
 from neuracore.core.exceptions import RobotError
 from neuracore.core.robot import Robot
 from neuracore.core.streaming.data_stream import (
-    DataStream,
     DepthDataStream,
     JointDataStream,
     JsonDataStream,
@@ -250,26 +249,6 @@ def _publish_video_to_p2p(
     )
 
 
-def start_stream(robot: Robot, data_stream: DataStream) -> None:
-    """Arm a stream for a recording this process started, if there is one.
-
-    Arming carries no recording identity into the stream — the daemon owns
-    that. It only starts a fresh timeline for the monotonic-timestamp check.
-
-    Both reads are process-local: this is the log path, so it never asks the
-    daemon. A recording this process did not start leaves streams unarmed, and
-    the monotonic check simply stops enforcing for them.
-
-    Args:
-        robot: Robot instance
-        data_stream: Data stream to arm
-    """
-    if data_stream.is_recording():
-        return
-    if robot._local_recording_handle is not None:
-        data_stream.start_recording()
-
-
 def _get_or_create_joint_stream(
     data_type: DataType,
     name: str,
@@ -285,8 +264,6 @@ def _get_or_create_joint_stream(
     assert isinstance(
         joint_stream, JointDataStream
     ), "Expected stream to be instance of JointDataStream"
-    if not joint_stream.is_recording() and robot._local_recording_handle is not None:
-        joint_stream.start_recording()
     return JointStreamBinding(
         stream_id=str_id,
         storage_name=storage_name,
@@ -351,11 +328,12 @@ def _log_group_of_joint_data(
         tuple(joint_data),
         bindings_for_type,
     )
+    recording_epoch = robot._recording_epoch()
 
     if live_data_orchestrator is None:
         native_values = list(joint_data.values())
         for binding, joint_value in zip(group.bindings, native_values):
-            binding.stream.record_scalar(timestamp, joint_value)
+            binding.stream.record_scalar(timestamp, joint_value, recording_epoch)
         robot._get_daemon_recording_context().log_joints(
             data_type.value, timestamp, group.joined_names, native_values
         )
@@ -368,7 +346,7 @@ def _log_group_of_joint_data(
             # A live consumer needs the materialised sample now, so build it and
             # publish it; the stream keeps it as its latest data.
             data = JointData(timestamp=timestamp, value=joint_value)
-            binding.stream.log(data=data)
+            binding.stream.log(data=data, recording_epoch=recording_epoch)
             live_data_orchestrator.get_provider_manager(
                 robot_id, robot_instance
             ).get_json_source(
@@ -380,7 +358,7 @@ def _log_group_of_joint_data(
             # No live consumer: stash the raw scalar and defer building the
             # JointData to get_latest_data(), keeping the per-joint hot path
             # allocation-free (see JointDataStream).
-            binding.stream.record_scalar(timestamp, joint_value)
+            binding.stream.record_scalar(timestamp, joint_value, recording_epoch)
 
         native_values.append(joint_value)
 
@@ -468,7 +446,6 @@ def _log_camera_data(
         stream, VideoDataStream
     ), "Expected stream as instance of VideoDataStream"
 
-    start_stream(robot, stream)
     if stream.width != image.shape[1] or stream.height != image.shape[0]:
         raise ValueError(
             f"Camera image dimensions {image.shape[1]}x{image.shape[0]} do not match "
@@ -478,7 +455,9 @@ def _log_camera_data(
     # NOTE: we explicitly do not include the frame in the
     # camera_data_without_frame object to avoid serializing the frame to JSON
     # or having to make two copies for streaming and bucket storage.
-    stream.log(camera_data_without_frame, frame=image)
+    stream.log(
+        camera_data_without_frame, frame=image, recording_epoch=robot._recording_epoch()
+    )
 
     contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
     robot._get_daemon_recording_context().log_frame(
@@ -536,14 +515,12 @@ def log_custom_1d(
         )
         robot.add_data_stream(str_id, stream)
 
-    start_stream(robot, stream)
-
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
     custom_data = Custom1DData(timestamp=timestamp, data=data)
-    stream.log(custom_data)
+    stream.log(custom_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
         robot, DataType.CUSTOM_1D, storage_name, custom_data, timestamp
     )
@@ -924,13 +901,12 @@ def log_pose(
         stream = JsonDataStream(data_type=DataType.POSES, data_type_name=storage_name)
         robot.add_data_stream(str_id, stream)
 
-    start_stream(robot, stream)
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
     pose_data = PoseData(timestamp=timestamp, pose=pose.tolist())
-    stream.log(pose_data)
+    stream.log(pose_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(robot, DataType.POSES, storage_name, pose_data, timestamp)
     _publish_json_to_p2p(robot, str_id, DataType.POSES, pose_data)
 
@@ -990,11 +966,10 @@ def log_end_effector_pose(
         )
         robot.add_data_stream(str_id, stream)
 
-    start_stream(robot, stream)
     assert isinstance(stream, JsonDataStream)
 
     ee_pose_data = EndEffectorPoseData(timestamp=timestamp, pose=pose.tolist())
-    stream.log(ee_pose_data)
+    stream.log(ee_pose_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
         robot, DataType.END_EFFECTOR_POSES, storage_name, ee_pose_data, timestamp
     )
@@ -1046,13 +1021,14 @@ def log_parallel_gripper_open_amount(
         )
         robot.add_data_stream(str_id, stream)
 
-    start_stream(robot, stream)
     assert isinstance(stream, JsonDataStream)
 
     parallel_gripper_open_amount_data = ParallelGripperOpenAmountData(
         timestamp=timestamp, open_amount=value
     )
-    stream.log(parallel_gripper_open_amount_data)
+    stream.log(
+        parallel_gripper_open_amount_data, recording_epoch=robot._recording_epoch()
+    )
     _record_json_to_daemon(
         robot,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
@@ -1149,13 +1125,15 @@ def log_parallel_gripper_target_open_amount(
         )
         robot.add_data_stream(str_id, stream)
 
-    start_stream(robot, stream)
     assert isinstance(stream, JsonDataStream)
 
     parallel_gripper_target_open_amount_data = ParallelGripperOpenAmountData(
         timestamp=timestamp, open_amount=value
     )
-    stream.log(parallel_gripper_target_open_amount_data)
+    stream.log(
+        parallel_gripper_target_open_amount_data,
+        recording_epoch=robot._recording_epoch(),
+    )
     _record_json_to_daemon(
         robot,
         DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
@@ -1243,13 +1221,12 @@ def log_language(
             data_type=DataType.LANGUAGE, data_type_name=storage_name
         )
         robot.add_data_stream(str_id, stream)
-    start_stream(robot, stream)
     assert isinstance(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
     language_data = LanguageData(timestamp=timestamp, text=language)
-    stream.log(language_data)
+    stream.log(language_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
         robot, DataType.LANGUAGE, storage_name, language_data, timestamp
     )
@@ -1433,7 +1410,6 @@ def log_point_cloud(
     assert isinstance(
         stream, PointCloudDataStream
     ), "Expected stream to be instance of PointCloudDataStream"
-    start_stream(robot, stream)
     point_data = PointCloudData(
         timestamp=timestamp,
         points=points,
@@ -1441,7 +1417,7 @@ def log_point_cloud(
         extrinsics=extrinsics,
         intrinsics=intrinsics,
     )
-    stream.log(point_data)
+    stream.log(point_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
         robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp
     )

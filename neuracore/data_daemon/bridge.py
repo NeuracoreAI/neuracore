@@ -309,6 +309,23 @@ class RecordingContext:
             self._robot_id, self._robot_instance, timestamp_ns
         )
 
+    def recording_epoch(self) -> int | None:
+        """The recording this source has open, as this process last saw it.
+
+        A counter, not a property of the recording — compare it, don't read
+        it, and don't carry it between processes. It changes when the source
+        crosses a recording boundary, whoever opened it; ``None`` means no open
+        recording, or that nothing has answered yet, which callers must treat
+        the same.
+
+        A cache read, cheap enough for the log path: the daemon is asked off
+        the caller's thread, and a recording this process bracketed is known
+        without asking at all.
+        """
+        if self._robot_id is None:
+            return None
+        return _load_native().recording_epoch(self._robot_id, self._robot_instance)
+
     def _require_source(self, operation: str) -> str:
         """Return the active source's robot id or raise if logging before start."""
         if not self._robot_id:

@@ -38,6 +38,8 @@
 //! - [`writer`] — the background video-writer thread, the in-progress
 //!   video-chunk registry, and chunk seal/announce/flush logic.
 //! - [`query`] — recording-id resolution over the `queries` service.
+//! - [`recording_boundary`] — per-source recording-boundary state, cached from
+//!   the daemon so the log path can read it without an IPC round trip.
 //! - [`nut_writer`] — minimal NUT-container muxer for raw RGB video.
 
 pub mod nut_writer;
@@ -46,6 +48,7 @@ mod depth;
 mod paths;
 mod publisher;
 mod query;
+mod recording_boundary;
 mod writer;
 
 use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery, RecordingStateQuery};
@@ -96,6 +99,7 @@ fn start_recording(
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
     let robot_id = robot_id.to_string();
+    let robot_id_for_boundary = robot_id.clone();
     py.detach(|| -> PyResult<i64> {
         let publish_timestamp_ns = now_ns();
         // Caller-supplied capture time, mirroring the `log_*` timestamp default
@@ -111,6 +115,14 @@ fn start_recording(
             timestamp_ns: capture_timestamp_ns,
             cloud_recording_id,
         })?;
+        // The daemon stores this exact value as the recording's start, so this
+        // process now holds the same identity a refresh would fetch — a
+        // recording bracketed here needs no query at all.
+        recording_boundary::note_local_start(
+            &robot_id_for_boundary,
+            robot_instance,
+            capture_timestamp_ns,
+        );
         // The writer is deliberately not told where the window opened: a chunk
         // may span the boundary, and the daemon splits it per frame.
         Ok(capture_timestamp_ns)
@@ -386,6 +398,7 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        recording_boundary::note_local_end(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -460,10 +473,11 @@ fn cancel_recording(
         // Publish `CancelRecording` from THIS (the calling) thread's publisher,
         // ordered with Start/Stop on the same port (see the writer module note).
         publish(&Envelope::CancelRecording {
-            robot_id,
+            robot_id: robot_id.clone(),
             robot_instance,
             timestamp_ns: capture_timestamp_ns,
         })?;
+        recording_boundary::note_local_end(&robot_id, robot_instance);
         Ok(())
     })
 }
@@ -528,6 +542,25 @@ fn get_recording_id(
     py.detach(|| -> PyResult<Option<String>> {
         Ok(resolve_recording_id(&request_bytes, timeout_s)?)
     })
+}
+
+/// A counter this process bumps whenever its source crosses a recording
+/// boundary; `None` when no recording is open.
+///
+/// Cheap enough for the log path: a memory read, never an IPC round trip. It
+/// is written by this process's own `start_recording` / `stop_recording`
+/// / `cancel_recording` (exactly, at once) and otherwise refreshed off-thread
+/// through [`recording_state`], which is what surfaces a recording started
+/// from the web or another process.
+///
+/// Opaque — compare it, do not interpret it, and do not expect it to mean the
+/// same thing in another process. A caller that sees it change has crossed a
+/// boundary; a caller that sees `None` is either outside a recording or ahead
+/// of the first refresh, and must treat both the same.
+#[pyfunction]
+#[pyo3(signature = (robot_id, robot_instance))]
+fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
+    recording_boundary::epoch(robot_id, robot_instance)
 }
 
 /// Ask the daemon which recording, if any, a source currently has open.
@@ -621,6 +654,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(recording_state, module)?)?;
+    module.add_function(wrap_pyfunction!(recording_epoch, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;

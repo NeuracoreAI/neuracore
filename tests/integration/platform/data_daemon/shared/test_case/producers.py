@@ -68,8 +68,6 @@ class ProducerRequest:
     recording, and are ``0`` for a producer that outlives every recording.
 
     Attributes:
-        robot: Connected robot handle, read once per frame for the SDK's local
-            logging gate (see :attr:`EmittedFrame.handle`).
         recording_index: Recording ordinal that namespaces painted frame codes.
         seed_ordinal: Recording ordinal that seeds the random-phase offsets.
         plans: Streams to run, in the order the single-threaded producer breaks
@@ -80,7 +78,6 @@ class ProducerRequest:
             by :func:`pacer_for`. Independent of the producer's lifetime.
     """
 
-    robot: object
     robot_name: str
     context_index: int
     recording_index: int
@@ -178,8 +175,6 @@ def _emit_and_record(
     report: FrameReport,
 ) -> None:
     """Log one frame, recording everything the test can observe about the call."""
-    # Read before the call, to distinguish a refused frame from an admitted one.
-    handle = request.robot.get_current_recording_id()
     emitted_at = time.time()
     deadline_breaches = emitter.emit(frame_index, timestamp)
     report.record(
@@ -189,7 +184,6 @@ def _emit_and_record(
             frame_index=frame_index,
             emitted_at=emitted_at,
             completed_at=time.time(),
-            handle=handle,
             deadline_breaches=deadline_breaches,
         ),
     )
@@ -278,11 +272,8 @@ class ProducerSession(ABC):
     recording owns which (see :meth:`classify`).
     """
 
-    def __init__(
-        self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
-    ) -> None:
+    def __init__(self, spec: ContextSpec, plans: list[StreamPlan]) -> None:
         self.spec = spec
-        self.robot = robot
         self.plans = tuple(plans)
         self.stop_event = threading.Event()
 
@@ -297,7 +288,6 @@ class ProducerSession(ABC):
         """Build the request for one run of this session's engine."""
         case = self.spec.case
         return ProducerRequest(
-            robot=self.robot,
             robot_name=self.spec.robot_name,
             context_index=self.spec.context_index,
             recording_index=recording_ordinal,
@@ -342,11 +332,7 @@ class ProducerSession(ABC):
         frames: list[EmittedFrame],
         bounds: RecordingControlBounds,
     ) -> TraceClassification:
-        """Return what a recording requires of one trace's frames.
-
-        Cross-process sessions override this where the local handle rule does
-        not apply.
-        """
+        """Return what a recording requires of one trace's frames."""
         return _classify_boundary_frames(frames, bounds)
 
 
@@ -357,11 +343,10 @@ class BoundedProducerSession(ProducerSession):
     def __init__(
         self,
         spec: ContextSpec,
-        robot: object,
         plans: list[StreamPlan],
         engine: Callable[[ProducerRequest], dict[str, list[EmittedFrame]]],
     ) -> None:
-        super().__init__(spec, robot, plans)
+        super().__init__(spec, plans)
         self._engine = engine
         self._report = FrameReport()
         self._runs: list[tuple[int, dict[str, list[EmittedFrame]]]] = []
@@ -414,10 +399,8 @@ class LifetimeProducerSession(ProducerSession):
     before the first ``start_recording`` and stop after the last, so it is
     mid-loop at every boundary."""
 
-    def __init__(
-        self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
-    ) -> None:
-        super().__init__(spec, robot, plans)
+    def __init__(self, spec: ContextSpec, plans: list[StreamPlan]) -> None:
+        super().__init__(spec, plans)
         self._thread: threading.Thread | None = None
         self._frames: dict[str, list[EmittedFrame]] = {}
         self._error: BaseException | None = None
@@ -530,7 +513,6 @@ def _producer_process(
         ready_event.set()
         report = run_threaded_logging(
             ProducerRequest(
-                robot=robot,
                 robot_name=spec.robot_name,
                 context_index=spec.context_index,
                 recording_index=0,
@@ -582,14 +564,13 @@ class MultiProcessProducerSession(ProducerSession):
     def __init__(
         self,
         spec: ContextSpec,
-        robot: object,
         plans: list[StreamPlan],
         local_plans: list[StreamPlan],
         child_plan_groups: list[list[StreamPlan]],
     ) -> None:
-        super().__init__(spec, robot, plans)
+        super().__init__(spec, plans)
         self._child_plan_groups = child_plan_groups
-        self._local = LifetimeProducerSession(spec, robot, local_plans)
+        self._local = LifetimeProducerSession(spec, local_plans)
         self._children: list[_ChildProducer] = []
         self._child_frames: dict[str, list[EmittedFrame]] = {}
         # Precomputed: only needed by classify(), which runs after finish().
@@ -692,17 +673,13 @@ class MultiProcessProducerSession(ProducerSession):
         frames: list[EmittedFrame],
         bounds: RecordingControlBounds,
     ) -> TraceClassification:
-        """Use the cross-process rule for traces a child wrote — a child's own
-        handle value would make the in-process rule condemn frames the window
-        accepted."""
+        """Use the cross-process rule for traces a child wrote."""
         if trace_key not in self._child_trace_keys:
             return super().classify(trace_key, frames, bounds)
         return _classify_boundary_frames(frames, bounds)
 
 
-def make_producer_session(
-    spec: ContextSpec, *, robot: object, marker_name: str
-) -> ProducerSession:
+def make_producer_session(spec: ContextSpec, *, marker_name: str) -> ProducerSession:
     """Build the producer session a case asked for: the one place
     ``producer_channels`` decides which engine runs. *marker_name* is used only
     by the synchronous producer; per-thread producers ignore it.
@@ -723,14 +700,12 @@ def make_producer_session(
         local_plans, child_groups = partition_plans(
             plans, case.producer_process_streams
         )
-        return MultiProcessProducerSession(
-            spec, robot, plans, local_plans, child_groups
-        )
+        return MultiProcessProducerSession(spec, plans, local_plans, child_groups)
     if case.producer_channels == PRODUCER_PER_THREAD:
-        return LifetimeProducerSession(spec, robot, plans)
+        return LifetimeProducerSession(spec, plans)
     engine = (
         run_threaded_logging
         if case.producer_channels == PRODUCER_OLD_PER_THREAD
         else run_synchronous_logging
     )
-    return BoundedProducerSession(spec, robot, plans, engine)
+    return BoundedProducerSession(spec, plans, engine)

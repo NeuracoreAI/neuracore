@@ -52,12 +52,10 @@ class ControlBracket:
             local call stamps the bound itself, so it settles a bounded skew
             later; a remote one is a network round trip and a notification
             away, and is waited for.
-        handle: The recording this process's gate held once the call settled.
     """
 
     called_at: float
     settled_at: float
-    handle: str | None
 
 
 def await_gate(
@@ -127,7 +125,7 @@ class LocalRecordingController(RecordingController):
     """The SDK's own calls, made by the process the test runs in."""
 
     def open(self, capture_start_s: float) -> ControlBracket:
-        """Start the recording; the local gate is open by the time this returns."""
+        """Start the recording; the call itself stamps the window's lower bound."""
         called_at = time.time()
         with Timer(
             MAX_TIME_TO_START_S,
@@ -138,16 +136,11 @@ class LocalRecordingController(RecordingController):
             nc.start_recording(
                 robot_name=self.spec.robot_name, timestamp=capture_start_s
             )
-        return ControlBracket(
-            called_at=called_at,
-            settled_at=time.time(),
-            handle=self.robot.get_current_recording_id(),
-        )
+        return ControlBracket(called_at=called_at, settled_at=time.time())
 
     def cancel(self, capture_stop_s: float) -> ControlBracket:
         """Discard the recording with the SDK's own call, from this process."""
         called_at = time.time()
-        handle = self.robot.get_current_recording_id()
         with Timer(
             self.spec.case.stop_recording_sla_s,
             label="nc.cancel_recording",
@@ -157,9 +150,7 @@ class LocalRecordingController(RecordingController):
             nc.cancel_recording(
                 robot_name=self.spec.robot_name, timestamp=capture_stop_s
             )
-        return ControlBracket(
-            called_at=called_at, settled_at=time.time(), handle=handle
-        )
+        return ControlBracket(called_at=called_at, settled_at=time.time())
 
     def close(self, capture_stop_s: float) -> ControlBracket:
         """Stop the recording; the window's bound is stamped inside the call.
@@ -170,7 +161,6 @@ class LocalRecordingController(RecordingController):
         the call itself then spends.
         """
         called_at = time.time()
-        handle = self.robot.get_current_recording_id()
         with Timer(
             self.spec.case.stop_recording_sla_s,
             label="nc.stop_recording",
@@ -183,9 +173,7 @@ class LocalRecordingController(RecordingController):
                 timestamp=capture_stop_s,
             )
         return ControlBracket(
-            called_at=called_at,
-            settled_at=called_at + STOP_PUBLISH_SKEW_S,
-            handle=handle,
+            called_at=called_at, settled_at=called_at + STOP_PUBLISH_SKEW_S
         )
 
 
@@ -259,11 +247,7 @@ class RemoteRecordingController(RecordingController):
             f"{window_start_lag_s:.3f}s after the start time the cloud holds "
             f"for it, over the {REMOTE_START_ANNOUNCEMENT_SLA_S}s allowed"
         )
-        return ControlBracket(
-            called_at=called_at,
-            settled_at=settled_at,
-            handle=self.robot.get_current_recording_id(),
-        )
+        return ControlBracket(called_at=called_at, settled_at=settled_at)
 
     def close(self, capture_stop_s: float) -> ControlBracket:
         """Ask the backend to stop the recording, then wait to be told it did.
@@ -273,7 +257,6 @@ class RemoteRecordingController(RecordingController):
         """
         assert self._cloud_recording_id is not None, "close() before open()"
         called_at = time.time()
-        handle = self.robot.get_current_recording_id()
         with Timer(
             MAX_TIME_TO_START_S,
             label="remote.stop_recording",
@@ -299,7 +282,7 @@ class RemoteRecordingController(RecordingController):
             ),
         )
         self._cloud_recording_id = None
-        return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+        return ControlBracket(called_at=called_at, settled_at=settled_at)
 
 
 _PEER_AWAIT_OPEN = "await-open"
@@ -512,11 +495,7 @@ class SplitProcessRecordingController(RecordingController):
             )
         self._window_start_s = capture_start_s
         self._commands.put((_PEER_AWAIT_OPEN, capture_start_s))
-        return ControlBracket(
-            called_at=called_at,
-            settled_at=time.time(),
-            handle=self.robot.get_current_recording_id(),
-        )
+        return ControlBracket(called_at=called_at, settled_at=time.time())
 
     def close(self, capture_stop_s: float) -> ControlBracket:
         """Have the peer stop the recording, then wait to be told it did.
@@ -527,7 +506,6 @@ class SplitProcessRecordingController(RecordingController):
         """
         self._await_peer_heard_of_the_window()
         called_at = time.time()
-        handle = self.robot.get_current_recording_id()
         self._commands.put((_PEER_STOP, capture_stop_s))
         stopped: _StopAck = self._await_ack(
             _PEER_STOP,
@@ -547,11 +525,11 @@ class SplitProcessRecordingController(RecordingController):
                 f"gate was still open {REMOTE_STOP_PROPAGATION_SLA_S}s after the "
                 "peer's call returned, so its streams were never drained. A "
                 "peer stop whose daemon publish failed reads exactly like this "
-                "— Robot._drain_streams_and_notify_daemon logs it and returns, "
+                "— Robot._notify_daemon_of_stop logs it and returns, "
                 "so check the peer's stderr for a failed publish"
             ),
         )
-        return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+        return ControlBracket(called_at=called_at, settled_at=settled_at)
 
     def cancel(self, capture_stop_s: float) -> ControlBracket:
         """Have the peer cancel the recording, then wait to be told it did.
@@ -562,7 +540,6 @@ class SplitProcessRecordingController(RecordingController):
         """
         self._await_peer_heard_of_the_window()
         called_at = time.time()
-        handle = self.robot.get_current_recording_id()
         self._commands.put((_PEER_CANCEL, capture_stop_s))
         cancelled: _CancelAck = self._await_ack(
             _PEER_CANCEL,
@@ -583,7 +560,7 @@ class SplitProcessRecordingController(RecordingController):
                 "after the peer's call returned"
             ),
         )
-        return ControlBracket(called_at=called_at, settled_at=settled_at, handle=handle)
+        return ControlBracket(called_at=called_at, settled_at=settled_at)
 
     def _await_peer_heard_of_the_window(self) -> None:
         """Block until the peer has been told the window this process opened.
