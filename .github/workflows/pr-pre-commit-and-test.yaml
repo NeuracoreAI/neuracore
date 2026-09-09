@@ -57,19 +57,18 @@ jobs:
 
   test-non-ml:
     needs: [detect-changes, pre-commit]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-26]
         python-version: ["3.10", "3.11", "3.14"]
         package-manager: [uv, pip]
     env:
       UV_VENV_SEED: "true"
       SHOULD_RUN: ${{ needs.detect-changes.outputs.non-ml == 'true' || needs.detect-changes.outputs.deps == 'true' || needs.detect-changes.outputs.ci == 'true' }}
-      # Coverage runs on the 3.10 leg: it's the only Linux leg that installs
-      # [import] (no cp314 wheels for tensorflow-cpu), so importer tests count.
-      SHOULD_RUN_COVERAGE: ${{ matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.10' && matrix.package-manager == 'uv' }}
+      # Coverage runs on the 3.10 leg: it installs [import] (no cp314 wheels
+      # for tensorflow-cpu), so importer tests count.
+      SHOULD_RUN_COVERAGE: ${{ matrix.python-version == '3.10' && matrix.package-manager == 'uv' }}
     steps:
       - name: Checkout code
         if: env.SHOULD_RUN == 'true'
@@ -93,14 +92,6 @@ jobs:
         with:
           workspaces: rust
 
-      # Use brew's libclang — bindgen doesn't reliably find Xcode's. Matches
-      # build-wheels.yaml.
-      - name: Set up libclang (macOS)
-        if: env.SHOULD_RUN == 'true' && runner.os == 'macOS'
-        run: |
-          brew install llvm
-          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
-
       - name: Set up uv
         if: env.SHOULD_RUN == 'true' && matrix.package-manager == 'uv'
         uses: astral-sh/setup-uv@v5
@@ -112,9 +103,9 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: |
-          # [import] needs tensorflow-cpu (cp313 max, no cp314 wheels) and
-          # pinocchio (manylinux-only): Linux + Python < 3.14 legs only.
-          if [ "${{ matrix.os }}" = "macos-26" ] || [ "${{ matrix.python-version }}" = "3.14" ]; then
+          # [import] needs tensorflow-cpu (cp313 max, no cp314 wheels):
+          # Python < 3.14 legs only.
+          if [ "${{ matrix.python-version }}" = "3.14" ]; then
             EXTRAS=".[dev]"
           else
             EXTRAS=".[dev,import]"
@@ -137,10 +128,10 @@ jobs:
           else
             PYTEST="pytest"
           fi
-          # Importer tests need the [import] extra, skipped on macOS
-          # (pinocchio is manylinux-only) and 3.14 (no tensorflow-cpu wheels).
+          # Importer tests need the [import] extra, skipped on 3.14
+          # (no tensorflow-cpu wheels).
           IGNORE="--ignore=tests/unit/ml"
-          if [ "${{ matrix.os }}" = "macos-26" ] || [ "${{ matrix.python-version }}" = "3.14" ]; then
+          if [ "${{ matrix.python-version }}" = "3.14" ]; then
             IGNORE="${IGNORE} --ignore=tests/unit/importer"
           fi
           PYTEST_ARGS="-v -n 4 --dist loadfile -o log_level=INFO"
