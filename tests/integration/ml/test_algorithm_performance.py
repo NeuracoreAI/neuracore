@@ -66,7 +66,7 @@ MAX_REWARD = 4.0
 ENDPOINT_NAME = "Integration Test Endpoint"
 TRAINING_NAME = "Integration Test"
 DATASET_NAME = "Transfer Cube VX300s Dataset"
-GPU_TYPE = "NVIDIA_TESLA_V100"
+DEFAULT_GPU_TYPE = "NVIDIA_TESLA_V100"
 NUM_GPUS = 1
 FREQUENCY = 50
 NUM_ROLLOUTS = 20
@@ -189,10 +189,11 @@ class TestAlgorithmPerformance:
         robot_id = robot_ids[0]
 
         timestamp = int(time.time())
+        gpu_type = algorithm_config_entry.get("gpu_type", DEFAULT_GPU_TYPE)
         logger.info(f"[{algorithm_name}] Starting training job...")
         job_data = nc.start_training_run(
             name=f"{TRAINING_NAME} - {algorithm_name} - {timestamp}",
-            gpu_type=GPU_TYPE,
+            gpu_type=gpu_type,
             num_gpus=NUM_GPUS,
             frequency=FREQUENCY,
             algorithm_name=algorithm_name,
@@ -254,7 +255,9 @@ class TestAlgorithmPerformance:
                 input_embodiment_description=INPUT_EMBODIMENT_DESCRIPTION,
                 output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
                 ttl=60 * 30,
-                gpu_type=GPUType.NVIDIA_TESLA_V100,
+                gpu_type=GPUType(
+                    algorithm_config_entry.get("gpu_type", DEFAULT_GPU_TYPE)
+                ),
             )
             endpoint_id = endpoint_data["id"]
 
