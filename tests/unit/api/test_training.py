@@ -55,6 +55,7 @@ def test_validate_gpu_to_algorithm_accepts_supported_gpu():
                 "NVIDIA_TESLA_V100",
             ],
         }],
+        {},
     )
 
 
@@ -77,6 +78,36 @@ def test_validate_gpu_to_algorithm_rejects_unsupported_gpu():
                     "NVIDIA_A100_80GB",
                 ],
             }],
+            {},
+        )
+
+
+@pytest.mark.parametrize(
+    "algorithm_config",
+    [
+        {"paligemma_variant": "gemma_tiny"},
+        {"action_expert_variant": "gemma_tiny"},
+        {"use_tiny_vlm": True},
+    ],
+)
+def test_validate_gpu_to_algorithm_exempts_small_models(algorithm_config: dict):
+    """A test-scale variant runs on a GPU the full-size model does not declare."""
+    _validate_gpu_to_algorithm(
+        GPUType.NVIDIA_TESLA_V100,
+        "Pi0",
+        [{"name": "Pi0", "supported_gpus": ["NVIDIA_A100_80GB"]}],
+        algorithm_config,
+    )
+
+
+def test_validate_gpu_to_algorithm_rejects_full_size_variant():
+    """A full-size variant of the same algorithm keeps the GPU restriction."""
+    with pytest.raises(ValueError, match="GPU NVIDIA_TESLA_V100 is not supported"):
+        _validate_gpu_to_algorithm(
+            GPUType.NVIDIA_TESLA_V100,
+            "Pi0",
+            [{"name": "Pi0", "supported_gpus": ["NVIDIA_A100_80GB"]}],
+            {"paligemma_variant": "gemma_2b", "use_tiny_vlm": False},
         )
 
 

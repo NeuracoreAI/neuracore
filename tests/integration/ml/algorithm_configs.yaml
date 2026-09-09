@@ -28,7 +28,6 @@ algorithms:
 
   - name: Pi0
     min_success_rate: 0.0
-    gpu_type: NVIDIA_A100_80GB
     algorithm_config:
       batch_size: 2
       epochs: 1
@@ -45,7 +44,6 @@ algorithms:
 
   - name: Pi05
     min_success_rate: 0.0
-    gpu_type: NVIDIA_A100_80GB
     algorithm_config:
       batch_size: 2
       epochs: 1
@@ -63,7 +61,6 @@ algorithms:
 
   - name: Groot
     min_success_rate: 0.0
-    gpu_type: NVIDIA_A100_80GB
     algorithm_config:
       batch_size: 2
       epochs: 1
