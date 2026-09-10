@@ -22,7 +22,6 @@ def _manager() -> RecordingStateManager:
     manager._recording_timers = {}
     manager.active_dataset_ids = {}
     manager._drain_callbacks = {}
-    manager._start_callbacks = {}
     manager._cancel_recording_timers = MagicMock()
     manager._schedule_recording_timers = MagicMock()
     manager._ensure_daemon_for_recording = MagicMock()
@@ -47,7 +46,6 @@ def test_delayed_start_after_local_stop_does_not_restart_daemon() -> None:
     manager.recording_robot_instances[source] = TrackedRecording(
         recording_id="local-handle",
         start_time=100.0,
-        opened_locally=True,
     )
 
     manager.recording_stopped("robot-1", 0, "local-handle")
@@ -67,7 +65,6 @@ def test_newer_start_after_local_stop_is_applied_and_starts_daemon() -> None:
     manager.recording_robot_instances[source] = TrackedRecording(
         recording_id="first-recording",
         start_time=100.0,
-        opened_locally=True,
     )
     manager.recording_stopped("robot-1", 0, "first-recording")
 
@@ -79,7 +76,6 @@ def test_newer_start_after_local_stop_is_applied_and_starts_daemon() -> None:
     assert manager.recording_robot_instances[source] == TrackedRecording(
         recording_id="second-recording",
         start_time=101.0,
-        opened_locally=True,
     )
     assert manager.active_dataset_ids[source] == "dataset-1"
     manager._ensure_daemon_for_recording.assert_called_once_with()

@@ -23,8 +23,16 @@ class _FailingStopStream(_ActiveStream):
         raise RuntimeError("stop failed")
 
 
-def test_web_stop_drains_streams_and_notifies_daemon() -> None:
-    """Callback registered at connect time must drain streams and notify the daemon."""
+def test_web_stop_drains_streams_without_publishing_a_stop() -> None:
+    """Callback registered at connect time drains locally and publishes no stop.
+
+    A stop this process only heard about is not its to publish: the envelope
+    names no recording, so a publish arriving a network hop late would close
+    whichever window is live by then — the next recording, back-to-back. The
+    daemon reads the same stream and closes the named recording itself. What
+    still has to happen here is everything only this process can do: stop its
+    streams and seal its writer's tail chunks.
+    """
     robot = Robot("robot", instance=0, org_id="org-1")
     robot.id = "robot-id-1"
 
@@ -56,7 +64,7 @@ def test_web_stop_drains_streams_and_notifies_daemon() -> None:
     callback("rec-abc")
 
     assert active.stop_calls == 1
-    fake_daemon.stop_recording.assert_called_once_with(timestamp=None)
+    fake_daemon.stop_recording.assert_not_called()
     fake_daemon.flush_source.assert_called_once_with()
 
 
