@@ -226,8 +226,6 @@ def _record_json_to_daemon(
     ``log_json`` entry point is datatype-agnostic, so adding a new JSON type
     needs no daemon-side change.
 
-    A no-op unless a recording is in progress.
-
     Args:
         robot: Robot instance owning the daemon recording context.
         data_type: Wire label for the sample's trace.
@@ -235,8 +233,6 @@ def _record_json_to_daemon(
         data: Data object to serialize and persist.
         timestamp: Capture timestamp in seconds.
     """
-    if robot.get_current_recording_id() is None:
-        return
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
     robot._get_daemon_recording_context().log_json(
         data_type.value, storage_name, payload, timestamp
@@ -406,10 +402,9 @@ def _log_group_of_joint_data(
         native_values = list(joint_data.values())
         for binding, joint_value in zip(group.bindings, native_values):
             binding.stream.record_scalar(timestamp, joint_value)
-        if current_recording_id is not None:
-            robot._get_daemon_recording_context().log_joints(
-                data_type.value, timestamp, group.joined_names, native_values
-            )
+        robot._get_daemon_recording_context().log_joints(
+            data_type.value, timestamp, group.joined_names, native_values
+        )
         return
 
     native_values = []
@@ -433,8 +428,7 @@ def _log_group_of_joint_data(
             # allocation-free (see JointDataStream).
             binding.stream.record_scalar(timestamp, joint_value)
 
-        if current_recording_id is not None:
-            native_values.append(joint_value)
+        native_values.append(joint_value)
 
     if native_values:
         robot._get_daemon_recording_context().log_joints(
@@ -532,17 +526,16 @@ def _log_camera_data(
     # or having to make two copies for streaming and bucket storage.
     stream.log(camera_data_without_frame, frame=image)
 
-    if robot.get_current_recording_id() is not None:
-        contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
-        robot._get_daemon_recording_context().log_frame(
-            camera_type.value,
-            storage_name,
-            int(image.shape[1]),
-            int(image.shape[0]),
-            image.dtype.name,
-            memoryview(contiguous).cast("B"),
-            camera_data_without_frame.timestamp,
-        )
+    contiguous = image if image.flags.c_contiguous else np.ascontiguousarray(image)
+    robot._get_daemon_recording_context().log_frame(
+        camera_type.value,
+        storage_name,
+        int(image.shape[1]),
+        int(image.shape[0]),
+        image.dtype.name,
+        memoryview(contiguous).cast("B"),
+        camera_data_without_frame.timestamp,
+    )
 
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
 

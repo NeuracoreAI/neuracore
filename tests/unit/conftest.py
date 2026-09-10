@@ -24,6 +24,7 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
     get_consume_live_data_enabled_manager,
     get_provide_live_data_enabled_manager,
 )
+from neuracore.data_daemon import bridge
 
 
 def pytest_configure(config):
@@ -48,6 +49,17 @@ def isolated_config_dir(tmp_path_factory):
     tmpdir = tmp_path_factory.mktemp("nc_config")
     with patch.object(config_manager, "CONFIG_DIR", tmpdir):
         yield tmpdir
+
+
+@pytest.fixture(autouse=True)
+def stub_data_bridge(monkeypatch):
+    """Stub the data daemon's native extension for every unit test.
+
+    Tests import ``neuracore`` from the source tree, which holds no compiled
+    ``_data_bridge``; only the installed wheel does. Tests that assert on the
+    daemon patch ``_load_native`` themselves.
+    """
+    monkeypatch.setattr(bridge, "_load_native", lambda: MagicMock())
 
 
 @pytest.fixture
