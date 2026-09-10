@@ -453,11 +453,12 @@ class PerThread(DataDaemonTestCase):
 
 
 @dataclass(frozen=True)
-class SeparateProcessStartStop(PerThread):
+class SeparateProcessRecordingControl(PerThread):
     """:class:`PerThread`, with every stream produced in one OS process of its
-    own, so the original process does nothing but start and stop the recording.
+    own, so the original process only ever controls the recording — starting,
+    stopping, or cancelling it — and never logs into it.
 
-    A robot driver logging alongside an application that brackets the windows:
+    A robot driver logging alongside an application that controls the windows:
     every trace is written by a process that learns its window second-hand.
     Subclasses keep that and split the producing further.
     """
@@ -506,8 +507,8 @@ class SeparateProcessStartStop(PerThread):
 
 
 @dataclass(frozen=True)
-class ProcessPerCamera(SeparateProcessStartStop):
-    """:class:`SeparateProcessStartStop`, with the producing split per camera,
+class ProcessPerCamera(SeparateProcessRecordingControl):
+    """:class:`SeparateProcessRecordingControl`, with the producing split per camera,
     so ``max(video_count, depth_count)`` decides how many camera children there
     are and the joints keep a child of their own."""
 
