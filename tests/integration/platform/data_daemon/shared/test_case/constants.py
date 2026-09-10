@@ -66,6 +66,9 @@ DETAIL_FLAT = "flat"
 # recording_control — who opens and closes the recording window.
 CONTROL_LOCAL = "local"  # nc.start_recording/nc.stop_recording, in the test process
 CONTROL_REMOTE = "remote"  # the backend's own endpoints, as the web frontend calls them
+CONTROL_SPLIT_PROCESS = (
+    "split"  # this process starts; a peer process makes the SDK stop call
+)
 
 # producer_pacing — when a stream offers its next frame.
 PACING_DEADLINE = "deadline"  # one frame per interval, what a real robot does
@@ -111,7 +114,7 @@ PRODUCER_CHANNELS = (
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
-RECORDING_CONTROLS = (CONTROL_LOCAL, CONTROL_REMOTE)
+RECORDING_CONTROLS = (CONTROL_LOCAL, CONTROL_REMOTE, CONTROL_SPLIT_PROCESS)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -125,7 +128,7 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
-RecordingControl = Literal["local", "remote"]
+RecordingControl = Literal["local", "remote", "split"]
 ProducerChannels = Literal[
     "synchronous", "old_per_thread", "per_thread", "multi_process"
 ]
@@ -286,16 +289,14 @@ PER_THREAD_LOGGING_TAIL_S = 2.0
 # RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
 TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
 
-# How long a producer child gets to exit, and to deliver its report.
-PRODUCER_PROCESS_JOIN_TIMEOUT_S = 30.0
-PRODUCER_PROCESS_REPORT_TIMEOUT_S = 30.0
+CHILD_PROCESS_JOIN_TIMEOUT_S = 30.0
+CHILD_PROCESS_REPORT_TIMEOUT_S = 30.0
 
 # Re-check interval, so a child that dies while connecting reports its own
 # traceback rather than a timeout.
-PRODUCER_PROCESS_READY_POLL_S = 0.1
+CHILD_PROCESS_READY_POLL_S = 0.1
 
-# How long a producer child gets after terminate() before it reads as leaked.
-PRODUCER_PROCESS_TERMINATE_TIMEOUT_S = 5.0
+CHILD_PROCESS_TERMINATE_TIMEOUT_S = 5.0
 
 # How long after the stop call the window's publish-clock bound can still fall:
 # the stop envelope is published before the flush, so only a robot lookup,
@@ -310,6 +311,8 @@ REMOTE_STOP_PROPAGATION_SLA_S = 2.0
 REMOTE_GATE_POLL_INTERVAL_S = 0.005
 
 REMOTE_START_ANNOUNCEMENT_SLA_S = 3.0
+
+SPLIT_CONTROL_ACK_POLL_S = 0.05
 
 # How far either side of the control calls a condemned frame keeps its reason.
 CONDEMNED_PROVENANCE_MARGIN_S = 2.0

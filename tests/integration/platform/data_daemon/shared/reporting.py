@@ -403,7 +403,7 @@ def build_performance_metrics(
         label: _timer_metric(stats)
         for label, stats in sorted(timer_stats.items())
         if label.startswith(("performance.", "daemon.", "storage.", "cloud."))
-        or label == "nc.stop_recording"
+        or label in ("nc.stop_recording", "peer.stop_recording")
         or label.startswith("stop_daemon")
     }
 

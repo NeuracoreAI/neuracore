@@ -246,8 +246,10 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 ordinal_by_disk_key[disk_recording_key] = recording_ordinal
                 publish_timer_stats(spec.context_index)
         finally:
-            # A surviving producer thread breaks the cleanup assertions.
-            session.finish()
+            try:
+                session.finish()
+            finally:
+                controller.shutdown()
 
         # Turns an RGB trace's classified frames back into painted codes.
         rgb_trace_cameras = {
