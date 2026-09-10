@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal
 
+# cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
 # ---------------------------------------------------------------------------
@@ -60,6 +61,14 @@ DURATION_VARIABLE_MAX_FACTOR = 1.25
 DETAIL_REALISTIC = "realistic"
 DETAIL_FLAT = "flat"
 
+# producer_pacing — when a stream offers its next frame.
+PACING_DEADLINE = "deadline"  # one frame per interval, what a real robot does
+PACING_BURST_VIDEO = "burst-video"  # video clumps; joints keep their deadlines
+PACING_SATURATE = "saturate"  # no stream waits; a spool wedge fails the run
+
+# Frames a burst-video stream withholds and then releases back-to-back.
+BURST_VIDEO_FRAMES = 8
+
 # Phase-offset amplitude as a proportion of half the inter-frame interval, so the
 # window scales with the case's fps instead of being pinned to one frame rate.
 RANDOM_PHASE_JITTER_FACTOR = 0.5
@@ -90,6 +99,7 @@ MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_OLD_PER_THREAD, PRODUCER_PER_THREAD)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
+PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
 
 # ---------------------------------------------------------------------------
 # Type aliases (for type hints)
@@ -102,6 +112,7 @@ DepthMode = Literal["float16", "float32"]
 derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
+ProducerPacing = Literal["deadline", "burst-video", "saturate"]
 
 # The ``nc.log_joint_*`` calls a joint stream makes per frame.
 JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")
