@@ -74,7 +74,6 @@ def test_cloud_upload_and_readiness_performance(
                         case_timeout_seconds(case),
                         label="performance.recording_contexts",
                         always_log=True,
-                        assert_deadline=False,
                     ):
                         results = report.capture_results(
                             run_case_contexts(case, specs=specs)
@@ -84,7 +83,6 @@ def test_cloud_upload_and_readiness_performance(
                         case_timeout_seconds(case),
                         label="performance.dataset_ready_wait",
                         always_log=True,
-                        assert_deadline=False,
                     ):
                         wait_for_dataset_ready(
                             results[0].dataset_name,
