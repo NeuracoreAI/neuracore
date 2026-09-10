@@ -168,7 +168,7 @@ def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]
     ]
 
 
-def _collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
+def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
     """Return mapping of trace file key (joint/camera name) to timestamps
     from every trace.json under a recording dir."""
     trace_timestamps: dict[str, list[float]] = {}
@@ -332,7 +332,7 @@ def assert_disk_recording_properties(
                 )
                 continue
 
-            trace_timestamps = _collect_trace_timestamps_per_file(recording_dir)
+            trace_timestamps = collect_trace_timestamps_per_file(recording_dir)
             if not trace_timestamps:
                 all_failures.append(
                     RecordingFailures(
