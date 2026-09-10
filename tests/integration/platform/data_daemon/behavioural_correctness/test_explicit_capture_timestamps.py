@@ -32,17 +32,19 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
     has_configured_org,
 )
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
-    ContextSpec,
-    build_context_specs,
-    create_testing_dataset_name,
-    log_frames,
-    precompute_timestamps,
-)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STORAGE_STATE_DELETE,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
+    ContextSpec,
+    build_context_specs,
+    precompute_timestamps,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_worker import (
+    create_testing_dataset_name,
+    log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,

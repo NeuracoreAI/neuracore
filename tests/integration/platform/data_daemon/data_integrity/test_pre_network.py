@@ -25,15 +25,17 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_id,
     case_ids,
 )
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
-    ContextResult,
-    build_context_specs,
-    create_testing_dataset_name,
-    run_case_contexts,
-)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
     STORAGE_STATE_DELETE,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
+    ContextResult,
+    build_context_specs,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_worker import (
+    create_testing_dataset_name,
+    run_case_contexts,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     scoped_storage_state,

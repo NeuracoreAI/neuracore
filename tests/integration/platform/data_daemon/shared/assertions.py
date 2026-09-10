@@ -72,9 +72,11 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
 )
 
 if TYPE_CHECKING:
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
-        ContextResult,
+    from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
         ObservedFrameCodes,
+    )
+    from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
+        ContextResult,
     )
 
 from tests.integration.platform.data_daemon.shared.test_case.constants import (

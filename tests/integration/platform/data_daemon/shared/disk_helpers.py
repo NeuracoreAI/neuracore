@@ -26,12 +26,14 @@ from tests.integration.platform.data_daemon.shared.test_case.frame_source import
 )
 
 if TYPE_CHECKING:
+    from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
+        ObservedFrameCodes,
+    )
     from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (  # noqa: E501
         DataDaemonTestCase,
     )
-    from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+    from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
         ContextResult,
-        ObservedFrameCodes,
     )
 
 
@@ -207,12 +209,11 @@ def _assert_timestamps_match(
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
 
-    *unknowable_timestamps* are frames a producer logging across the recording
-    lifecycle emitted while one of the recording's boundaries was passing, so
-    neither side can say whether the daemon took them (see
-    ``build_test_case_context._classify_boundary_frames``). They are removed
+    *unknowable_timestamps* are frames emitted while one of the recording's
+    boundaries was passing, so neither side can say whether the daemon took them
+    (see ``test_case.boundaries._classify_boundary_frames``). They are removed
     from **both** lists up front — never permitted on one — and what remains is
-    compared exactly, at both ends alike. Empty for every other case.
+    compared exactly. Empty for every other case.
 
     Appends :class:`TraceFailure` instances to *failures* so the caller can
     aggregate traces that share the same failure body (e.g. all joints failing
