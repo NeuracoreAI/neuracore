@@ -45,8 +45,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, COMMANDS_MAX_PAYLOAD_BYTES, HEALTH, HEALTH_MAX_PAYLOAD_BYTES,
     LIFECYCLE_SUBSCRIBER_BUFFER_SIZE, MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE, MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE,
-    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES, RECORDING_STATE,
-    RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
+    MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
+    VERSION_MAX_PAYLOAD_BYTES,
 };
 use data_daemon_shared::{BatchedDataItem, Envelope};
 use iceoryx2::node::{Node, NodeBuilder};
@@ -101,12 +101,6 @@ pub(crate) struct ProducerState {
     _node: Node<ipc::Service>,
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
     commands_publisher: Publisher<ipc::Service, [u8], ()>,
-    /// Service handle held alongside the recording-id client so port discovery doesn't
-    /// race the handle going out of scope.
-    _recording_id_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
-    /// Request-response client used by `get_recording_id` to ask the daemon
-    /// for a recording's cloud id.
-    pub(crate) recording_id_client: Client<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the recording-state client so port
     /// discovery doesn't race the handle going out of scope.
     _recording_state_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
@@ -378,8 +372,6 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         COMMANDS_MAX_PAYLOAD_BYTES,
     )?;
 
-    let (recording_id_service, recording_id_client) =
-        open_query_client(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
     let (recording_state_service, recording_state_client) =
         open_query_client(&node, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES)?;
     let (health_service, health_client) =
@@ -391,8 +383,6 @@ fn build_producer_state() -> Result<ProducerState, ProducerError> {
         _node: node,
         _commands_service: commands_service,
         commands_publisher,
-        _recording_id_service: recording_id_service,
-        recording_id_client,
         _recording_state_service: recording_state_service,
         recording_state_client,
         _health_service: health_service,

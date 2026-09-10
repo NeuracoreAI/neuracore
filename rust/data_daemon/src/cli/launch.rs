@@ -485,7 +485,6 @@ fn run_daemon(
             listener::run(
                 transport,
                 dispatcher_tx.clone(),
-                Arc::new(state_store.clone()),
                 recording_state,
                 shutdown_tx.subscribe(),
             )
