@@ -38,6 +38,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
+    Synchronous,
     case_ids,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -303,11 +304,11 @@ def test_online_daemon_running_exit_cleans_up_after_active_recording() -> None:
 
 # Minimal joints-only case used by kill-and-restart tests.
 _KILL_RESTART_CASES: list[DataDaemonTestCase] = [
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=5,
         joint_count=4,
     ),
-    DataDaemonTestCase(
+    Synchronous(
         duration_sec=5,
         joint_count=4,
         video_count=2,
