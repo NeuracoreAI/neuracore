@@ -42,6 +42,7 @@ from tests.integration.platform.data_daemon.shared.test_case.context_worker impo
     log_frames,
 )
 from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
+    await_gate,
     make_recording_controller,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
@@ -70,6 +71,22 @@ _CASES = DataDaemonTestBatch(
         ),
     ),
 ).as_cases()
+
+
+def _await_window_open(robot: object) -> None:
+    """Wait for the daemon to report the window open.
+
+    A local start returns before the daemon has applied it, so the window is
+    not open the instant the call comes back.
+    """
+    await_gate(
+        robot,
+        open_gate=True,
+        deadline=time.time() + MAX_TIME_TO_START_S,
+        label="cancel.open_gate_wait",
+        overdue="the recording to cancel never opened",
+        assert_deadline=False,
+    )
 
 
 @pytest.mark.parametrize("case", _CASES, ids=case_ids(_CASES))
@@ -112,8 +129,7 @@ def test_cancel_recording_produces_no_data(
 
                 controller = make_recording_controller(spec, robot=robot)
                 controller.open(time.time())
-                cancelled_recording_id = robot.get_current_recording_id()
-                assert cancelled_recording_id is not None
+                _await_window_open(robot)
 
                 log_frames(
                     spec, robot=robot, recording_index=0, marker_name="marker_cancel"
@@ -205,8 +221,7 @@ def test_cancel_either_side_of_a_valid_recording(
 
                 # --- cancelled recording ---
                 controller.open(time.time())
-                cancelled_recording_id = robot.get_current_recording_id()
-                assert cancelled_recording_id is not None
+                _await_window_open(robot)
 
                 log_frames(
                     spec, robot=robot, recording_index=0, marker_name="marker_cancelled"
@@ -233,7 +248,7 @@ def test_cancel_either_side_of_a_valid_recording(
 
                 # --- cancelled window behind the valid recording ---
                 controller.open(time.time())
-                assert robot.get_current_recording_id() is not None
+                _await_window_open(robot)
                 controller.cancel(time.time())
 
                 results = [
