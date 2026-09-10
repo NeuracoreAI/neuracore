@@ -14,7 +14,10 @@ import random
 import threading
 import time
 import uuid
+from abc import ABC, abstractmethod
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 
@@ -40,10 +43,14 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
+    JOINT_KINDS,
     MAX_RECORDING_DURATION_S,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
+    PER_THREAD_LOGGING_TAIL_S,
+    PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
+    PRODUCER_SYNCHRONOUS,
     STOP_RECORDING_NO_WAIT_SLA_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
@@ -72,6 +79,71 @@ VIDEO_STREAM = 1
 LOG_LOOP_FREQUENCY_HZ = 120
 LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
 
+# Semantic trace data type each ``nc.log_joint_*`` call writes to. Derived from
+# JOINT_KINDS so the two cannot drift apart.
+_JOINT_DATA_TYPES = {kind: kind.upper() for kind in JOINT_KINDS}
+
+
+class EmittedFrame(NamedTuple):
+    """One frame a producer logged, bracketed on the wall clock.
+
+    The daemon routes a sample by a publish stamp taken *inside* the ``log_*``
+    call, so the test cannot observe that stamp — only that it lies somewhere in
+    ``[emitted_at, completed_at]``. Both edges are kept because the two
+    boundaries need opposite ones (see :func:`_classify_boundary_frames`).
+
+    Every producer reports these, whatever its lifetime: a producer scoped to
+    one recording brackets its frames well inside that recording's own control
+    calls, so the same classification that a lifetime producer needs simply
+    finds all of them inside.
+
+    Attributes:
+        timestamp: The frame's own capture timestamp — the value that reaches
+            disk, and the only field the assertion compares.
+        emitted_at: Wall clock immediately before the ``log_*`` call.
+        completed_at: Wall clock immediately after it returned.
+        handle: The SDK recording handle latched immediately before the call,
+            or ``None`` when no recording was active. This is the local logging
+            gate, not the daemon's window.
+        deadline_breaches: ``nc.log_*`` calls this frame made that exceeded
+            ``MAX_TIME_TO_LOG_S``. Only asserted on when this frame is inside.
+    """
+
+    timestamp: float
+    emitted_at: float
+    completed_at: float
+    handle: str | None
+    deadline_breaches: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RecordingControlBounds:
+    """Wall-clock brackets around the two control calls that bound a recording.
+
+    The daemon's window is ``[started_at_ns, stopped_at_ns)``, and both bounds
+    are stamped on the publish clock *inside* the producer-side
+    ``start_recording`` / ``stop_recording`` calls — never from the capture
+    timestamp the caller passes. Neither instant is visible from here, but each
+    is known to fall within the call that carries it, and the control thread can
+    stamp both edges of that call on the same clock the producer threads use.
+
+    Attributes:
+        handle: The SDK recording handle for this recording, as the producer
+            threads see it while it is current.
+        start_called_at: Wall clock immediately before ``nc.start_recording``.
+        start_returned_at: Wall clock immediately after it returned. The
+            window's lower bound is somewhere in between.
+        stop_called_at: Wall clock immediately before ``nc.stop_recording``.
+        stop_returned_at: Wall clock immediately after it returned. The window's
+            upper bound is somewhere in between.
+    """
+
+    handle: str | None
+    start_called_at: float
+    start_returned_at: float
+    stop_called_at: float
+    stop_returned_at: float
+
 
 @dataclass(frozen=True, slots=True)
 class RecordingExpectedTimestamps:
@@ -87,9 +159,17 @@ class RecordingExpectedTimestamps:
         by_trace: Maps semantic trace key (e.g. ``"JOINT_POSITIONS"``,
             ``"camera_0"``) to the ordered list of expected timestamps for
             that trace within this recording.
+        by_trace_unknowable: Maps the same semantic trace key to timestamps
+            whose membership of this recording the test cannot determine —
+            frames whose ``log_*`` call straddled one of the two control calls
+            that carry the window's bounds (see
+            :func:`_classify_boundary_frames`). The assertion drops them from
+            both the expected and the on-disk list rather than tolerating them
+            on one. Empty for producers that log strictly within one recording.
     """
 
     by_trace: dict[str, list[float]]
+    by_trace_unknowable: dict[str, set[float]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,9 +318,10 @@ def build_context_specs(
     """Build per-context worker specs for a matrix case.
 
     ``assert_deadline`` is the performance suites' marker: besides arming the
-    ``Timer`` deadline assertions it switches on producer pacing, so those suites
-    emit at :data:`LOG_LOOP_FREQUENCY_HZ` instead of saturating the daemon's RGB
-    spool.
+    ``Timer`` deadline assertions it imposes the fixed
+    :data:`LOG_LOOP_FREQUENCY_HZ` inter-frame interval, so a performance case
+    measures latency at a known offered rate rather than under whatever load
+    the machine happens to sustain.
     """
     specs: list[ContextSpec] = []
     timestamp_stagger_s = case.duration_sec / 2.0
@@ -371,367 +452,381 @@ def precompute_timestamps(
     ]
 
 
-def log_synchronous_frames(
+def _await_frame_deadline(deadline: float, stop_event: threading.Event) -> bool:
+    """Wait until *deadline*, unless *stop_event* fires first.
+
+    Returns:
+        ``True`` when *stop_event* fired, meaning the caller's loop should stop.
+    """
+    remaining = deadline - time.time()
+    if remaining <= 0:
+        return False
+    return stop_event.wait(remaining)
+
+
+@dataclass(frozen=True, slots=True)
+class StreamPlan:
+    """One producer stream: which channels it logs, and under which marker.
+
+    Producers consume it through :class:`StreamEmitter` rather than re-deriving
+    channel names, log functions or frame codes for themselves.
+    """
+
+    name: str
+    fps: int
+    channel_names: tuple[str, ...]
+    marker_name: str | None = None
+    # Per-thread streams hold one kind; the synchronous producer bundles all.
+    joint_kinds: tuple[str, ...] = ()
+    camera_indexes: tuple[int, ...] = ()
+    # Sample dtype for depth streams; ignored by every other kind.
+    depth_mode: DepthMode = "float32"
+
+    @property
+    def is_rgb(self) -> bool:
+        """Whether this stream logs RGB camera frames."""
+        return self.name == "rgb"
+
+    @property
+    def is_depth(self) -> bool:
+        """Whether this stream logs depth camera frames."""
+        return self.name == "depth"
+
+    @property
+    def is_video(self) -> bool:
+        """Whether this stream feeds the video pipeline rather than joint data.
+
+        Both camera kinds share the video timestamp schedule and are paced
+        together, so producers branch on this rather than :attr:`is_rgb`.
+        """
+        return self.is_rgb or self.is_depth
+
+    @property
+    def trace_keys(self) -> list[str]:
+        """Semantic trace keys one logged frame from this stream touches.
+
+        Matches the ``data_type/data_type_name`` keys disk_helpers resolves from
+        the DB, plus this stream's own ``CUSTOM_1D`` marker when it has one.
+        """
+        from neuracore_types.utils import validate_safe_name
+
+        if self.is_rgb:
+            data_types = ["RGB_IMAGES"]
+        elif self.is_depth:
+            data_types = ["DEPTH_IMAGES"]
+        else:
+            data_types = [_JOINT_DATA_TYPES[kind] for kind in self.joint_kinds]
+        keys = [
+            f"{data_type}/{validate_safe_name(name)}"
+            for data_type in data_types
+            for name in self.channel_names
+        ]
+        if self.marker_name is not None:
+            keys.append(f"CUSTOM_1D/{validate_safe_name(self.marker_name)}")
+        return keys
+
+
+def build_stream_plans(
     *,
-    robot_name: str,
-    joint_timestamps: list[float],
-    video_timestamps: list[float],
-    recording_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
     depth_camera_name_list: list[str],
     depth_mode: DepthMode,
-    image_width: int | None,
-    image_height: int | None,
     joint_fps: int,
-    marker_name: str,
-    context_index: int,
-    video_detail: str,
-    assert_deadline: bool = False,  # only set by performance tests
-    log_interval_s: float = 0.0,  # only set by performance tests
-) -> None:
-    """Log all joint and video frames for one recording synchronously.
-
-    Both timestamp sequences are precomputed by the caller and emitted as fast
-    as the transport allows, save for the fixed *log_interval_s* sleep after
-    each iteration — the timestamps themselves are never paced to wall clock.
-    Frames are interleaved in timestamp order so the daemon receives them the
-    way a real producer would order them. Depth cameras (if any) share the
-    RGB video timestamp sequence and are logged alongside the RGB cameras at
-    each video timestamp.
-    """
-    camera_feed = make_camera_feed(
-        bool(camera_name_list), image_width, image_height, video_detail
-    )
-    depth_buffer = preallocate_depth_buffer(
-        bool(depth_camera_name_list), image_width, image_height, depth_mode
-    )
-
-    joint_frame_count = len(joint_timestamps)
-    video_frame_count = (
-        len(video_timestamps) if camera_name_list or depth_camera_name_list else 0
-    )
-    joint_index = 0
-    video_index = 0
-
-    while joint_index < joint_frame_count or video_index < video_frame_count:
-        next_joint = (
-            joint_timestamps[joint_index]
-            if joint_index < joint_frame_count
-            else float("inf")
-        )
-        next_video = (
-            video_timestamps[video_index]
-            if video_index < video_frame_count
-            else float("inf")
-        )
-
-        if next_joint <= next_video:
-            timestamp = next_joint
-            joint_values = generate_joint_values(joint_index, joint_fps, joint_names)
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_positions",
-                assert_deadline=assert_deadline,
-                log_breaches=False,
-            ):
-                nc.log_joint_positions(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_velocities",
-                assert_deadline=assert_deadline,
-                log_breaches=False,
-            ):
-                nc.log_joint_velocities(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_joint_torques",
-                assert_deadline=assert_deadline,
-                log_breaches=False,
-            ):
-                nc.log_joint_torques(
-                    joint_values, robot_name=robot_name, timestamp=timestamp
-                )
-            with Timer(
-                MAX_TIME_TO_LOG_S,
-                label="nc.log_custom_1d",
-                assert_deadline=assert_deadline,
-                log_breaches=False,
-            ):
-                nc.log_custom_1d(
-                    marker_name,
-                    np.array([float(joint_index)], dtype=np.float32),
-                    robot_name=robot_name,
-                    timestamp=timestamp,
-                )
-            joint_index += 1
-        else:
-            timestamp = next_video
-            for camera_index, camera_name in enumerate(camera_name_list):
-                frame_code = (
-                    frame_code_base(
-                        context_index=context_index,
-                        recording_ordinal=recording_index,
-                        camera_index=camera_index,
-                    )
-                    + video_index
-                )
-                # video_index, not camera_index: every camera shows the same
-                # instant, distinguished only by its embedded frame code.
-                rgb_image = camera_feed.render(video_index, frame_code)
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_rgb",
-                    assert_deadline=assert_deadline,
-                    log_breaches=False,
-                ):
-                    nc.log_rgb(
-                        camera_name,
-                        rgb_image,
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
+    video_fps: int,
+) -> list[StreamPlan]:
+    """Decompose a workload into one stream per camera and per joint data type."""
+    return [
+        *(
+            StreamPlan(
+                name="rgb",
+                marker_name=f"marker_{camera_name}",
+                fps=video_fps,
+                channel_names=(camera_name,),
+                camera_indexes=(camera_index,),
+            )
+            for camera_index, camera_name in enumerate(camera_name_list)
+        ),
+        *(
+            StreamPlan(
+                name="depth",
+                marker_name=f"marker_{depth_camera_name}",
+                fps=video_fps,
+                channel_names=(depth_camera_name,),
+                camera_indexes=(depth_camera_index,),
+                depth_mode=depth_mode,
+            )
             for depth_camera_index, depth_camera_name in enumerate(
                 depth_camera_name_list
-            ):
-                frame_code = (
-                    frame_code_base(
-                        context_index=context_index,
-                        recording_ordinal=recording_index,
-                        camera_index=depth_camera_index,
-                    )
-                    + video_index
-                )
-                depth_image = encode_depth_frame(
-                    frame_code, image_width, image_height, depth_mode, out=depth_buffer
-                )
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_depth",
-                    assert_deadline=assert_deadline,
-                    log_breaches=False,
-                ):
-                    nc.log_depth(
-                        depth_camera_name,
-                        depth_image,
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
-            video_index += 1
-
-        if log_interval_s:
-            time.sleep(log_interval_s)
+            )
+        ),
+        *(
+            StreamPlan(
+                name=kind,
+                marker_name=f"marker_{kind}",
+                fps=joint_fps,
+                channel_names=tuple(joint_names),
+                joint_kinds=(kind,),
+            )
+            for kind in JOINT_KINDS
+        ),
+    ]
 
 
-def build_thread_roles(
+def build_synchronous_stream_plans(
     *,
-    joint_names: list[str],
-    camera_name_list: list[str],
-    depth_camera_name_list: list[str],
-) -> list[dict[str, object]]:
-    """Build role specs for per-thread logging."""
-    roles: list[dict[str, object]] = []
-    for camera_name in camera_name_list:
-        roles.append({
-            "role": "rgb",
-            "camera_names": [camera_name],
-            "marker_name": f"marker_{camera_name}",
-        })
-    for depth_camera_name in depth_camera_name_list:
-        roles.append({
-            "role": "depth",
-            "camera_names": [depth_camera_name],
-            "marker_name": f"marker_{depth_camera_name}",
-        })
-    for role_name in ("joint_positions", "joint_velocities", "joint_torques"):
-        roles.append({
-            "role": role_name,
-            "joint_names": list(joint_names),
-            "marker_name": f"marker_{role_name}",
-        })
-    return roles
-
-
-def run_threaded_logging(
-    *,
-    robot_name: str,
-    joint_timestamps: list[float],
-    video_timestamps: list[float],
-    recording_index: int,
-    joint_fps: int,
-    context_index: int,
     joint_names: list[str],
     camera_name_list: list[str],
     depth_camera_name_list: list[str],
     depth_mode: DepthMode,
-    image_width: int | None,
-    image_height: int | None,
-    video_detail: str,
-    assert_deadline: bool = False,  # only set by performance tests
-    log_interval_s: float = 0.0,  # only set by performance tests
-) -> list[str]:
-    """Run logging across multiple threads, one per data role.
+    joint_fps: int,
+    video_fps: int,
+    marker_name: str,
+) -> tuple[StreamPlan, StreamPlan | None, StreamPlan | None]:
+    """Decompose a workload for the single-threaded producer.
 
-    Every role emits the timestamp sequence its stream was given, as fast as the
-    transport allows, save for the fixed *log_interval_s* sleep after each
-    iteration — the timestamps themselves are never paced to wall clock.  Each
-    role paces its own stream, so the rgb/depth roles that feed the daemon's
-    spool are capped independently of the joint roles.  All joint roles share
-    the joint sequence, so the three joint data types stay aligned exactly as
-    they do in the synchronous producer. Depth roles share the RGB video
-    timestamp sequence, exactly as in the synchronous producer.
+    One stream per kind, not per camera, since a single thread logs every
+    camera of a kind together; only the joint stream carries a marker.
     """
-    roles = build_thread_roles(
+    joint_plan = StreamPlan(
+        name="joints",
+        marker_name=marker_name,
+        fps=joint_fps,
+        channel_names=tuple(joint_names),
+        joint_kinds=JOINT_KINDS,
+    )
+    video_plan = (
+        StreamPlan(
+            name="rgb",
+            fps=video_fps,
+            channel_names=tuple(camera_name_list),
+            camera_indexes=tuple(range(len(camera_name_list))),
+        )
+        if camera_name_list
+        else None
+    )
+    depth_plan = (
+        StreamPlan(
+            name="depth",
+            fps=video_fps,
+            channel_names=tuple(depth_camera_name_list),
+            camera_indexes=tuple(range(len(depth_camera_name_list))),
+            depth_mode=depth_mode,
+        )
+        if depth_camera_name_list
+        else None
+    )
+    return joint_plan, video_plan, depth_plan
+
+
+def stream_plans_for_case(
+    *,
+    producer_channels: str,
+    joint_names: list[str],
+    camera_name_list: list[str],
+    depth_camera_name_list: list[str],
+    depth_mode: DepthMode,
+    joint_fps: int,
+    video_fps: int,
+    marker_name: str,
+) -> list[StreamPlan]:
+    """Every stream the producer for *producer_channels* will actually run."""
+    if producer_channels == PRODUCER_SYNCHRONOUS:
+        return [
+            plan
+            for plan in build_synchronous_stream_plans(
+                joint_names=joint_names,
+                camera_name_list=camera_name_list,
+                depth_camera_name_list=depth_camera_name_list,
+                depth_mode=depth_mode,
+                joint_fps=joint_fps,
+                video_fps=video_fps,
+                marker_name=marker_name,
+            )
+            if plan is not None
+        ]
+    return build_stream_plans(
         joint_names=joint_names,
         camera_name_list=camera_name_list,
         depth_camera_name_list=depth_camera_name_list,
+        depth_mode=depth_mode,
+        joint_fps=joint_fps,
+        video_fps=video_fps,
     )
-    barrier = threading.Barrier(len(roles))
+
+
+@dataclass(slots=True, eq=False)  # identity-keyed: one emitter per thread
+class StreamEmitter:
+    """Binds a :class:`StreamPlan` to one recording's logging calls.
+
+    Owns every per-frame side effect, so producers cannot drift in what they
+    log, how frames are identified, or how calls are labelled for reporting.
+    """
+
+    plan: StreamPlan
+    robot_name: str
+    context_index: int
+    recording_index: int
+    assert_deadline: bool = False
+    feed: object | None = None
+    depth_buffer: np.ndarray | None = None
+    image_width: int | None = None
+    image_height: int | None = None
+    # Resolved once, not per frame: building them walks validate_safe_name.
+    trace_keys: tuple[str, ...] = ()
+    # Deadline breaches for the frame currently being emitted; drained by emit().
+    _deadline_breaches: list[str] = field(default_factory=list)
+
+    def prepare(self, image_width: int | None, image_height: int | None, detail: str):
+        """Build this stream's frame source. Called on the stream's own thread."""
+        self.image_width = image_width
+        self.image_height = image_height
+        self.trace_keys = tuple(self.plan.trace_keys)
+        self.feed = make_camera_feed(
+            self.plan.is_rgb, image_width, image_height, detail
+        )
+        self.depth_buffer = preallocate_depth_buffer(
+            self.plan.is_depth, image_width, image_height, self.plan.depth_mode
+        )
+
+    def _record_breach_if_slow(self, label: str, timer: Timer) -> None:
+        """Record a deadline breach; the boundary classifier judges it later."""
+        if self.assert_deadline and timer.interval >= MAX_TIME_TO_LOG_S:
+            self._deadline_breaches.append(
+                f"{label} took {timer.interval:.3f}s >= {MAX_TIME_TO_LOG_S:.3f}s"
+            )
+
+    def emit(self, frame_index: int, timestamp: float | None) -> tuple[str, ...]:
+        """Log one frame's payload plus this stream's marker.
+
+        Returns:
+            Labels of any ``nc.log_*`` calls that breached the deadline.
+        """
+        self._deadline_breaches = []
+        if self.plan.is_rgb:
+            self._emit_rgb(frame_index, timestamp)
+        elif self.plan.is_depth:
+            self._emit_depth(frame_index, timestamp)
+        else:
+            self._emit_joints(frame_index, timestamp)
+        self._emit_marker(frame_index, timestamp)
+        return tuple(self._deadline_breaches)
+
+    def _emit_rgb(self, frame_index: int, timestamp: float | None) -> None:
+        for camera_name, camera_index in zip(
+            self.plan.channel_names, self.plan.camera_indexes
+        ):
+            # Frame codes must stay unique across contexts, recordings and
+            # cameras: they are read back to identify frames.
+            frame_code = (
+                frame_code_base(
+                    context_index=self.context_index,
+                    recording_ordinal=self.recording_index,
+                    camera_index=camera_index,
+                )
+                + frame_index
+            )
+            rgb_image = self.feed.render(frame_index, frame_code)
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_rgb",
+                assert_deadline=False,
+                log_breaches=False,
+            ) as timer:
+                nc.log_rgb(
+                    camera_name,
+                    rgb_image,
+                    robot_name=self.robot_name,
+                    timestamp=timestamp,
+                )
+            self._record_breach_if_slow("nc.log_rgb", timer)
+
+    def _emit_depth(self, frame_index: int, timestamp: float | None) -> None:
+        for camera_name, camera_index in zip(
+            self.plan.channel_names, self.plan.camera_indexes
+        ):
+            # Same identity the RGB path paints; here it seeds the depth pattern.
+            frame_code = (
+                frame_code_base(
+                    context_index=self.context_index,
+                    recording_ordinal=self.recording_index,
+                    camera_index=camera_index,
+                )
+                + frame_index
+            )
+            depth_image = encode_depth_frame(
+                frame_code,
+                self.image_width,
+                self.image_height,
+                self.plan.depth_mode,
+                out=self.depth_buffer,
+            )
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label="nc.log_depth",
+                assert_deadline=False,
+                log_breaches=False,
+            ) as timer:
+                nc.log_depth(
+                    camera_name,
+                    depth_image,
+                    robot_name=self.robot_name,
+                    timestamp=timestamp,
+                )
+            self._record_breach_if_slow("nc.log_depth", timer)
+
+    def _emit_joints(self, frame_index: int, timestamp: float | None) -> None:
+        joint_values = generate_joint_values(
+            frame_index, self.plan.fps, list(self.plan.channel_names)
+        )
+        for kind in self.plan.joint_kinds:
+            log_fn_name = f"log_{kind}"
+            label = f"nc.{log_fn_name}"
+            with Timer(
+                MAX_TIME_TO_LOG_S,
+                label=label,
+                assert_deadline=False,
+                log_breaches=False,
+            ) as timer:
+                getattr(nc, log_fn_name)(
+                    joint_values, robot_name=self.robot_name, timestamp=timestamp
+                )
+            self._record_breach_if_slow(label, timer)
+
+    def _emit_marker(self, frame_index: int, timestamp: float | None) -> None:
+        if self.plan.marker_name is None:
+            return
+        label = "nc.log_custom_1d"
+        with Timer(
+            MAX_TIME_TO_LOG_S, label=label, assert_deadline=False, log_breaches=False
+        ) as timer:
+            nc.log_custom_1d(
+                self.plan.marker_name,
+                np.array([float(frame_index)], dtype=np.float32),
+                robot_name=self.robot_name,
+                timestamp=timestamp,
+            )
+        self._record_breach_if_slow(label, timer)
+
+
+def _run_stream_threads(
+    emitters: list[StreamEmitter],
+    worker: Callable[[StreamEmitter], None],
+    *,
+    error_label: str,
+) -> None:
+    """Run *worker* on one daemon thread per stream, then join and surface errors."""
     thread_errors: list[BaseException] = []
 
-    def worker(role_spec: dict[str, object]) -> None:
-        """Execute logging for a single thread role."""
+    def guarded(emitter: StreamEmitter) -> None:
         try:
-            barrier.wait()
-            role_name = str(role_spec["role"])
-            marker_name = str(role_spec["marker_name"])
-            is_rgb = role_name == "rgb"
-            is_depth = role_name == "depth"
-            timestamps = video_timestamps if (is_rgb or is_depth) else joint_timestamps
-            camera_feed = make_camera_feed(
-                is_rgb, image_width, image_height, video_detail
-            )
-            depth_buffer = preallocate_depth_buffer(
-                is_depth, image_width, image_height, depth_mode
-            )
-            for frame_index, timestamp in enumerate(timestamps):
-                if is_rgb:
-                    for camera_offset, camera_name in enumerate(
-                        role_spec["camera_names"]
-                    ):
-                        camera_id = str(camera_name)
-                        camera_index = camera_name_list.index(camera_id) + camera_offset
-                        frame_code = (
-                            frame_code_base(
-                                context_index=context_index,
-                                recording_ordinal=recording_index,
-                                camera_index=camera_index,
-                            )
-                            + frame_index
-                        )
-                        rgb_image = camera_feed.render(frame_index, frame_code)
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_rgb",
-                            assert_deadline=assert_deadline,
-                            log_breaches=False,
-                        ):
-                            nc.log_rgb(
-                                camera_id,
-                                rgb_image,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                elif is_depth:
-                    for camera_offset, camera_name in enumerate(
-                        role_spec["camera_names"]
-                    ):
-                        depth_camera_id = str(camera_name)
-                        depth_camera_index = (
-                            depth_camera_name_list.index(depth_camera_id)
-                            + camera_offset
-                        )
-                        frame_code = (
-                            frame_code_base(
-                                context_index=context_index,
-                                recording_ordinal=recording_index,
-                                camera_index=depth_camera_index,
-                            )
-                            + frame_index
-                        )
-                        depth_image = encode_depth_frame(
-                            frame_code,
-                            image_width,
-                            image_height,
-                            depth_mode,
-                            out=depth_buffer,
-                        )
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_depth",
-                            assert_deadline=assert_deadline,
-                            log_breaches=False,
-                        ):
-                            nc.log_depth(
-                                depth_camera_id,
-                                depth_image,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                else:
-                    thread_joint_names = list(role_spec["joint_names"])
-                    joint_values = generate_joint_values(
-                        frame_index, joint_fps, thread_joint_names
-                    )
-                    if role_name == "joint_positions":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_positions",
-                            assert_deadline=assert_deadline,
-                            log_breaches=False,
-                        ):
-                            nc.log_joint_positions(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    elif role_name == "joint_velocities":
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_velocities",
-                            assert_deadline=assert_deadline,
-                            log_breaches=False,
-                        ):
-                            nc.log_joint_velocities(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                    else:
-                        with Timer(
-                            MAX_TIME_TO_LOG_S,
-                            label="nc.log_joint_torques",
-                            assert_deadline=assert_deadline,
-                            log_breaches=False,
-                        ):
-                            nc.log_joint_torques(
-                                joint_values,
-                                robot_name=robot_name,
-                                timestamp=timestamp,
-                            )
-                with Timer(
-                    MAX_TIME_TO_LOG_S,
-                    label="nc.log_custom_1d",
-                    assert_deadline=assert_deadline,
-                    log_breaches=False,
-                ):
-                    nc.log_custom_1d(
-                        marker_name,
-                        np.array([float(frame_index)], dtype=np.float32),
-                        robot_name=robot_name,
-                        timestamp=timestamp,
-                    )
-                if log_interval_s:
-                    time.sleep(log_interval_s)
+            worker(emitter)
         except BaseException as exc:  # noqa: BLE001
             thread_errors.append(exc)
 
     threads = [
-        threading.Thread(target=worker, args=(role,), daemon=True) for role in roles
+        threading.Thread(target=guarded, args=(emitter,), daemon=True)
+        for emitter in emitters
     ]
     for thread in threads:
         thread.start()
@@ -740,10 +835,539 @@ def run_threaded_logging(
 
     if thread_errors:
         raise RuntimeError(
-            f"Threaded producer failed: {thread_errors[0]}"
+            f"{error_label} producer failed: {thread_errors[0]}"
         ) from thread_errors[0]
 
-    return [str(role["marker_name"]) for role in roles]
+
+@dataclass(frozen=True, slots=True)
+class ProducerRequest:
+    """Everything a producer needs to run, whatever that producer's lifetime.
+
+    One shape for all three engines, so a case can swap producers without its
+    caller learning anything about which one it got. Two fields carry the whole
+    difference between them:
+
+    - *duration_sec* bounds every stream at ``fps * duration_sec`` frames.
+      ``None`` instead runs each stream until *stop_event* fires, which is what
+      lets a producer outlive the recordings it logs across.
+    - *recording_index* and *seed_ordinal* name the recording being logged. A
+      producer that outlives every recording has none to name and passes ``0``
+      for both: its frame index is session-wide and never resets, so frame
+      codes stay unique without one.
+
+    Attributes:
+        robot: The connected robot handle, read once per frame for the SDK's
+            local logging gate (see :attr:`EmittedFrame.handle`).
+        robot_name: Name every ``nc.log_*`` call is made against.
+        context_index: Index of the parallel context this producer runs in.
+        recording_index: Recording ordinal that namespaces painted frame codes.
+        seed_ordinal: Recording ordinal that seeds the random-phase offsets.
+        plans: The streams to run, in the order the single-threaded producer
+            should break ties between them.
+        image_width: Camera frame width, or ``None`` when no camera streams.
+        image_height: Camera frame height, or ``None`` when no camera streams.
+        video_detail: Whether camera frames carry realistic content or flat fill.
+        timestamp_start_s: Capture timestamp the first frame of every stream
+            carries.
+        random_phase: Whether to offset each timestamp within
+            :func:`random_phase_jitter_window`.
+        duration_sec: Seconds of frames each stream emits, or ``None`` to run
+            until *stop_event*.
+        stop_event: Set to ask every stream to stop at its next frame.
+        assert_deadline: Arms the per-call ``Timer`` deadline assertions.
+        log_interval_s: Fixed sleep after each frame, imposed by the
+            performance suites so latency is measured at a known offered rate.
+    """
+
+    robot: object
+    robot_name: str
+    context_index: int
+    recording_index: int
+    seed_ordinal: int
+    plans: tuple[StreamPlan, ...]
+    image_width: int | None
+    image_height: int | None
+    video_detail: str
+    timestamp_start_s: float
+    random_phase: bool
+    duration_sec: int | None
+    stop_event: threading.Event
+    assert_deadline: bool = False
+    log_interval_s: float = 0.0
+
+    def frame_budget(self, plan: StreamPlan) -> int | None:
+        """Frames *plan* emits, or ``None`` when it runs until stopped."""
+        if self.duration_sec is None:
+            return None
+        return plan.fps * self.duration_sec
+
+
+def stream_frame_schedule(
+    plan: StreamPlan, request: ProducerRequest
+) -> Iterator[tuple[int, float]]:
+    """Yield ``(frame_index, timestamp)`` for one stream, in emission order.
+
+    Streams of the same kind share a seed, keeping them aligned with each other
+    however many threads run them.
+    """
+    stream = VIDEO_STREAM if plan.is_video else JOINT_STREAM
+    rng = random.Random(
+        stream_phase_seed(request.context_index, request.seed_ordinal, stream)
+    )
+    window = random_phase_jitter_window(plan.fps)
+    budget = request.frame_budget(plan)
+    frame_index = 0
+    while budget is None or frame_index < budget:
+        offset = rng.uniform(-window, window) if request.random_phase else 0.0
+        yield frame_index, request.timestamp_start_s + frame_index / plan.fps + offset
+        frame_index += 1
+
+
+class FrameReport:
+    """Every frame the producer logged, keyed by the traces it feeds.
+
+    Filled from one thread per stream; read only after those threads join.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_trace: dict[str, list[EmittedFrame]] = {}
+
+    def record(self, emitter: StreamEmitter, frame: EmittedFrame) -> None:
+        """Attribute *frame* to every trace *emitter*'s stream writes."""
+        with self._lock:
+            for trace_key in emitter.trace_keys:
+                self._by_trace.setdefault(trace_key, []).append(frame)
+
+    def merge(self, other: dict[str, list[EmittedFrame]]) -> None:
+        """Fold another run's frames in, keeping each trace in emission order."""
+        with self._lock:
+            for trace_key, frames in other.items():
+                self._by_trace.setdefault(trace_key, []).extend(frames)
+
+    def as_dict(self) -> dict[str, list[EmittedFrame]]:
+        """Return the frames per trace, in emission order."""
+        with self._lock:
+            return dict(self._by_trace)
+
+
+def _build_emitters(request: ProducerRequest) -> list[StreamEmitter]:
+    """One emitter per stream, in the request's own plan order."""
+    return [
+        StreamEmitter(
+            plan=plan,
+            robot_name=request.robot_name,
+            context_index=request.context_index,
+            recording_index=request.recording_index,
+            assert_deadline=request.assert_deadline,
+        )
+        for plan in request.plans
+    ]
+
+
+def _emit_and_record(
+    emitter: StreamEmitter,
+    frame_index: int,
+    timestamp: float,
+    request: ProducerRequest,
+    report: FrameReport,
+) -> None:
+    """Log one frame, recording everything the test can observe about the call."""
+    # Read before the call, to distinguish a refused frame from an admitted one.
+    handle = request.robot.get_current_recording_id()
+    emitted_at = time.time()
+    deadline_breaches = emitter.emit(frame_index, timestamp)
+    report.record(
+        emitter,
+        EmittedFrame(
+            timestamp=timestamp,
+            emitted_at=emitted_at,
+            completed_at=time.time(),
+            handle=handle,
+            deadline_breaches=deadline_breaches,
+        ),
+    )
+
+
+def run_synchronous_logging(request: ProducerRequest) -> dict[str, list[EmittedFrame]]:
+    """Log every stream from one thread, in nominal schedule order.
+
+    Scoped to one recording: returns before that recording stops.
+    """
+    emitters = _build_emitters(request)
+    for emitter in emitters:
+        emitter.prepare(request.image_width, request.image_height, request.video_detail)
+
+    report = FrameReport()
+    schedules = {
+        emitter: stream_frame_schedule(emitter.plan, request) for emitter in emitters
+    }
+    pending = {
+        emitter: frame
+        for emitter, schedule in schedules.items()
+        if (frame := next(schedule, None)) is not None
+    }
+
+    while pending and not request.stop_event.is_set():
+        due = min(pending, key=lambda emitter: pending[emitter][0] / emitter.plan.fps)
+        frame_index, timestamp = pending[due]
+        _emit_and_record(due, frame_index, timestamp, request, report)
+        next_frame = next(schedules[due], None)
+        if next_frame is None:
+            del pending[due]
+        else:
+            pending[due] = next_frame
+        if request.log_interval_s:
+            time.sleep(request.log_interval_s)
+
+    return report.as_dict()
+
+
+def run_old_per_thread_logging(
+    request: ProducerRequest,
+) -> dict[str, list[EmittedFrame]]:
+    """Run one thread per stream, each bursting through its own frame budget.
+
+    Streams race each other inside a recording, but every thread is joined
+    before it stops, so no frame is in flight at a boundary.
+    """
+    emitters = _build_emitters(request)
+    report = FrameReport()
+    barrier = threading.Barrier(len(emitters))
+
+    def worker(emitter: StreamEmitter) -> None:
+        barrier.wait()
+        emitter.prepare(request.image_width, request.image_height, request.video_detail)
+        for frame_index, timestamp in stream_frame_schedule(emitter.plan, request):
+            if request.stop_event.is_set():
+                break
+            _emit_and_record(emitter, frame_index, timestamp, request, report)
+            if request.log_interval_s:
+                time.sleep(request.log_interval_s)
+
+    _run_stream_threads(emitters, worker, error_label="Old per-thread")
+
+    return report.as_dict()
+
+
+def run_per_thread_logging(request: ProducerRequest) -> dict[str, list[EmittedFrame]]:
+    """Run one thread per stream, for as long as the caller keeps them running.
+
+    Mirrors real deployments where camera and proprioception loops run for the
+    process lifetime: the threads start before the first ``nc.start_recording``
+    and keep logging — on a session-wide, ever-increasing frame index — until
+    the request's *stop_event* is set, regardless of how many recordings start
+    and stop while they run.
+
+    Real time is this producer's schedule. With no frame count to bound it, a
+    stream that emitted as fast as it could would be an unbounded firehose for
+    the whole context lifetime, so each one waits for its next frame's
+    wall-clock deadline exactly as the camera it stands in for would.
+
+    Every frame is reported, whichever recording was current and even when none
+    was: which of them belong to a recording is decided afterwards, from the
+    wall-clock brackets around that recording's control calls (see
+    :func:`_classify_boundary_frames`). Reporting only the frames logged during
+    a recording would hide the ones the daemon must be shown to have *rejected*.
+
+    Returns:
+        Mapping of trace key -> every frame logged for it, in order.
+    """
+    emitters = _build_emitters(request)
+    report = FrameReport()
+    barrier = threading.Barrier(len(emitters))
+
+    def worker(emitter: StreamEmitter) -> None:
+        barrier.wait()
+        emitter.prepare(request.image_width, request.image_height, request.video_detail)
+        thread_wall_start = time.time()
+        for frame_index, timestamp in stream_frame_schedule(emitter.plan, request):
+            if request.stop_event.is_set():
+                break
+            frame_deadline = thread_wall_start + (frame_index / emitter.plan.fps)
+            if _await_frame_deadline(frame_deadline, request.stop_event):
+                break
+            _emit_and_record(emitter, frame_index, timestamp, request, report)
+            if request.log_interval_s:
+                time.sleep(request.log_interval_s)
+
+    _run_stream_threads(emitters, worker, error_label="Per-thread")
+
+    return report.as_dict()
+
+
+class ProducerSession(ABC):
+    """Runs a case's producer, whatever its lifetime, behind one interface.
+
+    Lifetime is the only thing that differs at the call site: a producer scoped
+    to a recording runs *inside* the window, while one that outlives every
+    recording has to be started before the first and stopped after the last.
+    Both are driven the same way here, so a caller states the recording
+    protocol once and the case's ``producer_channels`` decides nothing about
+    the shape of that code::
+
+        session = make_producer_session(spec, robot=robot, marker_name=...)
+        session.start()
+        try:
+            for ordinal in range(recordings):
+                nc.start_recording(...)
+                session.run_recording(ordinal)
+                nc.stop_recording(...)
+        finally:
+            session.finish()
+        report = session.report()
+
+    The report is uniform too: every producer reports every frame it logged
+    with the wall-clock brackets around the call, so one classification decides
+    which recording owns which frame (see :func:`_classify_boundary_frames`).
+    """
+
+    def __init__(
+        self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
+    ) -> None:
+        self.spec = spec
+        self.robot = robot
+        self.plans = tuple(plans)
+        self.stop_event = threading.Event()
+
+    @property
+    def marker_names(self) -> list[str]:
+        """The ``CUSTOM_1D`` marker series this producer's streams write."""
+        return [plan.marker_name for plan in self.plans if plan.marker_name is not None]
+
+    def _request(
+        self, *, recording_ordinal: int, duration_sec: int | None
+    ) -> ProducerRequest:
+        """Build the request for one run of this session's engine."""
+        case = self.spec.case
+        return ProducerRequest(
+            robot=self.robot,
+            robot_name=self.spec.robot_name,
+            context_index=self.spec.context_index,
+            recording_index=recording_ordinal,
+            seed_ordinal=recording_ordinal,
+            plans=self.plans,
+            image_width=case.image_width,
+            image_height=case.image_height,
+            video_detail=case.video_detail,
+            timestamp_start_s=(
+                self.spec.timestamp_start_s + recording_ordinal * case.duration_sec
+            ),
+            random_phase=case.random_phase,
+            duration_sec=duration_sec,
+            stop_event=self.stop_event,
+            assert_deadline=self.spec.assert_deadline,
+            log_interval_s=self.spec.log_interval_s,
+        )
+
+    @abstractmethod
+    def start(self) -> None:
+        """Begin producing, if this producer starts before any recording."""
+
+    @abstractmethod
+    def run_recording(self, recording_ordinal: int) -> None:
+        """Produce this recording's frames, and return once it may be stopped."""
+
+    @abstractmethod
+    def finish(self) -> None:
+        """Stop producing and surface anything a producer thread raised."""
+
+    @abstractmethod
+    def report(self) -> dict[str, list[EmittedFrame]]:
+        """Return every frame logged so far, keyed by trace."""
+
+
+class BoundedProducerSession(ProducerSession):
+    """A producer that lives and dies inside a single recording: returns only
+    once every thread has joined, so no frame is in flight at a boundary."""
+
+    def __init__(
+        self,
+        spec: ContextSpec,
+        robot: object,
+        plans: list[StreamPlan],
+        engine: Callable[[ProducerRequest], dict[str, list[EmittedFrame]]],
+    ) -> None:
+        super().__init__(spec, robot, plans)
+        self._engine = engine
+        self._report = FrameReport()
+        self._runs: list[tuple[int, dict[str, list[EmittedFrame]]]] = []
+
+    def start(self) -> None:
+        """Nothing to start: this producer only runs inside a recording."""
+
+    def run_recording(self, recording_ordinal: int) -> None:
+        """Log this recording's whole frame budget, then join every thread."""
+        frames = self._engine(
+            self._request(
+                recording_ordinal=recording_ordinal,
+                duration_sec=self.spec.case.duration_sec,
+            )
+        )
+        self._runs.append((recording_ordinal, frames))
+        self._report.merge(frames)
+
+    def finish(self) -> None:
+        """Check each run against the schedule it was supposed to emit.
+
+        Checked here rather than in :meth:`run_recording`, to keep the
+        comparison out of the recording window.
+        """
+        for recording_ordinal, frames in self._runs:
+            joint_timestamps, video_timestamps = recording_timestamps(
+                self.spec, recording_ordinal
+            )
+            for plan in self.plans:
+                expected = video_timestamps if plan.is_video else joint_timestamps
+                for trace_key in plan.trace_keys:
+                    logged = [frame.timestamp for frame in frames.get(trace_key, ())]
+                    assert logged == expected, (
+                        f"{self.spec.case.producer_channels} producer logged "
+                        f"{len(logged)} frames for {trace_key} in recording "
+                        f"{recording_ordinal}, expected {len(expected)}"
+                    )
+
+    def report(self) -> dict[str, list[EmittedFrame]]:
+        """Return every frame logged, across all this context's recordings."""
+        return self._report.as_dict()
+
+
+class LifetimeProducerSession(ProducerSession):
+    """A producer that outlives every recording it logs across: threads start
+    before the first ``start_recording`` and stop after the last, so it is
+    mid-loop at every boundary."""
+
+    def __init__(
+        self, spec: ContextSpec, robot: object, plans: list[StreamPlan]
+    ) -> None:
+        super().__init__(spec, robot, plans)
+        self._thread: threading.Thread | None = None
+        self._frames: dict[str, list[EmittedFrame]] = {}
+        self._error: BaseException | None = None
+
+    def start(self) -> None:
+        """Start logging now, before any recording exists."""
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            self._frames = run_per_thread_logging(
+                self._request(recording_ordinal=0, duration_sec=None)
+            )
+        except BaseException as exc:  # noqa: BLE001
+            self._error = exc
+
+    def run_recording(self, recording_ordinal: int) -> None:
+        """Hold the window open: the producer is already running its own schedule."""
+        time.sleep(self.spec.case.duration_sec)
+
+    def finish(self) -> None:
+        """Log past the last recording, then stop the threads and join them."""
+        if self._thread is None:
+            return
+        try:
+            # Logs past the stop so the daemon is shown rejecting post-stop frames.
+            time.sleep(PER_THREAD_LOGGING_TAIL_S)
+        finally:
+            self.stop_event.set()
+            self._thread.join()
+            self._thread = None
+        if self._error is not None:
+            raise RuntimeError(f"Per-thread producer failed: {self._error}") from (
+                self._error
+            )
+
+    def report(self) -> dict[str, list[EmittedFrame]]:
+        """Return every frame logged over the whole context lifetime."""
+        return self._frames
+
+
+def make_producer_session(
+    spec: ContextSpec, *, robot: object, marker_name: str
+) -> ProducerSession:
+    """Build the producer session a case asked for: the one place
+    ``producer_channels`` decides which engine runs. *marker_name* is used only
+    by the synchronous producer; per-thread producers ignore it.
+    """
+    case = spec.case
+    plans = stream_plans_for_case(
+        producer_channels=case.producer_channels,
+        joint_names=joint_names_for_count(case.joint_count),
+        camera_name_list=camera_names(case.video_count),
+        depth_camera_name_list=depth_camera_names(case.depth_count),
+        depth_mode=case.depth_mode,
+        joint_fps=case.joint_fps,
+        video_fps=case.video_fps,
+        marker_name=marker_name,
+    )
+    if case.producer_channels == PRODUCER_PER_THREAD:
+        return LifetimeProducerSession(spec, robot, plans)
+    engine = (
+        run_old_per_thread_logging
+        if case.producer_channels == PRODUCER_OLD_PER_THREAD
+        else run_synchronous_logging
+    )
+    return BoundedProducerSession(spec, robot, plans, engine)
+
+
+def _classify_boundary_frames(
+    frames: list[EmittedFrame],
+    bounds: RecordingControlBounds,
+) -> tuple[list[float], set[float]]:
+    """Split one trace's frames into those inside a recording and those unknowable.
+
+    A producer that logs across the recording lifecycle is mid-loop when each
+    boundary passes, and neither boundary is directly observable: the daemon
+    routes every sample by a publish stamp taken inside the ``log_*`` call, and
+    stamps the window's own bounds inside the ``start_recording`` /
+    ``stop_recording`` calls. The test resolves both the same way — by bracketing
+    each unobservable instant between two it can measure on the same clock — and
+    the same rule then decides every frame:
+
+    - **Inside**: the frame's whole ``log_*`` call ran after ``start_recording``
+      returned and finished before ``stop_recording`` was called, so its publish
+      stamp cannot be anything but within the window. The start compares the
+      emit interval's near edge and the stop its far edge; that opposition is
+      the whole of the symmetry.
+    - **Outside**: the call finished before ``start_recording`` was entered, so
+      the window did not yet exist; or the SDK's local logging gate had already
+      refused the frame at a point past the stop call. The gate is a deliberate
+      superset of the window at both ends, which makes a stale read of it
+      conclusive in exactly one direction at each end: a frame the gate *refused*
+      was emitted after the gate closed, hence after the window closed, so it
+      must not reach disk. A frame the gate *admitted* proves nothing at the
+      start, because the gate opens before the window does.
+    - **Unknowable**: everything else, i.e. the call straddled one of the two
+      brackets. The daemon's answer for those frames is correct either way, so
+      they are dropped from *both* sides of the comparison rather than tolerated
+      on one.
+
+    The ambiguous band is therefore measured, not guessed: it is as wide as the
+    control call that carries the boundary, which is why a frame count could not
+    size it — ``start_recording`` takes ~30 ms and a burst producer emits far
+    more than a frame or two inside it.
+
+    Returns:
+        ``(inside timestamps in order, unknowable timestamps)``. Frames that are
+        outside appear in neither, so the assertion requires them to be absent
+        from disk.
+    """
+    inside: list[float] = []
+    unknowable: set[float] = set()
+    for frame in frames:
+        is_inside = (
+            frame.emitted_at >= bounds.start_returned_at
+            and frame.completed_at <= bounds.stop_called_at
+        )
+        is_outside = frame.completed_at <= bounds.start_called_at or (
+            frame.emitted_at >= bounds.stop_called_at and frame.handle != bounds.handle
+        )
+        if is_inside:
+            inside.append(frame.timestamp)
+        elif not is_outside:
+            unknowable.add(frame.timestamp)
+    return inside, unknowable
 
 
 def recording_timestamps(
@@ -751,9 +1375,8 @@ def recording_timestamps(
 ) -> tuple[list[float], list[float]]:
     """Return the ``(joint, video)`` timestamp sequences for one recording.
 
-    A pure function of ``(spec, recording_index)``, so :func:`context_worker`
-    can call it to build the on-disk expectation and :func:`log_frames` can call
-    it to decide what to emit, with no way for the two to drift apart.
+    Shares nothing with the schedule producers emit from, so a bounded producer
+    is checked against what it was supposed to log rather than against itself.
     """
     case = spec.case
     start_s = spec.timestamp_start_s + recording_index * case.duration_sec
@@ -778,57 +1401,29 @@ def recording_timestamps(
 def log_frames(
     spec: ContextSpec,
     *,
+    robot: object,
     recording_index: int,
     marker_name: str,
 ) -> list[str]:
-    """Log all frames for one recording, dispatching based on producer_channels.
+    """Log one recording's frames, for a caller driving that recording by hand.
 
-    Timestamps come from :func:`recording_timestamps`, which the caller may also
-    use to build the matching on-disk expectation.
+    Refuses a case whose producer outlives its recordings: it has no single
+    recording's worth of frames to log.
+
+    Returns:
+        The marker series the producer wrote.
     """
-    joint_timestamps, video_timestamps = recording_timestamps(spec, recording_index)
-    joint_name_list = joint_names_for_count(spec.case.joint_count)
-    camera_name_list = camera_names(spec.case.video_count)
-    depth_camera_name_list = depth_camera_names(spec.case.depth_count)
-
     if spec.case.producer_channels == PRODUCER_PER_THREAD:
-        return run_threaded_logging(
-            robot_name=spec.robot_name,
-            joint_timestamps=joint_timestamps,
-            video_timestamps=video_timestamps,
-            recording_index=recording_index,
-            joint_fps=spec.case.joint_fps,
-            context_index=spec.context_index,
-            joint_names=joint_name_list,
-            camera_name_list=camera_name_list,
-            depth_camera_name_list=depth_camera_name_list,
-            depth_mode=spec.case.depth_mode,
-            image_width=spec.case.image_width,
-            image_height=spec.case.image_height,
-            video_detail=spec.case.video_detail,
-            assert_deadline=spec.assert_deadline,
-            log_interval_s=spec.log_interval_s,
+        raise ValueError(
+            f"log_frames needs a producer scoped to one recording, but "
+            f"producer_channels={PRODUCER_PER_THREAD!r} runs for the whole "
+            "context lifetime — drive it through make_producer_session instead"
         )
-
-    log_synchronous_frames(
-        robot_name=spec.robot_name,
-        joint_timestamps=joint_timestamps,
-        video_timestamps=video_timestamps,
-        recording_index=recording_index,
-        joint_names=joint_name_list,
-        camera_name_list=camera_name_list,
-        depth_camera_name_list=depth_camera_name_list,
-        depth_mode=spec.case.depth_mode,
-        image_width=spec.case.image_width,
-        image_height=spec.case.image_height,
-        joint_fps=spec.case.joint_fps,
-        marker_name=marker_name,
-        context_index=spec.context_index,
-        video_detail=spec.case.video_detail,
-        assert_deadline=spec.assert_deadline,
-        log_interval_s=spec.log_interval_s,
-    )
-    return [marker_name]
+    session = make_producer_session(spec, robot=robot, marker_name=marker_name)
+    session.start()
+    session.run_recording(recording_index)
+    session.finish()
+    return session.marker_names
 
 
 def _bind_worker_dataset(spec: ContextSpec) -> None:
@@ -906,102 +1501,100 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         source: tuple[str, int] = (str(robot.id), int(robot.instance))
 
         expected_by_recording: dict[str, RecordingExpectedTimestamps] = {}
+        bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
 
-        for recording_ordinal in range(spec.recordings_per_context):
-            recording_capture_start_s = time.time()
-            recording_capture_stop_s = recording_capture_start_s + case.duration_sec
+        session = make_producer_session(
+            spec, robot=robot, marker_name="marker_synchronous"
+        )
+        marker_names = session.marker_names
+        session.start()
+        try:
+            for recording_ordinal in range(spec.recordings_per_context):
+                recording_capture_start_s = time.time()
+                recording_capture_stop_s = recording_capture_start_s + case.duration_sec
 
-            # The very sequences log_frames will emit below.
-            joint_ts, video_ts = recording_timestamps(spec, recording_ordinal)
-
-            with Timer(
-                MAX_TIME_TO_START_S,
-                label="nc.start_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.start_recording(
-                    robot_name=spec.robot_name, timestamp=recording_capture_start_s
-                )
-            if wall_started_at is None:
-                wall_started_at = time.time()
-
-            previous_index = recording_indexes[-1] if recording_indexes else 0
-            daemon_recording_index = wait_for_recording_index_for_source(
-                source[0],
-                source[1],
-                after_index=previous_index,
-                timeout_s=MAX_TIME_TO_START_S,
-            )
-            recording_indexes.append(daemon_recording_index)
-
-            cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
-            recording_ids.append(str(cloud_recording_id or ""))
-
-            disk_recording_key = str(daemon_recording_index)
-
-            # Map the two stream sequences onto every trace they feed, now that
-            # the recording key is known. Trace keys use
-            # "data_type/data_type_name" to match the semantic keys resolved
-            # from the DB in disk_helpers. data_type_name is the storage name
-            # produced by validate_safe_name (e.g. "vx300s_left\waist").
-            from neuracore_types.utils import validate_safe_name
-
-            by_trace: dict[str, list[float]] = {}
-            for joint_name in joint_name_list:
-                safe = validate_safe_name(joint_name)
-                by_trace[f"JOINT_POSITIONS/{safe}"] = joint_ts
-                by_trace[f"JOINT_VELOCITIES/{safe}"] = joint_ts
-                by_trace[f"JOINT_TORQUES/{safe}"] = joint_ts
-            for camera in camera_name_list:
-                safe_cam = validate_safe_name(camera)
-                by_trace[f"RGB_IMAGES/{safe_cam}"] = video_ts
-            for depth_camera in depth_camera_name_list:
-                safe_depth_cam = validate_safe_name(depth_camera)
-                by_trace[f"DEPTH_IMAGES/{safe_depth_cam}"] = video_ts
-            # CUSTOM_1D marker — name depends on producer_channels mode
-            if case.producer_channels == PRODUCER_PER_THREAD:
-                # One marker per joint data type thread
-                for role_name in (
-                    "joint_positions",
-                    "joint_velocities",
-                    "joint_torques",
+                start_called_at = time.time()
+                with Timer(
+                    MAX_TIME_TO_START_S,
+                    label="nc.start_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
                 ):
-                    safe_marker = validate_safe_name(f"marker_{role_name}")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-                for camera in camera_name_list:
-                    safe_marker = validate_safe_name(f"marker_{camera}")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
-                for depth_camera in depth_camera_name_list:
-                    safe_marker = validate_safe_name(f"marker_{depth_camera}")
-                    by_trace[f"CUSTOM_1D/{safe_marker}"] = video_ts
-            else:
-                safe_marker = validate_safe_name("marker_synchronous")
-                by_trace[f"CUSTOM_1D/{safe_marker}"] = joint_ts
-            expected_by_recording[disk_recording_key] = RecordingExpectedTimestamps(
-                by_trace=by_trace,
-            )
+                    nc.start_recording(
+                        robot_name=spec.robot_name, timestamp=recording_capture_start_s
+                    )
+                start_returned_at = time.time()
+                if wall_started_at is None:
+                    wall_started_at = start_returned_at
 
-            current_marker_names = log_frames(
-                spec,
-                recording_index=recording_ordinal,
-                marker_name="marker_synchronous",
-            )
-            if not marker_names:
-                marker_names = current_marker_names
-
-            with Timer(
-                case.stop_recording_sla_s,
-                label="nc.stop_recording",
-                always_log=True,
-                assert_deadline=spec.assert_deadline,
-            ):
-                nc.stop_recording(
-                    robot_name=spec.robot_name,
-                    wait=case.wait,
-                    timestamp=recording_capture_stop_s,
+                previous_index = recording_indexes[-1] if recording_indexes else 0
+                daemon_recording_index = wait_for_recording_index_for_source(
+                    source[0],
+                    source[1],
+                    after_index=previous_index,
+                    timeout_s=MAX_TIME_TO_START_S,
                 )
-            wall_stopped_at = time.time()
+                recording_indexes.append(daemon_recording_index)
+
+                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                recording_ids.append(str(cloud_recording_id or ""))
+
+                disk_recording_key = str(daemon_recording_index)
+                recording_handle = robot.get_current_recording_id()
+
+                session.run_recording(recording_ordinal)
+
+                # Brackets the window's upper bound, the mirror of the start.
+                stop_called_at = time.time()
+                with Timer(
+                    case.stop_recording_sla_s,
+                    label="nc.stop_recording",
+                    always_log=True,
+                    assert_deadline=spec.assert_deadline,
+                ):
+                    nc.stop_recording(
+                        robot_name=spec.robot_name,
+                        wait=case.wait,
+                        timestamp=recording_capture_stop_s,
+                    )
+                wall_stopped_at = time.time()
+
+                bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
+                    handle=recording_handle,
+                    start_called_at=start_called_at,
+                    start_returned_at=start_returned_at,
+                    stop_called_at=stop_called_at,
+                    stop_returned_at=wall_stopped_at,
+                )
+        finally:
+            # A surviving producer thread breaks the cleanup assertions.
+            session.finish()
+
+        report = session.report()
+        for disk_key, bounds in bounds_by_disk_key.items():
+            inside_by_trace: dict[str, list[float]] = {}
+            unknowable_by_trace: dict[str, set[float]] = {}
+            for trace_key, frames in report.items():
+                inside, unknowable = _classify_boundary_frames(frames, bounds)
+                inside_by_trace[trace_key] = inside
+                unknowable_by_trace[trace_key] = unknowable
+
+                breaching = [
+                    frame
+                    for frame in frames
+                    if frame.deadline_breaches
+                    and frame.emitted_at >= bounds.start_returned_at
+                    and frame.completed_at <= bounds.stop_called_at
+                ]
+                assert not breaching, (
+                    f"{trace_key} logged {len(breaching)} frame(s) inside "
+                    f"recording {disk_key} that breached the logging deadline: "
+                    f"{breaching[0].deadline_breaches}"
+                )
+            expected_by_recording[disk_key] = RecordingExpectedTimestamps(
+                by_trace=inside_by_trace,
+                by_trace_unknowable=unknowable_by_trace,
+            )
 
         captured_timer_stats = {k: dict(v) for k, v in Timer._stats.items()}
         return ContextResult(
