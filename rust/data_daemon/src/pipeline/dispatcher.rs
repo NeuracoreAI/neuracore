@@ -289,7 +289,7 @@ struct TraceHandle {
 /// lifecycle `started_at_ns` / `stopped_at_ns` use, so routing never depends
 /// on the data's own (possibly custom) capture clock — it depends only on when
 /// the producer published, which is exactly "which recording was active then".
-struct ActiveWindow {
+struct RecordingWindow {
     recording_index: i64,
     /// Inclusive lower bound — the lifecycle publish time of the start.
     started_at_ns: i64,
@@ -315,7 +315,7 @@ struct ActiveWindow {
     traces: HashMap<TraceKey, TraceHandle>,
 }
 
-impl ActiveWindow {
+impl RecordingWindow {
     /// Does this window's `[started_at_ns, stopped_at_ns)` contain `ts`?
     fn contains(&self, ts: i64) -> bool {
         ts >= self.started_at_ns && self.stopped_at_ns.is_none_or(|stop| ts < stop)
@@ -354,8 +354,8 @@ impl ActiveWindow {
 /// recently-closed windows retained until their late data has drained.
 #[derive(Default)]
 struct WindowsForSource {
-    live: Option<ActiveWindow>,
-    closing: Vec<ActiveWindow>,
+    live: Option<RecordingWindow>,
+    closing: Vec<RecordingWindow>,
     /// Daemon clock of the last envelope seen for this source — drives the
     /// idle reaper.
     last_seen: Option<Instant>,
@@ -902,7 +902,7 @@ impl Dispatcher {
             }
             entry.closing.push(previous);
         }
-        entry.live = Some(ActiveWindow {
+        entry.live = Some(RecordingWindow {
             recording_index,
             started_at_ns: publish_timestamp_ns,
             stopped_at_ns: None,
@@ -1268,7 +1268,7 @@ impl Dispatcher {
     /// into `closing_actors`.
     fn finish_eviction(
         source: &Source,
-        window: &mut ActiveWindow,
+        window: &mut RecordingWindow,
         elapsed: Duration,
         retention: Duration,
         closing_actors: &mut Vec<TraceHandle>,
@@ -1496,7 +1496,7 @@ impl Dispatcher {
     /// bounded on both sides and are checked first (newest-first); the live
     /// window is an unbounded-above catch-all, so it must be the last resort or
     /// it would steal data belonging to a just-closed window.
-    fn window_for_mut(entry: &mut WindowsForSource, ts: i64) -> Option<&mut ActiveWindow> {
+    fn window_for_mut(entry: &mut WindowsForSource, ts: i64) -> Option<&mut RecordingWindow> {
         if let Some(pos) = entry.closing.iter().rposition(|window| window.contains(ts)) {
             return entry.closing.get_mut(pos);
         }
@@ -1511,7 +1511,10 @@ impl Dispatcher {
     }
 
     /// Borrow the window a [`ChunkClaim`] addresses.
-    fn window_at_mut(entry: &mut WindowsForSource, slot: WindowSlot) -> Option<&mut ActiveWindow> {
+    fn window_at_mut(
+        entry: &mut WindowsForSource,
+        slot: WindowSlot,
+    ) -> Option<&mut RecordingWindow> {
         match slot {
             WindowSlot::Live => entry.live.as_mut(),
             WindowSlot::Closing(index) => entry.closing.get_mut(index),
@@ -1680,7 +1683,7 @@ impl Dispatcher {
     /// Look up or spawn the per-trace actor for `(window, data_type,
     /// sensor_name)`, returning its routing handle.
     fn ensure_actor<'a>(
-        window: &'a mut ActiveWindow,
+        window: &'a mut RecordingWindow,
         actor_context: &Arc<TraceActorContext>,
         data_type: String,
         sensor_name: Option<String>,
@@ -1728,7 +1731,7 @@ impl Dispatcher {
         }
         let windows = std::mem::take(&mut self.windows);
         for (_, mut entry) in windows {
-            let mut all: Vec<ActiveWindow> = Vec::new();
+            let mut all: Vec<RecordingWindow> = Vec::new();
             if let Some(live) = entry.live.take() {
                 all.push(live);
             }
@@ -1913,8 +1916,8 @@ mod tests {
     use tokio::time::{timeout, Duration};
 
     /// A live window for a source, as `open_window` would have built it.
-    fn test_window(recording_index: i64, started_at_ns: i64) -> ActiveWindow {
-        ActiveWindow {
+    fn test_window(recording_index: i64, started_at_ns: i64) -> RecordingWindow {
+        RecordingWindow {
             recording_index,
             started_at_ns,
             stopped_at_ns: None,
@@ -2469,7 +2472,7 @@ mod tests {
     }
 
     /// A window stopped `stopped_ago` ago, still owed a marker from producer 7.
-    fn window_awaiting_a_flush(now: Instant, stopped_ago: Duration) -> ActiveWindow {
+    fn window_awaiting_a_flush(now: Instant, stopped_ago: Duration) -> RecordingWindow {
         let mut window = test_window(1, 100);
         window.stopped_at_ns = Some(150);
         window.stop_recv_at = Some(now - stopped_ago);
