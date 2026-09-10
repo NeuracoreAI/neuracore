@@ -36,6 +36,9 @@ pub use notifiers::recording_start_notifier::spawn_recording_start_notifier;
 pub use notifiers::recording_stop_notifier::spawn_recording_stop_notifier;
 pub use watchers::config_watcher::{spawn_config_watcher, ConfigRefreshRequest, ConfigRx};
 pub use watchers::org_watcher::{spawn_org_watcher, OrgIdRx, OrgWatcherHandle};
+pub use watchers::recording_notifications::{
+    spawn_recording_notifications, RecordingNotificationsHandle,
+};
 pub use watchers::recording_reaper::spawn_recording_reaper;
 
 use std::path::Path;
