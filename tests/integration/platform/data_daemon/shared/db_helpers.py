@@ -383,7 +383,7 @@ def resolve_cloud_recording_ids(
     NULL at record time; observed ids from :func:`latching_upload_observer`
     are preferred since the reaper can delete a row before this reads it.
 
-    Resolving from the DB rather than ``nc.get_cloud_recording_id`` is required
+    Resolving from the DB rather than the daemon's own state is required
     here: recordings are made in worker subprocesses, so the verifying process
     has no active recording context to resolve against — only the daemon-assigned
     ``recording_index`` values carried on each result.

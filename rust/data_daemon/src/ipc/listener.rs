@@ -13,14 +13,14 @@
 //! backpressure on the dispatcher send propagate to iceoryx2 without keeping
 //! the subscriber locked across the await. (`Send` is not actually required
 //! here — `run` is awaited inline under `block_on`, never `tokio::spawn`'d, and
-//! the later `serve_recording_id_queries` borrow is itself held across an await.)
+//! the later `serve_recording_state_queries` borrow is itself held across an
+//! await.)
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use data_daemon_shared::{
-    Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, RecordingStateQuery,
-    RecordingStateReply, VersionReply, VersionRequest,
+    Envelope, HealthReply, HealthRequest, RecordingStateQuery, RecordingStateReply, VersionReply,
+    VersionRequest,
 };
 use iceoryx2::port::server::Server;
 use iceoryx2::port::subscriber::Subscriber;
@@ -32,7 +32,6 @@ use tokio::time::sleep;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingState;
-use crate::state::{SqliteStateStore, StateStore};
 
 /// Poll cadence while envelopes are actively flowing.
 ///
@@ -70,13 +69,11 @@ const IDLE_POLL_AFTER_EMPTY: u32 = 64;
 pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
-    store: Arc<SqliteStateStore>,
     recording_state: RecordingState,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
         commands = data_daemon_shared::service_name::COMMANDS,
-        recording_ids = data_daemon_shared::service_name::RECORDING_IDS,
         recording_state = data_daemon_shared::service_name::RECORDING_STATE,
         health = data_daemon_shared::service_name::HEALTH,
         version = data_daemon_shared::service_name::VERSION,
@@ -126,16 +123,10 @@ pub async fn run(
         // instead of being adopted silently.
         serve_version(transport.version_server());
 
-        // -- Answer recording-id queries ----------------------------------------
-        // Each recording-id request is resolved against the daemon's own store (a single
-        // `.await`) while holding the iceoryx2 `ActiveRequest` to reply on. That
-        // borrow makes this future `!Send`, which is fine: `run` is awaited
-        // inline under `block_on`, never `tokio::spawn`'d.
-        serve_recording_id_queries(transport.recording_id_server(), &store).await;
-
         // -- Answer recording-state queries --------------------------------------
         // Every process on this host reads its recording state from here
-        // rather than from its own subscription to the backend.
+        // rather than from its own subscription to the backend. The reply
+        // carries the cloud id too, so this is the only state service.
         serve_recording_state_queries(transport.recording_state_server(), &recording_state).await;
 
         // -- Yield / shutdown ---------------------------------------------------
@@ -239,73 +230,6 @@ fn serve_version(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
     }
 }
 
-/// Drain every pending recording-id query, answering each from the daemon's
-/// own store.
-///
-/// The SDK resolves a recording's cloud id by asking the daemon over the
-/// `recording_ids` request-response service instead of reading the daemon's private
-/// SQLite DB directly. Requests are cheap and infrequent (one per
-/// `get_recording_id` poll), so a malformed request or store error is logged
-/// and the next request is served rather than aborting the loop.
-///
-/// The per-tick request volume is bounded rather than unbounded: each recording-id
-/// client keeps at most one request in flight (it awaits the reply before
-/// sending the next), so a single drain serves at most one request per
-/// connected request-response client (≤ `MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE`) before `receive`
-/// returns `None` and the loop hands the next tick back to the commands drain.
-async fn serve_recording_id_queries(
-    server: &Server<ipc::Service, [u8], (), [u8], ()>,
-    store: &Arc<SqliteStateStore>,
-) {
-    loop {
-        let active = match server.receive() {
-            Ok(Some(active)) => active,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(%error, "recording-id server receive failed");
-                return;
-            }
-        };
-
-        let query = match RecordingIdQuery::decode(active.payload()) {
-            Ok(query) => query,
-            Err(error) => {
-                tracing::warn!(%error, "dropping malformed recording-id query");
-                continue;
-            }
-        };
-
-        let recording_id = match store
-            .resolve_recording_id_for_marker(
-                &query.robot_id,
-                query.robot_instance,
-                query.timestamp_ns,
-            )
-            .await
-        {
-            Ok(recording_id) => recording_id,
-            Err(error) => {
-                tracing::warn!(%error, robot_id = query.robot_id, "recording-id lookup failed");
-                None
-            }
-        };
-
-        let reply = RecordingIdReply { recording_id };
-        match reply.encode() {
-            Ok(bytes) => match active.loan_slice_uninit(bytes.len()) {
-                Ok(response) => {
-                    let response = response.write_from_slice(&bytes);
-                    if let Err(error) = response.send() {
-                        tracing::warn!(%error, "failed to send recording-id reply");
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "failed to loan recording-id reply sample"),
-            },
-            Err(error) => tracing::warn!(%error, "failed to encode recording-id reply"),
-        }
-    }
-}
-
 /// Drain every pending recording-state query, answering each from the
 /// dispatcher's own state.
 ///
@@ -315,8 +239,11 @@ async fn serve_recording_id_queries(
 /// started nothing — on a node that has logged nothing — still gets the true
 /// answer, and it never depends on a row existing yet.
 ///
-/// Bounded per tick on the same grounds as [`serve_recording_id_queries`]: each
-/// client keeps one request in flight.
+/// Bounded per tick rather than unbounded: each client keeps at most one
+/// request in flight (it awaits the reply before sending the next), so a single
+/// drain serves at most one request per connected client
+/// (≤ `MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE`) before `receive` returns
+/// `None` and the loop hands the next tick back to the commands drain.
 async fn serve_recording_state_queries(
     server: &Server<ipc::Service, [u8], (), [u8], ()>,
     recording_state: &RecordingState,

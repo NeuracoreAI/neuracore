@@ -13,6 +13,7 @@ from collections.abc import Callable
 import pytest
 
 import neuracore as nc
+from neuracore.api.core import _await_cloud_recording_id
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
     assert_post_test_storage_state,
@@ -236,7 +237,7 @@ def test_cancel_either_side_of_a_valid_recording(
                 # --- valid recording ---
                 wall_started_at = time.time()
                 controller.open(wall_started_at)
-                resumed_recording_id = robot.get_cloud_recording_id()
+                resumed_recording_id = _await_cloud_recording_id(robot)
                 assert resumed_recording_id is not None
 
                 log_frames(

@@ -360,7 +360,7 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         def is_recording(self) -> bool:
             return True
 
-        def get_cloud_recording_id(self) -> str:
+        def get_current_recording_id(self) -> str:
             return "rec-123"
 
         def stop_recording(self, timestamp: float | None = None) -> None:
@@ -398,7 +398,7 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         def is_recording(self) -> bool:
             return True
 
-        def get_cloud_recording_id(self) -> str:
+        def get_current_recording_id(self) -> str:
             return "rec-123"
 
         def stop_recording(self, timestamp: float | None = None) -> None:
@@ -411,11 +411,12 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
 
     # First call creates the deadline:
     #     0.0 + 1.0 = 1.0
-    # Second call allows one poll:
+    # Second is the cloud-id wait's own deadline, spent before the id resolves.
+    # Third allows one poll:
     #     0.0 < 1.0
-    # Third call passes the deadline:
+    # Fourth passes the deadline:
     #     2.0 > 1.0
-    clock = iter((0.0, 0.0, 2.0))
+    clock = iter((0.0, 0.0, 0.0, 2.0))
 
     monkeypatch.setattr(
         api_core,
@@ -445,6 +446,40 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         nc.stop_recording(wait=True, wait_timeout_s=1.0)
 
     assert poll_count == 1
+
+
+def test_await_cloud_recording_id_returns_the_id_once_minted(monkeypatch) -> None:
+    """The daemon mints the cloud id after the recording opens, so this polls.
+
+    A caller that gave up on the first `None` would skip the upload wait for
+    every recording stopped promptly after starting.
+    """
+    ids = iter((None, None, "rec-123"))
+
+    class _FakeRobot:
+        def get_current_recording_id(self) -> str | None:
+            return next(ids)
+
+    monkeypatch.setattr(api_core.time, "sleep", lambda _seconds: None)
+
+    assert api_core._await_cloud_recording_id(_FakeRobot(), timeout_s=1.0) == "rec-123"
+
+
+def test_await_cloud_recording_id_gives_up_on_an_id_that_never_arrives(
+    monkeypatch,
+) -> None:
+    """An offline recording never gets an id, so this must end, not hang."""
+
+    class _FakeRobot:
+        def get_current_recording_id(self) -> str | None:
+            return None
+
+    # First call sets the deadline, second passes it.
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr(api_core.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(api_core.time, "sleep", lambda _seconds: None)
+
+    assert api_core._await_cloud_recording_id(_FakeRobot(), timeout_s=1.0) is None
 
 
 def test_version_check_sends_sdk_and_types_versions():

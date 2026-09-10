@@ -216,7 +216,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 )
                 recording_indexes.append(daemon_recording_index)
 
-                cloud_recording_id = robot.get_cloud_recording_id(timeout_s=0.0)
+                cloud_recording_id = robot.get_current_recording_id()
                 recording_ids.append(str(cloud_recording_id or ""))
 
                 disk_recording_key = str(daemon_recording_index)

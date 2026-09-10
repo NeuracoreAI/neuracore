@@ -68,32 +68,32 @@ class RecordingStateUnavailableError(RuntimeError):
     """The daemon did not answer a recording-state query in time."""
 
 
-def query_recording_state(
-    robot_id: str, robot_instance: int, timeout_s: float = 0.1
-) -> LiveRecording | None:
-    """Ask the daemon which recording, if any, a source currently has open.
+def query_recording_state(robot_id: str, robot_instance: int) -> LiveRecording | None:
+    """Which recording, if any, a source currently has open.
 
     The daemon owns recording state — including the recordings the backend
     started, which it alone subscribes to — so this is how a process learns
     about a recording it did not itself start or stop.
 
+    Reads the cache the bridge keeps, the same one
+    :meth:`RecordingContext.recording_epoch` reads, so a call costs a memory
+    read. Only the first read for a source can block, and only briefly: an entry
+    nothing has answered for is queried on the calling thread. The cache is
+    refreshed off-thread within 50 ms, so a recording started elsewhere shows up
+    that late; a recording this process bracketed is exact immediately.
+
     Returns:
         The open recording, or ``None`` when the source has none.
 
     Raises:
-        RecordingStateUnavailableError: nothing answered within ``timeout_s``.
-            Silence is not "not recording", and callers must not read it as
-            such.
-
-    Blocks for up to ``timeout_s``, which bounds a caller's stall. The daemon
-    polls its IPC inbox every 25 ms once idle, so a timeout near that raises
-    against a healthy daemon.
+        RecordingStateUnavailableError: nothing has ever answered for this
+            source. Silence is not "not recording", and callers must not read it
+            as such.
     """
-    reply = _load_native().recording_state(robot_id, robot_instance, timeout_s)
+    reply = _load_native().recording_state(robot_id, robot_instance)
     if reply is None:
         raise RecordingStateUnavailableError(
-            f"the daemon did not answer within {timeout_s}s "
-            f"for {robot_id} instance {robot_instance}"
+            f"the daemon has not answered for {robot_id} instance {robot_instance}"
         )
     live = reply["recording"]
     if live is None:
@@ -134,7 +134,6 @@ class RecordingContext:
         """Initialize the recording context."""
         self._robot_id: str | None = None
         self._robot_instance: int = 0
-        self._recording_marker_ns: int = 0
 
     def bind_source(self, robot_id: str, robot_instance: int = 0) -> None:
         """Bind messages to a robot source without starting a recording.
@@ -172,9 +171,8 @@ class RecordingContext:
         Cloud recording id is passed only when recording is started from web frontend
 
         ``timestamp`` is the recording's *capture* start time (Unix seconds),
-        stored and reported as such, and returned as the marker that resolves the
-        cloud id (:meth:`get_recording_id`). It does **not** bound the recording
-        window, which the daemon takes from a publish stamp inside this call.
+        stored and reported as such. It does **not** bound the recording window,
+        which the daemon takes from a publish stamp inside this call.
 
         Returns:
             The capture marker the daemon stored as this recording's
@@ -185,7 +183,7 @@ class RecordingContext:
         self.bind_source(robot_id, robot_instance)
         timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
 
-        self._recording_marker_ns = _load_native().start_recording(
+        return _load_native().start_recording(
             robot_id,
             robot_instance,
             robot_name,
@@ -194,7 +192,6 @@ class RecordingContext:
             timestamp_ns,
             cloud_recording_id,
         )
-        return self._recording_marker_ns
 
     def log_joints(
         self,
@@ -361,34 +358,6 @@ class RecordingContext:
         if not self._robot_id:
             return
         _load_native().flush_source(self._robot_id, self._robot_instance)
-
-    def get_recording_id(
-        self,
-        timestamp_ns: int | None = None,
-        timeout_s: float = 30.0,
-    ) -> str | None:
-        """Resolve the daemon-owned cloud recording id for this source.
-
-        The producer never sees the cloud recording id — the
-        daemon allocates it and POSTs ``/recording/start`` asynchronously. This
-        asks the daemon over the native ``queries`` request-response service for
-        the id of the recording identified by this source and the capture
-        ``timestamp_ns`` marker (defaulting to the marker captured at
-        ``start_recording``). The daemon answers authoritatively from its own
-        state; the native call blocks (with the GIL released) until the id is
-        minted or ``timeout_s`` elapses.
-
-        It MAY block and is for non-performance-critical paths only (tests,
-        ``nc.stop_recording(wait=True)``). Returns ``None`` on timeout.
-        """
-        if not self._robot_id:
-            return None
-        marker_ns = (
-            timestamp_ns if timestamp_ns is not None else self._recording_marker_ns
-        )
-        return _load_native().get_recording_id(
-            self._robot_id, self._robot_instance, marker_ns, timeout_s
-        )
 
     def close(self) -> None:
         """Release resources owned by this instance.

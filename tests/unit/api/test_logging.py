@@ -645,8 +645,9 @@ def test_the_log_path_never_asks_the_daemon(
     """Logging must not cost an IPC round trip per frame.
 
     The log path does need the daemon's recording state — it is what scopes the
-    monotonic-timestamp check to one recording — but it reads a cache the daemon
-    fills off-thread, never the blocking `recording_state` query.
+    monotonic-timestamp check to one recording — but it reads it through
+    `recording_epoch`, which only ever touches a cache the daemon fills
+    off-thread.
     """
     nc.login("test_api_key")
     mock_auth_requests.post(
