@@ -10,7 +10,6 @@ import io
 import logging
 import os
 import tempfile
-import uuid
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -119,7 +118,6 @@ class Robot:
         )
         self._joint_group_cache: "dict[DataType, ResolvedJointGroup]" = dict()
         self._daemon_recording_context: DaemonRecordingContext | None = None
-        self._local_recording_handle: str | None = None
 
         self.org_id = org_id or get_current_org()
 
@@ -257,25 +255,17 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(
-        self, dataset_id: str, timestamp: float | None = None
-    ) -> str | None:
+    def start_recording(self, dataset_id: str, timestamp: float | None = None) -> None:
         """Start recording data from all active streams to a dataset.
 
-        Initiates a recording session that will capture data from all registered
-        data streams and associate it with the specified dataset.
+        Asks the daemon to open a recording window; it owns recording identity
+        and mints the cloud id asynchronously, so there is nothing to return
+        here. Ask :meth:`get_cloud_recording_id` once it exists.
 
         Args:
             dataset_id: Unique identifier of the dataset to record into.
-
-
-
-        Returns:
-            A handle correlating this call with the frames logged after it. It
-            is local to this process — the daemon owns recording identity and
-            mints the cloud id asynchronously, so there is nothing
-            authoritative to return at call time; ask
-            :meth:`get_cloud_recording_id` once it exists.
+            timestamp: Optional capture time (Unix seconds) for the recording's
+                start, matching the ``log_*`` methods.
 
         Raises:
             RobotError: If the robot is not initialized or if
@@ -284,22 +274,14 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        local_handle = str(uuid.uuid4())
-        self._local_recording_handle = local_handle
-        try:
-            self._get_daemon_recording_context().start_recording(
-                robot_id=self.id,
-                robot_instance=self.instance,
-                robot_name=self.name,
-                dataset_id=dataset_id,
-                dataset_name=None,
-                timestamp=timestamp,
-            )
-        except Exception:
-            self._local_recording_handle = None
-            self._stop_all_streams()
-            raise
-        return local_handle
+        self._get_daemon_recording_context().start_recording(
+            robot_id=self.id,
+            robot_instance=self.instance,
+            robot_name=self.name,
+            dataset_id=dataset_id,
+            dataset_name=None,
+            timestamp=timestamp,
+        )
 
     def stop_recording(
         self,
@@ -325,44 +307,27 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        # The gate closes inside the drain, not here.
-        self._drain_streams_and_notify_daemon(recording_id, timestamp=timestamp)
+        # The gate closes inside the notify, not here.
+        self._notify_daemon_of_stop(recording_id, timestamp=timestamp)
 
-    def _drain_streams_and_notify_daemon(
+    def _notify_daemon_of_stop(
         self,
         recording_id: str | None,
         timestamp: float | None = None,
     ) -> None:
-        """Stop all streams and send the recording-stopped IPC message to the daemon.
-
-        Disarming sits between the stop and the writer's tail-chunk barrier.
-        Before the notify it would discard nothing the daemon still wants — the
-        window is open until it receives the stop — and after the barrier it
-        would stay armed for as long as the writer's backlog takes to drain
-        (over a second under burst logging).
-        """
+        """Send the recording-stopped IPC message to the daemon."""
         try:
-            self._stop_all_streams()
             context = self._get_daemon_recording_context()
             try:
                 context.stop_recording(timestamp=timestamp)
             finally:
-                # Both run even if the notify failed.
-                self._local_recording_handle = None
+                # Runs even if the notify failed.
                 context.flush_source()
         except Exception:
             logger.exception(
-                "Failed to stop streams and notify daemon for recording_id=%s",
+                "Failed to notify daemon of stop for recording_id=%s",
                 recording_id,
             )
-
-    def _stop_all_streams(self) -> None:
-        """Stop recording on all data streams for this robot instance."""
-        for stream_id, stream in list(self._data_streams.items()):
-            try:
-                stream.stop_recording()
-            except Exception:
-                logger.exception("Failed to stop data stream %s", stream_id)
 
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
@@ -389,6 +354,19 @@ class Robot:
         return (
             recording_context.query_recording_state(self.id, self.instance) is not None
         )
+
+    def _recording_epoch(self) -> int | None:
+        """Which recording the daemon has open for this source, as a token.
+
+        Opaque and only worth comparing: it changes when the source crosses a
+        recording boundary, whoever opened it, and is ``None`` when none is
+        open. The log path uses it to scope the monotonic-timestamp check to one
+        recording, so unlike :meth:`is_recording` it must never block — it reads
+        a cache the bridge keeps, not the daemon.
+        """
+        if not self.id:
+            return None
+        return self._get_daemon_recording_context().recording_epoch()
 
     def get_current_recording_id(self) -> str | None:
         """Get the cloud ID of the current active recording session.
@@ -691,8 +669,6 @@ class Robot:
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
-        self._stop_all_streams()
-        self._local_recording_handle = None
         self._get_daemon_recording_context().cancel_recording(timestamp=timestamp)
 
     def _get_daemon_recording_context(self) -> DaemonRecordingContext:

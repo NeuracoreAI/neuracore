@@ -6,7 +6,6 @@ frames a recording owns.
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from typing import NamedTuple
 
@@ -26,8 +25,6 @@ class EmittedFrame(NamedTuple):
         timestamp: The value that reaches disk; the only field compared there.
         frame_index: Session-wide, never resets across recordings — recovers
             the painted frame code (see :func:`rgb_frame_code`).
-        handle: Recording handle latched before the call, or ``None``. Reflects
-            the local logging gate, not the daemon's actual window.
         deadline_breaches: ``nc.log_*`` calls this frame made that exceeded
             ``MAX_TIME_TO_LOG_S``. Only asserted on when this frame is ``owed``.
     """
@@ -36,7 +33,6 @@ class EmittedFrame(NamedTuple):
     frame_index: int
     emitted_at: float
     completed_at: float
-    handle: str | None
     deadline_breaches: tuple[str, ...] = ()
 
 
@@ -95,16 +91,12 @@ class RecordingControlBounds:
     themselves, never from a capture timestamp.
 
     Attributes:
-        handles: Every SDK handle this recording held — a set, not one value,
-            because a recording holds a client-generated UUID before the
-            backend swaps in its own id.
         stop_settled_at: When the window's upper bound is known to have
             passed. A local stop stamps that bound itself, so this is a
             bounded skew after ``stop_called_at``; a remote one is measured,
             a notification later.
     """
 
-    handles: frozenset[str]
     start_called_at: float
     start_returned_at: float
     stop_called_at: float
@@ -178,16 +170,7 @@ def describe_condemnation(frame: EmittedFrame, bounds: RecordingControlBounds) -
     if frame.completed_at <= bounds.start_called_at:
         return "log call finished before start_recording was entered"
     if frame.emitted_at >= bounds.stop_settled_at:
-        timing = "log call began after the window's bound had passed"
-    elif frame.emitted_at >= bounds.stop_called_at:
-        timing = "log call began after stop_recording was entered"
-    else:
-        timing = "log call ran wholly inside the control calls"
-    if frame.handle is None:
-        gate = "gate held no recording"
-    elif frame.handle in bounds.handles:
-        gate = "gate held this recording"
-    else:
-        gate = "gate held another recording"
-    # Interned: one string per category, not per condemned frame.
-    return sys.intern(f"{timing}, {gate}")
+        return "log call began after the window's bound had passed"
+    if frame.emitted_at >= bounds.stop_called_at:
+        return "log call began after stop_recording was entered"
+    return "log call ran wholly inside the control calls"

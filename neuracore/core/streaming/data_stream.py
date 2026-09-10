@@ -6,8 +6,8 @@ and depth data.
 
 Streams own no transport of their own: the daemon interface lives at the
 logging-function layer (:class:`~neuracore.data_daemon.bridge.RecordingContext`),
-so a stream only tracks recording state and the latest sample for live-data
-consumers.
+so a stream keeps the latest sample for live-data consumers and its own
+position in the recording the daemon has open.
 """
 
 import logging
@@ -22,8 +22,9 @@ logger = logging.getLogger(__name__)
 class DataStream(ABC):
     """Base class for data streams.
 
-    Provides common functionality for managing recording state and the latest
-    sample across different types of sensor data streams.
+    Provides common functionality for tracking the latest sample and the
+    stream's position in the current recording, across different types of
+    sensor data streams.
     """
 
     def __init__(self, data_type: DataType, stream_name: str) -> None:
@@ -36,37 +37,16 @@ class DataStream(ABC):
         Note:
             This must be kept lightweight and not perform any blocking operations.
         """
-        self._recording = False
         self._latest_data: NCData | None = None
         self._data_type = data_type
         self._stream_name = stream_name
+        self._recording_epoch: int | None = None
         self._last_logged_timestamp: float | None = None
 
     @property
     def data_type(self) -> DataType:
         """Get the data type of this stream."""
         return self._data_type
-
-    def start_recording(self) -> None:
-        """Arm the stream for a new recording.
-
-        The stream carries no recording identity — the daemon owns that. This
-        only marks a fresh timeline for :meth:`_enforce_monotonic_timestamp`.
-        """
-        self._recording = True
-        self._last_logged_timestamp = None
-
-    def stop_recording(self) -> None:
-        """Stop recording data for this stream."""
-        self._recording = False
-
-    def is_recording(self) -> bool:
-        """Check if recording is active.
-
-        Returns:
-            bool: True if currently recording, False otherwise
-        """
-        return self._recording
 
     def get_latest_data(self) -> NCData | None:
         """Get the latest data from the stream.
@@ -76,22 +56,36 @@ class DataStream(ABC):
         """
         return self._latest_data
 
-    def _enforce_monotonic_timestamp(self, timestamp: float) -> None:
+    def _enforce_monotonic_timestamp(
+        self, timestamp: float, recording_epoch: int | None
+    ) -> None:
         """Reject a timestamp that does not strictly increase within a recording.
 
-        Tracked per stream and only while recording; the previous value is
-        cleared when a recording starts (see :meth:`start_recording`) so each
-        recording is an independent, strictly increasing timeline. A no-op when
-        the stream is not recording.
+        ``recording_epoch`` identifies the recording the daemon has open for
+        this stream's source, or is ``None`` for none. The daemon owns that —
+        the stream cannot see a recording start, least of all one begun from the
+        web — so the epoch is what tells this stream where one recording's
+        timeline ends and the next begins. Crossing into a new one clears the
+        previous timestamp, because a recording may legitimately start below
+        where the last one ended: an importer replaying episodes newest-first
+        does exactly that.
+
+        A no-op outside a recording. Nothing logged there reaches a trace, so
+        there is no timeline to keep, and a producer free-running between
+        recordings must not be failed for it.
 
         Args:
             timestamp: Capture timestamp, in seconds, of the sample being logged.
+            recording_epoch: Identity of the source's open recording, or ``None``.
 
         Raises:
             ValueError: If ``timestamp`` is not strictly greater than the last
                 timestamp logged to this stream during the current recording.
         """
-        if not self._recording:
+        if recording_epoch != self._recording_epoch:
+            self._recording_epoch = recording_epoch
+            self._last_logged_timestamp = None
+        if recording_epoch is None:
             return
         last_logged_timestamp = self._last_logged_timestamp
         if last_logged_timestamp is not None and timestamp <= last_logged_timestamp:
@@ -121,13 +115,14 @@ class JsonDataStream(DataStream):
         """
         super().__init__(data_type=data_type, stream_name=data_type_name)
 
-    def log(self, data: NCData) -> None:
+    def log(self, data: NCData, recording_epoch: int | None = None) -> None:
         """Log structured data.
 
         Args:
             data: Data object implementing NCData interface
+            recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(data.timestamp)
+        self._enforce_monotonic_timestamp(data.timestamp, recording_epoch)
         self._latest_data = data
 
 
@@ -154,7 +149,9 @@ class JointDataStream(JsonDataStream):
         self._pending_value: float = 0.0
         self._has_pending_latest = False
 
-    def record_scalar(self, timestamp: float, value: float) -> None:
+    def record_scalar(
+        self, timestamp: float, value: float, recording_epoch: int | None = None
+    ) -> None:
         """Stash the latest scalar sample without building a ``JointData``.
 
         The model is materialised lazily in :meth:`get_latest_data`. The
@@ -163,15 +160,15 @@ class JointDataStream(JsonDataStream):
         atomically), but it never raises and never returns a partially
         constructed ``JointData``.
         """
-        self._enforce_monotonic_timestamp(timestamp)
+        self._enforce_monotonic_timestamp(timestamp, recording_epoch)
         self._pending_timestamp = timestamp
         self._pending_value = value
         self._has_pending_latest = True
 
-    def log(self, data: NCData) -> None:
+    def log(self, data: NCData, recording_epoch: int | None = None) -> None:
         """Log a materialised sample, superseding any deferred scalar."""
         self._has_pending_latest = False
-        super().log(data=data)
+        super().log(data=data, recording_epoch=recording_epoch)
 
     def get_latest_data(self) -> NCData | None:
         """Return the latest sample, materialising a deferred scalar on demand."""
@@ -195,13 +192,14 @@ class PointCloudDataStream(DataStream):
         """
         super().__init__(data_type=DataType.POINT_CLOUDS, stream_name=data_type_name)
 
-    def log(self, data: PointCloudData) -> None:
+    def log(self, data: PointCloudData, recording_epoch: int | None = None) -> None:
         """Log point cloud data.
 
         Args:
             data: Point cloud data to log
+            recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(data.timestamp)
+        self._enforce_monotonic_timestamp(data.timestamp, recording_epoch)
         self._latest_data = data
 
 
@@ -229,14 +227,20 @@ class VideoDataStream(DataStream):
         self.width = width
         self.height = height
 
-    def log(self, metadata: CameraData, frame: np.ndarray) -> None:
+    def log(
+        self,
+        metadata: CameraData,
+        frame: np.ndarray,
+        recording_epoch: int | None = None,
+    ) -> None:
         """Log video frame data.
 
         Args:
             metadata: Camera metadata including timestamp and calibration
             frame: Video frame as numpy array
+            recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(metadata.timestamp)
+        self._enforce_monotonic_timestamp(metadata.timestamp, recording_epoch)
         metadata.frame = frame
         self._latest_data = metadata
 

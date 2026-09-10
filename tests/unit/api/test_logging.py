@@ -75,7 +75,7 @@ def test_log_with_extrinsics_intrinsics(
     nc.log_depth("depth_camera", depth, extrinsics=extrinsics, intrinsics=intrinsics)
 
 
-def test_logging_reaches_the_daemon_with_no_local_recording_handle(
+def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
     temp_config_dir,
     mock_auth_requests,
     reset_neuracore,
@@ -83,8 +83,8 @@ def test_logging_reaches_the_daemon_with_no_local_recording_handle(
     monkeypatch,
     mocked_org_id,
 ):
-    """Every data type forwards to the daemon even when this process holds no
-    recording handle.
+    """Every data type forwards to the daemon from a process that opened no
+    recording of its own.
 
     A producer is a thin shipper: the daemon decides which recording a datum
     belongs to. A process that never brackets a recording still contributes to
@@ -632,3 +632,68 @@ def test_log_parallel_gripper_target_open_amount_validation(
     # Test invalid name type
     with pytest.raises(ValueError, match="Parallel gripper names must be strings"):
         nc.log_parallel_gripper_target_open_amount(name=123, value=0.5)
+
+
+def test_the_log_path_never_asks_the_daemon(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """Logging must not cost an IPC round trip per frame.
+
+    The log path does need the daemon's recording state — it is what scopes the
+    monotonic-timestamp check to one recording — but it reads a cache the daemon
+    fills off-thread, never the blocking `recording_state` query.
+    """
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    monkeypatch.setattr(recording_context, "_load_native", lambda: MagicMock())
+    monkeypatch.setattr(
+        recording_context,
+        "query_recording_state",
+        MagicMock(side_effect=AssertionError("the log path must not ask the daemon")),
+    )
+
+    nc.log_joint_positions(positions={"vx300s_left/waist": 0.5})
+    nc.log_rgb("front_camera", np.zeros((8, 8, 3), dtype=np.uint8))
+
+
+def test_the_monotonic_check_spans_a_recording_not_a_stream(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    monkeypatch,
+    mocked_org_id,
+):
+    """A timestamp that goes backwards is a producer bug inside one recording
+    and ordinary across a boundary, and only the daemon's recording state tells
+    the two apart — so the log path carries it down to the stream.
+    """
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+    native = MagicMock()
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    native.recording_epoch.return_value = 1_000
+    nc.log_rgb("front_camera", frame, timestamp=5.0)
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        nc.log_rgb("front_camera", frame, timestamp=4.0)
+
+    # The next recording is free to start below where the last one ended.
+    native.recording_epoch.return_value = 2_000
+    nc.log_rgb("front_camera", frame, timestamp=1.0)

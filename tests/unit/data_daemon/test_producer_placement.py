@@ -73,9 +73,7 @@ def _camera_children(session) -> list[list[tuple[str, ...]]]:
 
 def _session(case, **spec_kwargs):
     spec = build_context_specs(case, dataset_name="unit-test-dataset")[0]
-    return make_producer_session(
-        spec, robot=object(), marker_name="marker", **spec_kwargs
-    )
+    return make_producer_session(spec, marker_name="marker", **spec_kwargs)
 
 
 def test_partition_moves_only_the_named_streams() -> None:
@@ -482,7 +480,6 @@ def test_every_trace_starts_late_whatever_the_owner_splits(variant) -> None:
 def test_an_owner_with_no_streams_of_its_own_runs_and_reports_nothing() -> None:
     """The engine is asked for zero threads, which it must not treat as an error."""
     request = ProducerRequest(
-        robot=object(),
         robot_name="robot",
         context_index=0,
         recording_index=0,
