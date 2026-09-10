@@ -101,6 +101,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 
 logger = logging.getLogger(__name__)
 
+RECORDING_DURATION_TOLERANCE_S = 2.0
+
 
 # ---------------------------------------------------------------------------
 # Process assertions
@@ -757,16 +759,21 @@ def _verify_synched_episode_summary(
         if recording_expected is not None
         else None
     )
+    camera_failures: list[str] = []
     for camera_index, camera_name in enumerate(result.camera_names):
-        _assert_synced_camera_codes_are_sane(
-            actual_codes=summary["frame_codes"].get(camera_name),
-            camera_name=camera_name,
-            context_index=result.context_index,
-            recording_index=recording_index,
-            camera_index=camera_index,
-            expected_video_frame_count=result.video_frame_count,
-            observed_codes=observed_codes,
-        )
+        try:
+            _assert_synced_camera_codes_are_sane(
+                actual_codes=summary["frame_codes"].get(camera_name),
+                camera_name=camera_name,
+                context_index=result.context_index,
+                recording_index=recording_index,
+                camera_index=camera_index,
+                expected_video_frame_count=result.video_frame_count,
+                observed_codes=observed_codes,
+            )
+        except AssertionError as exc:
+            camera_failures.append(str(exc))
+    assert not camera_failures, "\n".join(camera_failures)
 
 
 def _verify_recording_structure(
@@ -807,17 +814,18 @@ def _verify_recording_structure(
     # Duration bounds: variable mode allows 0.75–1.25× base; fixed mode uses exact
     # base duration.
     base_duration_s = float(result.duration_sec)
-    clock_tolerance_s = 15.0
     if case.context_duration_mode == DURATION_MODE_VARIABLE:
         min_duration_s = (
-            base_duration_s * DURATION_VARIABLE_MIN_FACTOR - clock_tolerance_s
+            base_duration_s * DURATION_VARIABLE_MIN_FACTOR
+            - RECORDING_DURATION_TOLERANCE_S
         )
         max_duration_s = (
-            base_duration_s * DURATION_VARIABLE_MAX_FACTOR + clock_tolerance_s
+            base_duration_s * DURATION_VARIABLE_MAX_FACTOR
+            + RECORDING_DURATION_TOLERANCE_S
         )
     else:
-        min_duration_s = base_duration_s - clock_tolerance_s
-        max_duration_s = base_duration_s + clock_tolerance_s
+        min_duration_s = base_duration_s - RECORDING_DURATION_TOLERANCE_S
+        max_duration_s = base_duration_s + RECORDING_DURATION_TOLERANCE_S
 
     actual_duration_s = (  # type: ignore[union-attr]
         float(recording.end_time) - float(recording.start_time)
