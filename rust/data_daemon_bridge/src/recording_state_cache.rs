@@ -37,7 +37,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use data_daemon_shared::{LiveRecording, RecordingStateQuery};
+use data_daemon_shared::{LiveRecording, RecordingStateQuery, Source};
 
 use crate::query::query_recording_state;
 
@@ -59,8 +59,6 @@ const REFRESH_REARM: Duration = Duration::from_secs(1);
 /// Bound on a single refresh query. Generous — it runs off the log path, and
 /// giving up early just leaves the entry stale for another interval.
 const REFRESH_TIMEOUT_S: f64 = 0.1;
-
-type Source = (String, i64);
 
 /// State nested `robot_id -> instance` rather than keyed on a
 /// `(String, i64)` tuple. A tuple key cannot be looked up by borrow, so every
