@@ -104,7 +104,8 @@ jobs:
       # --import-mode=importlib keeps the repo root off sys.path. log_cli_format
       # namespaces live log lines by worker process so interleaved context output
       # stays attributable.
-      # TEMPORARY: data-integrity only; drop this commit before merging.
+      # TEMPORARY: the two cases that failed run 34475162962 with 30s of upload
+      # still owed, at their ladder resolutions. Drop this commit before merging.
       run: >-
         pytest -o log_cli=true --log-cli-level=INFO
         -o "log_cli_format=%(levelname)-8s %(processName)-11s %(filename)s:%(lineno)s %(message)s"
@@ -113,7 +114,8 @@ jobs:
         --clean-alluredir
         --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
         --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
-        tests/integration/platform/data_daemon/data_integrity/
+        "tests/integration/platform/data_daemon/data_integrity/test_network.py::test_cloud_data_integrity[ProcessPerCamera-6s-8recs-7joints-2cam-256x256-30hz-flatframes-saturate]"
+        "tests/integration/platform/data_daemon/data_integrity/test_network.py::test_cloud_data_integrity[ProcessPerLimbPerCamera-15s-15recs-7joints-4cam-160x120-30hz-flatframes-saturate-remote-control]"
 
     - name: Generate Allure performance report
       if: always()
