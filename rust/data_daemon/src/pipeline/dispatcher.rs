@@ -187,8 +187,8 @@ impl RecordingState {
         self.0
             .get(&(robot_id.to_string(), robot_instance))
             .map(|announced| LiveRecording {
-                recording_index: announced.opened_index,
-                recording_id: announced.cloud_recording_id.clone(),
+                recording_index: announced.recording_index,
+                recording_id: announced.recording_id.clone(),
                 start_timestamp_ns: Some(announced.start_timestamp_ns),
             })
     }
@@ -203,14 +203,14 @@ impl RecordingState {
 #[derive(Debug, Clone)]
 struct AnnouncedRecording {
     /// The backend's id, when the announcement carried one.
-    cloud_recording_id: Option<String>,
+    recording_id: Option<String>,
     dataset_id: Option<String>,
     /// The window's lower bound on the publish clock.
     open_at_ns: i64,
     /// The recording's own capture-clock start → the row's `start_timestamp_ns`.
     start_timestamp_ns: i64,
     /// The recording this announcement opened, once it has.
-    opened_index: Option<i64>,
+    recording_index: Option<i64>,
 }
 
 /// A recording lifecycle event the *backend* originated, delivered over the
@@ -225,7 +225,7 @@ struct AnnouncedRecording {
 pub enum RecordingCommand {
     /// The backend minted a recording for this source.
     Open {
-        cloud_recording_id: String,
+        recording_id: String,
         robot_id: String,
         robot_instance: i64,
         dataset_id: Option<String>,
@@ -234,7 +234,7 @@ pub enum RecordingCommand {
     },
     /// The named recording ended.
     Close {
-        cloud_recording_id: String,
+        recording_id: String,
         /// When the daemon learned of the stop (Unix nanoseconds). Used as the
         /// recording's `end_time` only when nothing local already stopped it.
         observed_at_ns: i64,
@@ -538,14 +538,14 @@ impl Dispatcher {
                 dataset_id,
                 publish_timestamp_ns,
                 timestamp_ns,
-                cloud_recording_id,
+                recording_id,
                 ..
             } => {
                 let source = (robot_id, robot_instance);
                 self.announce_recording(
                     source.clone(),
                     dataset_id,
-                    cloud_recording_id,
+                    recording_id,
                     publish_timestamp_ns,
                     timestamp_ns,
                 )
@@ -743,7 +743,7 @@ impl Dispatcher {
         &mut self,
         source: Source,
         dataset_id: Option<String>,
-        cloud_recording_id: Option<String>,
+        recording_id: Option<String>,
         publish_timestamp_ns: i64,
         timestamp_ns: i64,
     ) {
@@ -753,21 +753,17 @@ impl Dispatcher {
         // this daemon opened itself. An id already on a row belongs to a
         // recording past announcing — keep the id, drop the echo. Holding the
         // id is what lets a stop from the web name this recording later.
-        if let Some(cloud_recording_id) = cloud_recording_id.as_deref() {
-            match self
-                .store
-                .recording_index_for_cloud_id(cloud_recording_id)
-                .await
-            {
+        if let Some(recording_id) = recording_id.as_deref() {
+            match self.store.recording_index_for_cloud_id(recording_id).await {
                 Ok(Some(existing_index)) => {
                     if let Some(mut announcement) = self.announced.0.get_mut(&source) {
-                        if announcement.opened_index == Some(existing_index) {
-                            announcement.cloud_recording_id = Some(cloud_recording_id.to_string());
+                        if announcement.recording_index == Some(existing_index) {
+                            announcement.recording_id = Some(recording_id.to_string());
                         }
                     }
                     tracing::debug!(
                         recording_index = existing_index,
-                        cloud_recording_id,
+                        recording_id,
                         robot_id = source.0,
                         "recording already open for this cloud id; ignoring duplicate start"
                     );
@@ -777,7 +773,7 @@ impl Dispatcher {
                 Err(error) => {
                     tracing::warn!(
                         %error,
-                        cloud_recording_id,
+                        recording_id,
                         robot_id = source.0,
                         "failed to check for an existing recording; proceeding"
                     );
@@ -786,11 +782,11 @@ impl Dispatcher {
         }
 
         let announced = AnnouncedRecording {
-            cloud_recording_id,
+            recording_id,
             dataset_id,
             open_at_ns: publish_timestamp_ns,
             start_timestamp_ns: timestamp_ns,
-            opened_index: None,
+            recording_index: None,
         };
         tracing::debug!(robot_id = source.0, "recording announced");
         self.announced.0.insert(source, announced);
@@ -808,7 +804,7 @@ impl Dispatcher {
         let Some(announced) = announced else {
             return;
         };
-        if announced.opened_index.is_some() {
+        if announced.recording_index.is_some() {
             return;
         }
         let mut open_at_ns = announced.open_at_ns.min(publish_ts);
@@ -864,7 +860,7 @@ impl Dispatcher {
         };
         tracing::info!(recording_index, robot_id = source.0, "recording started");
         if let Some(mut announcement) = self.announced.0.get_mut(&source) {
-            announcement.opened_index = Some(recording_index);
+            announcement.recording_index = Some(recording_index);
         }
 
         let entry = self.windows.entry(source).or_default();
@@ -929,24 +925,24 @@ impl Dispatcher {
             }
         }
 
-        match announced.cloud_recording_id {
+        match announced.recording_id {
             None => {
                 if let Some(bus) = self.context.event_bus.as_ref() {
                     bus.publish(DaemonEvent::RecordingStarted { recording_index });
                 }
             }
-            Some(cloud_recording_id) => {
+            Some(recording_id) => {
                 // The backend already created this id — skip the notifier's
                 // POST and wake its waiters directly.
                 if let Err(error) = self
                     .store
-                    .mark_recording_start_notified(recording_index, &cloud_recording_id)
+                    .mark_recording_start_notified(recording_index, &recording_id)
                     .await
                 {
                     tracing::warn!(
                         %error,
                         recording_index,
-                        cloud_recording_id,
+                        recording_id,
                         "failed to persist recording id"
                     );
                 }
@@ -962,7 +958,7 @@ impl Dispatcher {
     async fn handle_recording_command(&mut self, command: RecordingCommand, recv_at: Instant) {
         match command {
             RecordingCommand::Open {
-                cloud_recording_id,
+                recording_id,
                 robot_id,
                 robot_instance,
                 dataset_id,
@@ -971,25 +967,25 @@ impl Dispatcher {
                 self.announce_recording(
                     (robot_id, robot_instance),
                     dataset_id,
-                    Some(cloud_recording_id),
+                    Some(recording_id),
                     start_timestamp_ns,
                     start_timestamp_ns,
                 )
                 .await;
             }
             RecordingCommand::Close {
-                cloud_recording_id,
+                recording_id,
                 observed_at_ns,
             } => {
-                let Some(source) = self.source_recording(&cloud_recording_id).await else {
+                let Some(source) = self.source_recording(&recording_id).await else {
                     tracing::debug!(
-                        cloud_recording_id,
+                        recording_id,
                         "notification names no recording open here; ignoring"
                     );
                     return;
                 };
                 tracing::info!(
-                    cloud_recording_id,
+                    recording_id,
                     robot_id = source.0,
                     "closing a recording the backend reported stopped"
                 );
@@ -999,17 +995,17 @@ impl Dispatcher {
         }
     }
 
-    /// The source whose current recording is `cloud_recording_id`.
+    /// The source whose current recording is `recording_id`.
     ///
     /// `None` when no source has that recording open — including a stop that
     /// trailed its successor's start, which retired the recording already, and
     /// every recording belonging to another host.
-    async fn source_recording(&self, cloud_recording_id: &str) -> Option<Source> {
+    async fn source_recording(&self, recording_id: &str) -> Option<Source> {
         let announced = self
             .announced
             .0
             .iter()
-            .find(|entry| entry.value().cloud_recording_id.as_deref() == Some(cloud_recording_id))
+            .find(|entry| entry.value().recording_id.as_deref() == Some(recording_id))
             .map(|entry| entry.key().clone());
         if let Some(source) = announced {
             return Some(source);
@@ -1019,7 +1015,7 @@ impl Dispatcher {
         // its id — so fall back to the row it was written to.
         let recording_index = self
             .store
-            .recording_index_for_cloud_id(cloud_recording_id)
+            .recording_index_for_cloud_id(recording_id)
             .await
             .ok()
             .flatten()?;
@@ -1969,7 +1965,7 @@ mod tests {
             dataset_name: None,
             publish_timestamp_ns,
             timestamp_ns: publish_timestamp_ns,
-            cloud_recording_id: None,
+            recording_id: None,
         }
     }
 
@@ -2919,9 +2915,9 @@ mod tests {
     }
 
     /// The backend announcing a recording, as the notification watcher relays it.
-    fn announced(robot: &str, cloud_recording_id: &str, start_ns: i64) -> RecordingCommand {
+    fn announced(robot: &str, recording_id: &str, start_ns: i64) -> RecordingCommand {
         RecordingCommand::Open {
-            cloud_recording_id: cloud_recording_id.into(),
+            recording_id: recording_id.into(),
             robot_id: robot.into(),
             robot_instance: 0,
             dataset_id: None,
@@ -3069,7 +3065,7 @@ mod tests {
         dispatcher
             .handle_recording_command(
                 RecordingCommand::Close {
-                    cloud_recording_id: "rec-a".into(),
+                    recording_id: "rec-a".into(),
                     observed_at_ns: 150,
                 },
                 now,

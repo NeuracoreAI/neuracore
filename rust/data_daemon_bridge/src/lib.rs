@@ -110,7 +110,7 @@ fn start_recording(
             dataset_name,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
-            cloud_recording_id,
+            recording_id: cloud_recording_id,
         })?;
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
