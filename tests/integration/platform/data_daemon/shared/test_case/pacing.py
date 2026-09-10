@@ -12,6 +12,9 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
+from tests.integration.platform.data_daemon.shared.process_control import (
+    MAX_TIME_TO_LOG_S,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BURST_VIDEO_FRAMES,
     PACING_BURST_VIDEO,
@@ -53,23 +56,41 @@ class StreamPacer(ABC):
             stop.
         """
 
+    def observe(self, emit_s: float) -> None:
+        """Report how long the last frame's ``nc.log_*`` calls took.
 
-@dataclass(frozen=True, slots=True)
+        Ignored by a pacer that holds to a schedule of its own.
+        """
+
+
+@dataclass(slots=True)
 class Unpaced(StreamPacer):
-    """Offers each frame as soon as the last one returned, so the daemon's own
-    back-pressure is the only thing holding the stream back."""
+    """Offers each frame as soon as the last one returned, yielding only while
+    the SDK is stalled, so the daemon's own back-pressure is what holds the
+    stream back.
+
+    A stall is a ``nc.log_*`` call that took :data:`MAX_TIME_TO_LOG_S` or more;
+    the gap that follows is as long as that stall, and clears on the first call
+    that returns promptly. A stream that answers a slowing daemon by queueing
+    harder only moves the backlog into the spool.
+    """
 
     fps: int
+    _stalled_for_s: float = 0.0
 
     def release_offset_s(self, frame_index: int) -> float:
         """The nominal schedule position, used for ordering and never waited on."""
         return frame_index / self.fps
 
+    def observe(self, emit_s: float) -> None:
+        """Hold the last stall, or clear it once a call returns promptly."""
+        self._stalled_for_s = emit_s if emit_s >= MAX_TIME_TO_LOG_S else 0.0
+
     def wait_until_due(
         self, started_at: float, frame_index: int, stop_event: threading.Event
     ) -> bool:
-        """Never waits."""
-        return False
+        """Wait out a gap as long as the last stall; waits at all only after one."""
+        return self._stalled_for_s > 0.0 and stop_event.wait(self._stalled_for_s)
 
 
 @dataclass(frozen=True, slots=True)

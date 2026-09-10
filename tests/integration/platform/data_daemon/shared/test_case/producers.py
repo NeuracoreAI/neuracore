@@ -172,20 +172,26 @@ def _emit_and_record(
     timestamp: float,
     request: ProducerRequest,
     report: FrameReport,
-) -> None:
-    """Log one frame, recording everything the test can observe about the call."""
+) -> float:
+    """Log one frame, recording everything the test can observe about the call.
+
+    Returns:
+        Seconds the frame's logging calls took, which a pacer may pace on.
+    """
     emitted_at = time.time()
     deadline_breaches = emitter.emit(frame_index, timestamp)
+    completed_at = time.time()
     report.record(
         emitter,
         EmittedFrame(
             timestamp=timestamp,
             frame_index=frame_index,
             emitted_at=emitted_at,
-            completed_at=time.time(),
+            completed_at=completed_at,
             deadline_breaches=deadline_breaches,
         ),
     )
+    return completed_at - emitted_at
 
 
 def run_synchronous_logging(request: ProducerRequest) -> dict[str, list[EmittedFrame]]:
@@ -219,7 +225,9 @@ def run_synchronous_logging(request: ProducerRequest) -> dict[str, list[EmittedF
         frame_index, timestamp = pending[due]
         if pacers[due].wait_until_due(started_at, frame_index, request.stop_event):
             break
-        _emit_and_record(due, frame_index, timestamp, request, report)
+        pacers[due].observe(
+            _emit_and_record(due, frame_index, timestamp, request, report)
+        )
         next_frame = next(schedules[due], None)
         if next_frame is None:
             del pending[due]
@@ -255,7 +263,9 @@ def run_threaded_logging(request: ProducerRequest) -> dict[str, list[EmittedFram
                 break
             if pacer.wait_until_due(started_at, frame_index, request.stop_event):
                 break
-            _emit_and_record(emitter, frame_index, timestamp, request, report)
+            pacer.observe(
+                _emit_and_record(emitter, frame_index, timestamp, request, report)
+            )
 
     _run_stream_threads(emitters, worker, error_label="Threaded")
 
