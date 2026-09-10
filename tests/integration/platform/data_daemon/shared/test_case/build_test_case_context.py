@@ -19,7 +19,6 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import neuracore as nc
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.process_control import (
     MAX_TIME_TO_LOG_S,
@@ -38,20 +37,9 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATASET_POLL_INTERVAL_S,
-    DEPTH_FRAME_BASE_FRACTION,
-    DEPTH_FRAME_BASE_MODULUS,
-    DEPTH_FRAME_COL_FRACTION,
-    DEPTH_FRAME_FLOOR_FRACTION,
-    DEPTH_FRAME_ROW_FRACTION,
     DURATION_MODE_VARIABLE,
     DURATION_VARIABLE_MAX_FACTOR,
     DURATION_VARIABLE_MIN_FACTOR,
-    FRAME_BYTE_LENGTH,
-    FRAME_COLOR_CHANNELS,
-    FRAME_DEFAULT_FILL_VALUE,
-    FRAME_GRID_SIZE,
-    FRAME_HALF_DIVISOR,
-    FRAME_MAX_COLOR_VALUE,
     MAX_RECORDING_DURATION_S,
     MAX_TIME_TO_START_S,
     MODE_STAGGERED,
@@ -62,6 +50,13 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
     DepthMode,
     random_phase_jitter_window,
+)
+from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
+    encode_depth_frame,
+    frame_code_base,
+    make_camera_feed,
+    preallocate_depth_buffer,
+    prewarm_frame_bank,
 )
 
 logger = logging.getLogger(__name__)
@@ -76,190 +71,6 @@ VIDEO_STREAM = 1
 # Producer pacing for the performance suites
 LOG_LOOP_FREQUENCY_HZ = 120
 LOG_LOOP_INTERVAL_S = 1.0 / LOG_LOOP_FREQUENCY_HZ
-
-
-def encode_frame_number(
-    frame_num: int, width: int, height: int, out: np.ndarray | None = None
-) -> np.ndarray:
-    """Encode a frame number into the pixel data of a synthetic video frame.
-
-    The 16-byte big-endian representation of ``frame_num`` is written into the
-    top-left 4x4 grid of the image. For each pixel at ``(row, col)`` in that
-    grid the byte value is mapped to the RGB channels as follows:
-
-    - Red channel = ``byte_value``
-    - Green channel = ``FRAME_MAX_COLOR_VALUE - byte_value``
-    - Blue channel = ``byte_value // FRAME_HALF_DIVISOR``
-
-    The remaining pixels are filled with :data:`FRAME_DEFAULT_FILL_VALUE`.
-
-    Args:
-        frame_num: The frame number to embed. Must fit in 16 bytes (i.e.
-            less than ``2 ** 128``).
-        width: Frame width in pixels.
-        height: Frame height in pixels.
-        out: If given, write into this preallocated ``(height, width, 3)``
-            ``uint8`` array instead of allocating a new one, and skip the
-            fill (every grid cell is always overwritten below, so a buffer
-            filled once and reused is never left with stale pixels). Callers
-            that pass ``out`` must never retain the returned array past the
-            point where its contents may next be overwritten.
-
-    Returns:
-        A NumPy array with shape ``(height, width, 3)`` and dtype ``uint8``.
-    """
-    if out is None:
-        img = np.zeros((height, width, FRAME_COLOR_CHANNELS), dtype=np.uint8)
-        img.fill(FRAME_DEFAULT_FILL_VALUE)
-    else:
-        img = out
-
-    frame_bytes = frame_num.to_bytes(FRAME_BYTE_LENGTH, byteorder="big")
-
-    for row in range(FRAME_GRID_SIZE):
-        for col in range(FRAME_GRID_SIZE):
-            idx = row * FRAME_GRID_SIZE + col
-            if idx < len(frame_bytes):
-                pixel_value = frame_bytes[idx]
-                img[row, col, 0] = pixel_value
-                img[row, col, 1] = FRAME_MAX_COLOR_VALUE - pixel_value
-                img[row, col, 2] = pixel_value // FRAME_HALF_DIVISOR
-
-    return img
-
-
-def preallocate_frame_buffer(
-    should_allocate: bool, image_width: int | None, image_height: int | None
-) -> np.ndarray | None:
-    """Preallocate and fill a reusable frame buffer, or return ``None``.
-
-    Callers that log video frames reuse a single buffer across iterations
-    (via :func:`encode_frame_number`'s ``out`` param) instead of allocating a
-    new one per frame, for a reduced memory footprint.
-
-    Args:
-        should_allocate: Whether this caller needs a buffer at all (e.g. the
-            recording has cameras, or this thread's role is "rgb").
-        image_width: Frame width in pixels, or ``None`` if not video.
-        image_height: Frame height in pixels, or ``None`` if not video.
-
-    Returns:
-        A preallocated, pre-filled ``(image_height, image_width, 3)``
-        ``uint8`` array, or ``None`` if ``should_allocate`` is ``False`` or
-        either dimension is ``None``.
-    """
-    if not should_allocate or image_width is None or image_height is None:
-        return None
-    frame_buffer = np.zeros(
-        (image_height, image_width, FRAME_COLOR_CHANNELS), dtype=np.uint8
-    )
-    frame_buffer.fill(FRAME_DEFAULT_FILL_VALUE)
-    encode_frame_number(0, image_width, image_height, out=frame_buffer)
-    return frame_buffer
-
-
-def encode_depth_frame(
-    frame_num: int,
-    width: int,
-    height: int,
-    mode: DepthMode,
-    out: np.ndarray | None = None,
-) -> np.ndarray:
-    """Build a deterministic, non-zero, spatially non-uniform depth frame.
-
-    The value at ``(row, col)`` is::
-
-        floor + base(frame_num) + row_gradient(row) + col_gradient(col)
-
-    where each term is a distinct fraction of ``MAX_DEPTH`` (see module
-    docs on :data:`~.constants.DEPTH_FRAME_BASE_FRACTION` and friends):
-
-    - ``floor`` — a small constant so no pixel is ever exactly zero (a
-      round-trip check against an all-zero frame would trivially pass for
-      the wrong reason).
-    - ``base(frame_num)`` — a pseudo-random-looking but deterministic
-      per-frame offset, keyed off the same composite ``frame_num`` the RGB
-      producer already derives from ``(context_index, recording_index,
-      camera_index, frame_index)`` — so distinct frames/cameras/recordings
-      never collide on the same pattern.
-    - ``row_gradient``/``col_gradient`` — linear ramps with *different*
-      amplitudes, so a width/height mix-up or an accidental transpose
-      shifts the decoded pattern into a detectably wrong shape rather than
-      leaving it looking correct.
-
-    The sum of all terms never exceeds ``0.85 * MAX_DEPTH``, so the pattern
-    never saturates at the encoding's clip boundary — saturation would flatten
-    the very differences this pattern exists to preserve.
-
-    Args:
-        frame_num: Composite per-frame identity (see above). Only
-            ``frame_num % DEPTH_FRAME_BASE_MODULUS`` affects the output.
-        width: Frame width in pixels.
-        height: Frame height in pixels.
-        mode: ``"float16"`` or ``"float32"`` — the array is cast to this
-            dtype before being returned, matching what ``nc.log_depth()``
-            actually transmits (the cast is the ground truth a round-trip
-            check must compare against, not the pre-cast float pattern).
-        out: If given, write into this preallocated ``(height, width)``
-            array instead of allocating a new one. Must already have the
-            dtype matching ``mode``. Callers that pass ``out`` must never
-            retain the returned array past the point where its contents may
-            next be overwritten.
-
-    Returns:
-        A NumPy array with shape ``(height, width)`` and dtype ``float16``
-        or ``float32`` per ``mode``.
-    """
-    dtype = np.float16 if mode == "float16" else np.float32
-    base = (
-        (frame_num % DEPTH_FRAME_BASE_MODULUS)
-        / DEPTH_FRAME_BASE_MODULUS
-        * (MAX_DEPTH * DEPTH_FRAME_BASE_FRACTION)
-    )
-    row_gradient = (np.arange(height, dtype=np.float32) / max(height - 1, 1)) * (
-        MAX_DEPTH * DEPTH_FRAME_ROW_FRACTION
-    )
-    col_gradient = (np.arange(width, dtype=np.float32) / max(width - 1, 1)) * (
-        MAX_DEPTH * DEPTH_FRAME_COL_FRACTION
-    )
-    floor = MAX_DEPTH * DEPTH_FRAME_FLOOR_FRACTION
-
-    pattern = floor + base + row_gradient[:, None] + col_gradient[None, :]
-
-    if out is None:
-        return pattern.astype(dtype)
-    out[:] = pattern.astype(dtype)
-    return out
-
-
-def preallocate_depth_buffer(
-    should_allocate: bool,
-    image_width: int | None,
-    image_height: int | None,
-    mode: DepthMode,
-) -> np.ndarray | None:
-    """Preallocate a reusable depth frame buffer, or return ``None``.
-
-    Mirrors :func:`preallocate_frame_buffer` for depth cameras: callers reuse
-    a single buffer across iterations (via :func:`encode_depth_frame`'s
-    ``out`` param) instead of allocating a new array per frame.
-
-    Args:
-        should_allocate: Whether this caller needs a buffer at all (e.g. the
-            recording has depth cameras, or this thread's role is "depth").
-        image_width: Frame width in pixels, or ``None`` if not depth.
-        image_height: Frame height in pixels, or ``None`` if not depth.
-        mode: ``"float16"`` or ``"float32"`` — determines the buffer's dtype.
-
-    Returns:
-        A preallocated ``(image_height, image_width)`` array of the dtype
-        matching ``mode``, or ``None`` if ``should_allocate`` is ``False`` or
-        either dimension is ``None``.
-    """
-    if not should_allocate or image_width is None or image_height is None:
-        return None
-    dtype = np.float16 if mode == "float16" else np.float32
-    return np.empty((image_height, image_width), dtype=dtype)
 
 
 @dataclass(frozen=True, slots=True)
@@ -306,6 +117,7 @@ class ContextCaseSpec:
     video_fps: int
     wait: bool
     random_phase: bool
+    video_detail: str
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -476,6 +288,7 @@ def build_context_specs(
                     video_fps=case.video_fps,
                     wait=case.wait,
                     random_phase=case.random_phase,
+                    video_detail=case.video_detail,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),
@@ -573,6 +386,7 @@ def log_synchronous_frames(
     joint_fps: int,
     marker_name: str,
     context_index: int,
+    video_detail: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> None:
@@ -586,8 +400,8 @@ def log_synchronous_frames(
     RGB video timestamp sequence and are logged alongside the RGB cameras at
     each video timestamp.
     """
-    frame_buffer = preallocate_frame_buffer(
-        bool(camera_name_list), image_width, image_height
+    camera_feed = make_camera_feed(
+        bool(camera_name_list), image_width, image_height, video_detail
     )
     depth_buffer = preallocate_depth_buffer(
         bool(depth_camera_name_list), image_width, image_height, depth_mode
@@ -659,14 +473,16 @@ def log_synchronous_frames(
             timestamp = next_video
             for camera_index, camera_name in enumerate(camera_name_list):
                 frame_code = (
-                    (context_index * 1_000_000_000)
-                    + (recording_index * 10_000_000)
-                    + (camera_index * 100_000)
+                    frame_code_base(
+                        context_index=context_index,
+                        recording_ordinal=recording_index,
+                        camera_index=camera_index,
+                    )
                     + video_index
                 )
-                rgb_image = encode_frame_number(
-                    frame_code, image_width, image_height, out=frame_buffer
-                )
+                # video_index, not camera_index: every camera shows the same
+                # instant, distinguished only by its embedded frame code.
+                rgb_image = camera_feed.render(video_index, frame_code)
                 with Timer(
                     MAX_TIME_TO_LOG_S,
                     label="nc.log_rgb",
@@ -683,9 +499,11 @@ def log_synchronous_frames(
                 depth_camera_name_list
             ):
                 frame_code = (
-                    (context_index * 1_000_000_000)
-                    + (recording_index * 10_000_000)
-                    + (depth_camera_index * 100_000)
+                    frame_code_base(
+                        context_index=context_index,
+                        recording_ordinal=recording_index,
+                        camera_index=depth_camera_index,
+                    )
                     + video_index
                 )
                 depth_image = encode_depth_frame(
@@ -752,6 +570,7 @@ def run_threaded_logging(
     depth_mode: DepthMode,
     image_width: int | None,
     image_height: int | None,
+    video_detail: str,
     assert_deadline: bool = False,  # only set by performance tests
     log_interval_s: float = 0.0,  # only set by performance tests
 ) -> list[str]:
@@ -783,7 +602,9 @@ def run_threaded_logging(
             is_rgb = role_name == "rgb"
             is_depth = role_name == "depth"
             timestamps = video_timestamps if (is_rgb or is_depth) else joint_timestamps
-            frame_buffer = preallocate_frame_buffer(is_rgb, image_width, image_height)
+            camera_feed = make_camera_feed(
+                is_rgb, image_width, image_height, video_detail
+            )
             depth_buffer = preallocate_depth_buffer(
                 is_depth, image_width, image_height, depth_mode
             )
@@ -795,14 +616,14 @@ def run_threaded_logging(
                         camera_id = str(camera_name)
                         camera_index = camera_name_list.index(camera_id) + camera_offset
                         frame_code = (
-                            (context_index * 1_000_000_000)
-                            + (recording_index * 10_000_000)
-                            + (camera_index * 100_000)
+                            frame_code_base(
+                                context_index=context_index,
+                                recording_ordinal=recording_index,
+                                camera_index=camera_index,
+                            )
                             + frame_index
                         )
-                        rgb_image = encode_frame_number(
-                            frame_code, image_width, image_height, out=frame_buffer
-                        )
+                        rgb_image = camera_feed.render(frame_index, frame_code)
                         with Timer(
                             MAX_TIME_TO_LOG_S,
                             label="nc.log_rgb",
@@ -825,9 +646,11 @@ def run_threaded_logging(
                             + camera_offset
                         )
                         frame_code = (
-                            (context_index * 1_000_000_000)
-                            + (recording_index * 10_000_000)
-                            + (depth_camera_index * 100_000)
+                            frame_code_base(
+                                context_index=context_index,
+                                recording_ordinal=recording_index,
+                                camera_index=depth_camera_index,
+                            )
                             + frame_index
                         )
                         depth_image = encode_depth_frame(
@@ -982,6 +805,7 @@ def log_frames(
             depth_mode=spec.case.depth_mode,
             image_width=spec.case.image_width,
             image_height=spec.case.image_height,
+            video_detail=spec.case.video_detail,
             assert_deadline=spec.assert_deadline,
             log_interval_s=spec.log_interval_s,
         )
@@ -1000,6 +824,7 @@ def log_frames(
         joint_fps=spec.case.joint_fps,
         marker_name=marker_name,
         context_index=spec.context_index,
+        video_detail=spec.case.video_detail,
         assert_deadline=spec.assert_deadline,
         log_interval_s=spec.log_interval_s,
     )
@@ -1058,6 +883,8 @@ def context_worker(spec: ContextSpec) -> ContextResult:
     joint_name_list = joint_names_for_count(case.joint_count)
     camera_name_list = camera_names(case.video_count)
     depth_camera_name_list = depth_camera_names(case.depth_count)
+    if camera_name_list:
+        prewarm_frame_bank(case.video_detail, case.image_width, case.image_height)
     marker_names: list[str] = []
     recording_ids: list[str] = []
     recording_indexes: list[int] = []

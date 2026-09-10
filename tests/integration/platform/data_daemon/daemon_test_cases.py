@@ -2,6 +2,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestCase,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    DETAIL_FLAT,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
     MODE_STAGGERED,
@@ -29,6 +30,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         # producer modes.
         depth_count=1,
         depth_mode="float32",
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -40,6 +42,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -61,6 +64,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         # can't rely on sync-iteration order lining up with capture order.
         depth_count=1,
         depth_mode="float16",
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -72,6 +76,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         wait=False,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -84,6 +89,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -93,6 +99,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         image_width=64,
         video_codec="h264_medium",
+        video_detail=DETAIL_FLAT,
     ),
 )
 
@@ -124,6 +131,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
+        video_detail=DETAIL_FLAT,
     ),
     # Large number of joints without cameras
     # Tests: high joint dimensionality, memory efficiency, sensor-only workload
@@ -153,6 +161,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_FIXED,
         video_fps=15,
         joint_fps=15,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=300,
@@ -166,6 +175,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         random_phase=True,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -177,6 +187,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_fps=250,  # previously 1000 but flaky due to sync
         producer_channels=PRODUCER_PER_THREAD,
         wait=False,
+        video_detail=DETAIL_FLAT,
     ),
 )
 
@@ -218,6 +229,7 @@ NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=20,
@@ -232,6 +244,7 @@ NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         wait=True,
+        video_detail=DETAIL_FLAT,
     ),
     # Large number of joints without cameras
     # Tests: high joint dimensionality, memory efficiency, sensor-only workload
@@ -269,6 +282,7 @@ NETWORK_PERFORMANCE_CASES = (
         context_duration_mode=DURATION_MODE_FIXED,
         video_fps=15,
         joint_fps=15,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=300,
@@ -282,6 +296,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         wait=True,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=300,
@@ -295,6 +310,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=15,
         joint_fps=15,
         random_phase=True,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=300,
@@ -309,6 +325,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=15,
         random_phase=True,
         wait=True,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -319,6 +336,7 @@ NETWORK_PERFORMANCE_CASES = (
         video_fps=120,
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -330,6 +348,7 @@ NETWORK_PERFORMANCE_CASES = (
         joint_fps=250,
         producer_channels=PRODUCER_PER_THREAD,
         wait=True,
+        video_detail=DETAIL_FLAT,
     ),
     DataDaemonTestCase(
         duration_sec=10,
@@ -342,5 +361,6 @@ NETWORK_PERFORMANCE_CASES = (
         producer_channels=PRODUCER_PER_THREAD,
         random_phase=True,
         wait=False,
+        video_detail=DETAIL_FLAT,
     ),
 )
