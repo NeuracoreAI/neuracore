@@ -12,8 +12,8 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
+    latching_upload_observer,
     resolve_cloud_recording_ids,
-    wait_for_upload_complete_in_db,
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
@@ -44,23 +44,6 @@ _CASES = DataDaemonTestBatch(
     storage_state_action=STORAGE_STATE_DELETE,
     stop_method=STOP_METHOD_CLI,
 ).as_cases()
-
-
-def _assert_online_verification_invariants(
-    results: list[ContextResult],
-    *,
-    timeout_seconds: float = 30.0,
-) -> None:
-    """Block until every recording in *results* has reached ``upload_complete``
-    in the platform DB.  Must be called before cloud frame verification so
-    that downloaded data reflects the fully-committed upload state.
-
-    Upload completion is tracked in the daemon DB by the local
-    ``recording_index`` correlation key.
-    """
-    for result in results:
-        for recording_index in result.recording_indexes:
-            wait_for_upload_complete_in_db(recording_index, timeout_s=timeout_seconds)
 
 
 # ---------------------------------------------------------------------------
@@ -109,9 +92,15 @@ def test_cloud_data_integrity(
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()
-                results = run_case_contexts(case, specs=specs)
-                _assert_online_verification_invariants(results)
-                results = resolve_cloud_recording_ids(results)
+                with latching_upload_observer() as observed:
+                    results = run_case_contexts(case, specs=specs)
+                    recording_indexes = [
+                        recording_index
+                        for result in results
+                        for recording_index in result.recording_indexes
+                    ]
+                    observed.wait_for_all_complete(recording_indexes, timeout_s=30.0)
+                results = resolve_cloud_recording_ids(results, observed=observed)
                 verify_cloud_results(results=results, case=case)
 
         finally:
