@@ -18,7 +18,6 @@ from neuracore.core.streaming.p2p.provider.global_live_data_enabled import (
 from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
-from neuracore.core.streaming.recording_state_manager import get_recording_state_manager
 from neuracore.core.utils import backend_utils
 
 from ..core.auth import get_auth
@@ -180,8 +179,6 @@ def connect_robot(
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
-    get_recording_state_manager().register_connected_robot(robot.id)
-    robot._register_remote_stop_handler()
     return robot
 
 
@@ -338,16 +335,12 @@ def stop_recording(
             "Your recording may have been stopped by another node."
         )
         return
-    recording_id = robot.get_current_recording_id()
-    if not recording_id:
-        raise ValueError("Recording_id is None, no current recording")
-
     if wait_timeout_s < 0:
         raise ValueError("wait_timeout_s must be non-negative")
 
     wait_deadline = time.monotonic() + wait_timeout_s if wait else None
     cloud_recording_id = robot.get_cloud_recording_id() if wait else None
-    robot.stop_recording(recording_id, timestamp=timestamp)
+    robot.stop_recording(timestamp=timestamp)
     if not wait or not cloud_recording_id:
         return
     recording_id = cloud_recording_id
@@ -438,7 +431,4 @@ def cancel_recording(
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
         return
-    recording_id = robot.get_current_recording_id()
-    if not recording_id:
-        return
-    robot.cancel_recording(recording_id, timestamp=timestamp)
+    robot.cancel_recording(timestamp=timestamp)
