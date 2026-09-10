@@ -247,7 +247,6 @@ def test_recording_manager_tears_down_owned_state(nc_loop) -> None:
 
     key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
     manager.recording_robot_instances[key] = TrackedRecording("recording-1", 1.0)
-    manager.active_dataset_ids[key] = "dataset-1"
     manager._drain_callbacks[key] = MagicMock()
     timer = MagicMock()
     manager._recording_timers["recording-1"] = [timer]
@@ -264,7 +263,6 @@ def test_recording_manager_tears_down_owned_state(nc_loop) -> None:
     assert manager.signalling_stream_future.cancelled()
     timer.cancel.assert_called_once_with()
     assert manager.recording_robot_instances == {}
-    assert manager.active_dataset_ids == {}
     assert manager._drain_callbacks == {}
     assert auth.listeners(Auth.LOGOUT_EVENT) == []
 
@@ -297,7 +295,6 @@ def test_recording_manager_keeps_owned_state_when_the_stream_cannot_authenticate
 
     key = RobotInstanceIdentifier(robot_id="robot-1", robot_instance=0)
     manager.recording_robot_instances[key] = TrackedRecording("recording-1", 1.0)
-    manager.active_dataset_ids[key] = "dataset-1"
 
     manager_future: Future[RecordingStateManager] = Future()
     manager_future.set_result(manager)
@@ -308,7 +305,6 @@ def test_recording_manager_keeps_owned_state_when_the_stream_cannot_authenticate
 
         assert manager.get_current_recording_id("robot-1", 0) == "recording-1"
         assert manager.is_recording("robot-1", 0)
-        assert manager.active_dataset_ids[key] == "dataset-1"
         assert enabled.is_enabled()
         assert recording_module._recording_manager is manager_future
 
