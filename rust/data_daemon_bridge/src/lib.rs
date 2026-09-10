@@ -48,16 +48,17 @@ mod publisher;
 mod query;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery};
+use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery, RecordingStateQuery};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::publisher::{
     flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
 };
 use crate::query::{
-    daemon_version as daemon_version_impl, resolve_recording_id,
+    daemon_version as daemon_version_impl, query_recording_state, resolve_recording_id,
     wait_until_ready as wait_until_ready_impl,
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
@@ -529,6 +530,52 @@ fn get_recording_id(
     })
 }
 
+/// Ask the daemon which recording, if any, a source currently has open.
+///
+/// The daemon holds the only subscription to the backend's org-wide
+/// notification stream, so this is how an SDK process learns about a recording
+/// it did not itself start or stop.
+///
+/// Returns `None` when nothing answered within `timeout_s` — "unknown", never
+/// "not recording". An answer is a dict whose `"recording"` is `None` or the
+/// recording's `recording_index` / `recording_id` / `start_timestamp_ns`.
+///
+/// Blocks for up to `timeout_s` with the GIL released; for a polling thread,
+/// not the logging path.
+#[pyfunction]
+#[pyo3(signature = (robot_id, robot_instance, timeout_s))]
+fn recording_state<'py>(
+    py: Python<'py>,
+    robot_id: &str,
+    robot_instance: i64,
+    timeout_s: f64,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    if robot_id.is_empty() {
+        return Err(PyValueError::new_err("robot_id must not be empty"));
+    }
+    let query = RecordingStateQuery {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+    };
+    let request_bytes = query.encode().map_err(ProducerError::from)?;
+    let answer = py.detach(|| query_recording_state(&request_bytes, timeout_s))?;
+    let Some(recording) = answer else {
+        return Ok(None);
+    };
+    let reply = PyDict::new(py);
+    match recording {
+        Some(recording) => {
+            let live = PyDict::new(py);
+            live.set_item("recording_index", recording.recording_index)?;
+            live.set_item("recording_id", recording.recording_id)?;
+            live.set_item("start_timestamp_ns", recording.start_timestamp_ns)?;
+            reply.set_item("recording", live)?;
+        }
+        None => reply.set_item("recording", py.None())?,
+    }
+    Ok(Some(reply))
+}
+
 /// Wait until the Rust daemon answers a side-effect-free IPC health probe.
 #[pyfunction]
 #[pyo3(signature = (timeout_s))]
@@ -573,6 +620,7 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
     module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
+    module.add_function(wrap_pyfunction!(recording_state, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;
     module.add_function(wrap_pyfunction!(daemon_version, module)?)?;
     module.add_function(wrap_pyfunction!(refresh_config, module)?)?;

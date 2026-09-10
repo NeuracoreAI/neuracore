@@ -8,7 +8,8 @@
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
-    HealthReply, HealthRequest, RecordingIdReply, VersionReply, VersionRequest,
+    HealthReply, HealthRequest, LiveRecording, RecordingIdReply, RecordingStateReply, VersionReply,
+    VersionRequest,
 };
 
 use crate::publisher::{now_ns, with_producer, ProducerError, ProducerState};
@@ -19,6 +20,8 @@ const RECORDING_ID_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const RECORDING_ID_RESPONSE_WAIT: Duration = Duration::from_millis(40);
 /// Poll cadence while waiting for a single request's reply.
 const RECORDING_ID_RECEIVE_POLL: Duration = Duration::from_millis(2);
+/// Poll cadence while waiting for one recording-state reply.
+const RECORDING_STATE_RECEIVE_POLL: Duration = Duration::from_millis(2);
 /// Interval between successive health probes to the daemon.
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// How long a single health request waits for the daemon's reply before re-asking.
@@ -210,4 +213,49 @@ fn resolve_recording_id_once(
         }
         std::thread::sleep(RECORDING_ID_RECEIVE_POLL);
     }
+}
+
+/// Ask the daemon which recording, if any, `request_bytes` names a source for.
+///
+/// Single-shot: one request, one bounded wait, because the caller is a poll
+/// loop that re-asks on its own cadence.
+///
+/// The two "no" answers are distinct and must stay so:
+///
+/// * `Ok(None)` — nothing answered; the caller leaves its state alone.
+/// * `Ok(Some(None))` — the daemon answered: no open recording. That is the
+///   edge a producer drains and seals its tail chunks on.
+pub(crate) fn query_recording_state(
+    request_bytes: &[u8],
+    timeout_s: f64,
+) -> Result<Option<Option<LiveRecording>>, ProducerError> {
+    with_producer(|state| {
+        let request = state
+            .recording_state_client
+            .loan_slice_uninit(request_bytes.len())
+            .map_err(|error| ProducerError::Loan(error.to_string()))?;
+        let request = request.write_from_slice(request_bytes);
+        let pending = request
+            .send()
+            .map_err(|error| ProducerError::Send(error.to_string()))?;
+
+        let response_deadline = Instant::now() + bounded_timeout(timeout_s);
+        loop {
+            match pending.receive() {
+                Ok(Some(response)) => {
+                    let reply = RecordingStateReply::decode(response.payload())?;
+                    return Ok(Some(reply.recording));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, "recording-state receive failed; treating as no reply");
+                    return Ok(None);
+                }
+            }
+            if Instant::now() >= response_deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(RECORDING_STATE_RECEIVE_POLL);
+        }
+    })
 }
