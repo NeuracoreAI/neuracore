@@ -113,6 +113,7 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
+ProducerChannels = Literal["synchronous", "old_per_thread", "per_thread"]
 
 # The ``nc.log_joint_*`` calls a joint stream makes per frame.
 JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")

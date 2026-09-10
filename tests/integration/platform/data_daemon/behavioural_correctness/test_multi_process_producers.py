@@ -28,7 +28,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
-    DataDaemonTestCase,
+    Synchronous,
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -210,7 +210,7 @@ def test_three_processes_log_to_one_sse_started_recording() -> None:
     run_id = uuid.uuid4().hex[:10]
     dataset_name = f"multi_producer_dataset_{run_id}"
     robot_name = f"multi_producer_robot_{run_id}"
-    case = DataDaemonTestCase(
+    case = Synchronous(
         duration_sec=1,
         parallel_contexts=_PRODUCER_COUNT,
         joint_count=0,
