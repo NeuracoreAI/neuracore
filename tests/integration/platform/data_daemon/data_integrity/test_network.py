@@ -15,12 +15,12 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     latching_upload_observer,
     resolve_cloud_recording_ids,
 )
+from tests.integration.platform.data_daemon.shared.profiles import scoped_holdback_ms
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
     case_ids,
-    has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_METHOD_CLI,
@@ -74,17 +74,14 @@ def test_cloud_data_integrity(
     - asserts no residual processes, files, sockets, or DB artefacts remain
       (isolation post-condition)
     """
-    if not has_configured_org():
-        pytest.skip(
-            "Recording/playback matrix tests require NEURACORE_ORG_ID"
-            " or a saved current organization."
-        )
-
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
     results: list[ContextResult] = []
 
-    with scoped_storage_state(case, specs):
+    with (
+        scoped_storage_state(case, specs),
+        scoped_holdback_ms(50),
+    ):
         try:
             with online_daemon_running():
                 assert_exactly_one_daemon_pid()

@@ -18,6 +18,7 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_disk_recording_properties,
     assert_video_artifacts,
 )
+from tests.integration.platform.data_daemon.shared.profiles import scoped_holdback_ms
 from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -85,7 +86,10 @@ def test_disk_db_data_integrity(
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name)
-    with scoped_storage_state(case, specs):
+    with (
+        scoped_storage_state(case, specs),
+        scoped_holdback_ms(50),
+    ):
         try:
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()

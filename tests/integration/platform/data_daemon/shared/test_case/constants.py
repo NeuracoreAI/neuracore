@@ -46,10 +46,12 @@ LOG_DELETE = "delete"
 MODE_SEQUENTIAL = "sequential"
 MODE_STAGGERED = "staggered"
 
-# Producer lifetime strategies: synchronous, old_per_thread, per_thread.
-PRODUCER_SYNCHRONOUS = "synchronous"
-PRODUCER_OLD_PER_THREAD = "old_per_thread"
-PRODUCER_PER_THREAD = "per_thread"
+# producer_channels — thread allocation and producer lifetime.
+PRODUCER_SYNCHRONOUS = "synchronous"  # one thread, scoped to one recording
+PRODUCER_OLD_PER_THREAD = "old_per_thread"  # thread per stream, one recording
+PRODUCER_PER_THREAD = "per_thread"  # thread per stream, whole context lifetime
+# per_thread, but some streams run in their own OS process
+PRODUCER_MULTI_PROCESS = "multi_process"
 
 # context_duration_mode
 DURATION_MODE_FIXED = "fixed"
@@ -96,7 +98,12 @@ STORAGE_STATE_ACTIONS = (
 )
 LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_OLD_PER_THREAD, PRODUCER_PER_THREAD)
+PRODUCER_CHANNELS = (
+    PRODUCER_SYNCHRONOUS,
+    PRODUCER_OLD_PER_THREAD,
+    PRODUCER_PER_THREAD,
+    PRODUCER_MULTI_PROCESS,
+)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
@@ -113,10 +120,124 @@ derives from the array's own dtype (`image.dtype.name`)."""
 LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
-ProducerChannels = Literal["synchronous", "old_per_thread", "per_thread"]
+ProducerChannels = Literal[
+    "synchronous", "old_per_thread", "per_thread", "multi_process"
+]
+
+# ---------------------------------------------------------------------------
+# Names: stream kinds, channels, markers and trace keys
+# ---------------------------------------------------------------------------
+#
+# Every name a test can see is present here, so a rename lands in one place and
+# the producers, the assertions and the on-disk lookups cannot drift apart.
+#
+# - Stream kind: what a plan logs, and the token that moves it to a process.
+# - Data type: the DB's name for the trace a kind writes.
+# - Channel: one camera or joint a stream logs under.
+# - Marker: the CUSTOM_1D series a stream writes beside its payload.
+# - Trace key: ``data_type/channel``, the identity a recording is read back by.
+
+# Stream kinds, which are also `StreamPlan.name` values. As a producer
+# placement token a kind names every channel it covers; a camera channel name
+# (below) names that camera alone.
+STREAM_RGB = "rgb"
+STREAM_DEPTH = "depth"
+STREAM_JOINTS = "joints"  # the synchronous producer's bundled joint stream
+STREAM_JOINT_POSITIONS = "joint_positions"
+STREAM_JOINT_VELOCITIES = "joint_velocities"
+STREAM_JOINT_TORQUES = "joint_torques"
 
 # The ``nc.log_joint_*`` calls a joint stream makes per frame.
-JOINT_KINDS = ("joint_positions", "joint_velocities", "joint_torques")
+JOINT_KINDS = (STREAM_JOINT_POSITIONS, STREAM_JOINT_VELOCITIES, STREAM_JOINT_TORQUES)
+
+# Trace data types, and the stream kind each one is logged by. ``STREAM_JOINTS``
+# is absent: it bundles the joint kinds rather than logging a type of its own.
+DATA_TYPE_RGB_IMAGES = "RGB_IMAGES"
+DATA_TYPE_DEPTH_IMAGES = "DEPTH_IMAGES"
+DATA_TYPE_CUSTOM_1D = "CUSTOM_1D"
+DATA_TYPE_BY_STREAM = {
+    STREAM_RGB: DATA_TYPE_RGB_IMAGES,
+    STREAM_DEPTH: DATA_TYPE_DEPTH_IMAGES,
+    STREAM_JOINT_POSITIONS: "JOINT_POSITIONS",
+    STREAM_JOINT_VELOCITIES: "JOINT_VELOCITIES",
+    STREAM_JOINT_TORQUES: "JOINT_TORQUES",
+}
+
+CAMERA_NAME_PREFIX = "camera_"
+DEPTH_CAMERA_NAME_PREFIX = "depth_camera_"
+MARKER_NAME_PREFIX = "marker_"
+
+BASE_JOINT_NAMES = [
+    "vx300s_left/waist",
+    "vx300s_left/shoulder",
+    "vx300s_left/elbow",
+    "vx300s_left/forearm_roll",
+    "vx300s_left/wrist_angle",
+    "vx300s_left/wrist_rotate",
+    "vx300s_left/left_finger",
+    "vx300s_left/right_finger",
+    "vx300s_right/waist",
+    "vx300s_right/shoulder",
+    "vx300s_right/elbow",
+    "vx300s_right/forearm_roll",
+    "vx300s_right/wrist_angle",
+    "vx300s_right/wrist_rotate",
+    "vx300s_right/left_finger",
+    "vx300s_right/right_finger",
+]
+
+
+def camera_name(index: int) -> str:
+    """Return the RGB camera channel name at *index*."""
+    return f"{CAMERA_NAME_PREFIX}{index}"
+
+
+def depth_camera_name(index: int) -> str:
+    """Return the depth camera channel name at *index*."""
+    return f"{DEPTH_CAMERA_NAME_PREFIX}{index}"
+
+
+def camera_names(video_count: int) -> list[str]:
+    """Return a list of RGB camera names for the given count."""
+    return [camera_name(index) for index in range(video_count)]
+
+
+def depth_camera_names(depth_count: int) -> list[str]:
+    """Return a list of depth camera names for the given count.
+
+    Distinct from :func:`camera_names` — depth cameras are independent
+    stream identities (``DEPTH_IMAGES/depth_camera_N`` traces) even though a
+    depth-enabled case reuses the RGB spec's resolution and frame rate.
+    """
+    return [depth_camera_name(index) for index in range(depth_count)]
+
+
+def joint_names_for_count(joint_count: int) -> list[str]:
+    """Return a list of joint names of the requested length."""
+    if joint_count <= len(BASE_JOINT_NAMES):
+        return BASE_JOINT_NAMES[:joint_count]
+    generated_names = list(BASE_JOINT_NAMES)
+    for index in range(len(BASE_JOINT_NAMES), joint_count):
+        generated_names.append(f"synthetic_joint_{index:02d}")
+    return generated_names
+
+
+def marker_name_for(channel_or_kind: str) -> str:
+    """Return the marker series a stream logs alongside *channel_or_kind*."""
+    return f"{MARKER_NAME_PREFIX}{channel_or_kind}"
+
+
+def trace_key_for(data_type: str, name: str) -> str:
+    """Return the ``data_type/name`` key the DB resolves for one channel."""
+    # Deferred: keeps this module free of package imports.
+    from neuracore_types.utils import validate_safe_name
+
+    return f"{data_type}/{validate_safe_name(name)}"
+
+
+CAMERA_0 = camera_name(0)
+CAMERA_1 = camera_name(1)
+DEPTH_CAMERA_0 = depth_camera_name(0)
 
 MAX_TIME_TO_START_S = 20.0
 STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
@@ -131,6 +252,30 @@ PER_THREAD_LOGGING_TAIL_S = 2.0
 
 # RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
 TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
+# How long a producer child gets to exit, and to deliver its report.
+PRODUCER_PROCESS_JOIN_TIMEOUT_S = 30.0
+PRODUCER_PROCESS_REPORT_TIMEOUT_S = 30.0
+
+# Re-check interval, so a child that dies while connecting reports its own
+# traceback rather than a timeout.
+PRODUCER_PROCESS_READY_POLL_S = 0.1
+
+# How long a producer child gets after terminate() before it reads as leaked.
+PRODUCER_PROCESS_TERMINATE_TIMEOUT_S = 5.0
+
+# watch_local_gate_close: poll interval — the width of the bracket it measures
+# (see RecordingControlBounds.stop_settled_at) — and its thread join timeout.
+GATE_CLOSE_POLL_INTERVAL_S = 0.001
+GATE_CLOSE_WATCHER_JOIN_TIMEOUT_S = 5.0
+
+# How far either side of the control calls a condemned frame keeps its reason.
+CONDEMNED_PROVENANCE_MARGIN_S = 2.0
+
+# Leading sync points a non-owning process may be missing, over the interval
+# between the window opening and the daemon announcing it (see
+# `late_starting_trace_keys`).
+LATE_START_SYNC_POINT_TOLERANCE = 12
 
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0

@@ -16,6 +16,7 @@ import math
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass, fields
+from itertools import zip_longest
 from typing import TYPE_CHECKING, ClassVar
 
 if TYPE_CHECKING:
@@ -40,6 +41,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_SEQUENTIAL,
     PACING_BURST_VIDEO,
     PACING_DEADLINE,
+    PRODUCER_MULTI_PROCESS,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -53,30 +55,13 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     StopMethod,
     StorageStateAction,
     VideoDetail,
+    camera_names,
+    depth_camera_names,
 )
 
 logger = logging.getLogger(__name__)
 
 SESSION_RUNS: list[dict[str, object]] = []
-
-BASE_JOINT_NAMES = [
-    "vx300s_left/waist",
-    "vx300s_left/shoulder",
-    "vx300s_left/elbow",
-    "vx300s_left/forearm_roll",
-    "vx300s_left/wrist_angle",
-    "vx300s_left/wrist_rotate",
-    "vx300s_left/left_finger",
-    "vx300s_left/right_finger",
-    "vx300s_right/waist",
-    "vx300s_right/shoulder",
-    "vx300s_right/elbow",
-    "vx300s_right/forearm_roll",
-    "vx300s_right/wrist_angle",
-    "vx300s_right/wrist_rotate",
-    "vx300s_right/left_finger",
-    "vx300s_right/right_finger",
-]
 
 # Parameters that live at batch level and are propagated to each case.
 _BATCH_PARAMS = frozenset({
@@ -97,6 +82,66 @@ def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
             f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0 or "
             "depth_count > 0: it clumps the video streams and there are none"
         )
+    return _unsupported_process_placement(case)
+
+
+def _unsupported_process_placement(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s producer placement cannot run, or None if it can.
+
+    A stream placed twice would paint the same frame codes from two processes,
+    so it is refused rather than silently producing implausible data.
+    """
+    # Imported late to dodge a circular import with ``streams``.
+    from tests.integration.platform.data_daemon.shared.test_case.streams import (
+        case_stream_plans,
+    )
+
+    multi_process = case.producer_channels == PRODUCER_MULTI_PROCESS
+    if case.producer_process_streams and not multi_process:
+        return (
+            "producer_process_streams only applies to "
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r}, "
+            f"not {case.producer_channels!r}"
+        )
+    if not multi_process:
+        return None
+
+    if not case.producer_process_streams:
+        return (
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r} needs "
+            "producer_process_streams to name at least one stream to move: "
+            f"with none it is just {PRODUCER_PER_THREAD!r}"
+        )
+    if case.parallel_contexts != 1:
+        return (
+            f"producer_channels={PRODUCER_MULTI_PROCESS!r} needs "
+            f"parallel_contexts=1, got {case.parallel_contexts}: parallel "
+            "contexts run in pool workers, which cannot start processes"
+        )
+
+    plans = case_stream_plans(case)
+    placeable = {token for plan in plans for token in plan.placement_tokens}
+    for group in case.producer_process_streams:
+        if not group:
+            return "producer_process_streams entries cannot be empty"
+        for name in group:
+            if name not in placeable:
+                return (
+                    f"producer_process_streams names {name!r}, which this case "
+                    f"does not produce — it produces {sorted(placeable)}"
+                )
+
+    groups = [frozenset(group) for group in case.producer_process_streams]
+    for plan in plans:
+        claimants = sum(1 for group in groups if plan.placement_tokens & group)
+        if claimants > 1:
+            named = plan.channel_names[0] if plan.is_video else plan.name
+            return (
+                f"producer_process_streams places {named!r} in more than one "
+                "process; every stream must run in exactly one"
+            )
+    # Moving every stream out is legitimate: the owner then only opens and
+    # closes the window.
     return None
 
 
@@ -118,28 +163,20 @@ class DataDaemonTestCase:
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
-        recording_count: Total number of recordings to produce across *all*
-            parallel contexts. Work is distributed as evenly as possible:
-            each context gets ``recording_count // parallel_contexts`` recordings,
-            and the first ``recording_count % parallel_contexts`` contexts each
-            get one additional recording.
         mode: Timestamp layout across parallel contexts — *not* an execution
-            order.  Every context in a multi-context case runs concurrently in
-            a multiprocessing pool regardless of this value.  ``"sequential"``
-            gives all contexts the same timestamp origin, so their recordings
-            cover the same span; ``"staggered"`` offsets context *i* by
-            ``duration_sec / 2 * i``, so consecutive contexts' spans partly
-            overlap.  Single-context cases always use ``"sequential"``.
-            joint_count: Number of joint channels to log per frame.  Names are
-            drawn from ``BASE_JOINT_NAMES`` and extended with synthetic names
-            when the count exceeds the base list length.
-        CHANNELS: How producer threads are allocated, and how long they live —
-            a class attribute, not a field, so it is chosen by constructing the
-            matching subclass.  This class is :class:`Synchronous`; see
-            :class:`PerThread` and :class:`OldPerThread`.  Producer lifetime
-            belongs on this axis rather than a separate flag because logging
-            across recordings *requires* a thread per stream, so it is not
-            independent of the allocation.
+            order; every context runs concurrently regardless. ``"staggered"``
+            offsets each context so consecutive spans partly
+            overlap. Single-context cases always use ``"sequential"``.
+        CHANNELS: How producer threads are allocated and how long they live — a
+            class attribute, not a field, chosen by constructing the matching
+            subclass (:class:`PerThread`, :class:`OldPerThread`,
+            :class:`SeparateProcessPerCamera`).
+        producer_process_streams: One entry per extra producer process, naming
+            the streams (a kind, or a single camera's channel) that run there;
+            streams not named stay with the recording-owning process. Only
+            :class:`SeparateProcessPerCamera` and its subclasses may set it;
+            left empty they take that class's
+            :meth:`default_process_streams`.
         video_count: Number of RGB camera streams to log per recording.  A
             value of ``0`` disables video entirely.
         image_width: Horizontal resolution of each camera frame in pixels.
@@ -200,7 +237,7 @@ class DataDaemonTestCase:
         depth_count: Number of depth camera streams to log per recording. A
             value of ``0`` disables depth entirely. Depth cameras are
             independent streams from RGB cameras (distinct trace identities,
-            see :func:`depth_camera_names`) but reuse ``image_width``,
+            see :func:`constants.depth_camera_names`) but reuse ``image_width``,
             ``image_height``, ``video_fps``, and the RGB video timestamp
             schedule — depth intentionally adds no separate resolution or
             frame-rate knobs.
@@ -247,12 +284,23 @@ class DataDaemonTestCase:
     depth_mode: DepthMode = "float32"
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_DEADLINE
+    producer_process_streams: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
-        """Reject parameter combinations this case's shape cannot run."""
+        """Fill in the class's default placement, then reject parameter
+        combinations this case's shape cannot run."""
+        if not self.producer_process_streams:
+            object.__setattr__(
+                self, "producer_process_streams", self.default_process_streams()
+            )
         problem = _unsupported_combination(self)
         if problem is not None:
             raise ValueError(problem)
+
+    def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """The placement this case's class picks for its shape; empty keeps every
+        stream in the recording-owning process."""
+        return ()
 
     @property
     def producer_channels(self) -> ProducerChannels:
@@ -330,6 +378,35 @@ class PerThread(DataDaemonTestCase):
 
 
 @dataclass(frozen=True)
+class SeparateProcessPerCamera(PerThread):
+    """:class:`PerThread`, with every camera in an OS process of its own, so
+    ``max(video_count, depth_count)`` decides how many producer children there are.
+
+    A camera here is a *device*: index ``i``'s RGB and depth streams are the two
+    outputs of one RGBD sensor, so they share a process the way one driver reads
+    both. The data model already couples them — a depth camera reuses the RGB
+    resolution, frame rate, and timestamp schedule (see ``depth_count``) — and
+    splitting them would model two sensors that happen to be synchronised.
+    """
+
+    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_MULTI_PROCESS
+
+    def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """One child per camera device, named by channel so no two children share.
+
+        Indexes past the shorter count are a device with only that one output, so
+        an unequal ``video_count``/``depth_count`` still places every stream.
+        """
+        return tuple(
+            tuple(name for name in pair if name is not None)
+            for pair in zip_longest(
+                camera_names(self.video_count),
+                depth_camera_names(self.depth_count),
+            )
+        )
+
+
+@dataclass(frozen=True)
 class DataDaemonTestBatch:
     """A named collection of test cases sharing common infrastructure parameters.
 
@@ -399,6 +476,18 @@ class DataDaemonTestBatch:
 # ---------------------------------------------------------------------------
 
 
+def _placement_id(case: DataDaemonTestCase) -> str:
+    """Name which streams *case* moved out, or "" when it took its class's default."""
+    if case.producer_process_streams == case.default_process_streams():
+        return ""
+    moved = "-".join(
+        name.replace("_", "")
+        for group in case.producer_process_streams
+        for name in group
+    )
+    return f"{len(case.producer_process_streams)}proc-{moved}"
+
+
 def case_id(case: DataDaemonTestCase) -> str:
     """Generate a short human-readable ID for a test case.
 
@@ -431,7 +520,9 @@ def case_id(case: DataDaemonTestCase) -> str:
     if case.has_depth:
         parts.append(f"{case.depth_count}depth")
         parts.append(case.depth_mode)
-    if case.producer_pacing != DataDaemonTestCase.producer_pacing:
+    if placement := _placement_id(case):
+        parts.append(placement)
+    if case.producer_pacing != default.producer_pacing:
         parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
@@ -476,31 +567,6 @@ def has_configured_org() -> bool:
         return False
 
 
-def joint_names_for_count(joint_count: int) -> list[str]:
-    """Return a list of joint names of the requested length."""
-    if joint_count <= len(BASE_JOINT_NAMES):
-        return BASE_JOINT_NAMES[:joint_count]
-    generated_names = list(BASE_JOINT_NAMES)
-    for index in range(len(BASE_JOINT_NAMES), joint_count):
-        generated_names.append(f"synthetic_joint_{index:02d}")
-    return generated_names
-
-
-def camera_names(video_count: int) -> list[str]:
-    """Return a list of RGB camera names for the given count."""
-    return [f"camera_{index}" for index in range(video_count)]
-
-
-def depth_camera_names(depth_count: int) -> list[str]:
-    """Return a list of depth camera names for the given count.
-
-    Distinct from :func:`camera_names` — depth cameras are independent
-    stream identities (``DEPTH_IMAGES/depth_camera_N`` traces) even though a
-    depth-enabled case reuses the RGB spec's resolution and frame rate.
-    """
-    return [f"depth_camera_{index}" for index in range(depth_count)]
-
-
 def generate_joint_values(
     frame_index: int,
     fps: int,
@@ -522,8 +588,8 @@ def case_timeout_seconds(case: DataDaemonTestCase) -> float:
         and case.image_width is not None
         and case.image_height is not None
     ):
-        camera_count = case.video_count + case.depth_count
-        image_pixels = camera_count * case.image_width * case.image_height
+        image_stream_count = case.video_count + case.depth_count
+        image_pixels = image_stream_count * case.image_width * case.image_height
     workload_units = (
         case.recording_count
         * case.duration_sec
