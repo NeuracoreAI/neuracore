@@ -101,7 +101,7 @@ def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
     native = MagicMock()
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     robot = _get_robot(None, 0)
-    monkeypatch.setattr(robot, "get_current_recording_id", lambda: None)
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: None)
 
     nc.log_joint_positions(positions={"vx300s_left/waist": 0.5})
     nc.log_rgb("front_camera", np.zeros((8, 8, 3), dtype=np.uint8))
@@ -147,7 +147,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
     native = MagicMock()
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     robot = _get_robot(None, 0)
-    monkeypatch.setattr(robot, "get_current_recording_id", lambda: "rec-1")
+    monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "rec-1")
 
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
     nc.log_rgb("front_camera", rgb_uint8)
@@ -542,7 +542,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
     monkeypatch.setattr(recording_context, "_load_native", lambda: native)
     monkeypatch.setattr(
         robot,
-        "get_current_recording_id",
+        "get_cloud_recording_id",
         lambda: "cloud-recording-id-from-sse",
     )
 
@@ -645,8 +645,9 @@ def test_the_log_path_never_asks_the_daemon(
     """Logging must not cost an IPC round trip per frame.
 
     The log path does need the daemon's recording state — it is what scopes the
-    monotonic-timestamp check to one recording — but it reads a cache the daemon
-    fills off-thread, never the blocking `recording_state` query.
+    monotonic-timestamp check to one recording — but it reads it through
+    `recording_epoch`, which only ever touches a cache the daemon fills
+    off-thread.
     """
     nc.login("test_api_key")
     mock_auth_requests.post(

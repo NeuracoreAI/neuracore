@@ -294,22 +294,6 @@ pub trait StateStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
-    /// Resolve the cloud `recording_id` for the recording identified by
-    /// `(robot_id, robot_instance, start_timestamp_ns)`.
-    ///
-    /// Backs the `queries` IPC service: the SDK asks the daemon for the id
-    /// instead of reading this DB directly. Matches `start_timestamp_ns`
-    /// exactly (the producer's capture marker, stored verbatim) and excludes
-    /// cancelled recordings, mirroring the previous client-side query. Returns
-    /// `None` when no such recording exists or its cloud id has not been minted
-    /// yet.
-    async fn resolve_recording_id_for_marker(
-        &self,
-        robot_id: &str,
-        robot_instance: i64,
-        start_timestamp_ns: i64,
-    ) -> Result<Option<String>, StateStoreError>;
-
     /// Atomically transition `progress_reported` for `recording_id`.
     ///
     /// `expected` is the status the caller observed before the request — if
@@ -1316,28 +1300,6 @@ impl StateStore for SqliteStateStore {
         }
         tx.commit().await?;
         Ok(claimed)
-    }
-
-    async fn resolve_recording_id_for_marker(
-        &self,
-        robot_id: &str,
-        robot_instance: i64,
-        start_timestamp_ns: i64,
-    ) -> Result<Option<String>, StateStoreError> {
-        let recording_id = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT recording_id FROM recordings \
-              WHERE robot_id = ?1 AND robot_instance = ?2 AND start_timestamp_ns = ?3 \
-                AND cancelled_at IS NULL \
-           ORDER BY recording_index DESC LIMIT 1",
-        )
-        .bind(robot_id)
-        .bind(robot_instance)
-        .bind(start_timestamp_ns)
-        .fetch_optional(&self.read_pool)
-        .await?;
-        // Outer `Option` = row present; inner = the nullable column. A matching
-        // row whose cloud id has not been minted yet flattens to `None`.
-        Ok(recording_id.flatten())
     }
 
     async fn mark_recording_stop_notified(
