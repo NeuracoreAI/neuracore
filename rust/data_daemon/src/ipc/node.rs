@@ -14,7 +14,8 @@ use data_daemon_shared::service_name::{
     COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
     MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
     MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS,
-    RECORDING_ID_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
+    RECORDING_ID_MAX_PAYLOAD_BYTES, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
+    VERSION_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::server::Server;
@@ -96,6 +97,11 @@ pub struct IpcTransport {
     recording_id_server: Server<ipc::Service, [u8], (), [u8], ()>,
     /// Service handle held alongside the server, as for the commands service.
     _recording_id_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
+    /// Request-response server on `neuracore/data_daemon/recording_state` that
+    /// answers "is this source recording, and as what?".
+    recording_state_server: Server<ipc::Service, [u8], (), [u8], ()>,
+    /// Service handle held alongside the recording-state server.
+    _recording_state_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response server on `neuracore/data_daemon/health` that answers
     /// side-effect-free readiness probes.
     health_server: Server<ipc::Service, [u8], (), [u8], ()>,
@@ -131,6 +137,8 @@ impl IpcTransport {
 
         let (recording_id_service, recording_id_server) =
             open_query_server(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
+        let (recording_state_service, recording_state_server) =
+            open_query_server(&node, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES)?;
         let (health_service, health_server) =
             open_query_server(&node, HEALTH, HEALTH_MAX_PAYLOAD_BYTES)?;
         let (version_service, version_server) =
@@ -142,6 +150,8 @@ impl IpcTransport {
             _commands_service: commands_service,
             recording_id_server,
             _recording_id_service: recording_id_service,
+            recording_state_server,
+            _recording_state_service: recording_state_service,
             health_server,
             _health_service: health_service,
             version_server,
@@ -157,6 +167,11 @@ impl IpcTransport {
     /// Borrow the `recording_ids` request-response server port.
     pub fn recording_id_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
         &self.recording_id_server
+    }
+
+    /// Borrow the `recording_state` request-response server port.
+    pub fn recording_state_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
+        &self.recording_state_server
     }
 
     /// Borrow the `health` request-response server port.

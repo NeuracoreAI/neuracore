@@ -258,6 +258,14 @@ pub mod service_name {
         - VIDEO_CHUNK_HEADER_RESERVE)
         / VIDEO_CHUNK_BYTES_PER_FRAME) as u32;
 
+    /// How long the producer's writer leaves a video chunk open on a stream
+    /// that has stopped receiving frames before sealing it anyway.
+    ///
+    /// Shared because it is the daemon's only handle on when a quiet producer
+    /// has finished: a stopped window owed a flush marker no producer will
+    /// send waits out this bound and settles on the source's silence instead.
+    pub const VIDEO_CHUNK_MAX_OPEN_NS: i64 = 5 * 1_000_000_000;
+
     /// The microsecond clock shared by every stage of the video path: the
     /// producer writes spool NUT chunks with a `1/1_000_000` time base, and
     /// the daemon pins its per-chunk encode outputs to the same clock
@@ -383,6 +391,22 @@ pub mod service_name {
     /// Maximum size of a single `recording_ids` service sample. Both the request and
     /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
     pub const RECORDING_ID_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
+
+    /// Request-response service the SDK uses to read a source's *current*
+    /// recording state.
+    ///
+    /// The daemon is the only party subscribed to the backend's org-wide
+    /// notification stream, so it is the only one that knows a recording
+    /// nothing local bracketed. Distinct from [`RECORDING_IDS`], which resolves
+    /// the cloud id of *one named* recording: this asks which recording, if
+    /// any, is live right now.
+    ///
+    /// See [`crate::RecordingStateQuery`] / [`crate::RecordingStateReply`].
+    pub const RECORDING_STATE: &str = "neuracore/data_daemon/recording_state";
+
+    /// Maximum size of a single `recording_state` service sample. Mirrors
+    /// [`RECORDING_ID_MAX_PAYLOAD_BYTES`].
+    pub const RECORDING_STATE_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
     /// Maximum number of concurrent request-response clients. Mirrors
     /// [`MAX_PUBLISHERS_PER_SERVICE`]: the data bridge parks one client port
@@ -777,6 +801,38 @@ pub struct RecordingIdReply {
     pub recording_id: Option<String>,
 }
 
+/// Request sent over [`service_name::RECORDING_STATE`] asking which recording,
+/// if any, is currently open for a source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStateQuery {
+    pub robot_id: String,
+    pub robot_instance: i64,
+}
+
+/// The recording a source has open, as the daemon sees it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveRecording {
+    /// The daemon's local primary key, once data has opened the recording's
+    /// window. It exists before [`Self::recording_id`] does, so it is what
+    /// tells two consecutive recordings apart. `None` for a recording the
+    /// backend has announced that this host has not yet published for.
+    pub recording_index: Option<i64>,
+    /// The cloud handle, once `/recording/start` has been notified. `None`
+    /// while the recording is still local-only.
+    pub recording_id: Option<String>,
+    /// The recording's capture-clock start (Unix nanoseconds), when known.
+    pub start_timestamp_ns: Option<i64>,
+}
+
+/// Reply to a [`RecordingStateQuery`].
+///
+/// `recording` is `None` when the source has no open recording, however it
+/// came to have none: the caller acts on "recording" versus "not recording".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStateReply {
+    pub recording: Option<LiveRecording>,
+}
+
 /// Side-effect-free readiness probe sent over [`service_name::HEALTH`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthRequest {
@@ -829,6 +885,30 @@ impl RecordingIdReply {
     }
 
     /// Decode from the byte slice carried in a `recording_ids` service response sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl RecordingStateQuery {
+    /// Encode as a postcard byte vector for a `recording_state` request sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `recording_state` request sample.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
+        decode_postcard(bytes)
+    }
+}
+
+impl RecordingStateReply {
+    /// Encode as a postcard byte vector for a `recording_state` response sample.
+    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
+        encode_postcard(self)
+    }
+
+    /// Decode from the byte slice carried in a `recording_state` response sample.
     pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
         decode_postcard(bytes)
     }
