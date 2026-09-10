@@ -762,6 +762,7 @@ def make_producer_session(
         joint_fps=case.joint_fps,
         video_fps=case.video_fps,
         marker_name=marker_name,
+        joint_process_groups=case.joint_process_groups,
     )
     if case.producer_channels == PRODUCER_MULTI_PROCESS:
         local_plans, child_groups = partition_plans(
