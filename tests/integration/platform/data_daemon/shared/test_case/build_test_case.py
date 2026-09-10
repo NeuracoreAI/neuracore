@@ -38,6 +38,8 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
+    PACING_BURST_VIDEO,
+    PACING_DEADLINE,
     PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -46,6 +48,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_EMPTY,
     DepthMode,
     LogAction,
+    ProducerPacing,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -84,6 +87,18 @@ _BATCH_PARAMS = frozenset({
 })
 
 
+def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
+    """Return why *case*'s parameters cannot run together, or None if they can."""
+    if case.producer_pacing == PACING_BURST_VIDEO and not (
+        case.has_video or case.has_depth
+    ):
+        return (
+            f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0 or "
+            "depth_count > 0: it clumps the video streams and there are none"
+        )
+    return None
+
+
 @dataclass(frozen=True)
 class DataDaemonTestCase:
     """A single parametrised test case for the data-daemon integration suite.
@@ -94,12 +109,11 @@ class DataDaemonTestCase:
     ``DataDaemonTestBatch`` that applies shared infrastructure parameters.
 
     Attributes:
-        duration_sec: Simulated capture duration per individual recording, in
-            seconds. All frames are generated at ``fps`` Hz so the total expected
-            frame count is ``fps * duration_sec``. Frames are emitted as quickly
-            as the transport allows rather than waiting for this amount of
-            wall-clock time — ``duration_sec`` sizes the workload, it does not
-            pace it.
+        duration_sec: Capture duration per individual recording, in seconds. All
+            frames are generated at ``fps`` Hz so the total expected frame count
+            is ``fps * duration_sec``. Under the default ``producer_pacing``
+            it is wall-clock time too; a ``"saturate"`` case spends the same
+            frame budget as fast as the transport allows.
         parallel_contexts: Number of recording contexts that run concurrently.
             Each context owns an independent robot connection and cycles through
             its share of the total ``recording_count``.
@@ -174,9 +188,8 @@ class DataDaemonTestCase:
             total expected video frame count as ``video_fps * duration_sec``.
             Ignored when ``video_count`` is ``0``.
         random_phase: Controls *where* the explicitly-supplied timestamps sit,
-            never *when* the producer runs — every case precomputes its full
-            timestamp sequence up front and emits frames as fast as the
-            transport allows.  ``False``
+            never *when* the producer runs — that is ``producer_pacing``'s
+            business, and the two are independent.  ``False``
             (default) puts frames on an exact ``timestamp_start_s +
             frame_index / fps`` grid.  ``True`` offsets each frame by a
             deterministic pseudo-random amount within
@@ -204,6 +217,9 @@ class DataDaemonTestCase:
         video_detail: Pixel content of the synthetic camera frames — realistic
             costs full compression/encode, flat is a cheap solid fill; frame
             identity is embedded either way.
+        producer_pacing: When each stream offers its next frame. Every value
+            works under every producer lifetime; none of them decide what
+            timestamp a frame carries (see ``random_phase``).
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -237,6 +253,13 @@ class DataDaemonTestCase:
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
     video_detail: VideoDetail = DETAIL_REALISTIC
+    producer_pacing: ProducerPacing = PACING_DEADLINE
+
+    def __post_init__(self) -> None:
+        """Reject parameter combinations this case's shape cannot run."""
+        problem = _unsupported_combination(self)
+        if problem is not None:
+            raise ValueError(problem)
 
     @property
     def has_video(self) -> bool:
@@ -310,6 +333,9 @@ class DataDaemonTestBatch:
             leaves each case's own value alone.  Lets a suite declare one
             producer model — e.g. ``"per_thread"`` — across its whole matrix
             instead of restating it on every case.
+        producer_pacing: Workload override applied to every case when set; see
+            ``DataDaemonTestCase.producer_pacing``.  ``None`` (default) leaves
+            each case's own value alone.
     """
 
     cases: tuple[DataDaemonTestCase, ...]
@@ -320,6 +346,7 @@ class DataDaemonTestBatch:
     stop_method: StopMethod = STOP_METHOD_CLI
     skip: bool = False
     producer_channels: str | None = None
+    producer_pacing: ProducerPacing | None = None
 
     def as_cases(self) -> list[DataDaemonTestCase]:
         """Return cases with batch-level infrastructure params applied."""
@@ -335,6 +362,8 @@ class DataDaemonTestBatch:
         # Workload overrides are opt-in; unset = keep case default.
         if self.producer_channels is not None:
             batch_overrides["producer_channels"] = self.producer_channels
+        if self.producer_pacing is not None:
+            batch_overrides["producer_pacing"] = self.producer_pacing
         return [
             DataDaemonTestCase(**{
                 **{
@@ -383,6 +412,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append("old-per-thread")
     elif case.producer_channels == PRODUCER_PER_THREAD:
         parts.append("per-thread")
+    if case.producer_pacing != DataDaemonTestCase.producer_pacing:
+        parts.append(case.producer_pacing)
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:
