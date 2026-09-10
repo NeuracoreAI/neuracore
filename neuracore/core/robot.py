@@ -10,6 +10,7 @@ import io
 import logging
 import os
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 import zipfile
 from collections import defaultdict
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 DaemonRecordingContext = recording_context.RecordingContext
 
 _ROBOTS_LIST_PAGE_SIZE = 30
+_CLOUD_RECORDING_ID_POLL_INTERVAL_S = 0.05
 
 
 @dataclass
@@ -332,22 +334,22 @@ class Robot:
     def is_recording(self) -> bool:
         """Check if the robot is currently recording data.
 
-        Asks the daemon, which owns recording state. It therefore answers the
-        same for a recording started here, in another process on this host, or
-        from the web — a process that started nothing still gets a true answer.
+        Reads the daemon-backed cache, which owns recording state. It therefore
+        answers the same for a recording started here, in another process on
+        this host, or from the web — a process that started nothing still gets a
+        true answer.
 
-        The window closes when the daemon processes the stop, roughly a holdback
-        behind :meth:`stop_recording` returning, so this can read ``True`` for a
-        moment after a local stop. That is the honest answer: the recording is
-        open until the daemon closes it.
+        A recording this process bracketed is exact the moment the call returns.
+        One started elsewhere is seen within a refresh interval (50 ms), which is
+        far inside the propagation the backend itself takes.
 
         Returns:
             True if the robot is actively recording, False otherwise.
 
         Raises:
-            RecordingStateUnavailableError: the daemon did not answer. Silence
-                is not "not recording" — what this process started says nothing
-                about a recording opened elsewhere.
+            RecordingStateUnavailableError: nothing has ever answered for this
+                source. Silence is not "not recording" — what this process
+                started says nothing about a recording opened elsewhere.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
@@ -361,44 +363,40 @@ class Robot:
         Opaque and only worth comparing: it changes when the source crosses a
         recording boundary, whoever opened it, and is ``None`` when none is
         open. The log path uses it to scope the monotonic-timestamp check to one
-        recording, so unlike :meth:`is_recording` it must never block — it reads
-        a cache the bridge keeps, not the daemon.
+        recording, so unlike :meth:`is_recording` it must never block, not even
+        on a source's first read.
         """
         if not self.id:
             return None
         return self._get_daemon_recording_context().recording_epoch()
 
-    def get_current_recording_id(self) -> str | None:
-        """Get the cloud ID of the current active recording session.
+    def get_cloud_recording_id(self, timeout_s: float = 30.0) -> str | None:
+        """Resolve the daemon-owned cloud recording id for the open recording.
+
+        The id is resolvable only while the recording is open: the daemon drops
+        the source's entry when it stops, and this reads that entry.
+
+        Args:
+            timeout_s: Maximum time to wait for the daemon to mint the id. ``0``
+                reads it once without waiting.
 
         Returns:
             The cloud recording id of the open recording, or ``None`` when the
-            robot is not recording *or* the id has not been minted yet — it is
-            assigned asynchronously, and never at all for a recording made
-            offline. Use :meth:`is_recording` to ask whether a recording is
-            open, and :meth:`get_cloud_recording_id` to wait for the id.
+            robot is not recording *or* the id is not minted within
+            ``timeout_s`` — it is assigned asynchronously, and never at all for
+            a recording made offline. Use :meth:`is_recording` to ask whether a
+            recording is open.
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
-        recording = recording_context.query_recording_state(self.id, self.instance)
-        return recording.recording_id if recording is not None else None
-
-    def get_cloud_recording_id(
-        self, timestamp_ns: int | None = None, timeout_s: float = 30.0
-    ) -> str | None:
-        """Resolve the daemon-owned cloud recording id for a recording window.
-
-        The daemon allocates the cloud recording id asynchronously, so this asks
-        the daemon (it may block) for the id of the recording whose window
-        brackets ``timestamp_ns`` for this source (defaulting to the most
-        recently started recording). For non-performance-critical use only
-        (tests, ``stop_recording(wait=True)``).
-        """
-        if not self.id:
-            raise RobotError("Robot not initialized. Call init() first.")
-        return self._get_daemon_recording_context().get_recording_id(
-            timestamp_ns=timestamp_ns, timeout_s=timeout_s
-        )
+        deadline = time.monotonic() + timeout_s
+        while True:
+            recording = recording_context.query_recording_state(self.id, self.instance)
+            if recording is not None and recording.cloud_recording_id is not None:
+                return recording.cloud_recording_id
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(_CLOUD_RECORDING_ID_POLL_INTERVAL_S)
 
     def _package_urdf(self) -> dict:
         """Package URDF file and associated meshes into a ZIP archive.

@@ -377,35 +377,21 @@ pub mod service_name {
     /// the reply are a nonce plus a short version string.
     pub const VERSION_MAX_PAYLOAD_BYTES: usize = 1024;
 
-    /// Request-response service the SDK uses to resolve a recording's
-    /// daemon-owned cloud `recording_id`.
-    ///
-    /// The cloud id is minted asynchronously by the start notifier, so the SDK
-    /// (`nc.start_recording(wait=True)`, tests) asks the daemon for it over this
-    /// service instead of reading the daemon's private SQLite DB directly — the
-    /// daemon answers authoritatively from its own state. A request carries the
-    /// source + the recording's capture marker; the reply carries the id once
-    /// minted (or "not yet"). See [`crate::RecordingIdQuery`] / [`crate::RecordingIdReply`].
-    pub const RECORDING_IDS: &str = "neuracore/data_daemon/recording_ids";
-
-    /// Maximum size of a single `recording_ids` service sample. Both the request and
-    /// the reply are a handful of UUID strings + integers; 4 KiB is generous.
-    pub const RECORDING_ID_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
-
     /// Request-response service the SDK uses to read a source's *current*
     /// recording state.
     ///
     /// The daemon is the only party subscribed to the backend's org-wide
     /// notification stream, so it is the only one that knows a recording
-    /// nothing local bracketed. Distinct from [`RECORDING_IDS`], which resolves
-    /// the cloud id of *one named* recording: this asks which recording, if
-    /// any, is live right now.
+    /// nothing local bracketed. It answers both "is this source recording?" and
+    /// "under what cloud id?", which is why the SDK needs no second service to
+    /// resolve an id.
     ///
     /// See [`crate::RecordingStateQuery`] / [`crate::RecordingStateReply`].
     pub const RECORDING_STATE: &str = "neuracore/data_daemon/recording_state";
 
-    /// Maximum size of a single `recording_state` service sample. Mirrors
-    /// [`RECORDING_ID_MAX_PAYLOAD_BYTES`].
+    /// Maximum size of a single `recording_state` service sample. Both the
+    /// request and the reply are a handful of UUID strings + integers; 4 KiB is
+    /// generous.
     pub const RECORDING_STATE_MAX_PAYLOAD_BYTES: usize = 4 * 1024;
 
     /// Maximum number of concurrent request-response clients. Mirrors
@@ -774,33 +760,6 @@ pub enum EnvelopeCodecError {
     Decode(#[source] postcard::Error),
 }
 
-/// Request sent by the SDK on the [`service_name::RECORDING_IDS`] service to resolve a
-/// recording's daemon-owned cloud `recording_id`.
-///
-/// The recording is identified exactly the way the daemon stored it: the
-/// `(robot_id, robot_instance)` source plus `timestamp_ns` — the producer's
-/// capture marker returned by `start_recording`, persisted verbatim as the
-/// recording row's `start_timestamp_ns`. Matching on the marker (not `<=`)
-/// resolves precisely that recording, never an earlier one for the same source.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordingIdQuery {
-    pub robot_id: String,
-    pub robot_instance: i64,
-    /// The recording's capture marker (Unix nanoseconds).
-    pub timestamp_ns: i64,
-}
-
-/// Reply to a [`RecordingIdQuery`].
-///
-/// `recording_id` is `None` while the start notifier has not yet minted the
-/// cloud id (or no matching, non-cancelled recording exists); the SDK re-asks
-/// until it is `Some` or its own timeout elapses.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RecordingIdReply {
-    /// The daemon-owned cloud recording id, once available.
-    pub recording_id: Option<String>,
-}
-
 /// Request sent over [`service_name::RECORDING_STATE`] asking which recording,
 /// if any, is currently open for a source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -864,30 +823,6 @@ pub struct VersionReply {
     pub nonce: u64,
     /// The neuracore version the answering daemon was built from.
     pub version: String,
-}
-
-impl RecordingIdQuery {
-    /// Encode as a postcard byte vector for a `recording_ids` service request sample.
-    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
-        encode_postcard(self)
-    }
-
-    /// Decode from the byte slice carried in a `recording_ids` service request sample.
-    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
-        decode_postcard(bytes)
-    }
-}
-
-impl RecordingIdReply {
-    /// Encode as a postcard byte vector for a `recording_ids` service response sample.
-    pub fn encode(&self) -> Result<Vec<u8>, EnvelopeCodecError> {
-        encode_postcard(self)
-    }
-
-    /// Decode from the byte slice carried in a `recording_ids` service response sample.
-    pub fn decode(bytes: &[u8]) -> Result<Self, EnvelopeCodecError> {
-        decode_postcard(bytes)
-    }
 }
 
 impl RecordingStateQuery {
