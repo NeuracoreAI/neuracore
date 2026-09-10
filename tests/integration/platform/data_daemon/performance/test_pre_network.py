@@ -24,8 +24,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STORAGE_STATE_DELETE,
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
-    cloud_resource_deleter,
-    cloud_resource_names,
     scoped_storage_state,
 )
 
@@ -54,12 +52,8 @@ def test_disk_db_write_performance(
 
     dataset_name = create_testing_dataset_name(case)
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
-    cloud_names = cloud_resource_names(specs)
     with performance_report(case, dataset_name=dataset_name) as report:
-        with (
-            cloud_resource_deleter(*cloud_names),
-            scoped_storage_state(case),
-        ):
+        with scoped_storage_state(case, specs):
             with offline_daemon_running():
                 assert_exactly_one_daemon_pid()
                 report.capture_results(
