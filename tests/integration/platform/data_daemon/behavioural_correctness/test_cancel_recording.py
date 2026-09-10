@@ -24,14 +24,14 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     DataDaemonTestBatch,
     DataDaemonTestCase,
     Synchronous,
-    camera_names,
     case_ids,
     has_configured_org,
-    joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
     STOP_RECORDING_OVERHEAD_PER_SEC,
+    camera_names,
+    joint_names_for_count,
 )
 from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
     ContextResult,
