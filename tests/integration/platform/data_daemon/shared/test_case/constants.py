@@ -128,6 +128,9 @@ STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
 # Pause after the last stop_recording, so post-stop frames are logged.
 PER_THREAD_LOGGING_TAIL_S = 2.0
 
+# RGB tail may lag stop by up to N frame intervals (prevents silent orphaning).
+TRAILING_RGB_GAP_FRAME_TOLERANCE = 2
+
 BASE_DATASET_READY_TIMEOUT_S = 180.0
 MAX_DATASET_READY_TIMEOUT_S = 3600.0
 DATASET_POLL_INTERVAL_S = 0.25
