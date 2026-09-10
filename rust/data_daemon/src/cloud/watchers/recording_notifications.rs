@@ -296,7 +296,7 @@ fn parse_notification(data: &str) -> Option<RecordingCommand> {
         "START" => {
             let payload: StartPayload = serde_json::from_value(notification.payload).ok()?;
             Some(RecordingCommand::Open {
-                cloud_recording_id: payload.recording_id,
+                recording_id: payload.recording_id,
                 robot_id: payload.robot_id,
                 robot_instance: payload.instance,
                 dataset_id: payload.dataset_ids.into_iter().next(),
@@ -306,7 +306,7 @@ fn parse_notification(data: &str) -> Option<RecordingCommand> {
         "STOP" | "DISCARDED" | "EXPIRED" => {
             let payload: StopPayload = serde_json::from_value(notification.payload).ok()?;
             Some(RecordingCommand::Close {
-                cloud_recording_id: payload.recording_id,
+                recording_id: payload.recording_id,
                 observed_at_ns: wall_clock_ns(),
             })
         }
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(
             command,
             RecordingCommand::Open {
-                cloud_recording_id: "rec-1".into(),
+                recording_id: "rec-1".into(),
                 robot_id: "robot-1".into(),
                 robot_instance: 2,
                 dataset_id: Some("ds-1".into()),
@@ -385,9 +385,7 @@ mod tests {
             ))
             .expect("a close command");
             match command {
-                RecordingCommand::Close {
-                    cloud_recording_id, ..
-                } => assert_eq!(cloud_recording_id, "rec-1"),
+                RecordingCommand::Close { recording_id, .. } => assert_eq!(recording_id, "rec-1"),
                 other => panic!("{kind} produced {other:?}"),
             }
         }
