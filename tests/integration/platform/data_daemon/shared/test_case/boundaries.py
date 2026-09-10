@@ -99,8 +99,9 @@ class RecordingControlBounds:
             because a recording holds a client-generated UUID before the
             backend swaps in its own id.
         stop_settled_at: When the window's upper bound is known to have
-            passed — the producer-side gate closing, not the call's return
-            (which lags behind on an unrelated flush).
+            passed. A local stop stamps that bound itself, so this is a
+            bounded skew after ``stop_called_at``; a remote one is measured,
+            a notification later.
     """
 
     handles: frozenset[str]
@@ -140,11 +141,12 @@ def _classify_boundary_frames(
     clock readings: a frame is **inside** only if its whole ``log_*`` call ran
     between ``start_recording`` returning and ``stop_recording`` being called.
     It is **outside** if the call finished before ``start_recording`` was
-    entered, or if the SDK's gate — a deliberate superset of the window — had
-    already refused it after the stop; a gate *admission* proves nothing, since
-    the gate opens first, so only a refusal is conclusive. Everything else
-    straddled a bracket and is **unknowable**: the daemon's answer is correct
-    either way, so those frames count on neither side.
+    entered, or began after the window's upper bound had certainly passed.
+    Everything else straddled a bracket and is **unknowable**: the daemon's
+    answer is correct either way, so those frames count on neither side.
+
+    Both rules read clocks only, so they hold for a process that never made
+    the control calls itself as much as for the one that did.
 
     Returns:
         The recording's verdict on these frames, as whole frames rather than
@@ -158,9 +160,9 @@ def _classify_boundary_frames(
             frame.emitted_at >= bounds.start_returned_at
             and frame.completed_at <= bounds.stop_called_at
         )
-        is_outside = frame.completed_at <= bounds.start_called_at or (
-            frame.emitted_at >= bounds.stop_settled_at
-            and frame.handle not in bounds.handles
+        is_outside = (
+            frame.completed_at <= bounds.start_called_at
+            or frame.emitted_at >= bounds.stop_settled_at
         )
         if is_inside:
             owed.append(frame)
@@ -176,7 +178,7 @@ def describe_condemnation(frame: EmittedFrame, bounds: RecordingControlBounds) -
     if frame.completed_at <= bounds.start_called_at:
         return "log call finished before start_recording was entered"
     if frame.emitted_at >= bounds.stop_settled_at:
-        timing = "log call began after the local gate had closed"
+        timing = "log call began after the window's bound had passed"
     elif frame.emitted_at >= bounds.stop_called_at:
         timing = "log call began after stop_recording was entered"
     else:

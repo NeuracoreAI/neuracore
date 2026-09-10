@@ -33,9 +33,12 @@ from tests.integration.platform.data_daemon.shared.process_control import (
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     BASE_DATASET_READY_TIMEOUT_S,
+    CONTROL_LOCAL,
+    CONTROL_REMOTE,
     DETAIL_REALISTIC,
     DURATION_MODE_FIXED,
     DURATION_MODE_VARIABLE,
+    JOINT_KINDS,
     LOG_PRESERVE,
     MAX_DATASET_READY_TIMEOUT_S,
     MODE_SEQUENTIAL,
@@ -52,6 +55,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     LogAction,
     ProducerChannels,
     ProducerPacing,
+    RecordingControl,
     StopMethod,
     StorageStateAction,
     VideoDetail,
@@ -82,7 +86,32 @@ def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
             f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0 or "
             "depth_count > 0: it clumps the video streams and there are none"
         )
-    return _unsupported_process_placement(case)
+    return _unsupported_recording_control(case) or _unsupported_process_placement(case)
+
+
+def _unsupported_recording_control(case: DataDaemonTestCase) -> str | None:
+    """Return why *case* cannot be driven remotely, or None if it can.
+
+    A remotely-started window opens after the call returns, so the frames at
+    the head of each recording are logged before any gate is open. Only a
+    producer that runs across the boundary can report that.
+    """
+    if case.recording_control != CONTROL_REMOTE:
+        return None
+    if case.producer_channels not in (PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS):
+        return (
+            f"recording_control={CONTROL_REMOTE!r} needs a producer that outlives "
+            f"its recordings, not {case.producer_channels!r}: the window opens "
+            "after the call returns, so a recording-scoped producer logs its "
+            "leading frames into a window that is not open yet"
+        )
+    if case.wait:
+        return (
+            f"recording_control={CONTROL_REMOTE!r} cannot honour wait=True: the "
+            "web's stop endpoint returns as soon as the backend accepts it and "
+            "has no notion of waiting for the upload to finish"
+        )
+    return None
 
 
 def _unsupported_process_placement(case: DataDaemonTestCase) -> str | None:
@@ -249,6 +278,11 @@ class DataDaemonTestCase:
         producer_pacing: When each stream offers its next frame. Every value
             works under every producer lifetime; none of them decide what
             timestamp a frame carries (see ``random_phase``).
+        recording_control: Who opens and closes each window. ``"local"``
+            (default) calls the SDK from the test process; ``"remote"`` calls
+            the backend's own endpoints, so every process learns about the
+            window over the notification stream. Needs the network, and a
+            producer that outlives its recordings.
 
     Note:
         ``mode="staggered"`` and ``context_duration_mode="variable"``:
@@ -285,6 +319,7 @@ class DataDaemonTestCase:
     video_detail: VideoDetail = DETAIL_REALISTIC
     producer_pacing: ProducerPacing = PACING_DEADLINE
     producer_process_streams: tuple[tuple[str, ...], ...] = ()
+    recording_control: RecordingControl = CONTROL_LOCAL
 
     def __post_init__(self) -> None:
         """Fill in the class's default placement, then reject parameter
@@ -407,6 +442,24 @@ class SeparateProcessPerCamera(PerThread):
 
 
 @dataclass(frozen=True)
+class SeparateProcessJoints(SeparateProcessPerCamera):
+    """:class:`SeparateProcessPerCamera`, with the joint streams in a child of
+    their own, so the recording owner logs nothing at all.
+
+    The owner is then a pure recording controller: every trace is written by a
+    process that learns the window second-hand.
+    """
+
+    def default_process_streams(self) -> tuple[tuple[str, ...], ...]:
+        """The joint kinds as one child, then a child per camera device.
+
+        One child, not three: the joint kinds are the one sensor's outputs.
+        """
+        joints = (JOINT_KINDS,) if self.joint_count else ()
+        return (*joints, *super().default_process_streams())
+
+
+@dataclass(frozen=True)
 class DataDaemonTestBatch:
     """A named collection of test cases sharing common infrastructure parameters.
 
@@ -524,6 +577,8 @@ def case_id(case: DataDaemonTestCase) -> str:
         parts.append(placement)
     if case.producer_pacing != default.producer_pacing:
         parts.append(case.producer_pacing)
+    if case.recording_control != default.recording_control:
+        parts.append(f"{case.recording_control}-control")
     if case.random_phase:
         parts.append("random-phase")
     if case.wait:

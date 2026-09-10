@@ -85,6 +85,7 @@ class ContextCaseSpec:
     video_detail: str
     producer_pacing: str
     producer_process_streams: tuple[tuple[str, ...], ...]
+    recording_control: str
     depth_count: int = 0
     depth_mode: DepthMode = "float32"
 
@@ -259,6 +260,7 @@ def build_context_specs(
                     video_detail=case.video_detail,
                     producer_pacing=case.producer_pacing,
                     producer_process_streams=case.producer_process_streams,
+                    recording_control=case.recording_control,
                     depth_count=case.depth_count,
                     depth_mode=case.depth_mode,
                 ),
