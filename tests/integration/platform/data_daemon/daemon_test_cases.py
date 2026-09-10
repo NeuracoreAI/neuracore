@@ -3,6 +3,10 @@
 Every case owns an axis combination no other case covers. A case that only
 re-runs a covered combination at a different size belongs in a performance
 workload, not here.
+
+Frame resolution is one of those axes: the video cases sit on distinct rungs
+from 64x64 to 1080p, each on a different side of a spool-buffer, preview-scale
+or chunk-roll threshold. The expensive rungs go to bounded or paced producers.
 """
 
 from dataclasses import replace
@@ -63,8 +67,8 @@ PRE_NETWORK_INTEGRITY_CASES = (
         joint_count=7,
         recording_count=1,
         video_count=1,
-        image_height=64,
-        image_width=64,
+        image_height=1080,
+        image_width=1920,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
         joint_fps=15,
@@ -215,8 +219,8 @@ NETWORK_ONLY_INTEGRITY_CASES = (
         recording_count=4,
         joint_count=7,
         video_count=1,
-        image_width=64,
-        image_height=64,
+        image_width=1280,
+        image_height=720,
         video_fps=30,
         video_detail=DETAIL_FLAT,
         recording_control=CONTROL_SPLIT_PROCESS,
@@ -228,8 +232,8 @@ NETWORK_ONLY_INTEGRITY_CASES = (
         recording_count=15,
         joint_count=7,
         video_count=4,
-        image_width=640,
-        image_height=480,
+        image_width=160,
+        image_height=120,
         video_fps=30,
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
