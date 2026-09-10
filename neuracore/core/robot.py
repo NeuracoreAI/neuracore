@@ -741,6 +741,128 @@ class Robot:
         self.__dict__.clear()
         self.__class__ = _DeletedRobot
 
+    def set_archived(self, archived: bool = True) -> None:
+        """Archive or unarchive this robot.
+
+        Archiving hides the robot from the default robots list while keeping the
+        robot record and URDF package so recordings can still be visualized.
+
+        Args:
+            archived: True to archive, False to unarchive.
+
+        Raises:
+            RobotError: If the robot has not been initialized or the server
+                rejects the update.
+        """
+        if self.id is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        try:
+            session = thread_local_session()
+            response = session.put(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/archive",
+                json={"archived": archived},
+                params={"is_shared": str(self.shared).lower()},
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+            self.archived = archived
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            action = "archive" if archived else "unarchive"
+            raise RobotError(f"Failed to {action} robot: {detail or str(e)}")
+
+    def list_instance_ids(self) -> list[int]:
+        """Return registered instance IDs for this robot.
+
+        Raises:
+            RobotError: If the robot has not been initialized or the server
+                rejects the request.
+        """
+        if self.id is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        try:
+            session = thread_local_session()
+            response = session.get(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}",
+                params={"is_shared": str(self.shared).lower()},
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+            instances = response.json().get("instances") or []
+            return [
+                int(item["robot_instance"])
+                for item in instances
+                if item.get("robot_instance") is not None
+            ]
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            raise RobotError(f"Failed to list robot instances: {detail or str(e)}")
+        except (KeyError, TypeError, ValueError) as e:
+            raise RobotError(f"Failed to parse robot instances: {e}") from e
+
+    def max_instance_id(self) -> int:
+        """Return the highest registered instance ID, or 0 if none exist.
+
+        Raises:
+            RobotError: If the robot has not been initialized or the server
+                rejects the request.
+        """
+        instance_ids = self.list_instance_ids()
+        return max(instance_ids) if instance_ids else 0
+
+    def remove_instance(self, instance: int) -> None:
+        """Delete a registered robot instance without deleting the robot.
+
+        Evicts the matching entry from the local robot registry if present.
+        Does not tombstone this Robot object.
+
+        Args:
+            instance: Instance number to remove.
+
+        Raises:
+            RobotError: If the robot has not been initialized or the server
+                rejects the delete.
+        """
+        if self.id is None:
+            raise RobotError("Robot not initialized. Call init() first.")
+        try:
+            session = thread_local_session()
+            response = session.delete(
+                f"{API_URL}/org/{self.org_id}/robots/{self.id}/instances/{instance}",
+                params={"is_shared": str(self.shared).lower()},
+                headers=self._auth.get_headers(),
+            )
+            response.raise_for_status()
+        except requests.exceptions.ConnectionError:
+            raise RobotError(
+                "Failed to connect to neuracore server, "
+                "please check your internet connection and try again."
+            )
+        except requests.exceptions.RequestException as e:
+            detail = None
+            if e.response is not None:
+                detail = extract_error_detail(e.response)
+            raise RobotError(f"Failed to delete robot instance: {detail or str(e)}")
+
+        _robots.pop(
+            RobotInstanceIdentifier(robot_id=self.id, robot_instance=instance),
+            None,
+        )
+
     def close(self) -> None:
         """Release local resources owned by this Robot instance."""
         self._cleanup_daemon_recording_context()

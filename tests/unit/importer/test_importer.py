@@ -2,7 +2,10 @@ import pytest
 
 from neuracore.core.exceptions import DatasetError
 from neuracore.importer.core.exceptions import DatasetOperationError
-from neuracore.importer.importer import _create_dataset_with_overwrite_guard
+from neuracore.importer.importer import (
+    _create_dataset_with_overwrite_guard,
+    _robot_exists,
+)
 
 
 def test_create_dataset_with_overwrite_guard_retries_if_old_id_returned(monkeypatch):
@@ -108,3 +111,24 @@ def test_create_dataset_with_overwrite_guard_retries_on_transient_create_error(
 
     assert result.id == "new-id"
     assert sleep_calls == [0.5]
+
+
+def test_robot_exists_checks_private_and_shared_mixed_lists(monkeypatch):
+    monkeypatch.setattr(
+        "neuracore.importer.importer.get_current_org",
+        lambda: "org-1",
+    )
+
+    def fake_list(_org_id, is_shared=False, mode="current"):
+        assert mode == "mixed"
+        if is_shared:
+            return [{"name": "shared-bot"}]
+        return [{"name": "private-bot"}]
+
+    monkeypatch.setattr(
+        "neuracore.importer.importer.list_organization_robots",
+        fake_list,
+    )
+    assert _robot_exists("private-bot") is True
+    assert _robot_exists("shared-bot") is True
+    assert _robot_exists("missing") is False

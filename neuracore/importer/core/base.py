@@ -43,7 +43,7 @@ from rich.progress import (
 from scipy.spatial.transform import Rotation as R
 
 import neuracore as nc
-from neuracore.core.robot import JointInfo
+from neuracore.core.robot import JointInfo, Robot
 from neuracore.data_daemon.const import DEFAULT_RECORDING_ROOT_PATH
 from neuracore.importer.core.robot_utils import RobotUtils
 from neuracore.importer.core.validation import (
@@ -132,6 +132,7 @@ class NeuracoreDatasetImporter(ABC):
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
+        robot_id: str | None = None,
     ) -> None:
         """Initialize the base dataset importer.
 
@@ -155,6 +156,7 @@ class NeuracoreDatasetImporter(ABC):
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector poses for debugging.
+            robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         self.dataset_dir = Path(dataset_dir)
         self.dataset_config = dataset_config
@@ -162,6 +164,7 @@ class NeuracoreDatasetImporter(ABC):
         self.data_config = dataset_config  # Backwards-compat alias used by callers
         self.output_dataset_id = output_dataset_id
         self.robot_name = dataset_config.robot.name
+        self.robot_id = robot_id
         self.frequency = dataset_config.frequency
         self.joint_info = joint_info
         self.urdf_path = urdf_path
@@ -194,14 +197,54 @@ class NeuracoreDatasetImporter(ABC):
         )
         self._progress_queue: mp.Queue[ProgressUpdate] | None = None
         self._worker_id: int = -1
-        self._instance_base: int = random.randrange(1_000, 1_000_000)
+        # Resolved in import_all before workers spawn (collision-safe allocation).
+        self._instance_base: int = 0
         self._error_queue: mp.Queue[WorkerError] | None = None
         self.completed_items_file = self._resolve_completed_items_file()
-        self.logger.debug("Importer robot instance base: %d", self._instance_base)
 
     def robot_instance(self, worker_id: int) -> int:
         """Robot instance for a worker, disjoint from other importer runs."""
         return self._instance_base + max(0, worker_id)
+
+    def _api_robot(self) -> Robot:
+        """Build a Robot handle for instance list/delete API calls."""
+        if not self.robot_id:
+            raise ImporterError(
+                "robot_id is required for importer robot instance allocation/cleanup."
+            )
+        robot = Robot(self.robot_name, instance=0, shared=self.shared)
+        robot.id = self.robot_id
+        return robot
+
+    def _allocate_instance_base(self) -> None:
+        """Choose a worker instance base above existing instances and a floor."""
+        nc.login()
+        max_existing = self._api_robot().max_instance_id()
+        floor = max(max_existing, 100_000)
+        self._instance_base = random.randrange(floor + 1, floor + 100_000)
+        self.logger.info(
+            "Importer robot instance base=%d (floor=%d, max_existing=%d)",
+            self._instance_base,
+            floor,
+            max_existing,
+        )
+
+    def _cleanup_worker_instances(self, max_workers_used: int) -> None:
+        """Best-effort delete of this run's worker instances."""
+        if self._instance_base <= 0 or max_workers_used <= 0:
+            return
+        robot = self._api_robot()
+        for instance in range(
+            self._instance_base, self._instance_base + max_workers_used
+        ):
+            try:
+                robot.remove_instance(instance)
+            except Exception as exc:  # noqa: BLE001 - never fail import on cleanup
+                self.logger.warning(
+                    "Failed to remove importer robot instance %s: %s",
+                    instance,
+                    exc,
+                )
 
     @abstractmethod
     def build_work_items(self) -> Sequence[ImportItem]:
@@ -1016,65 +1059,77 @@ class NeuracoreDatasetImporter(ABC):
 
         self.validate_work_items(items)
 
-        # Pre-check: dry run to check for errors
-        precheck_items = [random.choice(items)]
-        original_dry_run = self.dry_run
-        self.dry_run = True
-        self.pre_check = True
-        skip_joint_target_positions = False
+        max_workers_used = 0
         try:
+            self._allocate_instance_base()
+            # Pre-check always uses 1 worker; raise this before spawning so a
+            # failed allocate-to-precheck gap still cleans that instance range.
+            max_workers_used = 1
+
+            # Pre-check: dry run to check for errors
+            precheck_items = [random.choice(items)]
+            original_dry_run = self.dry_run
+            self.dry_run = True
+            self.pre_check = True
+            skip_joint_target_positions = False
+            try:
+                self.logger.info(
+                    "Pre-check: importing %s episode(s) with 1 worker.",
+                    len(precheck_items),
+                )
+                precheck_errors, precheck_processes, precheck_result_queue = (
+                    self._run_import_workers(
+                        precheck_items, 1, use_precheck_result_queue=True
+                    )
+                )
+                self._report_process_status(precheck_processes)
+                if precheck_errors:
+                    first = precheck_errors[0]
+                    msg = f"Pre-check failed: {first.message}" + (
+                        f" (worker {first.worker_id}, item {first.item_index})"
+                        if first.item_index is not None
+                        else f" (worker {first.worker_id})"
+                    )
+                    raise ImporterError(msg)
+                if precheck_result_queue is not None:
+                    try:
+                        skip_joint_target_positions = precheck_result_queue.get_nowait()
+                    except Empty:
+                        skip_joint_target_positions = False
+            finally:
+                self.dry_run = original_dry_run
+                self.pre_check = False
+                if skip_joint_target_positions:
+                    self.ordered_import_configs = [
+                        c
+                        for c in self.ordered_import_configs
+                        if c[0] != DataType.JOINT_TARGET_POSITIONS
+                    ]
+                    self.logger.warning(
+                        "Joint target positions provided are equivalent to joint "
+                        "positions in next step. Skip importing joint target positions."
+                    )
+
+            worker_count = self._resolve_worker_count(len(items))
+            max_workers_used = max(1, worker_count)
+            live_status = "Live" if not self.dry_run else "Dry-run"
             self.logger.info(
-                "Pre-check: importing %s episode(s) with 1 worker.",
-                len(precheck_items),
+                "%s: importing %s episodes with %s workers",
+                live_status,
+                len(items),
+                worker_count,
             )
-            precheck_errors, precheck_processes, precheck_result_queue = (
-                self._run_import_workers(
-                    precheck_items, 1, use_precheck_result_queue=True
-                )
+
+            self.worker_errors, processes, _ = self._run_import_workers(
+                items, worker_count
             )
-            self._report_process_status(precheck_processes)
-            if precheck_errors:
-                first = precheck_errors[0]
-                msg = f"Pre-check failed: {first.message}" + (
-                    f" (worker {first.worker_id}, item {first.item_index})"
-                    if first.item_index is not None
-                    else f" (worker {first.worker_id})"
-                )
-                raise ImporterError(msg)
-            if precheck_result_queue is not None:
-                try:
-                    skip_joint_target_positions = precheck_result_queue.get_nowait()
-                except Empty:
-                    skip_joint_target_positions = False
+            self._report_process_status(processes)
+            self._report_errors(self.worker_errors)
+
+            if self.worker_errors and self.skip_on_error == "all":
+                raise ImporterError("Import aborted due to worker errors.")
         finally:
-            self.dry_run = original_dry_run
-            self.pre_check = False
-            if skip_joint_target_positions:
-                self.ordered_import_configs = [
-                    c
-                    for c in self.ordered_import_configs
-                    if c[0] != DataType.JOINT_TARGET_POSITIONS
-                ]
-                self.logger.warning(
-                    "Joint target positions provided are equivalent to joint positions "
-                    "in next step. Skip importing joint target positions."
-                )
-
-        worker_count = self._resolve_worker_count(len(items))
-        live_status = "Live" if not self.dry_run else "Dry-run"
-        self.logger.info(
-            "%s: importing %s episodes with %s workers",
-            live_status,
-            len(items),
-            worker_count,
-        )
-
-        self.worker_errors, processes, _ = self._run_import_workers(items, worker_count)
-        self._report_process_status(processes)
-        self._report_errors(self.worker_errors)
-
-        if self.worker_errors and self.skip_on_error == "all":
-            raise ImporterError("Import aborted due to worker errors.")
+            self._cleanup_worker_instances(max_workers_used)
 
     def _run_import_workers(
         self,

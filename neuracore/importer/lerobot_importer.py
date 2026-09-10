@@ -61,6 +61,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
+        robot_id: str | None = None,
     ) -> None:
         """Initialize the LeRobot dataset importer.
 
@@ -82,6 +83,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             shared: Whether the dataset should be shared/open-source.
             debug_target_ee_frame: Optional end-effector frame name used
                 to log target joint actions as end-effector poses for debugging.
+            robot_id: Neuracore robot ID used for instance allocation/cleanup.
         """
         super().__init__(
             dataset_dir=dataset_dir,
@@ -98,6 +100,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             storage_limit=storage_limit,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
+            robot_id=robot_id,
         )
         self.dataset_name = input_dataset_name
         self.dataset_dir = Path(dataset_dir)
