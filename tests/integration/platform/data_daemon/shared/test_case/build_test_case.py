@@ -45,7 +45,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     PACING_BURST_VIDEO,
     PACING_DEADLINE,
     PRODUCER_MULTI_PROCESS,
-    PRODUCER_OLD_PER_THREAD,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
     STOP_METHOD_CLI,
@@ -227,7 +226,7 @@ class DataDaemonTestCase:
             overlap. Single-context cases always use ``"sequential"``.
         CHANNELS: How producer threads are allocated and how long they live — a
             class attribute, not a field, chosen by constructing the matching
-            subclass (:class:`PerThread`, :class:`OldPerThread`,
+            subclass (:class:`Synchronous`, :class:`PerThread`,
             :class:`ProcessPerCamera`).
         producer_process_streams: One entry per extra producer process, naming
             the streams (a kind, a single camera's channel, or a joint group)
@@ -434,14 +433,6 @@ class Synchronous(DataDaemonTestCase):
     """Logs every data type from one thread; no frame is in flight at a boundary."""
 
     CHANNELS: ClassVar[ProducerChannels] = PRODUCER_SYNCHRONOUS
-
-
-@dataclass(frozen=True)
-class OldPerThread(DataDaemonTestCase):
-    """One thread per stream, joined before ``stop_recording``: races inside a
-    recording but stops clean at its edges."""
-
-    CHANNELS: ClassVar[ProducerChannels] = PRODUCER_OLD_PER_THREAD
 
 
 @dataclass(frozen=True)

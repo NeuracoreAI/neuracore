@@ -48,7 +48,6 @@ MODE_STAGGERED = "staggered"
 
 # producer_channels — thread allocation and producer lifetime.
 PRODUCER_SYNCHRONOUS = "synchronous"  # one thread, scoped to one recording
-PRODUCER_OLD_PER_THREAD = "old_per_thread"  # thread per stream, one recording
 PRODUCER_PER_THREAD = "per_thread"  # thread per stream, whole context lifetime
 # per_thread, but some streams run in their own OS process
 PRODUCER_MULTI_PROCESS = "multi_process"
@@ -105,12 +104,7 @@ STORAGE_STATE_ACTIONS = (
 )
 LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
-PRODUCER_CHANNELS = (
-    PRODUCER_SYNCHRONOUS,
-    PRODUCER_OLD_PER_THREAD,
-    PRODUCER_PER_THREAD,
-    PRODUCER_MULTI_PROCESS,
-)
+PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
 VIDEO_DETAILS = (DETAIL_REALISTIC, DETAIL_FLAT)
 PRODUCER_PACINGS = (PACING_DEADLINE, PACING_BURST_VIDEO, PACING_SATURATE)
@@ -129,9 +123,7 @@ LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
 RecordingControl = Literal["local", "remote", "split"]
-ProducerChannels = Literal[
-    "synchronous", "old_per_thread", "per_thread", "multi_process"
-]
+ProducerChannels = Literal["synchronous", "per_thread", "multi_process"]
 
 # ---------------------------------------------------------------------------
 # Names: stream kinds, channels, markers and trace keys
