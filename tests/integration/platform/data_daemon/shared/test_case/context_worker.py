@@ -102,7 +102,7 @@ def log_frames(
             "whole context lifetime — drive it through make_producer_session "
             "instead"
         )
-    session = make_producer_session(spec, robot=robot, marker_name=marker_name)
+    session = make_producer_session(spec, marker_name=marker_name)
     session.start()
     session.run_recording(recording_index)
     session.finish()
@@ -191,9 +191,7 @@ def context_worker(spec: ContextSpec) -> ContextResult:
         bounds_by_disk_key: dict[str, RecordingControlBounds] = {}
         ordinal_by_disk_key: dict[str, int] = {}
 
-        session = make_producer_session(
-            spec, robot=robot, marker_name="marker_synchronous"
-        )
+        session = make_producer_session(spec, marker_name="marker_synchronous")
         controller = make_recording_controller(spec, robot=robot)
         marker_names = session.marker_names
         try:
@@ -221,8 +219,6 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 recording_ids.append(str(cloud_recording_id or ""))
 
                 disk_recording_key = str(daemon_recording_index)
-                recording_handle = opened.handle
-
                 session.run_recording(recording_ordinal)
 
                 # Brackets the window's upper bound, the mirror of the start.
@@ -233,11 +229,6 @@ def context_worker(spec: ContextSpec) -> ContextResult:
                 )
 
                 bounds_by_disk_key[disk_recording_key] = RecordingControlBounds(
-                    handles=frozenset(
-                        handle
-                        for handle in (recording_handle, closed.handle)
-                        if handle is not None
-                    ),
                     start_called_at=start_called_at,
                     start_returned_at=start_returned_at,
                     stop_called_at=closed.called_at,
