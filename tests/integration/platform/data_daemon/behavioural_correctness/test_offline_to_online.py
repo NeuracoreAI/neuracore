@@ -22,9 +22,11 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     case_ids,
     has_configured_org,
 )
-from tests.integration.platform.data_daemon.shared.test_case.build_test_case_context import (  # noqa: E501
+from tests.integration.platform.data_daemon.shared.test_case.context_spec import (
     ContextResult,
     build_context_specs,
+)
+from tests.integration.platform.data_daemon.shared.test_case.context_worker import (
     create_testing_dataset_name,
     run_case_contexts,
 )
