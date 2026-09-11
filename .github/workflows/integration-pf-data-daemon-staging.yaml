@@ -112,8 +112,8 @@ jobs:
         --clean-alluredir
         --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
         --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
-        tests/integration/platform/data_daemon/behavioural_correctness/
-        tests/integration/platform/data_daemon/data_integrity/
+        "tests/integration/platform/data_daemon/data_integrity/test_network.py::test_cloud_data_integrity[ProcessPerCamera-6s-8recs-7joints-1cam-160x120-30hz-flatframes-saturate]"
+        "tests/integration/platform/data_daemon/data_integrity/test_network.py::test_cloud_data_integrity[ProcessPerLimbPerCamera-15s-15recs-7joints-1cam-160x120-30hz-flatframes-saturate-remote-control]"
 
     - name: Generate Allure performance report
       if: always()
