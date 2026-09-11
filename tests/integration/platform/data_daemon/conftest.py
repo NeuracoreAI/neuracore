@@ -375,12 +375,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
         else:
             wall_info = ctx_parts or "wall=n/a"
         lines.append(f"\n  {run['case_id']}  ({wall_info}){dataset_suffix}")
-        for label in all_labels:
-            stats = run["timer_stats"].get(label)
-            if stats is not None:
-                lines.append(_format_timer_stats_line(label, stats))
-            else:
-                lines.append(f"    {label:<42}  ---")
+        for label, stats in sorted(run["timer_stats"].items()):
+            lines.append(_format_timer_stats_line(label, stats))
 
     infra_labels = sorted(label for label in timer_stats if label not in all_labels)
     if infra_labels:
