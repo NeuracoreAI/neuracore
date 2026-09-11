@@ -16,21 +16,21 @@ def test_is_recording_answers_from_the_daemon() -> None:
     robot.id = "robot-id-1"
 
     live = LiveRecording(
-        recording_index=7, recording_id="cloud-1", start_timestamp_ns=1_000
+        recording_index=7, cloud_recording_id="cloud-1", start_timestamp_ns=1_000
     )
     with patch(
         "neuracore.core.robot.recording_context.query_recording_state",
         return_value=live,
     ):
         assert robot.is_recording() is True
-        assert robot.get_current_recording_id() == "cloud-1"
+        assert robot.get_cloud_recording_id(timeout_s=0.0) == "cloud-1"
 
     with patch(
         "neuracore.core.robot.recording_context.query_recording_state",
         return_value=None,
     ):
         assert robot.is_recording() is False
-        assert robot.get_current_recording_id() is None
+        assert robot.get_cloud_recording_id(timeout_s=0.0) is None
 
     robot.id = None
 
@@ -53,6 +53,50 @@ def test_an_unanswered_query_raises_rather_than_reading_as_not_recording() -> No
         with pytest.raises(RecordingStateUnavailableError):
             robot.is_recording()
         with pytest.raises(RecordingStateUnavailableError):
-            robot.get_current_recording_id()
+            robot.get_cloud_recording_id(timeout_s=0.0)
+
+    robot.id = None
+
+
+def test_a_timeout_waits_for_the_cloud_id_to_be_minted(monkeypatch) -> None:
+    """The daemon mints the cloud id after the recording opens, so this polls.
+
+    A caller that gave up on the first `None` would skip the upload wait for
+    every recording stopped promptly after starting.
+    """
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+    pending = LiveRecording(
+        recording_index=7, cloud_recording_id=None, start_timestamp_ns=1_000
+    )
+    minted = pending._replace(cloud_recording_id="cloud-1")
+    monkeypatch.setattr("neuracore.core.robot.time.sleep", lambda _seconds: None)
+
+    with patch(
+        "neuracore.core.robot.recording_context.query_recording_state",
+        side_effect=(pending, pending, minted),
+    ):
+        assert robot.get_cloud_recording_id(timeout_s=1.0) == "cloud-1"
+
+    robot.id = None
+
+
+def test_a_timeout_gives_up_on_a_cloud_id_that_never_arrives(monkeypatch) -> None:
+    """An offline recording never gets an id, so this must end, not hang."""
+    robot = Robot("robot", instance=0, org_id="org-1")
+    robot.id = "robot-id-1"
+    pending = LiveRecording(
+        recording_index=7, cloud_recording_id=None, start_timestamp_ns=1_000
+    )
+    # First call sets the deadline, second passes it.
+    clock = iter((0.0, 2.0))
+    monkeypatch.setattr("neuracore.core.robot.time.monotonic", lambda: next(clock))
+    monkeypatch.setattr("neuracore.core.robot.time.sleep", lambda _seconds: None)
+
+    with patch(
+        "neuracore.core.robot.recording_context.query_recording_state",
+        return_value=pending,
+    ):
+        assert robot.get_cloud_recording_id(timeout_s=1.0) is None
 
     robot.id = None

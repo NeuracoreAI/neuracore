@@ -37,9 +37,10 @@
 //!   synchronous `publish`, and the background data-publisher thread.
 //! - [`writer`] — the background video-writer thread, the in-progress
 //!   video-chunk registry, and chunk seal/announce/flush logic.
-//! - [`query`] — recording-id resolution over the `queries` service.
-//! - [`recording_boundary`] — per-source recording-boundary state, cached from
-//!   the daemon so the log path can read it without an IPC round trip.
+//! - [`query`] — the producer's request-response calls to the daemon:
+//!   readiness, version, and recording state.
+//! - [`recording_state_cache`] — per-source recording state, cached from the daemon
+//!   so the log path and the state readers work without an IPC round trip.
 //! - [`nut_writer`] — minimal NUT-container muxer for raw RGB video.
 
 pub mod nut_writer;
@@ -48,21 +49,18 @@ mod depth;
 mod paths;
 mod publisher;
 mod query;
-mod recording_boundary;
+mod recording_state_cache;
 mod writer;
 
-use data_daemon_shared::{Envelope, FrameDtype, RecordingIdQuery, RecordingStateQuery};
+use data_daemon_shared::{Envelope, FrameDtype};
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::publisher::{
-    flush_published_data, now_ns, publish, publisher_tx, ProducerError, PublishMsg,
-};
+use crate::publisher::{flush_published_data, now_ns, publish, publisher_tx, PublishMsg};
 use crate::query::{
-    daemon_version as daemon_version_impl, query_recording_state, resolve_recording_id,
-    wait_until_ready as wait_until_ready_impl,
+    daemon_version as daemon_version_impl, wait_until_ready as wait_until_ready_impl,
 };
 use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 
@@ -75,9 +73,8 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 /// capture time can't shift the window or clip data. Separately, the recording's
 /// *capture* timestamp (`timestamp_ns` when supplied, else the publish time) is
 /// what the daemon stores as `start_timestamp_ns` and POSTs as the backend
-/// `start_time`. The capture timestamp is returned so the caller can use it as
-/// the marker that resolves the daemon-assigned cloud recording id
-/// (`get_recording_id`) for this exact recording.
+/// `start_time`. The capture timestamp is returned because it is what tells
+/// this recording apart from its predecessor before either has a cloud id.
 ///
 /// `cloud_recording_id` is set only when the backend already minted the id
 /// itself (a recording started from the web frontend) — the daemon then
@@ -118,7 +115,7 @@ fn start_recording(
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
         // recording bracketed here needs no query at all.
-        recording_boundary::note_local_start(
+        recording_state_cache::note_local_start(
             &robot_id_for_boundary,
             robot_instance,
             capture_timestamp_ns,
@@ -398,7 +395,7 @@ fn stop_recording(
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
         })?;
-        recording_boundary::note_local_end(&robot_id, robot_instance);
+        recording_state_cache::note_local_end(&robot_id, robot_instance);
         // Split from [`flush_source`] so the caller can close its logging gate
         // in between, rather than after a backlog-length barrier.
         Ok(())
@@ -477,7 +474,7 @@ fn cancel_recording(
             robot_instance,
             timestamp_ns: capture_timestamp_ns,
         })?;
-        recording_boundary::note_local_end(&robot_id, robot_instance);
+        recording_state_cache::note_local_end(&robot_id, robot_instance);
         Ok(())
     })
 }
@@ -512,38 +509,6 @@ fn parse_frame_dtype(data_type: &str, dtype: &str) -> Result<FrameDtype, String>
     Ok(frame_dtype)
 }
 
-/// Resolve the daemon-owned cloud `recording_id` for a recording, blocking with
-/// the GIL released until the id is available or `timeout_s` elapses.
-///
-/// The thin producer never mints recording identity — the daemon allocates the
-/// cloud id asynchronously after `/recording/start`. This asks the daemon over
-/// the `queries` request-response service (identifying the recording by its
-/// source + capture `timestamp_ns` marker) and returns the id once minted, or
-/// `None` on timeout / when no daemon is answering. Safe for
-/// non-performance-critical paths only (tests, `stop_recording(wait=True)`).
-#[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timestamp_ns, timeout_s))]
-fn get_recording_id(
-    py: Python<'_>,
-    robot_id: &str,
-    robot_instance: i64,
-    timestamp_ns: i64,
-    timeout_s: f64,
-) -> PyResult<Option<String>> {
-    if robot_id.is_empty() {
-        return Err(PyValueError::new_err("robot_id must not be empty"));
-    }
-    let query = RecordingIdQuery {
-        robot_id: robot_id.to_string(),
-        robot_instance,
-        timestamp_ns,
-    };
-    let request_bytes = query.encode().map_err(ProducerError::from)?;
-    py.detach(|| -> PyResult<Option<String>> {
-        Ok(resolve_recording_id(&request_bytes, timeout_s)?)
-    })
-}
-
 /// A counter this process bumps whenever its source crosses a recording
 /// boundary; `None` when no recording is open.
 ///
@@ -560,38 +525,35 @@ fn get_recording_id(
 #[pyfunction]
 #[pyo3(signature = (robot_id, robot_instance))]
 fn recording_epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
-    recording_boundary::epoch(robot_id, robot_instance)
+    recording_state_cache::epoch(robot_id, robot_instance)
 }
 
-/// Ask the daemon which recording, if any, a source currently has open.
+/// Which recording, if any, a source currently has open.
 ///
 /// The daemon holds the only subscription to the backend's org-wide
 /// notification stream, so this is how an SDK process learns about a recording
 /// it did not itself start or stop.
 ///
-/// Returns `None` when nothing answered within `timeout_s` — "unknown", never
-/// "not recording". An answer is a dict whose `"recording"` is `None` or the
-/// recording's `recording_index` / `recording_id` / `start_timestamp_ns`.
+/// Reads the same cache [`recording_epoch`] does, so repeated calls cost a
+/// memory read rather than a round trip. Only the first read for a source can
+/// block, and only briefly: an entry nothing has answered for is queried on the
+/// calling thread with the GIL released.
 ///
-/// Blocks for up to `timeout_s` with the GIL released; for a polling thread,
-/// not the logging path.
+/// Returns `None` for "unknown" — nothing has ever answered for this source —
+/// which is never "not recording". An answer is a dict whose `"recording"` is
+/// `None` or the recording's `recording_index` / `cloud_recording_id` /
+/// `start_timestamp_ns`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, timeout_s))]
+#[pyo3(signature = (robot_id, robot_instance))]
 fn recording_state<'py>(
     py: Python<'py>,
     robot_id: &str,
     robot_instance: i64,
-    timeout_s: f64,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
     }
-    let query = RecordingStateQuery {
-        robot_id: robot_id.to_string(),
-        robot_instance,
-    };
-    let request_bytes = query.encode().map_err(ProducerError::from)?;
-    let answer = py.detach(|| query_recording_state(&request_bytes, timeout_s))?;
+    let answer = py.detach(|| recording_state_cache::display(robot_id, robot_instance));
     let Some(recording) = answer else {
         return Ok(None);
     };
@@ -600,7 +562,7 @@ fn recording_state<'py>(
         Some(recording) => {
             let live = PyDict::new(py);
             live.set_item("recording_index", recording.recording_index)?;
-            live.set_item("recording_id", recording.recording_id)?;
+            live.set_item("cloud_recording_id", recording.recording_id)?;
             live.set_item("start_timestamp_ns", recording.start_timestamp_ns)?;
             reply.set_item("recording", live)?;
         }
@@ -652,7 +614,6 @@ fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(stop_recording, module)?)?;
     module.add_function(wrap_pyfunction!(flush_source, module)?)?;
     module.add_function(wrap_pyfunction!(cancel_recording, module)?)?;
-    module.add_function(wrap_pyfunction!(get_recording_id, module)?)?;
     module.add_function(wrap_pyfunction!(recording_state, module)?)?;
     module.add_function(wrap_pyfunction!(recording_epoch, module)?)?;
     module.add_function(wrap_pyfunction!(wait_until_ready, module)?)?;

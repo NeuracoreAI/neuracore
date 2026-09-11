@@ -366,29 +366,24 @@ def stop_recording(
 def get_cloud_recording_id(
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp_ns: int | None = None,
     timeout_s: float = 30.0,
 ) -> str | None:
-    """Resolve the daemon-owned cloud recording id for a robot's recording.
+    """Resolve the daemon-owned cloud recording id for a robot's open recording.
 
-    The cloud recording id is assigned asynchronously by the daemon. This asks
-    the daemon (it may block up to ``timeout_s``) for the id of the recording
-    whose window brackets ``timestamp_ns`` for this source
-    (defaulting to the most recently started recording). For
-    non-performance-critical use only (tests, ``stop_recording(wait=True)``).
+    The cloud recording id is assigned asynchronously by the daemon, and is
+    resolvable only while the recording is open.
 
     Args:
         robot_name: Robot identifier. Defaults to the active robot.
         instance: Robot instance number.
-        timestamp_ns: A wall-clock instant inside the target recording window;
-            defaults to the most recent recording for the source.
         timeout_s: Maximum time to wait for the daemon to mint the id.
 
     Returns:
-        The cloud recording id, or ``None`` on timeout.
+        The cloud recording id, or ``None`` when the robot is not recording or
+        the id is not minted within ``timeout_s``.
     """
     robot = _get_robot(robot_name, instance)
-    return robot.get_cloud_recording_id(timestamp_ns=timestamp_ns, timeout_s=timeout_s)
+    return robot.get_cloud_recording_id(timeout_s=timeout_s)
 
 
 def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:

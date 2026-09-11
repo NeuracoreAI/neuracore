@@ -13,9 +13,8 @@
 use data_daemon_shared::service_name::{
     COMMANDS, HEALTH, HEALTH_MAX_PAYLOAD_BYTES, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE,
     MAX_NODES_PER_SERVICE, MAX_PUBLISHERS_PER_SERVICE, MAX_REQUEST_RESPONSE_CLIENTS_PER_SERVICE,
-    MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_IDS,
-    RECORDING_ID_MAX_PAYLOAD_BYTES, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION,
-    VERSION_MAX_PAYLOAD_BYTES,
+    MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE, MAX_SUBSCRIBERS_PER_SERVICE, RECORDING_STATE,
+    RECORDING_STATE_MAX_PAYLOAD_BYTES, VERSION, VERSION_MAX_PAYLOAD_BYTES,
 };
 use iceoryx2::node::{Node, NodeBuilder};
 use iceoryx2::port::server::Server;
@@ -92,11 +91,6 @@ pub struct IpcTransport {
     /// Service handle held alongside the subscriber so port discovery doesn't
     /// race the service handle going out of scope.
     _commands_service: PortFactory<ipc::Service, [u8], ()>,
-    /// Request-response server on `neuracore/data_daemon/recording_ids` that answers
-    /// SDK recording-id lookups.
-    recording_id_server: Server<ipc::Service, [u8], (), [u8], ()>,
-    /// Service handle held alongside the server, as for the commands service.
-    _recording_id_service: QueryPortFactory<ipc::Service, [u8], (), [u8], ()>,
     /// Request-response server on `neuracore/data_daemon/recording_state` that
     /// answers "is this source recording, and as what?".
     recording_state_server: Server<ipc::Service, [u8], (), [u8], ()>,
@@ -135,8 +129,6 @@ impl IpcTransport {
         let (commands_service, commands_subscriber) =
             open_subscriber(&node, COMMANDS, LIFECYCLE_SUBSCRIBER_BUFFER_SIZE)?;
 
-        let (recording_id_service, recording_id_server) =
-            open_query_server(&node, RECORDING_IDS, RECORDING_ID_MAX_PAYLOAD_BYTES)?;
         let (recording_state_service, recording_state_server) =
             open_query_server(&node, RECORDING_STATE, RECORDING_STATE_MAX_PAYLOAD_BYTES)?;
         let (health_service, health_server) =
@@ -148,8 +140,6 @@ impl IpcTransport {
             _node: node,
             commands_subscriber,
             _commands_service: commands_service,
-            recording_id_server,
-            _recording_id_service: recording_id_service,
             recording_state_server,
             _recording_state_service: recording_state_service,
             health_server,
@@ -162,11 +152,6 @@ impl IpcTransport {
     /// Borrow the `commands` subscriber port.
     pub fn commands_subscriber(&self) -> &Subscriber<ipc::Service, [u8], ()> {
         &self.commands_subscriber
-    }
-
-    /// Borrow the `recording_ids` request-response server port.
-    pub fn recording_id_server(&self) -> &Server<ipc::Service, [u8], (), [u8], ()> {
-        &self.recording_id_server
     }
 
     /// Borrow the `recording_state` request-response server port.
@@ -246,7 +231,7 @@ type ByteSliceServer = Server<ipc::Service, [u8], (), [u8], ()>;
 ///
 /// The SDK opens client ports on the same service (one per OS thread, like the
 /// `commands` publisher), so the caps mirror the publisher topology. Requests
-/// and responses are both small postcard blobs ([`RECORDING_ID_MAX_PAYLOAD_BYTES`]).
+/// and responses are both small postcard blobs ([`RECORDING_STATE_MAX_PAYLOAD_BYTES`]).
 fn open_query_server(
     node: &Node<ipc::Service>,
     name: &str,
