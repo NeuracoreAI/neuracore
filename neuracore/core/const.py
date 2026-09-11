@@ -24,6 +24,11 @@ API_URL = os.getenv("NEURACORE_API_URL", "https://api.neuracore.com/api")
 # the path, which it cannot match.
 STREAM_API_URL = f"{API_URL}/stream"
 
+# Data synthesis is served by its own backend service, selected by the same kind
+# of path prefix. Overridable on its own so that a local run can reach a
+# synthesis service that is not behind the same host as the rest of the API.
+SYNTHESIS_API_URL = os.getenv("NEURACORE_SYNTHESIS_API_URL") or f"{API_URL}/synthesis"
+
 DEFAULT_CACHE_DIR = Path.home() / ".neuracore" / "training"
 DEFAULT_RECORDING_CACHE_DIR = DEFAULT_CACHE_DIR / "recording_cache"
 MAX_DATA_STREAMS = 1000
