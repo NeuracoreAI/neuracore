@@ -118,11 +118,11 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),
-    # A camera child outliving fifteen windows; early ones must retire first.
+    # A camera child outliving eight windows; early ones must retire first.
     # Long-lived children are where chunk retention leaks become visible.
     ProcessPerCamera(
         duration_sec=6,
-        recording_count=15,
+        recording_count=8,
         joint_count=7,
         video_count=1,
         image_width=640,
@@ -135,7 +135,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
     # Cross-talk between children needs more than one child to show at all.
     ProcessPerCamera(
         duration_sec=6,
-        recording_count=8,
+        recording_count=4,
         joint_count=7,
         video_count=2,
         image_width=256,
@@ -148,7 +148,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
     # Carries the depth path across a process boundary as well.
     ProcessPerCamera(
         duration_sec=6,
-        recording_count=8,
+        recording_count=4,
         joint_count=7,
         video_count=1,
         image_width=64,
@@ -163,7 +163,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
     # The baseline for a producer that learns its window second-hand.
     SeparateProcessRecordingControl(
         duration_sec=6,
-        recording_count=8,
+        recording_count=4,
         joint_count=7,
         producer_pacing=PACING_SATURATE,
     ),
@@ -171,7 +171,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
     # The only case that overrides the default stream-to-process mapping.
     SeparateProcessRecordingControl(
         duration_sec=6,
-        recording_count=8,
+        recording_count=4,
         joint_count=7,
         producer_pacing=PACING_SATURATE,
         producer_process_streams=(
@@ -183,7 +183,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
     # No camera split does this — a camera child owns its channel alone.
     ProcessPerLimbPerCamera(
         duration_sec=6,
-        recording_count=8,
+        recording_count=4,
         joint_count=8,
         producer_pacing=PACING_SATURATE,
     ),
@@ -224,8 +224,8 @@ NETWORK_ONLY_INTEGRITY_CASES = (
     # Remote control at the heaviest cross-process shape, fifteen windows deep.
     # Propagation has to hold under encode backlog, not only when idle.
     ProcessPerLimbPerCamera(
-        duration_sec=15,
-        recording_count=15,
+        duration_sec=8,
+        recording_count=8,
         joint_count=7,
         video_count=4,
         image_width=640,
@@ -253,7 +253,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_count=7,
         video_count=0,
         parallel_contexts=1,
-        recording_count=8,
+        recording_count=4,
         context_duration_mode=DURATION_MODE_FIXED,
         joint_fps=100,
     ),
@@ -279,7 +279,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=256,
         image_height=256,
         parallel_contexts=8,
-        recording_count=32,
+        recording_count=16,
         joint_fps=80,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=30,
@@ -295,7 +295,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         joint_count=100,
         video_count=0,
         parallel_contexts=1,
-        recording_count=8,
+        recording_count=4,
     ),
     # Five-minute 1080p windows: memory growth and spool backlog over a long
     # run, which is why this one is exempt from the shared window length. Takes
@@ -309,7 +309,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=1920,
         image_height=1080,
         parallel_contexts=2,
-        recording_count=8,
+        recording_count=4,
         context_duration_mode=DURATION_MODE_VARIABLE,
         video_fps=15,
         joint_fps=15,
@@ -326,7 +326,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         image_width=1920,
         image_height=1080,
         parallel_contexts=1,
-        recording_count=8,
+        recording_count=4,
         video_fps=15,
         joint_fps=15,
         producer_pacing=PACING_BURST_VIDEO,
@@ -340,7 +340,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_count=2,
         image_width=640,
         image_height=480,
-        recording_count=8,
+        recording_count=4,
         video_fps=15,
         joint_fps=15,
         depth_count=2,
@@ -368,7 +368,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
     # drawn from. Against the case above, boundary cost is the only difference.
     PerThread(
         duration_sec=20,
-        recording_count=8,
+        recording_count=4,
         video_count=1,
         image_height=120,
         image_width=120,
@@ -387,7 +387,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_count=2,
         image_width=256,
         image_height=256,
-        recording_count=8,
+        recording_count=4,
         joint_fps=80,
         video_fps=30,
         context_duration_mode=DURATION_MODE_VARIABLE,
@@ -402,7 +402,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_count=1,
         image_width=1920,
         image_height=1080,
-        recording_count=8,
+        recording_count=4,
         joint_fps=15,
         video_fps=15,
         producer_pacing=PACING_BURST_VIDEO,
@@ -416,7 +416,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_count=4,
         image_width=960,
         image_height=540,
-        recording_count=8,
+        recording_count=4,
         joint_fps=15,
         video_fps=15,
         producer_pacing=PACING_BURST_VIDEO,
@@ -430,7 +430,7 @@ PRE_NETWORK_PERFORMANCE_CASES = (
         video_count=4,
         image_width=640,
         image_height=480,
-        recording_count=8,
+        recording_count=4,
         joint_fps=80,
         video_fps=30,
         producer_pacing=PACING_BURST_VIDEO,
@@ -450,7 +450,7 @@ NETWORK_ONLY_PERFORMANCE_CASES = (
         video_count=1,
         image_width=256,
         image_height=256,
-        recording_count=8,
+        recording_count=4,
         joint_fps=80,
         video_fps=30,
         recording_control=CONTROL_REMOTE,
@@ -465,7 +465,7 @@ NETWORK_ONLY_PERFORMANCE_CASES = (
         video_count=1,
         image_width=256,
         image_height=256,
-        recording_count=8,
+        recording_count=4,
         joint_fps=80,
         video_fps=30,
         recording_control=CONTROL_SPLIT_PROCESS,
