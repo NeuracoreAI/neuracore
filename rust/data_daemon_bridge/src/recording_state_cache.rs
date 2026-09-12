@@ -21,6 +21,12 @@
 //!   somewhere else — the web, or another process — which this process would
 //!   otherwise never hear about.
 //!
+//! Observing a *close* is not only a read. A process with video for the source
+//! owes the daemon a flush marker for the window it just left, and one that
+//! brackets no recording of its own never makes the call that would send it —
+//! so a refresh that finds the recording gone runs that barrier here: see
+//! [`crate::writer::flush_source_detached`].
+//!
 //! What [`epoch`] hands out is a per-source counter, bumped whenever this
 //! process observes the source cross a recording boundary — never a property of
 //! the recording itself. A start timestamp cannot serve: two recordings may be
@@ -343,20 +349,28 @@ fn lookup<'a>(entries: &'a Entries, source: &Source) -> Option<&'a Entry> {
 }
 
 fn apply_refresh(source: &Source, seq_before: u64, found: Option<LiveRecording>) {
-    let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
-    let entry = entry_mut(&mut entries, &source.0, source.1);
-    entry.refresh_scheduled_at = None;
-    if entry.seq != seq_before {
-        // A local start or stop landed while this answer was in flight; it
-        // speaks for this process's own recording and outranks the daemon's
-        // older view.
-        return;
+    let left = {
+        let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
+        let entry = entry_mut(&mut entries, &source.0, source.1);
+        entry.refresh_scheduled_at = None;
+        if entry.seq != seq_before {
+            // A local start or stop landed while this answer was in flight; it
+            // speaks for this process's own recording and outranks the daemon's
+            // older view.
+            return;
+        }
+        if crossed_a_boundary(entry.open.as_ref(), found.as_ref()) {
+            entry.epoch = entry.epoch.wrapping_add(1);
+        }
+        let left = left_a_recording(entry.open.as_ref(), found.as_ref());
+        entry.open = found;
+        entry.written_at = Some(Instant::now());
+        left
+    };
+    if left {
+        // Outside the lock: every logging thread takes it per frame.
+        crate::writer::flush_source_detached(&source.0, source.1);
     }
-    if crossed_a_boundary(entry.open.as_ref(), found.as_ref()) {
-        entry.epoch = entry.epoch.wrapping_add(1);
-    }
-    entry.open = found;
-    entry.written_at = Some(Instant::now());
 }
 
 /// Whether moving from `held` to `found` leaves one recording for another.
@@ -371,6 +385,20 @@ fn crossed_a_boundary(held: Option<&LiveRecording>, found: Option<&LiveRecording
         // Nothing open now; the epoch a caller sees is `None` either way, so
         // there is no boundary to mark.
         (_, None) => false,
+    }
+}
+
+/// Whether moving from `held` to `found` leaves a recording behind — this
+/// process's cue to report the flush barrier it owes for one.
+///
+/// Unlike [`crossed_a_boundary`], closing into nothing counts: an ordinary stop
+/// is exactly the case a process that brackets nothing itself has to react to.
+/// Opening from nothing does not — there is no window to report for yet.
+fn left_a_recording(held: Option<&LiveRecording>, found: Option<&LiveRecording>) -> bool {
+    match (held, found) {
+        (Some(held), Some(found)) => is_other(held, found),
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 
@@ -564,6 +592,35 @@ mod tests {
         apply_refresh(&source, seq_of(&source), opened(Some(2), 200));
 
         assert_ne!(epoch(&source.0, source.1), first);
+    }
+
+    #[test]
+    fn filling_in_a_held_recordings_ids_does_not_leave_it() {
+        // The daemon assigns `recording_index` and mints `recording_id` after
+        // the recording opens, so a refresh routinely learns more about the one
+        // already held. Reading that as a close would run a flush barrier
+        // mid-recording, on every camera process, several times a second.
+        let held = opened(None, 4_200);
+        let found = opened_with_id(Some(7), 4_200, "rec-1");
+
+        assert!(!left_a_recording(held.as_ref(), found.as_ref()));
+    }
+
+    #[test]
+    fn a_recording_that_closed_or_gave_way_has_been_left() {
+        let held = opened(Some(7), 4_200);
+        let successor = opened(Some(8), 9_000);
+
+        assert!(left_a_recording(held.as_ref(), None));
+        assert!(left_a_recording(held.as_ref(), successor.as_ref()));
+    }
+
+    #[test]
+    fn opening_from_nothing_leaves_no_recording() {
+        let found = opened(Some(7), 4_200);
+
+        assert!(!left_a_recording(None, found.as_ref()));
+        assert!(!left_a_recording(None, None));
     }
 
     #[test]

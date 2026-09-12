@@ -90,8 +90,9 @@ const FLUSH_MARKER_WAIT_CAP: Duration = Duration::from_secs(30);
 /// How long a source must publish nothing at all before a stopped window owed
 /// a flush marker settles on that silence instead.
 ///
-/// A recording ended from the web has no local stop, so no producer publishes
-/// an [`Envelope::SourceFlushed`] and the window would sit out the whole
+/// A producer reports its barrier off the stop it observes, not only off one it
+/// calls — but observing takes a logging thread asking, so a producer that has
+/// gone quiet never sees the close and would sit out the whole
 /// [`FLUSH_MARKER_WAIT_CAP`]. Silence is the substitute proof: a source that
 /// has published nothing for longer than the producer's own seal deadline
 /// ([`VIDEO_CHUNK_MAX_OPEN_NS`](data_daemon_shared::service_name::VIDEO_CHUNK_MAX_OPEN_NS)),
