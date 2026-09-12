@@ -6,6 +6,9 @@ import random
 import uuid
 from dataclasses import dataclass, field
 
+from neuracore.api.core import (
+    _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S as DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S,
+)
 from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     ObservedFrameCodes,
     TraceClassification,
@@ -21,9 +24,9 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_RECORDING_DURATION_S,
     MODE_STAGGERED,
     STOP_RECORDING_NO_WAIT_SLA_S,
-    STOP_RECORDING_OVERHEAD_PER_SEC,
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
+    STOP_RECORDING_WAIT_OBSERVATION_S,
     DepthMode,
     random_phase_jitter_window,
 )
@@ -105,12 +108,13 @@ class ContextCaseSpec:
         per-pixel upload constant as a first approximation — both are
         video-family traces that always keep a lossless archive, so their
         upload cost is comparable order-of-magnitude, though not necessarily
-        identical. The budget is floored at the duration-based overhead so
-        short or low-volume recordings keep a sane minimum.
+        identical. Those upload terms sit on top of
+        ``STOP_RECORDING_WAIT_OBSERVATION_S`` rather than under it as a
+        minimum, because that fixed cost is paid before any payload matters
+        and does not scale with recording length.
         """
         if not self.wait:
             return STOP_RECORDING_NO_WAIT_SLA_S
-        duration_floor = self.duration_sec * STOP_RECORDING_OVERHEAD_PER_SEC
         joint_budget = (
             self.duration_sec
             * self.joint_count
@@ -128,7 +132,8 @@ class ContextCaseSpec:
                 * self.image_height
                 * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
             )
-        return max(duration_floor, joint_budget + video_budget)
+        budget = STOP_RECORDING_WAIT_OBSERVATION_S + joint_budget + video_budget
+        return min(budget, DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S)
 
 
 @dataclass(frozen=True, slots=True)
