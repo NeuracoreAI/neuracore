@@ -6,6 +6,9 @@ import random
 import uuid
 from dataclasses import dataclass, field
 
+from neuracore.api.core import (
+    _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S as DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S,
+)
 from tests.integration.platform.data_daemon.shared.test_case.boundaries import (
     ObservedFrameCodes,
     TraceClassification,
@@ -24,6 +27,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     STOP_RECORDING_OVERHEAD_PER_SEC,
     STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S,
     STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S,
+    STOP_RECORDING_WAIT_OBSERVATION_S,
     DepthMode,
     random_phase_jitter_window,
 )
@@ -128,7 +132,11 @@ class ContextCaseSpec:
                 * self.image_height
                 * STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S
             )
-        return max(duration_floor, joint_budget + video_budget)
+        budget = (
+            max(duration_floor, joint_budget + video_budget)
+            + STOP_RECORDING_WAIT_OBSERVATION_S
+        )
+        return min(budget, DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S)
 
 
 @dataclass(frozen=True, slots=True)
