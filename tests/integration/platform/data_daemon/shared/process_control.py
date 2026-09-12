@@ -153,10 +153,10 @@ class Timer:
     ``max_time``.
 
     Every logged line and assertion message apportions the elapsed time between
-    HTTP requests this thread made and everything else, so a breach states on its
-    face whether the backend was involved.  Blocks whose limit is at least
-    ``STACK_DUMP_MIN_LIMIT_S`` also dump every thread's stack to stderr at the
-    moment they breach, while the block is still stuck.
+    HTTP requests this thread made, CPU it burned, and time it merely waited, so
+    a breach states on its face whether the backend was involved.  Blocks whose
+    limit is at least ``STACK_DUMP_MIN_LIMIT_S`` also dump every thread's stack
+    to stderr at the moment they breach, while the block is still stuck.
 
     Attributes:
         _stats: Class-level dict mapping label strings to aggregate timing
@@ -178,6 +178,8 @@ class Timer:
             call buries the run, and the histogram already reports the tail.
         http_calls: Requests this thread issued inside the block.  Set on exit.
         http_seconds: Seconds those requests took.  Set on exit.
+        cpu_seconds: CPU seconds this thread burned inside the block.  Set on
+            exit.
         dumps_stack: Whether this timer armed the stack dump.
     """
 
@@ -208,12 +210,14 @@ class Timer:
             self.dump_deadline = time.monotonic() + self.max_time
             _dump_deadlines.append(self.dump_deadline)
             _rearm_stack_dump()
+        self.cpu_start = time.thread_time()
         self.start = time.perf_counter()
         return self
 
     def __exit__(self, *args: object) -> bool | None:
         self.end = time.perf_counter()
         self.interval = self.end - self.start
+        self.cpu_seconds = time.thread_time() - self.cpu_start
         if self.dumps_stack:
             try:
                 _dump_deadlines.remove(self.dump_deadline)
@@ -263,21 +267,24 @@ class Timer:
         return None
 
     def _attribution(self) -> str:
-        """Split the measured time between waiting on the API and local work.
+        """Split the measured time between the API, local work and waiting.
 
         Names whichever side dominates so a breach does not need cross-referencing
         against backend request logs to apportion. HTTP time covers only requests
-        this thread issued, so a block whose work happens in worker processes or
-        threads reports its own HTTP time as near zero.
+        this thread issued and local time only the CPU it burned, so a block that
+        polls, sleeps, or waits on worker threads and processes reports both near
+        zero and lands on ``wait`` instead of claiming work it never did.
 
         Returns:
-            A bracketed summary of HTTP time, local time and the dominant side.
+            A bracketed summary of HTTP time, local time, waiting time and the
+            dominant side.
         """
-        local = max(self.interval - self.http_seconds, 0.0)
-        dominant = "http" if self.http_seconds > local else "local"
+        waiting = max(self.interval - self.http_seconds - self.cpu_seconds, 0.0)
+        shares = {"http": self.http_seconds, "local": self.cpu_seconds, "wait": waiting}
+        dominant = max(shares, key=lambda side: shares[side])
         return (
             f"[http {self.http_seconds:.3f}s over {self.http_calls} calls, "
-            f"local {local:.3f}s -> {dominant}-bound]"
+            f"local {self.cpu_seconds:.3f}s, wait {waiting:.3f}s -> {dominant}-bound]"
         )
 
     @classmethod
