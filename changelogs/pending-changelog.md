@@ -10,3 +10,5 @@ Example: "This release adds support for multi-GPU training and improves streamin
 ## Summary
 
 <!-- Append your summary here -->
+
+Datasets now support backward pagination: `reversed(dataset)` walks a dataset's recordings from oldest to newest directly against the backend, instead of loading every recording forward first. This is new — backward traversal has never previously been available in the SDK. Forward iteration, indexing, and slicing are unchanged and continue to show the newest recordings first. The SDK also now detects a stalled pagination cursor (for example, a backend that repeats the same page instead of advancing) and raises a clear error instead of silently loading duplicate recordings.
