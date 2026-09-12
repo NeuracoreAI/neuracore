@@ -44,6 +44,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MODE_SEQUENTIAL,
     PACING_BURST_VIDEO,
     PACING_DEADLINE,
+    PACING_SATURATE,
     PRODUCER_MULTI_PROCESS,
     PRODUCER_PER_THREAD,
     PRODUCER_SYNCHRONOUS,
@@ -86,6 +87,15 @@ def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
         return (
             f"producer_pacing={PACING_BURST_VIDEO!r} needs video_count > 0 or "
             "depth_count > 0: it clumps the video streams and there are none"
+        )
+    if (
+        case.producer_pacing == PACING_SATURATE
+        and case.producer_channels != PRODUCER_SYNCHRONOUS
+    ):
+        return (
+            f"producer_pacing={PACING_SATURATE!r} needs a recording-scoped "
+            f"producer, not {case.producer_channels!r}: one that outlives its "
+            "recordings logs through the stop."
         )
     return _unsupported_recording_control(case) or _unsupported_process_placement(case)
 
@@ -307,8 +317,8 @@ class DataDaemonTestCase:
         video_detail: Pixel content of the synthetic camera frames — realistic
             costs full compression/encode, flat is a cheap solid fill; frame
             identity is embedded either way.
-        producer_pacing: When each stream offers its next frame. Every value
-            works under every producer lifetime; none of them decide what
+        producer_pacing: When each stream offers its next frame. ``"saturate"``
+            needs a recording-scoped producer; none of them decide what
             timestamp a frame carries (see ``random_phase``).
         recording_control: Who opens and closes each window. ``"local"``
             (default) calls the SDK from the test process; ``"remote"`` calls
