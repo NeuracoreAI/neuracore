@@ -14,9 +14,10 @@ from neuracore_types import DataType
 
 import neuracore as nc
 from neuracore.core.endpoint import policy_local_server
+from neuracore.core.utils.log_format import install_stream_logging
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
 
-logging.basicConfig(level=logging.INFO)
+install_stream_logging()
 logger = logging.getLogger(__name__)
 
 

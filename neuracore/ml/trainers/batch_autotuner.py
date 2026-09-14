@@ -13,6 +13,7 @@ import torch
 from omegaconf import DictConfig
 from torch.utils.data import DataLoader, Dataset
 
+from neuracore.core.utils.log_format import install_stream_logging
 from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
@@ -207,7 +208,7 @@ def _run_batch_size_probe_worker(
     device_str: str,
 ) -> None:
     """Subprocess entrypoint that probes a single batch size."""
-    logging.basicConfig(level=logging.INFO)
+    install_stream_logging()
     worker_logger = logging.getLogger(__name__)
 
     try:

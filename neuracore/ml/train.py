@@ -29,6 +29,7 @@ from neuracore.core.utils.embodiment_description_utils import (
     extract_data_types,
     merge_cross_embodiment_description,
 )
+from neuracore.core.utils.log_format import install_stream_logging
 from neuracore.ml import NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
@@ -171,7 +172,6 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
     """Setup logging configuration."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-    stream_handler = logging.StreamHandler()
 
     if rank == 0:
         file_handler = logging.FileHandler(output_path / "train.log")
@@ -179,12 +179,7 @@ def setup_logging(output_dir: str, rank: int = 0) -> None:
         file_handler = logging.FileHandler(output_path / f"train-rank{rank}.log")
     file_handler.setFormatter(JsonLineLogFormatter())
 
-    handlers: list[logging.Handler] = [file_handler, stream_handler]
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=handlers,
-        force=True,
-    )
+    install_stream_logging(logging.INFO, extra_handlers=[file_handler])
 
 
 def get_model_and_algorithm_config(

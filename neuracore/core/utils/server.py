@@ -28,6 +28,7 @@ from neuracore.core.const import (
     SET_CHECKPOINT_ENDPOINT,
 )
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
+from neuracore.core.utils.log_format import install_stream_logging
 from neuracore.ml.logging.json_line_formatter import JsonLineLogFormatter
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.preprocessing import resolve_preprocessing_config
@@ -51,19 +52,16 @@ class CheckpointRequest(BaseModel):
 
 def setup_server_logging(log_level: str, log_file_path: str | None = None) -> None:
     """Configure structured logging for the server process."""
-    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    extra_handlers: list[logging.Handler] = []
     if log_file_path is not None:
         path = Path(log_file_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         file_handler = logging.FileHandler(path)
-        handlers.append(file_handler)
-
-    formatter = JsonLineLogFormatter()
-    for handler in handlers:
-        handler.setFormatter(formatter)
+        file_handler.setFormatter(JsonLineLogFormatter())
+        extra_handlers.append(file_handler)
 
     level = getattr(logging, log_level.upper(), logging.INFO)
-    logging.basicConfig(level=level, handlers=handlers, force=True)
+    install_stream_logging(level, extra_handlers=extra_handlers)
 
 
 def write_startup_status(

@@ -642,9 +642,27 @@ fn refresh_config(py: Python<'_>) -> PyResult<()> {
     })
 }
 
+/// Logger-name prefix every Rust target is published under on the Python side.
+///
+/// `pyo3-log` rewrites `::` to `.` and prepends this, so `data_daemon_bridge::writer`
+/// reaches Python as `neuracore.data_daemon.rust.data_daemon_bridge.writer`.
+const PYTHON_LOG_PREFIX: &str = "neuracore.data_daemon.rust";
+
+/// Route this crate's `tracing` events to Python's `logging` module.
+///
+/// Requires the `log` feature on the `tracing` dependency; without it no event
+/// reaches `pyo3-log`.
+fn install_python_logging(py: Python<'_>) -> PyResult<()> {
+    let logger = pyo3_log::Logger::new(py, pyo3_log::Caching::LoggersAndLevels)?
+        .set_prefix(PYTHON_LOG_PREFIX);
+    let _ = logger.install();
+    Ok(())
+}
+
 /// Python module entrypoint registered as `neuracore.data_daemon._data_bridge`.
 #[pymodule]
 fn _data_bridge(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    install_python_logging(module.py())?;
     module.add_function(wrap_pyfunction!(start_recording, module)?)?;
     module.add_function(wrap_pyfunction!(log_joints, module)?)?;
     module.add_function(wrap_pyfunction!(log_frame, module)?)?;
