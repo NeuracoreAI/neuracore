@@ -154,9 +154,9 @@ class LocalRecordingController(RecordingController):
         """Stop the recording; the window's bound is stamped inside the call.
 
         The daemon closes the window at the publish stamp of the envelope this
-        call sends, which goes out before the flush ``wait`` waits on — so the
-        bound has passed by :data:`STOP_PUBLISH_SKEW_S` after entry, whatever
-        the call itself then spends.
+        call sends, and the bridge takes that stamp on entry, before either
+        flush — so the bound has passed by :data:`STOP_PUBLISH_SKEW_S` after
+        entry, whatever the call itself then spends.
         """
         called_at = time.time()
         with Timer(
