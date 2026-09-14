@@ -59,7 +59,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     delete_cloud_robot,
 )
@@ -258,7 +258,7 @@ def _collected_dataset(name_prefix: str) -> Iterator[Dataset]:
     robot_name = f"sync_it_robot_{run_id}"
     dataset: Dataset | None = None
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             assert_exactly_one_daemon_pid()
             dataset = _collect_dataset(
                 robot_name=robot_name,
@@ -340,7 +340,7 @@ def test_dataset_synchronization_after_mutation() -> None:
         "cross_embodiment_union": None,
     }
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             assert_exactly_one_daemon_pid()
 
             logger.info(

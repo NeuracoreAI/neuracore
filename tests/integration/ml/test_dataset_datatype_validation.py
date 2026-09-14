@@ -24,7 +24,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     delete_cloud_robot,
 )
@@ -200,7 +200,7 @@ class TestDatasetDatatypeValidation:
         )
         nc.create_dataset(name=self.dataset_name)
 
-        with online_daemon_running():
+        with online_daemon(start=True):
             assert_exactly_one_daemon_pid()
             for ep_idx, data_types in enumerate(EPISODE_DATA_TYPES):
                 logger.info(

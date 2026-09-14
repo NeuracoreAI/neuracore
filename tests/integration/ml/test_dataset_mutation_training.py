@@ -50,7 +50,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     delete_cloud_robot,
 )
@@ -211,7 +211,7 @@ def _collect_recordings(
     )
     new_recording_ids: set[str] = set()
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         assert_exactly_one_daemon_pid()
         nc.connect_robot(
             robot_name=robot_name,

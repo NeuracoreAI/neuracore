@@ -8,7 +8,7 @@ from tests.integration.platform.data_daemon.daemon_test_cases import (
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
 )
-from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import offline_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -56,8 +56,8 @@ def test_disk_db_write_performance(
     specs = build_context_specs(case, dataset_name=dataset_name, assert_deadline=True)
     with performance_report(case, dataset_name=dataset_name) as report:
         with scoped_storage_state(case, specs):
-            with offline_daemon_running():
-                assert_exactly_one_daemon_pid()
+            with offline_daemon():
                 report.capture_results(
                     run_case_contexts(case, specs=specs, wait_for_traces=True)
                 )
+                assert_exactly_one_daemon_pid()

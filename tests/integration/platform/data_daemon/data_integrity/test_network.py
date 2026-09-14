@@ -17,7 +17,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     resolve_cloud_recording_ids,
 )
 from tests.integration.platform.data_daemon.shared.profiles import scoped_holdback_ms
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -84,10 +84,10 @@ def test_cloud_data_integrity(
         scoped_holdback_ms(50),
     ):
         try:
-            with online_daemon_running():
-                assert_exactly_one_daemon_pid()
+            with online_daemon():
                 with latching_upload_observer() as observed:
                     results = run_case_contexts(case, specs=specs)
+                    assert_exactly_one_daemon_pid()
                     recording_indexes = [
                         recording_index
                         for result in results

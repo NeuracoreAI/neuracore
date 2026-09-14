@@ -38,7 +38,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
     wait_for_recordings_finalized,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ def collect_demo_data(
     ), f"episode_length_multiplier must be >= 1, got {episode_length_multiplier}"
     assert num_cameras >= 1, f"num_cameras must be >= 1, got {num_cameras}"
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         assert_exactly_one_daemon_pid()
         nc.connect_robot(
             robot_name=robot_name,

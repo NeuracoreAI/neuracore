@@ -78,57 +78,61 @@ def stop_daemon_and_verify() -> None:
 
 
 @contextmanager
-def offline_daemon_running() -> Generator[None]:
-    """Run the daemon in offline mode for the duration of the block.
+def offline_daemon(start: bool = False) -> Generator[None]:
+    """Configure the daemon for offline mode for the duration of the block.
 
-    Asserts clean process/socket state before starting the daemon and again
-    after it stops, so tests do not need to call :func:`assert_daemon_cleanup`
+    Asserts clean process/socket state on entry and again after the daemon
+    stops, so tests do not need to call :func:`assert_daemon_cleanup`
     themselves.
 
     Composes :func:`~profiles.scoped_offline_profile` (profile env)
     with :func:`~process_control.stop_daemon` /
     ``ensure_daemon_running`` (process lifecycle).
 
+    Args:
+        start: Start the daemon on entry. Otherwise the SDK starts it, as it
+            does for a user.
+
     Yields:
-        ``None`` — the daemon is running in offline mode while the body
-        executes.
+        ``None``, with offline mode configured while the body executes.
     """
     with scoped_daemon_storage_env(), scoped_offline_profile():
         try:
             stop_daemon_and_verify()
-            ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
+            if start:
+                ensure_daemon_running(timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS)
             yield
         finally:
             stop_daemon_and_verify()
 
 
 @contextmanager
-def online_daemon_running() -> Generator[None]:
-    """Run the daemon in online mode for the duration of the block.
+def online_daemon(start: bool = False) -> Generator[None]:
+    """Configure the daemon for online mode for the duration of the block.
 
     Stops any suite-owned leftover daemon, asserts clean process/socket state,
-    then starts a fresh daemon and asserts cleanup again after it stops.
+    and asserts cleanup again after the daemon stops.
 
     Forces ``NCD_OFFLINE=0`` and clears ``NEURACORE_DAEMON_PROFILE`` so
     callers cannot inherit a temporary offline profile from prior tests.
 
+    Args:
+        start: Start a fresh daemon on entry. Otherwise the SDK starts it, as
+            it does for a user.
+
     Yields:
-        ``None`` — the daemon is running in online mode while the body
-        executes.
+        ``None``, with online mode configured while the body executes.
     """
     with scoped_daemon_storage_env(), scoped_online_mode():
         try:
-            with report_step("Start clean online daemon"):
-                with Timer(
-                    DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS + 15,
-                    label="daemon.online_startup",
-                    always_log=True,
-                    assert_deadline=False,
-                ):
+            if start:
+                with report_step("Start clean online daemon"):
                     stop_daemon_and_verify()
                     ensure_daemon_running(
                         timeout_s=DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
                     )
+            else:
+                stop_daemon_and_verify()
             yield
         finally:
             with report_step("Gracefully stop online daemon"):

@@ -5,7 +5,7 @@ Verifies that stopping the daemon via SIGTERM, SIGINT, SIGKILL, or the CLI
 and no lingering runner subprocess.
 
 Each test starts a fresh daemon in online mode, isolated by the
-batch-start storage fixture and ``online_daemon_running``, calls
+batch-start storage fixture and ``online_daemon(start=True)``, calls
 :func:`stop_daemon` with the method under test, then asserts cleanup invariants.
 
 Graceful methods (CLI, SIGTERM, SIGINT) let the daemon run its own shutdown
@@ -35,7 +35,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     get_runner_pids,
     stop_daemon,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestCase,
     Synchronous,
@@ -88,7 +88,7 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
     IPC artefacts removed.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid = _single_runner_pid()
         logger.info("CLI stop for daemon pid=%d", pid)
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -97,7 +97,7 @@ def test_cli_stop_exits_daemon_and_cleans_up() -> None:
 def test_cli_stop_removes_pid_file() -> None:
     """PID file is absent after a clean CLI stop."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid_path = get_daemon_pid_path()
         assert pid_path.exists(), f"PID file missing before stop: {pid_path}"
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -108,7 +108,7 @@ def test_cli_stop_removes_pid_file() -> None:
 def test_cli_stop_unlinks_socket() -> None:
     """Unix domain socket is removed after a clean CLI stop."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
 
@@ -120,7 +120,7 @@ def test_cli_stop_unlinks_socket() -> None:
 def test_sigterm_exits_daemon_and_cleans_up() -> None:
     """SIGTERM triggers graceful shutdown and full resource cleanup."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid = _single_runner_pid()
         logger.info("SIGTERM to daemon pid=%d", pid)
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -129,7 +129,7 @@ def test_sigterm_exits_daemon_and_cleans_up() -> None:
 def test_sigterm_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGTERM."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
     assert_no_pid_file()
@@ -138,7 +138,7 @@ def test_sigterm_removes_pid_file() -> None:
 def test_sigterm_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGTERM."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
 
@@ -155,7 +155,7 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
     for SIGTERM.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid = _single_runner_pid()
         logger.info("SIGINT to daemon pid=%d", pid)
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -164,7 +164,7 @@ def test_sigint_exits_daemon_and_cleans_up() -> None:
 def test_sigint_removes_pid_file() -> None:
     """PID file is absent after the daemon receives SIGINT."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
     assert_no_pid_file()
@@ -173,7 +173,7 @@ def test_sigint_removes_pid_file() -> None:
 def test_sigint_unlinks_socket() -> None:
     """Unix domain socket is removed after the daemon receives SIGINT."""
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
 
@@ -188,11 +188,11 @@ def test_sigkill_terminates_daemon_process() -> None:
     SIGKILL cannot be caught or ignored; the daemon's cleanup handler never
     runs.  The test only asserts that the process is dead — it does NOT assert
     that IPC artefacts were cleaned up, since that is not guaranteed.
-    ``online_daemon_running`` teardown is responsible for removing stale
+    ``online_daemon`` teardown is responsible for removing stale
     artefacts after an unclean kill.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid = _single_runner_pid()
         logger.info("SIGKILL to daemon pid=%d", pid)
         stop_daemon(method="sigkill")
@@ -205,16 +205,16 @@ def test_sigkill_terminates_daemon_process() -> None:
 def test_sigkill_allows_clean_restart() -> None:
     """A new daemon starts cleanly after an unclean SIGKILL termination.
 
-    ``online_daemon_running`` teardown calls ``stop_daemon`` which removes
-    any stale artefacts left by SIGKILL.  A second ``online_daemon_running``
+    ``online_daemon`` teardown calls ``stop_daemon`` which removes
+    any stale artefacts left by SIGKILL.  A second ``online_daemon``
     block must succeed without manual intervention and produce a new PID.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid_before = _single_runner_pid()
         stop_daemon(method="sigkill")
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid_after = _single_runner_pid()
         assert pid_after != pid_before, (
             f"Expected a new daemon PID after SIGKILL restart, "
@@ -237,7 +237,7 @@ def test_sigterm_then_cli_stop_is_idempotent() -> None:
     daemon has already stopped.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
         # Daemon is gone; CLI stop must handle the already-stopped case cleanly.
         stop_daemon(method="cli", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
@@ -250,7 +250,7 @@ def test_sigint_then_sigterm_exits_cleanly() -> None:
     The second call must not deadlock or leave stale artefacts.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         stop_daemon(method="sigint", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
         stop_daemon(method="sigterm", graceful_timeout_s=GRACEFUL_EXIT_TIMEOUT_S)
 
@@ -261,18 +261,18 @@ def test_sigint_then_sigterm_exits_cleanly() -> None:
 
 
 def test_online_daemon_running_exit_leaves_no_pids() -> None:
-    """No daemon PIDs remain after ``online_daemon_running()`` exits normally.
+    """No daemon PIDs remain after ``online_daemon(start=True)`` exits normally.
 
     Regression for the failure seen in ``test_disk_db`` where
     ``assert_daemon_cleanup()`` at the top of the next test found PIDs still
-    alive after the previous ``online_daemon_running()`` block exited.
+    alive after the previous ``online_daemon(start=True)`` block exited.
 
-    ``online_daemon_running()`` calls ``stop_daemon()`` in its ``finally``
+    ``online_daemon(start=True)`` calls ``stop_daemon()`` in its ``finally``
     block; this test asserts that ``stop_daemon()`` fully reaps all runner
     subprocesses so the process table is clean for the subsequent test.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pid = _single_runner_pid()
         logger.info("daemon running with pid=%d, exiting context", pid)
 
@@ -280,7 +280,7 @@ def test_online_daemon_running_exit_leaves_no_pids() -> None:
 
 
 def test_online_daemon_running_exit_cleans_up_after_active_recording() -> None:
-    """No daemon PIDs remain after ``online_daemon_running()`` exits mid-recording.
+    """No daemon PIDs remain after ``online_daemon(start=True)`` exits mid-recording.
 
     Simulates the condition that triggered the test_disk_db isolation failure:
     the daemon was still alive (PIDs found in the process table) when the next
@@ -288,10 +288,10 @@ def test_online_daemon_running_exit_cleans_up_after_active_recording() -> None:
 
     This test starts the daemon, confirms it is running, then exits the context
     without an explicit stop inside the block — relying solely on the
-    ``finally: stop_daemon()`` in ``online_daemon_running()``.
+    ``finally: stop_daemon()`` in ``online_daemon(start=True)``.
     """
 
-    with online_daemon_running():
+    with online_daemon(start=True):
         pids_before = get_runner_pids()
         assert pids_before, "Expected at least one runner PID inside context"
         logger.info("runner PIDs inside context: %s", sorted(pids_before))
@@ -326,7 +326,7 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
     1. Start daemon in online mode, run one full recording to completion.
       2. SIGKILL the daemon — bypasses the graceful handler entirely.
       3. Verify the old PID is dead.
-    4. Start a fresh daemon in a new ``online_daemon_running()`` block.
+    4. Start a fresh daemon in a new ``online_daemon(start=True)`` block.
       5. Assert the new PID differs from the killed one and is alive.
       6. Verify full cleanup after the second block exits.
 
@@ -339,7 +339,7 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
     dataset_name, robot_names = cloud_resource_names(specs)
 
     with cloud_resource_deleter(dataset_name, robot_names):
-        with online_daemon_running():
+        with online_daemon(start=True):
             pid_first = assert_exactly_one_daemon_pid()
             results = run_case_contexts(case, specs=specs)
             if results:
@@ -351,9 +351,9 @@ def test_sigkill_after_recording_allows_clean_restart(case: DataDaemonTestCase) 
                 pid_first
             ), f"pid_is_running still True for killed daemon pid={pid_first}"
 
-        # IPC artefacts may be stale here. A second online_daemon_running block
+        # IPC artefacts may be stale here. A second online_daemon block
         # must clean them up and succeed from scratch.
-        with online_daemon_running():
+        with online_daemon(start=True):
             pid_second = assert_exactly_one_daemon_pid()
             assert pid_second != pid_first, (
                 f"Expected a new daemon PID after SIGKILL restart, "
@@ -387,7 +387,7 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
     dataset_name, robot_names = cloud_resource_names(specs)
 
     with cloud_resource_deleter(dataset_name, robot_names):
-        with online_daemon_running():
+        with online_daemon(start=True):
             pid_first = assert_exactly_one_daemon_pid()
 
             # Run the producer workload in a child process so a SIGKILL at any point
@@ -439,7 +439,7 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
 
             # Depending on where SIGKILL lands, the interrupted workload may have
             # auto-started a replacement daemon through nc.* calls. Remove it before
-            # online_daemon_running() performs its isolation check.
+            # online_daemon(start=True) performs its isolation check.
             replacement_pids = get_runner_pids()
             if replacement_pids:
                 logger.info(
@@ -448,7 +448,7 @@ def test_sigkill_mid_recording_allows_clean_restart(case: DataDaemonTestCase) ->
                 )
                 stop_daemon(method=STOP_METHOD_SIGKILL)
 
-        with online_daemon_running():
+        with online_daemon(start=True):
             pid_second = assert_exactly_one_daemon_pid()
             assert pid_second != pid_first, (
                 f"Expected a new daemon PID after mid-recording SIGKILL restart, "

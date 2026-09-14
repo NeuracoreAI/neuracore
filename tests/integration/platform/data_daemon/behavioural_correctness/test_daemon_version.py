@@ -19,7 +19,7 @@ from neuracore.data_daemon.daemon_control import (
     ensure_daemon_running,
     pid_is_running,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 
 STALE_SDK_VERSION = "0.0.0+stale"
 
@@ -39,7 +39,7 @@ def test_running_daemon_reports_the_installed_neuracore_version() -> None:
     The daemon comes from the binary this install ships, so the version it
     reports over iceoryx2 must equal the installed neuracore version.
     """
-    with online_daemon_running():
+    with online_daemon(start=True):
         sdk_version = daemon_control._sdk_version()
         reported_version = _query_daemon_version()
         assert reported_version is not None and (
@@ -60,10 +60,10 @@ def test_daemon_from_another_neuracore_version_is_rejected() -> None:
 
     The daemon stays real and only the installed version is replaced, so the
     comparison runs over the true iceoryx2 round trip. The replacement starts
-    inside the block because ``online_daemon_running`` itself calls
+    inside the block because ``online_daemon(start=True)`` itself calls
     ``ensure_daemon_running``, which the mismatch would then break.
     """
-    with online_daemon_running():
+    with online_daemon(start=True):
         reported_version = _query_daemon_version()
         assert (
             reported_version is not None

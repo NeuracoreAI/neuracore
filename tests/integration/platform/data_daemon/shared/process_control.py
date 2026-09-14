@@ -20,10 +20,13 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Container, Generator, MutableMapping
+from collections.abc import Callable, Container, Generator, MutableMapping
 from contextlib import contextmanager
+from typing import Any
 
 from neuracore.core.utils.http_session import http_time_snapshot
+from neuracore.data_daemon import daemon_control
+from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
 from neuracore.data_daemon.daemon_control import (
     ensure_daemon_running,
     pid_is_running,
@@ -291,6 +294,33 @@ class Timer:
                 existing["max"] = max(existing["max"], incoming["max"])
                 for key in BUCKET_KEYS:
                     existing[key] += incoming.get(key, 0.0)
+
+
+def _time_daemon_launches() -> None:
+    """Time every daemon launch as ``daemon.<mode>_startup``, whichever process
+    makes it.
+
+    Installed on import, since every harness process imports this module, so a
+    daemon the SDK starts in a spawned producer is timed like one a runner
+    starts. ``online_daemon`` forces ``NCD_OFFLINE=0``; offline leaves it unset.
+    """
+    launch: Callable[..., subprocess.Popen] = daemon_control.launch_daemon_subprocess
+
+    @functools.wraps(launch)
+    def timed_launch(*args: Any, **kwargs: Any) -> subprocess.Popen:
+        mode = "online" if os.environ.get("NCD_OFFLINE") == "0" else "offline"
+        with Timer(
+            DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS + 15,
+            label=f"daemon.{mode}_startup",
+            always_log=True,
+            assert_deadline=False,
+        ):
+            return launch(*args, **kwargs)
+
+    daemon_control.launch_daemon_subprocess = timed_launch  # type: ignore[assignment]
+
+
+_time_daemon_launches()
 
 
 def surface_worker_errors(fn):

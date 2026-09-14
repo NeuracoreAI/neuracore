@@ -17,7 +17,7 @@ from tests.integration.importer.utils import (
 from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 
 IMPORTER_DATASET_READY_TIMEOUT_S = 300.0
 
@@ -38,7 +38,7 @@ def test_import_dataset(
     if shared:
         extra_args.insert(0, "--shared")
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             run_checked(build_importer_command(context, case, extra_args))
             wait_for_dataset_ready(
                 context.dataset_name,
@@ -90,7 +90,7 @@ def test_overwrite_import(
     if shared:
         extra_args.append("--shared")
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             run_checked(build_importer_command(context, case, extra_args))
             wait_for_dataset_ready(
                 context.dataset_name,
@@ -136,7 +136,7 @@ def test_max_workers_import(
     expected_episodes = count_source_episodes(case, kind)
     context = prepare_importer_run(tmp_path, case, kind, name_suffix="max_workers_it")
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             run_checked(
                 build_importer_command(
                     context,
@@ -175,7 +175,7 @@ def test_random_sample_import(
     ), f"random_sample={random_sample} exceeds source episodes ({source_episodes})."
     context = prepare_importer_run(tmp_path, case, kind, name_suffix="random_sample_it")
     try:
-        with online_daemon_running():
+        with online_daemon(start=True):
             run_checked(
                 build_importer_command(
                     context,

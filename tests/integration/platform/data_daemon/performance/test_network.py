@@ -9,7 +9,7 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_dataset_ready,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -68,7 +68,7 @@ def test_cloud_upload_and_readiness_performance(
     with performance_report(case, dataset_name=dataset_name) as report:
         results: list[ContextResult] = []
         with scoped_storage_state(case, specs):
-            with online_daemon_running():
+            with online_daemon():
                 with report.step("Record workload and stop recordings"):
                     with Timer(
                         case_timeout_seconds(case),

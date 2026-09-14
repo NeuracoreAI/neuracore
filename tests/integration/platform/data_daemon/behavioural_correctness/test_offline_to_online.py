@@ -13,8 +13,8 @@ from tests.integration.platform.data_daemon.shared.db_helpers import (
     wait_for_all_traces_written,
 )
 from tests.integration.platform.data_daemon.shared.runners import (
-    offline_daemon_running,
-    online_daemon_running,
+    offline_daemon,
+    online_daemon,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
@@ -81,15 +81,15 @@ def test_offline_pending_data_recovers_when_online(
 
     try:
         with scoped_storage_state(case, specs):
-            with offline_daemon_running():
+            with offline_daemon(start=True):
                 assert_exactly_one_daemon_pid()
                 results = run_case_contexts(case, specs=specs)
                 wait_for_all_traces_written(results=results)
                 assert_offline_recordings_pending(results)
-            # offline_daemon_running() stops the daemon on exit, preserving
+            # offline_daemon(start=True) stops the daemon on exit, preserving
             # offline artefacts for the online recovery phase below.
 
-            with online_daemon_running():
+            with online_daemon(start=True):
                 with latching_upload_observer() as observed:
                     recording_indexes = [
                         recording_index

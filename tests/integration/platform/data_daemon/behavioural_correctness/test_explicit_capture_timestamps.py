@@ -30,8 +30,8 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
 from tests.integration.platform.data_daemon.shared.runners import (
-    offline_daemon_running,
-    online_daemon_running,
+    offline_daemon,
+    online_daemon,
 )
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     Synchronous,
@@ -195,7 +195,7 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
     capture_stop_s = capture_start_s + _CASE.duration_sec
 
     with scoped_storage_state(_CASE):
-        with offline_daemon_running():
+        with offline_daemon(start=True):
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
                 nc.create_dataset(dataset_name)
@@ -268,7 +268,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
     )
 
     with scoped_storage_state(_CASE):
-        with offline_daemon_running():
+        with offline_daemon(start=True):
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
                 nc.create_dataset(dataset_name)
@@ -380,10 +380,10 @@ def test_a_backwards_timestamp_inside_one_recording_is_rejected(
     # A remote start is the backend's to mint, so the daemon has to be online
     # to be told about it.
     remote = controller_type is RemoteRecordingController
-    daemon = online_daemon_running if remote else offline_daemon_running
+    daemon = online_daemon if remote else offline_daemon
 
     with scoped_storage_state(_CASE):
-        with daemon():
+        with daemon(start=True):
             assert_exactly_one_daemon_pid()
             with Timer(MAX_TIME_TO_START_S, label="nc.create_dataset", always_log=True):
                 nc.create_dataset(dataset_name)

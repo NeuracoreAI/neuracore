@@ -19,7 +19,7 @@ from tests.integration.platform.data_daemon.shared.assertions import (
     verify_cloud_results,
 )
 from tests.integration.platform.data_daemon.shared.process_control import Timer
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -115,7 +115,7 @@ def test_cancel_recording_produces_no_data(
 
     try:
         with scoped_storage_state(case, specs):
-            with online_daemon_running():
+            with online_daemon(start=True):
                 assert_exactly_one_daemon_pid()
 
                 with Timer(
@@ -202,7 +202,7 @@ def test_cancel_either_side_of_a_valid_recording(
 
     try:
         with scoped_storage_state(case, specs):
-            with online_daemon_running():
+            with online_daemon(start=True):
                 assert_exactly_one_daemon_pid()
 
                 with Timer(

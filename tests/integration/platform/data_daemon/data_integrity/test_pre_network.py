@@ -19,7 +19,7 @@ from tests.integration.platform.data_daemon.shared.disk_helpers import (
     assert_video_artifacts,
 )
 from tests.integration.platform.data_daemon.shared.profiles import scoped_holdback_ms
-from tests.integration.platform.data_daemon.shared.runners import offline_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import offline_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
@@ -91,9 +91,9 @@ def test_disk_db_data_integrity(
         scoped_holdback_ms(50),
     ):
         try:
-            with offline_daemon_running():
-                assert_exactly_one_daemon_pid()
+            with offline_daemon():
                 results = run_case_contexts(case, specs=specs)
+                assert_exactly_one_daemon_pid()
                 wait_for_all_traces_written(results=results)
                 assert_disk_recording_properties(results)
                 if case.has_video:

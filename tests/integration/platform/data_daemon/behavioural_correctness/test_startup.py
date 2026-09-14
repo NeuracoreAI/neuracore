@@ -13,7 +13,7 @@ from tests.integration.platform.data_daemon.shared.process_control import (
     collect_daemon_pids_from_parallel_startup,
     get_runner_pids,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.runners import online_daemon
 
 
 def test_ensure_single_daemon_process() -> None:
@@ -25,7 +25,7 @@ def test_ensure_single_daemon_process() -> None:
     must actually be running, and there must be exactly one runner subprocess.
     """
     worker_count = psutil.cpu_count(logical=False) or 4
-    with online_daemon_running():
+    with online_daemon(start=True):
         pids = collect_daemon_pids_from_parallel_startup(worker_count)
 
         assert len(pids) == worker_count
