@@ -54,9 +54,6 @@ jobs:
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
       NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
-    # Use the Rust data daemon for the staging integration suite. Exercise its
-    # bundled native artefacts on each shipped OS (Linux x86_64, macOS arm64)
-    # across the Python support range.
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -131,19 +128,6 @@ jobs:
           echo "No Allure results were produced"
         fi
 
-    # Upload only Allure's self-contained page, without the raw results,
-    # generated assets, metrics, or logs alongside it.
-    #
-    # This stays archived (the upload-artifact default) on purpose. `archive:
-    # false` reads better in the browser -- GitHub serves the HTML inline
-    # instead of a zip -- but it makes the artifact unreachable from the CLI:
-    # `gh run download` has no "do not extract" flag, so it fails the artifact
-    # with "zip: not a valid zip file", and it aborts the whole run download on
-    # the first such failure rather than skipping it (cli/cli#13012). A single
-    # unarchived artifact therefore hides every artifact behind it, including
-    # the diagnostics bundle carrying state.db and the Allure results. Agents
-    # and scripts read these runs far more often than humans click through, so
-    # the zip stays until the CLI can fetch unarchived artifacts.
     - name: Upload HTML performance report
       id: upload-performance-report
       if: always()
