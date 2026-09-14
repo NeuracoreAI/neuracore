@@ -17,6 +17,7 @@ os.environ["NEURACORE_ORG_ID"] = MOCKED_ORG_ID
 os.environ["NEURACORE_API_URL"] = "http://127.0.0.1:9/api"
 
 import neuracore as nc
+from neuracore.api import core as api_core
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.config import config_manager
 from neuracore.core.const import API_URL
@@ -60,6 +61,7 @@ def stub_data_bridge(monkeypatch):
     daemon patch ``_load_native`` themselves.
     """
     monkeypatch.setattr(bridge, "_load_native", lambda: MagicMock())
+    monkeypatch.setattr(api_core, "ensure_daemon_running", lambda: 0)
 
 
 @pytest.fixture
