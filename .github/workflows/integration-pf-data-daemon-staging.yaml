@@ -50,6 +50,7 @@ jobs:
       NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging/functional
       NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-functional-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
       NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/functional/daemon-phase-events.jsonl
+      NCD_PERF_REPORT_ARTIFACT: data-daemon-staging-functional-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
       NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
@@ -130,17 +131,27 @@ jobs:
           echo "No Allure results were produced"
         fi
 
-    # Upload Allure's self-contained page directly, without archiving the raw
-    # results, generated assets, metrics, or logs alongside it.
+    # Upload only Allure's self-contained page, without the raw results,
+    # generated assets, metrics, or logs alongside it.
+    #
+    # This stays archived (the upload-artifact default) on purpose. `archive:
+    # false` reads better in the browser -- GitHub serves the HTML inline
+    # instead of a zip -- but it makes the artifact unreachable from the CLI:
+    # `gh run download` has no "do not extract" flag, so it fails the artifact
+    # with "zip: not a valid zip file", and it aborts the whole run download on
+    # the first such failure rather than skipping it (cli/cli#13012). A single
+    # unarchived artifact therefore hides every artifact behind it, including
+    # the diagnostics bundle carrying state.db and the Allure results. Agents
+    # and scripts read these runs far more often than humans click through, so
+    # the zip stays until the CLI can fetch unarchived artifacts.
     - name: Upload HTML performance report
       id: upload-performance-report
       if: always()
       continue-on-error: true
       uses: actions/upload-artifact@v7
       with:
-        name: data-daemon-staging-functional-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+        name: ${{ env.NCD_PERF_REPORT_ARTIFACT }}
         path: ${{ env.NCD_PERF_REPORT_HTML }}
-        archive: false
         if-no-files-found: warn
         retention-days: 14
 
@@ -149,13 +160,18 @@ jobs:
       continue-on-error: true
       env:
         REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
+        ARTIFACT_NAME: ${{ env.NCD_PERF_REPORT_ARTIFACT }}
       run: |
         {
           echo "### Data-daemon performance report (functional)"
           echo
           echo "[Download the self-contained HTML report]($REPORT_URL)"
           echo
-          echo "Download the HTML file and open it directly in a browser."
+          echo "Unzip it and open the HTML file in a browser, or fetch it with:"
+          echo
+          echo "\`\`\`"
+          echo "gh run download $GITHUB_RUN_ID -n $ARTIFACT_NAME"
+          echo "\`\`\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload data-daemon diagnostics and analytics
@@ -187,6 +203,7 @@ jobs:
       NCD_PERF_REPORT_DIR: ${{ github.workspace }}/.data_daemon_test_reports/staging/performance
       NCD_PERF_REPORT_HTML: ${{ github.workspace }}/data-daemon-staging-performance-${{ matrix.os }}-py${{ matrix.python-version }}-attempt${{ github.run_attempt }}.html
       NCD_PERF_EVENTS_PATH: ${{ github.workspace }}/.data_daemon_test_reports/staging/performance/daemon-phase-events.jsonl
+      NCD_PERF_REPORT_ARTIFACT: data-daemon-staging-performance-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
       # Scheduled runs always capture metrics. A manual dispatch can disable
       # them without changing the workflow.
       NCD_PERF_METRICS: ${{ github.event_name != 'workflow_dispatch' || inputs.performance-metrics }}
@@ -259,17 +276,27 @@ jobs:
           echo "No Allure results were produced"
         fi
 
-    # Upload Allure's self-contained page directly, without archiving the raw
-    # results, generated assets, metrics, or logs alongside it.
+    # Upload only Allure's self-contained page, without the raw results,
+    # generated assets, metrics, or logs alongside it.
+    #
+    # This stays archived (the upload-artifact default) on purpose. `archive:
+    # false` reads better in the browser -- GitHub serves the HTML inline
+    # instead of a zip -- but it makes the artifact unreachable from the CLI:
+    # `gh run download` has no "do not extract" flag, so it fails the artifact
+    # with "zip: not a valid zip file", and it aborts the whole run download on
+    # the first such failure rather than skipping it (cli/cli#13012). A single
+    # unarchived artifact therefore hides every artifact behind it, including
+    # the diagnostics bundle carrying state.db and the Allure results. Agents
+    # and scripts read these runs far more often than humans click through, so
+    # the zip stays until the CLI can fetch unarchived artifacts.
     - name: Upload HTML performance report
       id: upload-performance-report
       if: always()
       continue-on-error: true
       uses: actions/upload-artifact@v7
       with:
-        name: data-daemon-staging-performance-report-${{ matrix.os }}-py${{ matrix.python-version }}-run${{ github.run_id }}-attempt${{ github.run_attempt }}
+        name: ${{ env.NCD_PERF_REPORT_ARTIFACT }}
         path: ${{ env.NCD_PERF_REPORT_HTML }}
-        archive: false
         if-no-files-found: warn
         retention-days: 14
 
@@ -278,13 +305,18 @@ jobs:
       continue-on-error: true
       env:
         REPORT_URL: ${{ steps.upload-performance-report.outputs.artifact-url }}
+        ARTIFACT_NAME: ${{ env.NCD_PERF_REPORT_ARTIFACT }}
       run: |
         {
           echo "### Data-daemon performance report (performance)"
           echo
           echo "[Download the self-contained HTML report]($REPORT_URL)"
           echo
-          echo "Download the HTML file and open it directly in a browser."
+          echo "Unzip it and open the HTML file in a browser, or fetch it with:"
+          echo
+          echo "\`\`\`"
+          echo "gh run download $GITHUB_RUN_ID -n $ARTIFACT_NAME"
+          echo "\`\`\`"
         } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload data-daemon diagnostics and analytics
