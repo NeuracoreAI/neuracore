@@ -11,6 +11,7 @@ from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
+from neuracore.data_daemon.daemon_control import DaemonLifecycleError
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -228,6 +229,54 @@ def test_connect_robot(
     assert robot is not None
     assert robot.name == "test_robot"
     session_factory.assert_called_once_with(retry_transient=True)
+
+
+def test_connect_robot_starts_the_data_daemon(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    mocked_org_id,
+    monkeypatch,
+):
+    """A producer that never starts a recording still needs a daemon for web starts."""
+    ensure_daemon_running = Mock(return_value=1)
+    monkeypatch.setattr(api_core, "ensure_daemon_running", ensure_daemon_running)
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+
+    nc.connect_robot("test_robot", urdf_path=mock_urdf)
+
+    ensure_daemon_running.assert_called_once_with()
+
+
+def test_connect_robot_raises_when_the_daemon_fails_to_start(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mock_urdf,
+    mocked_org_id,
+    monkeypatch,
+):
+    """A daemon that cannot start fails the connect rather than going unnoticed."""
+    monkeypatch.setattr(
+        api_core,
+        "ensure_daemon_running",
+        Mock(side_effect=DaemonLifecycleError("daemon did not start")),
+    )
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        f"{API_URL}/org/{mocked_org_id}/robots",
+        json={"robot_id": "mock_robot_id", "has_urdf": True},
+        status_code=200,
+    )
+
+    with pytest.raises(DaemonLifecycleError):
+        nc.connect_robot("test_robot", urdf_path=mock_urdf)
 
 
 def test_update_robot_name_calls_underlying_and_returns_robot_id(monkeypatch):

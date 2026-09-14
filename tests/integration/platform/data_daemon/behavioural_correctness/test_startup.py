@@ -1,19 +1,66 @@
 """Behavioural correctness tests for daemon process startup.
 
-Verifies that concurrent callers always resolve to a single daemon process,
-the PID file is consistent, and no duplicate runner processes are created.
-These tests force online mode so startup never inherits an offline profile.
+Verifies that connecting a robot starts the daemon, that concurrent callers
+always resolve to a single daemon process, the PID file is consistent, and no
+duplicate runner processes are created. These tests force online mode so
+startup never inherits an offline profile.
 """
 
-import psutil
+import uuid
 
+import psutil
+import pytest
+
+import neuracore as nc
 from neuracore.data_daemon.daemon_control import pid_is_running
 from neuracore.data_daemon.helpers import get_daemon_pid_path
+from tests.integration.platform.data_daemon.shared.assertions import (
+    assert_exactly_one_daemon_pid,
+)
 from tests.integration.platform.data_daemon.shared.process_control import (
+    Timer,
     collect_daemon_pids_from_parallel_startup,
     get_runner_pids,
 )
-from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+from tests.integration.platform.data_daemon.shared.profiles import scoped_online_mode
+from tests.integration.platform.data_daemon.shared.runners import (
+    online_daemon_running,
+    scoped_daemon_storage_env,
+    stop_daemon_and_verify,
+)
+from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
+    has_configured_org,
+)
+from tests.integration.platform.data_daemon.shared.test_case.constants import (
+    MAX_TIME_TO_START_S,
+)
+
+
+def test_connect_robot_starts_the_daemon() -> None:
+    """Verify that connecting a robot starts the daemon within the connect budget.
+
+    A producer that only connects and logs never calls ``start_recording``, so
+    this launch is the only one a web-started recording gets. Nothing starts a
+    daemon ahead of the connect, so the test gets what a user gets.
+    """
+    if not has_configured_org():
+        pytest.skip(
+            "Daemon startup on connect requires NEURACORE_ORG_ID"
+            " or a saved current organization."
+        )
+
+    with scoped_daemon_storage_env(), scoped_online_mode():
+        try:
+            stop_daemon_and_verify()
+
+            with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
+                nc.connect_robot(
+                    f"startup_robot_{uuid.uuid4().hex[:10]}", overwrite=False
+                )
+
+            assert_exactly_one_daemon_pid()
+        finally:
+            stop_daemon_and_verify()
 
 
 def test_ensure_single_daemon_process() -> None:
