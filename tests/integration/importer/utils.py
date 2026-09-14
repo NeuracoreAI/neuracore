@@ -14,12 +14,13 @@ from pathlib import Path
 import pytest
 import yaml
 
+import neuracore
 from tests.integration.importer.conftest import ROBOTS_REPO_COMMIT, ROBOTS_REPO_URL
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     has_configured_org,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+INSTALL_ROOT = Path(neuracore.__file__).resolve().parents[1]
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ def clone_robots_repo(tmp_path: Path) -> Path:
 
 
 def resolve_source_config_path(dataset_config: str) -> Path:
-    return REPO_ROOT / dataset_config
+    return INSTALL_ROOT / dataset_config
 
 
 def load_importer_config(case: dict) -> dict:
