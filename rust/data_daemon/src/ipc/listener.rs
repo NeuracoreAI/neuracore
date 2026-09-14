@@ -520,7 +520,7 @@ impl StallStats {
                     drain_ms = drain_us as f64 / 1000.0,
                     forward_ms = forward_us as f64 / 1000.0,
                     recording_id_ms = recording_id_us as f64 / 1000.0,
-                    "STALLMEAS new max"
+                    "listener stall new max"
                 );
             }
         }
@@ -550,7 +550,7 @@ impl StallStats {
             lt500ms = self.buckets[7],
             lt1000ms = self.buckets[8],
             ge1000ms = self.buckets[9],
-            "STALLMEAS summary"
+            "listener stall summary"
         );
         tracing::warn!(
             loaded_samples = self.loaded_samples,
@@ -568,7 +568,7 @@ impl StallStats {
             lt500ms = self.loaded_buckets[7],
             lt1000ms = self.loaded_buckets[8],
             ge1000ms = self.loaded_buckets[9],
-            "STALLMEAS loaded"
+            "listener stall loaded"
         );
     }
 }

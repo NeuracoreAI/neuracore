@@ -120,7 +120,7 @@ jobs:
       run: |
         find . -name daemon.log -print | while read -r log; do
           echo "===== $log ====="
-          grep -h "STALLMEAS" "$log" || echo "(no STALLMEAS lines)"
+          grep -h "listener stall" "$log" || echo "(no listener stall lines)"
         done
 
     - name: Generate Allure performance report
