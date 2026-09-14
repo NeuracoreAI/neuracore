@@ -333,13 +333,14 @@ fn log_json(
     Ok(())
 }
 
-/// Drain the data publisher, then publish one `StopRecording`.
+/// Stamp the window's upper bound, drain the data publisher, publish one
+/// `StopRecording`.
 ///
-/// Two barriers, in order: the data publisher's queue is drained first, so the
-/// recording's joint/JSON tail is on the wire before the window's upper bound
-/// is stamped, and only then is the stop published. The writer's tail video
-/// chunks are *not* sealed here — [`flush_source`] does that, and every caller
-/// must invoke it straight after this call.
+/// The bound is taken first, so it is the moment the caller asked to stop
+/// rather than the moment the drain finished; the queue is drained next, so
+/// the recording's joint/JSON tail is on the wire ahead of the stop. The
+/// writer's tail video chunks are *not* sealed here — [`flush_source`] does
+/// that, and every caller must invoke it straight after this call.
 ///
 /// The stop goes out BEFORE the writer flush barrier because it shares the
 /// calling thread's publisher with `StartRecording`: sending it first is what
@@ -348,7 +349,7 @@ fn log_json(
 /// holdback and the `SourceFlushed` marker.
 ///
 /// The producer stamps the window's upper bound on the publish clock here
-/// (`publish_timestamp_ns`, always wall-clock now at the send), so the whole
+/// (`publish_timestamp_ns`, always wall-clock now at the call), so the whole
 /// publish clock is owned by the producer (consistent with the data
 /// envelopes). The recording's *capture* stop time (`timestamp_ns` when
 /// supplied, else the publish time) is separate — it is stored as
@@ -367,28 +368,30 @@ fn stop_recording(
     }
     let robot_id = robot_id.to_string();
     py.detach(|| -> PyResult<()> {
-        // Drain the data publisher before stamping the window's upper bound.
-        // `log_joint_*` / `log_json` only hand their envelope to the background
-        // publisher thread's unbounded queue, which nothing drains at process
-        // exit — so the recording's samples are only durable once this returns.
-        // Draining before the stop (rather than after) also puts them ahead of
-        // it on the wire, so they never depend on the daemon's closing-window
-        // retention to be routed.
+        // The bound is when the caller asked, not when the drain below returns.
+        // A producer that outruns the publisher queues an unbounded backlog, and
+        // stamping after the barrier widens the window by however deep it was.
+        let publish_timestamp_ns = now_ns();
+        // Caller-supplied capture time, mirroring the `log_*` timestamp default
+        // (publish clock when omitted). Decoupled from the window boundary.
+        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
+        // Drain the data publisher before publishing the stop. `log_joint_*` /
+        // `log_json` only hand their envelope to the background publisher
+        // thread's unbounded queue, which nothing drains at process exit, so the
+        // recording's samples are only durable once this returns. Draining
+        // before the stop also puts them ahead of it on the wire, so they never
+        // depend on the daemon's closing-window retention to be routed; each
+        // carries the publish stamp of its own `log_*` call, so a backlogged
+        // sample still predates the bound above and routes into the window.
         //
         // Ordering with the stop below is unaffected: data rides the background
         // publisher's port, while `StartRecording`/`StopRecording` share the
         // calling thread's own publisher and stay in program order on it.
         flush_published_data();
-        let publish_timestamp_ns = now_ns();
-        // Caller-supplied capture time, mirroring the `log_*` timestamp default
-        // (publish clock when omitted). Decoupled from the window boundary.
-        let capture_timestamp_ns = timestamp_ns.unwrap_or(publish_timestamp_ns);
-        // Publish `StopRecording` FIRST, from THIS (the calling) thread's
-        // publisher — the same port as `StartRecording` — stamping the window's
-        // upper bound at the actual send. Publishing before the (possibly slow)
-        // flush barrier keeps consecutive recordings' start/stop boundaries
-        // strictly ordered: the stop can never be reordered behind the next
-        // recording's `StartRecording` on this thread.
+        // Publish `StopRecording` from THIS (the calling) thread's publisher,
+        // the same port as `StartRecording`, which keeps consecutive recordings'
+        // start/stop boundaries strictly ordered: the stop can never be
+        // reordered behind the next recording's `StartRecording` on this thread.
         publish(&Envelope::StopRecording {
             robot_id: robot_id.clone(),
             robot_instance,
