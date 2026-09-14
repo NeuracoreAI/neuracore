@@ -14,17 +14,17 @@ on:
         description: 'JSON array of Python versions. Trim entries to skip matrix rows.'
         required: false
         type: string
-        default: '["3.10", "3.14"]'
+        default: '["3.10"]'
       os:
         description: 'JSON array of runners. Trim entries to skip matrix rows.'
         required: false
         type: string
-        default: '["ubuntu-24.04", "macos-26"]'
+        default: '["macos-26"]'
       suites:
         description: 'JSON array of suites to run. Trim entries to skip whole jobs.'
         required: false
         type: string
-        default: '["functional", "performance"]'
+        default: '["functional"]'
       performance-metrics:
         description: 'Capture daemon phase metrics and include them in Allure.'
         required: false
@@ -64,8 +64,8 @@ jobs:
       # scheduled runs, where the `inputs` context is empty and dispatch input
       # defaults do not apply.
       matrix:
-        python-version: ${{ fromJSON(inputs.python-version || '["3.10", "3.14"]') }}
-        os: ${{ fromJSON(inputs.os || '["ubuntu-24.04", "macos-26"]') }}
+        python-version: ${{ fromJSON(inputs.python-version || '["3.10"]') }}
+        os: ${{ fromJSON(inputs.os || '["macos-26"]') }}
 
     steps:
     - name: Show disk space
@@ -112,8 +112,16 @@ jobs:
         --clean-alluredir
         --performance-metrics-dir="$NCD_PERF_REPORT_DIR/metrics"
         --junitxml="$NCD_PERF_REPORT_DIR/junit.xml"
-        tests/integration/platform/data_daemon/behavioural_correctness/
-        tests/integration/platform/data_daemon/data_integrity/
+        "tests/integration/platform/data_daemon/data_integrity/test_network.py::test_cloud_data_integrity[ProcessPerCamera-6s-15recs-7joints-1cam-640x480-30hz-flatframes-saturate]"
+
+    - name: Report listener stall measurements
+      if: always()
+      continue-on-error: true
+      run: |
+        find . -name daemon.log -print | while read -r log; do
+          echo "===== $log ====="
+          grep -h "STALLMEAS" "$log" || echo "(no STALLMEAS lines)"
+        done
 
     - name: Generate Allure performance report
       if: always()

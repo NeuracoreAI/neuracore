@@ -16,7 +16,7 @@
 //! the later `serve_recording_id_queries` borrow is itself held across an await.)
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
     Envelope, HealthReply, HealthRequest, RecordingIdQuery, RecordingIdReply, RecordingStateQuery,
@@ -89,12 +89,18 @@ pub async fn run(
     // daemon. Reset to 0 the moment any envelope arrives.
     let mut empty_drains: u32 = 0;
 
+    // TEMPORARY INSTRUMENTATION - how long a recording-state query waits.
+    let mut stall = StallStats::new();
+
     loop {
+        let iteration_start = Instant::now();
         // -- Synchronous drain --------------------------------------------------
         // The subscriber borrow MUST stay inside this block (no `.await` in
         // any of these calls). The local `batch` is `Send`, so it can survive
         // across the awaits below without infecting the task with !Send.
         drain_subscriber(transport.commands_subscriber(), &mut batch, &mut counters);
+        let batch_len = batch.len();
+        let drain_us = iteration_start.elapsed().as_micros();
 
         empty_drains = if batch.is_empty() {
             empty_drains.saturating_add(1)
@@ -103,6 +109,7 @@ pub async fn run(
         };
 
         // -- Async forward ------------------------------------------------------
+        let forward_start = Instant::now();
         for envelope in batch.drain(..) {
             let kind = envelope.kind();
             if dispatcher_tx.send(envelope).await.is_err() {
@@ -118,6 +125,7 @@ pub async fn run(
         // A health reply is the SDK launcher's readiness contract: reaching this
         // point proves the daemon has opened IPC, spawned the dispatcher, and
         // entered the listener loop that drains commands.
+        let forward_us = forward_start.elapsed().as_micros();
         serve_health(transport.health_server());
 
         // -- Answer version queries ---------------------------------------------
@@ -131,12 +139,15 @@ pub async fn run(
         // `.await`) while holding the iceoryx2 `ActiveRequest` to reply on. That
         // borrow makes this future `!Send`, which is fine: `run` is awaited
         // inline under `block_on`, never `tokio::spawn`'d.
+        let recording_id_start = Instant::now();
         serve_recording_id_queries(transport.recording_id_server(), &store).await;
+        let recording_id_us = recording_id_start.elapsed().as_micros();
 
         // -- Answer recording-state queries --------------------------------------
         // Every process on this host reads its recording state from here
         // rather than from its own subscription to the backend.
         serve_recording_state_queries(transport.recording_state_server(), &recording_state).await;
+        stall.record(batch_len, drain_us, forward_us, recording_id_us);
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -413,5 +424,151 @@ fn drain_subscriber(
                 return;
             }
         }
+    }
+}
+
+/// TEMPORARY INSTRUMENTATION - not for merge.
+///
+/// How long a recording-state query can wait: the period from one serve of it
+/// to the next, which covers the drain, the whole forward, the other serves and
+/// the poll sleep. Loaded iterations are tracked separately because the 25 ms
+/// idle poll otherwise owns every maximum.
+struct StallStats {
+    last_serve: Instant,
+    started: Instant,
+    last_report: Instant,
+    buckets: [u64; 10],
+    samples: u64,
+    max_us: u128,
+    worst_batch: usize,
+    worst_drain_us: u128,
+    worst_forward_us: u128,
+    worst_recording_id_us: u128,
+    loaded_buckets: [u64; 10],
+    loaded_samples: u64,
+    loaded_max_us: u128,
+    loaded_worst_batch: usize,
+    loaded_worst_forward_us: u128,
+    loaded_worst_recording_id_us: u128,
+    max_batch: usize,
+}
+
+const STALL_EDGES_US: [u128; 9] = [
+    1_000, 5_000, 10_000, 25_000, 50_000, 100_000, 250_000, 500_000, 1_000_000,
+];
+
+impl StallStats {
+    fn new() -> Self {
+        let now = Instant::now();
+        Self {
+            last_serve: now,
+            started: now,
+            last_report: now,
+            buckets: [0; 10],
+            samples: 0,
+            max_us: 0,
+            worst_batch: 0,
+            worst_drain_us: 0,
+            worst_forward_us: 0,
+            worst_recording_id_us: 0,
+            loaded_buckets: [0; 10],
+            loaded_samples: 0,
+            loaded_max_us: 0,
+            loaded_worst_batch: 0,
+            loaded_worst_forward_us: 0,
+            loaded_worst_recording_id_us: 0,
+            max_batch: 0,
+        }
+    }
+
+    fn record(
+        &mut self,
+        batch_len: usize,
+        drain_us: u128,
+        forward_us: u128,
+        recording_id_us: u128,
+    ) {
+        let gap_us = self.last_serve.elapsed().as_micros();
+        self.last_serve = Instant::now();
+        self.samples += 1;
+        self.max_batch = self.max_batch.max(batch_len);
+        let index = STALL_EDGES_US
+            .iter()
+            .position(|edge| gap_us < *edge)
+            .unwrap_or(9);
+        self.buckets[index] += 1;
+        if batch_len > 0 {
+            self.loaded_samples += 1;
+            self.loaded_buckets[index] += 1;
+            if gap_us > self.loaded_max_us {
+                self.loaded_max_us = gap_us;
+                self.loaded_worst_batch = batch_len;
+                self.loaded_worst_forward_us = forward_us;
+                self.loaded_worst_recording_id_us = recording_id_us;
+            }
+        }
+        if gap_us > self.max_us {
+            self.max_us = gap_us;
+            self.worst_batch = batch_len;
+            self.worst_drain_us = drain_us;
+            self.worst_forward_us = forward_us;
+            self.worst_recording_id_us = recording_id_us;
+            if gap_us >= 25_000 {
+                tracing::warn!(
+                    gap_ms = gap_us as f64 / 1000.0,
+                    batch = batch_len,
+                    drain_ms = drain_us as f64 / 1000.0,
+                    forward_ms = forward_us as f64 / 1000.0,
+                    recording_id_ms = recording_id_us as f64 / 1000.0,
+                    "STALLMEAS new max"
+                );
+            }
+        }
+        if self.last_report.elapsed() >= Duration::from_secs(5) {
+            self.report();
+            self.last_report = Instant::now();
+        }
+    }
+
+    fn report(&self) {
+        tracing::warn!(
+            elapsed_s = self.started.elapsed().as_secs_f64(),
+            samples = self.samples,
+            max_ms = self.max_us as f64 / 1000.0,
+            max_batch = self.max_batch,
+            worst_batch = self.worst_batch,
+            worst_drain_ms = self.worst_drain_us as f64 / 1000.0,
+            worst_forward_ms = self.worst_forward_us as f64 / 1000.0,
+            worst_recording_id_ms = self.worst_recording_id_us as f64 / 1000.0,
+            lt1ms = self.buckets[0],
+            lt5ms = self.buckets[1],
+            lt10ms = self.buckets[2],
+            lt25ms = self.buckets[3],
+            lt50ms = self.buckets[4],
+            lt100ms = self.buckets[5],
+            lt250ms = self.buckets[6],
+            lt500ms = self.buckets[7],
+            lt1000ms = self.buckets[8],
+            ge1000ms = self.buckets[9],
+            "STALLMEAS summary"
+        );
+        tracing::warn!(
+            loaded_samples = self.loaded_samples,
+            loaded_max_ms = self.loaded_max_us as f64 / 1000.0,
+            loaded_worst_batch = self.loaded_worst_batch,
+            loaded_worst_forward_ms = self.loaded_worst_forward_us as f64 / 1000.0,
+            loaded_worst_recording_id_ms = self.loaded_worst_recording_id_us as f64 / 1000.0,
+            lt1ms = self.loaded_buckets[0],
+            lt5ms = self.loaded_buckets[1],
+            lt10ms = self.loaded_buckets[2],
+            lt25ms = self.loaded_buckets[3],
+            lt50ms = self.loaded_buckets[4],
+            lt100ms = self.loaded_buckets[5],
+            lt250ms = self.loaded_buckets[6],
+            lt500ms = self.loaded_buckets[7],
+            lt1000ms = self.loaded_buckets[8],
+            ge1000ms = self.loaded_buckets[9],
+            "STALLMEAS loaded"
+        );
     }
 }
