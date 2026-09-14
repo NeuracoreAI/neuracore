@@ -296,8 +296,8 @@ CHILD_PROCESS_READY_POLL_S = 0.1
 CHILD_PROCESS_TERMINATE_TIMEOUT_S = 5.0
 
 # How long after the stop call the window's publish-clock bound can still fall:
-# the stop envelope is published before the flush, so only a robot lookup,
-# disarming the streams and one IPC publish sit inside this.
+# the bridge stamps the bound at the top of its call, before the publisher
+# drain, so only a robot lookup and disarming the streams sit inside this.
 STOP_PUBLISH_SKEW_S = 0.25
 
 # Remote control: the HTTP timeout on the backend's own start/stop endpoints,
