@@ -16,7 +16,7 @@ def test_is_recording_answers_from_the_daemon() -> None:
     robot.id = "robot-id-1"
 
     live = LiveRecording(
-        recording_index=7, recording_id="cloud-1", start_timestamp_ns=1_000
+        recording_index=7, recording_id="cloud-1", start_timestamp=1_000
     )
     with patch(
         "neuracore.core.robot.recording_context.query_recording_state",

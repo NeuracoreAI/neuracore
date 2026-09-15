@@ -212,20 +212,20 @@ mod tests {
         //   - on every entry: `frame_idx` is the index, `frame` is null
         //   - object insertion order is preserved
         //
-        // Inputs intentionally exercise: integer + float timestamps, string
+        // Inputs intentionally exercise: integer tick timestamps, string
         // values, nested objects, and an entry whose `frame` key was already
         // present (overwrite path).
         let tempdir = TempDir::new().unwrap();
         let mut accumulator = VideoMetadataAccumulator::new();
 
         let mut entry_a = Map::new();
-        entry_a.insert("timestamp".to_string(), json!(1.5));
+        entry_a.insert("timestamp".to_string(), json!(1_500_000));
         entry_a.insert("width".to_string(), json!(640));
         entry_a.insert("height".to_string(), json!(480));
         accumulator.record_frame(entry_a);
 
         let mut entry_b = Map::new();
-        entry_b.insert("timestamp".to_string(), json!(2));
+        entry_b.insert("timestamp".to_string(), json!(2_000_000));
         entry_b.insert("source".to_string(), json!("rgb-camera"));
         entry_b.insert("extra".to_string(), json!({"sequence": 17, "flag": true}));
         // Pre-existing `frame` payload — `finish` must overwrite it with null;
@@ -236,7 +236,7 @@ mod tests {
         let written_bytes = accumulator.finish(tempdir.path()).unwrap();
         let actual = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
 
-        let expected = br#"[{"timestamp":1.5,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
+        let expected = br#"[{"timestamp":1500000,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2000000,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
         assert_eq!(
             actual, expected,
             "metadata sidecar bytes diverged from expected fixture"
@@ -250,7 +250,7 @@ mod tests {
         let mut accumulator = VideoMetadataAccumulator::new();
         for index in 0..5 {
             let mut entry = Map::new();
-            entry.insert("timestamp".to_string(), json!(index as f64 * 0.033));
+            entry.insert("timestamp".to_string(), json!(index * 33_333));
             accumulator.record_frame(entry);
         }
         assert_eq!(accumulator.len(), 5);
@@ -274,10 +274,10 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let mut accumulator = VideoMetadataAccumulator::new();
         accumulator.record_value(json!([
-            {"timestamp": 0.1},
-            {"timestamp": 0.2},
+            {"timestamp": 100_000},
+            {"timestamp": 200_000},
             42,           // non-object — dropped
-            {"timestamp": 0.3},
+            {"timestamp": 300_000},
         ]));
         assert_eq!(accumulator.len(), 3);
         accumulator.finish(tempdir.path()).unwrap();
@@ -285,7 +285,7 @@ mod tests {
         let bytes = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
         let parsed: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed.as_array().unwrap().len(), 3);
-        assert_eq!(parsed[2]["timestamp"], json!(0.3));
+        assert_eq!(parsed[2]["timestamp"], json!(300_000));
     }
 
     #[test]

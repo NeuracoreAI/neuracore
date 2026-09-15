@@ -300,7 +300,7 @@ fn parse_notification(data: &str) -> Option<RecordingCommand> {
                 robot_id: payload.robot_id,
                 robot_instance: payload.instance,
                 dataset_id: payload.dataset_ids.into_iter().next(),
-                start_timestamp_ns: seconds_to_nanos(payload.start_time),
+                started_at_ns: seconds_to_nanos(payload.start_time),
             })
         }
         "STOP" | "DISCARDED" | "EXPIRED" => {
@@ -371,7 +371,7 @@ mod tests {
                 robot_id: "robot-1".into(),
                 robot_instance: 2,
                 dataset_id: Some("ds-1".into()),
-                start_timestamp_ns: 1_500_000_000,
+                started_at_ns: 1_500_000_000,
             }
         );
     }

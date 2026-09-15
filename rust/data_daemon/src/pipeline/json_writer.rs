@@ -40,10 +40,11 @@ enum JsonWriteMsg {
         trace_dir: PathBuf,
     },
     /// Append one entry. `payload` is forwarded verbatim when it is itself valid
-    /// JSON, else wrapped in a small fallback object stamped with `timestamp_ns`.
+    /// JSON, else wrapped in a small fallback object stamped with the capture
+    /// `timestamp` in ticks.
     Append {
         trace_id: String,
-        timestamp_ns: i64,
+        timestamp: i64,
         payload: Vec<u8>,
     },
     /// Finalise the trace (append `]`, flush, close) and report the on-disk byte
@@ -76,10 +77,10 @@ impl JsonWriteHandle {
 
     /// Append one entry (fire-and-forget). Takes ownership of `payload` so the
     /// caller's frame buffer is freed immediately.
-    pub fn append(&self, trace_id: &str, timestamp_ns: i64, payload: Vec<u8>) {
+    pub fn append(&self, trace_id: &str, timestamp: i64, payload: Vec<u8>) {
         let _ = self.tx.send(JsonWriteMsg::Append {
             trace_id: trace_id.to_string(),
-            timestamp_ns,
+            timestamp,
             payload,
         });
     }
@@ -145,14 +146,14 @@ fn writer_loop(rx: Receiver<JsonWriteMsg>) {
             },
             JsonWriteMsg::Append {
                 trace_id,
-                timestamp_ns,
+                timestamp,
                 payload,
             } => {
                 if errored.contains_key(&trace_id) {
                     continue;
                 }
                 if let Some(writer) = writers.get_mut(&trace_id) {
-                    if let Err(error) = append_entry(writer, timestamp_ns, &payload) {
+                    if let Err(error) = append_entry(writer, timestamp, &payload) {
                         errored.insert(trace_id, error);
                     }
                 }
@@ -183,7 +184,7 @@ fn writer_loop(rx: Receiver<JsonWriteMsg>) {
 /// (already-JSON) path.
 fn append_entry(
     writer: &mut JsonTraceWriter,
-    timestamp_ns: i64,
+    timestamp: i64,
     payload: &[u8],
 ) -> Result<(), JsonTraceError> {
     match serde_json::from_slice::<serde::de::IgnoredAny>(payload) {
@@ -194,11 +195,11 @@ fn append_entry(
             // dropping the bytes silently: only the length is retained on disk;
             // the raw payload bytes are intentionally discarded.
             tracing::warn!(
-                timestamp_ns,
+                timestamp,
                 payload_len = payload.len(),
                 "non-JSON scalar payload; storing length only (raw bytes discarded)"
             );
-            writer.add_entry(&scalar_fallback_entry(timestamp_ns, payload))
+            writer.add_entry(&scalar_fallback_entry(timestamp, payload))
         }
     }
 }
@@ -207,9 +208,9 @@ fn append_entry(
 /// `trace.json` array stays parseable. Only the payload length is recorded; the
 /// raw bytes are intentionally discarded. Only reached after a structural JSON
 /// parse has already failed, so it never re-parses the bytes.
-pub(crate) fn scalar_fallback_entry(timestamp_ns: i64, payload: &[u8]) -> Value {
+pub(crate) fn scalar_fallback_entry(timestamp: i64, payload: &[u8]) -> Value {
     let mut map = serde_json::Map::new();
-    map.insert("timestamp_ns".to_string(), Value::from(timestamp_ns));
+    map.insert("timestamp".to_string(), Value::from(timestamp));
     map.insert("payload_len".to_string(), Value::from(payload.len() as u64));
     Value::Object(map)
 }
@@ -297,7 +298,7 @@ mod tests {
 
         assert_eq!(
             read_back(tempdir.path()),
-            json!([{"timestamp_ns": 42, "payload_len": 8}]),
+            json!([{"timestamp": 42, "payload_len": 8}]),
             "a non-JSON payload is replaced by a length-only fallback object"
         );
         shutdown(handle, join);

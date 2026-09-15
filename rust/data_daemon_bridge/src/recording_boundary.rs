@@ -11,7 +11,7 @@
 //!
 //! * **This process's own lifecycle calls.** `start_recording` returns the very
 //!   capture timestamp the daemon stores as
-//!   [`data_daemon_shared::LiveRecording::start_timestamp_ns`], so a recording
+//!   [`data_daemon_shared::LiveRecording::start_timestamp`], so a recording
 //!   bracketed here is known exactly, the instant it opens, with no IPC at all.
 //! * **A refresh through the existing `recording_state` query**, scheduled off
 //!   the log path when an entry goes stale. This is what finds a recording
@@ -74,7 +74,7 @@ type Entries = HashMap<String, HashMap<i64, Entry>>;
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct OpenRecording {
     recording_index: Option<i64>,
-    started_at_ns: Option<i64>,
+    start_timestamp: Option<i64>,
 }
 
 impl OpenRecording {
@@ -88,7 +88,7 @@ impl OpenRecording {
     fn is_other(&self, other: &Self) -> bool {
         match (self.recording_index, other.recording_index) {
             (Some(held), Some(found)) => held != found,
-            _ => self.started_at_ns != other.started_at_ns,
+            _ => self.start_timestamp != other.start_timestamp,
         }
     }
 }
@@ -153,10 +153,10 @@ pub(crate) fn epoch(robot_id: &str, robot_instance: i64) -> Option<i64> {
 
 /// Record the recording this process just opened for `source`.
 ///
-/// `started_at_ns` is `start_recording`'s return value, which is exactly what
+/// `start_timestamp` is `start_recording`'s return value, which is exactly what
 /// the daemon stores as the recording's start — so this entry already agrees
 /// with what a refresh would fetch.
-pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_ns: i64) {
+pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, start_timestamp: i64) {
     let mut entries = BOUNDARIES.write().unwrap_or_else(|p| p.into_inner());
     let entry = entry_mut(&mut entries, robot_id, robot_instance);
     // Unconditional, unlike a refresh: this call *is* a new recording, whatever
@@ -164,7 +164,7 @@ pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_n
     entry.epoch = entry.epoch.wrapping_add(1);
     entry.open = Some(OpenRecording {
         recording_index: None,
-        started_at_ns: Some(started_at_ns),
+        start_timestamp: Some(start_timestamp),
     });
     entry.seq = entry.seq.wrapping_add(1);
     entry.written_at = Some(Instant::now());
@@ -273,7 +273,7 @@ fn refresh_loop(rx: Receiver<Source>) {
                 seq_before,
                 live.map(|recording| OpenRecording {
                     recording_index: recording.recording_index,
-                    started_at_ns: recording.start_timestamp_ns,
+                    start_timestamp: recording.start_timestamp,
                 }),
             ),
             // Nothing answered in time; leave the entry as it was.
@@ -353,10 +353,10 @@ mod tests {
         lookup(&entries, source).map(|entry| entry.seq).unwrap_or(0)
     }
 
-    fn opened(recording_index: Option<i64>, started_at_ns: i64) -> Option<OpenRecording> {
+    fn opened(recording_index: Option<i64>, start_timestamp: i64) -> Option<OpenRecording> {
         Some(OpenRecording {
             recording_index,
-            started_at_ns: Some(started_at_ns),
+            start_timestamp: Some(start_timestamp),
         })
     }
 

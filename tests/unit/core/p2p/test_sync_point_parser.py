@@ -49,14 +49,14 @@ class TestParseSyncPointJointData:
     )
     def test_parse_joint_data_types(self, data_type: DataType):
         """Test parsing all joint data types."""
-        joint_data = JointData(timestamp=1.5, value=0.75)
+        joint_data = JointData(timestamp=1_500_000, value=0.75)
         message_data = joint_data.model_dump_json()
         track = _create_track(data_type, label="arm_joint")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 1.5
+        assert result.timestamp == 1_500_000
         assert data_type in result.data
         assert "arm_joint" in result.data[data_type]
         parsed_joint = result.data[data_type]["arm_joint"]
@@ -69,14 +69,14 @@ class TestParseSyncPointLanguageData:
 
     def test_parse_language_data(self):
         """Test parsing language data."""
-        language_data = LanguageData(timestamp=2.0, text="pick up the red cube")
+        language_data = LanguageData(timestamp=2_000_000, text="pick up the red cube")
         message_data = language_data.model_dump_json()
         track = _create_track(DataType.LANGUAGE, label="instruction")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 2.0
+        assert result.timestamp == 2_000_000
         assert DataType.LANGUAGE in result.data
         assert "instruction" in result.data[DataType.LANGUAGE]
         parsed_lang = result.data[DataType.LANGUAGE]["instruction"]
@@ -91,14 +91,14 @@ class TestParseSyncPointCameraData:
         """Test parsing RGB camera data with image decoding."""
         test_image = np.zeros((10, 10, 3), dtype=np.uint8)
         test_image[5, 5] = [255, 0, 0]
-        rgb_data = RGBCameraData(timestamp=3.0, frame_idx=42, frame=test_image)
+        rgb_data = RGBCameraData(timestamp=3_000_000, frame_idx=42, frame=test_image)
         message_data = rgb_data.model_dump_json()
         track = _create_track(DataType.RGB_IMAGES, label="front_camera")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 3.0
+        assert result.timestamp == 3_000_000
         assert DataType.RGB_IMAGES in result.data
         assert "front_camera" in result.data[DataType.RGB_IMAGES]
         parsed_rgb = result.data[DataType.RGB_IMAGES]["front_camera"]
@@ -112,14 +112,16 @@ class TestParseSyncPointCameraData:
         """Test parsing depth camera data with image decoding."""
         # Depth is encoded as an RGB PNG and decoded back to a 2D depth map.
         test_depth = np.arange(64, dtype=np.float32).reshape(8, 8) / 10.0
-        depth_data = DepthCameraData(timestamp=3.5, frame_idx=10, frame=test_depth)
+        depth_data = DepthCameraData(
+            timestamp=3_500_000, frame_idx=10, frame=test_depth
+        )
         message_data = depth_data.model_dump_json()
         track = _create_track(DataType.DEPTH_IMAGES, label="depth_sensor")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 3.5
+        assert result.timestamp == 3_500_000
         assert DataType.DEPTH_IMAGES in result.data
         assert "depth_sensor" in result.data[DataType.DEPTH_IMAGES]
         parsed_depth = result.data[DataType.DEPTH_IMAGES]["depth_sensor"]
@@ -137,14 +139,14 @@ class TestParseSyncPointEndEffectorPose:
     def test_parse_end_effector_pose_data(self):
         """Test parsing end effector pose data."""
         pose = np.array([1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0])
-        ee_data = EndEffectorPoseData(timestamp=4.0, pose=pose)
+        ee_data = EndEffectorPoseData(timestamp=4_000_000, pose=pose)
         message_data = ee_data.model_dump_json()
         track = _create_track(DataType.END_EFFECTOR_POSES, label="left_gripper")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 4.0
+        assert result.timestamp == 4_000_000
         assert DataType.END_EFFECTOR_POSES in result.data
         assert "left_gripper" in result.data[DataType.END_EFFECTOR_POSES]
         parsed_ee = result.data[DataType.END_EFFECTOR_POSES]["left_gripper"]
@@ -157,14 +159,16 @@ class TestParseSyncPointGripper:
 
     def test_parse_parallel_gripper_open_amount(self):
         """Test parsing parallel gripper open amount data."""
-        gripper_data = ParallelGripperOpenAmountData(timestamp=5.0, open_amount=0.8)
+        gripper_data = ParallelGripperOpenAmountData(
+            timestamp=5_000_000, open_amount=0.8
+        )
         message_data = gripper_data.model_dump_json()
         track = _create_track(DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS, label="gripper_1")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 5.0
+        assert result.timestamp == 5_000_000
         assert DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS in result.data
         assert "gripper_1" in result.data[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS]
         parsed_gripper = result.data[DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS][
@@ -180,14 +184,14 @@ class TestParseSyncPointPointCloud:
     def test_parse_point_cloud_data(self):
         """Test parsing point cloud data."""
         points = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
-        pc_data = PointCloudData(timestamp=6.0, points=points)
+        pc_data = PointCloudData(timestamp=6_000_000, points=points)
         message_data = pc_data.model_dump_json()
         track = _create_track(DataType.POINT_CLOUDS, label="lidar")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 6.0
+        assert result.timestamp == 6_000_000
         assert DataType.POINT_CLOUDS in result.data
         assert "lidar" in result.data[DataType.POINT_CLOUDS]
         parsed_pc = result.data[DataType.POINT_CLOUDS]["lidar"]
@@ -202,14 +206,14 @@ class TestParseSyncPointCustom1D:
     def test_parse_custom_1d_data(self):
         """Test parsing custom 1D data."""
         data = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
-        custom_data = Custom1DData(timestamp=7.0, data=data)
+        custom_data = Custom1DData(timestamp=7_000_000, data=data)
         message_data = custom_data.model_dump_json()
         track = _create_track(DataType.CUSTOM_1D, label="sensor_readings")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 7.0
+        assert result.timestamp == 7_000_000
         assert DataType.CUSTOM_1D in result.data
         assert "sensor_readings" in result.data[DataType.CUSTOM_1D]
         parsed_custom = result.data[DataType.CUSTOM_1D]["sensor_readings"]
@@ -224,14 +228,14 @@ class TestParseSyncPointPose:
     def test_parse_pose_data(self):
         """Test parsing pose data."""
         pose = np.array([0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
-        pose_data = PoseData(timestamp=8.0, pose=pose)
+        pose_data = PoseData(timestamp=8_000_000, pose=pose)
         message_data = pose_data.model_dump_json()
         track = _create_track(DataType.POSES, label="base_pose")
 
         result = parse_sync_point(message_data, track)
 
         assert isinstance(result, SynchronizedPoint)
-        assert result.timestamp == 8.0
+        assert result.timestamp == 8_000_000
         assert DataType.POSES in result.data
         assert "base_pose" in result.data[DataType.POSES]
         parsed_pose = result.data[DataType.POSES]["base_pose"]
@@ -252,7 +256,7 @@ class TestParseSyncPointErrors:
 
     def test_invalid_data_for_type_raises_value_error(self):
         """Test that data mismatched with expected type raises ValueError."""
-        language_data = LanguageData(timestamp=1.0, text="hello")
+        language_data = LanguageData(timestamp=1_000_000, text="hello")
         message_data = language_data.model_dump_json()
         track = _create_track(DataType.JOINT_POSITIONS)
 
@@ -284,35 +288,35 @@ class TestMergeSyncPoints:
 
     def test_merge_single_sync_point(self):
         """Test merging a single sync point returns equivalent point."""
-        joint_data = JointData(timestamp=1.0, value=0.5)
+        joint_data = JointData(timestamp=1_000_000, value=0.5)
         sp = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data}},
         )
 
         result = merge_sync_points(sp)
 
-        assert result.timestamp == 1.0
+        assert result.timestamp == 1_000_000
         assert DataType.JOINT_POSITIONS in result.data
         assert "arm" in result.data[DataType.JOINT_POSITIONS]
 
     def test_merge_multiple_different_data_types(self):
         """Test merging sync points with different data types."""
-        joint_data = JointData(timestamp=1.0, value=0.5)
-        language_data = LanguageData(timestamp=2.0, text="hello")
+        joint_data = JointData(timestamp=1_000_000, value=0.5)
+        language_data = LanguageData(timestamp=2_000_000, text="hello")
 
         sp1 = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data}},
         )
         sp2 = SynchronizedPoint(
-            timestamp=2.0,
+            timestamp=2_000_000,
             data={DataType.LANGUAGE: {"instruction": language_data}},
         )
 
         result = merge_sync_points(sp1, sp2)
 
-        assert result.timestamp == 2.0
+        assert result.timestamp == 2_000_000
         assert DataType.JOINT_POSITIONS in result.data
         assert DataType.LANGUAGE in result.data
         assert "arm" in result.data[DataType.JOINT_POSITIONS]
@@ -320,42 +324,42 @@ class TestMergeSyncPoints:
 
     def test_merge_later_timestamp_overrides(self):
         """Test that later timestamps override earlier data for same key."""
-        joint_data_early = JointData(timestamp=1.0, value=0.5)
-        joint_data_late = JointData(timestamp=3.0, value=0.9)
+        joint_data_early = JointData(timestamp=1_000_000, value=0.5)
+        joint_data_late = JointData(timestamp=3_000_000, value=0.9)
 
         sp1 = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data_early}},
         )
         sp2 = SynchronizedPoint(
-            timestamp=3.0,
+            timestamp=3_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data_late}},
         )
 
         result = merge_sync_points(sp1, sp2)
 
-        assert result.timestamp == 3.0
+        assert result.timestamp == 3_000_000
         arm = result.data[DataType.JOINT_POSITIONS]["arm"]
         assert isinstance(arm, JointData)
         assert arm.value == 0.9
 
     def test_merge_preserves_different_labels(self):
         """Test that merging preserves data with different labels."""
-        joint_data_1 = JointData(timestamp=1.0, value=0.5)
-        joint_data_2 = JointData(timestamp=2.0, value=0.7)
+        joint_data_1 = JointData(timestamp=1_000_000, value=0.5)
+        joint_data_2 = JointData(timestamp=2_000_000, value=0.7)
 
         sp1 = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm_left": joint_data_1}},
         )
         sp2 = SynchronizedPoint(
-            timestamp=2.0,
+            timestamp=2_000_000,
             data={DataType.JOINT_POSITIONS: {"arm_right": joint_data_2}},
         )
 
         result = merge_sync_points(sp1, sp2)
 
-        assert result.timestamp == 2.0
+        assert result.timestamp == 2_000_000
         assert "arm_left" in result.data[DataType.JOINT_POSITIONS]
         assert "arm_right" in result.data[DataType.JOINT_POSITIONS]
         arm_left = result.data[DataType.JOINT_POSITIONS]["arm_left"]
@@ -367,47 +371,49 @@ class TestMergeSyncPoints:
 
     def test_merge_out_of_order_timestamps(self):
         """Test merging sync points provided out of timestamp order."""
-        joint_data_early = JointData(timestamp=1.0, value=0.5)
-        joint_data_late = JointData(timestamp=3.0, value=0.9)
+        joint_data_early = JointData(timestamp=1_000_000, value=0.5)
+        joint_data_late = JointData(timestamp=3_000_000, value=0.9)
 
         sp_late = SynchronizedPoint(
-            timestamp=3.0,
+            timestamp=3_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data_late}},
         )
         sp_early = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data_early}},
         )
 
         result = merge_sync_points(sp_late, sp_early)
 
-        assert result.timestamp == 3.0
+        assert result.timestamp == 3_000_000
         arm = result.data[DataType.JOINT_POSITIONS]["arm"]
         assert isinstance(arm, JointData)
         assert arm.value == 0.9
 
     def test_merge_three_sync_points(self):
         """Test merging three sync points."""
-        joint_data = JointData(timestamp=1.0, value=0.5)
-        language_data = LanguageData(timestamp=2.0, text="hello")
-        gripper_data = ParallelGripperOpenAmountData(timestamp=3.0, open_amount=0.8)
+        joint_data = JointData(timestamp=1_000_000, value=0.5)
+        language_data = LanguageData(timestamp=2_000_000, text="hello")
+        gripper_data = ParallelGripperOpenAmountData(
+            timestamp=3_000_000, open_amount=0.8
+        )
 
         sp1 = SynchronizedPoint(
-            timestamp=1.0,
+            timestamp=1_000_000,
             data={DataType.JOINT_POSITIONS: {"arm": joint_data}},
         )
         sp2 = SynchronizedPoint(
-            timestamp=2.0,
+            timestamp=2_000_000,
             data={DataType.LANGUAGE: {"instruction": language_data}},
         )
         sp3 = SynchronizedPoint(
-            timestamp=3.0,
+            timestamp=3_000_000,
             data={DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS: {"gripper": gripper_data}},
         )
 
         result = merge_sync_points(sp1, sp2, sp3)
 
-        assert result.timestamp == 3.0
+        assert result.timestamp == 3_000_000
         assert len(result.data) == 3
         assert DataType.JOINT_POSITIONS in result.data
         assert DataType.LANGUAGE in result.data

@@ -22,6 +22,7 @@ from neuracore_types import (
     SynchronizedEpisode,
     SynchronizedPoint,
 )
+from neuracore_types.timestamps import TICKS_PER_SECOND
 
 from neuracore.core.const import API_URL
 
@@ -259,14 +260,14 @@ def synced_data():
     """Create synced data fixture."""
     # Create camera data with frame indices
     camera1 = RGBCameraData(
-        timestamp=1000.0,
+        timestamp=1_000 * TICKS_PER_SECOND,
         frame_idx=0,
         extrinsics=np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
         intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
     )
 
     camera2 = RGBCameraData(
-        timestamp=1000.0,
+        timestamp=1_000 * TICKS_PER_SECOND,
         frame_idx=0,
         extrinsics=np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]),
         intrinsics=np.array([[500, 0, 112], [0, 500, 112], [0, 0, 1]]),
@@ -274,11 +275,11 @@ def synced_data():
 
     # Create sync points
     frame1 = SynchronizedPoint(
-        timestamp=0.0,
+        timestamp=0,
         data={
-            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0.0, value=0.5)},
+            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0, value=0.5)},
             DataType.JOINT_TARGET_POSITIONS: {
-                "joint1": JointData(timestamp=1000.0, value=1.0)
+                "joint1": JointData(timestamp=1_000 * TICKS_PER_SECOND, value=1.0)
             },
             DataType.RGB_IMAGES: {"cam1": camera1},
             DataType.DEPTH_IMAGES: {"cam2": camera2},
@@ -291,11 +292,11 @@ def synced_data():
     camera2.frame_idx = 1
 
     frame2 = SynchronizedPoint(
-        timestamp=1.0,
+        timestamp=TICKS_PER_SECOND,
         data={
-            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0.0, value=0.5)},
+            DataType.JOINT_POSITIONS: {"joint1": JointData(timestamp=0, value=0.5)},
             DataType.JOINT_TARGET_POSITIONS: {
-                "joint1": JointData(timestamp=1000.0, value=1.0)
+                "joint1": JointData(timestamp=1_000 * TICKS_PER_SECOND, value=1.0)
             },
             DataType.RGB_IMAGES: {"cam1": camera1},
             DataType.DEPTH_IMAGES: {"cam2": camera2},
@@ -303,7 +304,13 @@ def synced_data():
     )
 
     return SynchronizedEpisode(
-        observations=[frame1, frame2], start_time=0.0, end_time=1.0, robot_id="robot1"
+        observations=[frame1, frame2],
+        start_timestamp=0,
+        end_timestamp=TICKS_PER_SECOND,
+        ticks_per_second=TICKS_PER_SECOND,
+        start_time=0.0,
+        end_time=1.0,
+        robot_id="robot1",
     )
 
 
@@ -313,7 +320,7 @@ def synced_data_multiple_frames():
     frames = []
     for i in range(5):
         camera = RGBCameraData(
-            timestamp=float(i),
+            timestamp=i * TICKS_PER_SECOND,
             frame_idx=i,
             extrinsics=np.array(
                 [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
@@ -322,13 +329,15 @@ def synced_data_multiple_frames():
         )
 
         frame = SynchronizedPoint(
-            timestamp=float(i),
+            timestamp=i * TICKS_PER_SECOND,
             data={
                 DataType.JOINT_POSITIONS: {
-                    "joint1": JointData(timestamp=0.0, value=0.5 + i * 0.1)
+                    "joint1": JointData(timestamp=0, value=0.5 + i * 0.1)
                 },
                 DataType.JOINT_TARGET_POSITIONS: {
-                    "joint1": JointData(timestamp=1000.0, value=1.0 + i * 0.1)
+                    "joint1": JointData(
+                        timestamp=1_000 * TICKS_PER_SECOND, value=1.0 + i * 0.1
+                    )
                 },
                 DataType.RGB_IMAGES: {"cam1": camera},
             },
@@ -336,7 +345,13 @@ def synced_data_multiple_frames():
         frames.append(frame)
 
     return SynchronizedEpisode(
-        observations=frames, start_time=0.0, end_time=4.0, robot_id="robot1"
+        observations=frames,
+        start_timestamp=0,
+        end_timestamp=4 * TICKS_PER_SECOND,
+        ticks_per_second=TICKS_PER_SECOND,
+        start_time=0.0,
+        end_time=4.0,
+        robot_id="robot1",
     )
 
 

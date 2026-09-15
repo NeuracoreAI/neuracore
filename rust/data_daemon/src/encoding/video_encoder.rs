@@ -1006,21 +1006,11 @@ pub(crate) const MAX_BOUNDARY_DELTA_US: i64 = i32::MAX as i64 - 1;
 const SYNTH_PTS_STEP_MIN_US: u64 = 1_000;
 const SYNTH_PTS_STEP_MAX_US: u64 = 100_000;
 
-/// Convert a capture timestamp in seconds to microseconds with the NUT
-/// writer's truncation: to nanoseconds first, then divide toward zero. This
-/// mirrors the writer's integer microsecond arithmetic, `timestamp_ns /
-/// 1_000` in `data_daemon_bridge/src/writer.rs`, so the replayed extent does
-/// not undershoot the spooled PTS extent. A naive `round(s * 1e6)` is off by
-/// up to 1 us.
-pub(crate) fn capture_timestamp_us(timestamp_s: f64) -> i64 {
-    ((timestamp_s * 1e9) as i64) / 1000
-}
-
-/// Span between two chunks' first capture timestamps, floored at zero so a
+/// Span between two chunks' first capture ticks, floored at zero so a
 /// backwards announcement cannot emit a negative `duration`. The
 /// extent-relative ceiling belongs to [`declared_batch_span_us`].
-pub(crate) fn declared_span_us(from_timestamp_s: f64, to_timestamp_s: f64) -> i64 {
-    (capture_timestamp_us(to_timestamp_s) - capture_timestamp_us(from_timestamp_s)).max(0)
+pub(crate) fn declared_span_us(from_timestamp: i64, to_timestamp: i64) -> i64 {
+    (to_timestamp - from_timestamp).max(0)
 }
 
 /// The chunk's content extent: the last frame's PTS relative to the chunk
@@ -1032,21 +1022,20 @@ pub(crate) fn declared_span_us(from_timestamp_s: f64, to_timestamp_s: f64) -> i6
 /// unknown with the step ceiling and never undershoots the real extent.
 /// Undershooting would let the next chunk start inside this one's content,
 /// which makes a B-frame encode store backwards PTS.
-pub(crate) fn replayed_chunk_extent_us(frame_timestamps_s: &[f64]) -> i64 {
+pub(crate) fn replayed_chunk_extent_us(frame_timestamps: &[i64]) -> i64 {
     let mut origin_us: Option<i64> = None;
     let mut last_pts_us: Option<u64> = None;
     let mut observed_frame_gap_us: Option<u64> = None;
-    for &timestamp_s in frame_timestamps_s {
-        let timestamp_us = capture_timestamp_us(timestamp_s);
-        let origin = *origin_us.get_or_insert(timestamp_us);
-        let mut pts = timestamp_us.saturating_sub(origin).max(0) as u64;
+    for &timestamp in frame_timestamps {
+        let origin = *origin_us.get_or_insert(timestamp);
+        let mut pts = timestamp.saturating_sub(origin).max(0) as u64;
         if let Some(previous) = last_pts_us {
             if pts <= previous {
                 let step = observed_frame_gap_us
                     .unwrap_or(SYNTH_PTS_STEP_MAX_US)
                     .clamp(SYNTH_PTS_STEP_MIN_US, SYNTH_PTS_STEP_MAX_US);
                 pts = previous.saturating_add(step);
-                origin_us = Some(timestamp_us.saturating_sub(pts as i64));
+                origin_us = Some(timestamp.saturating_sub(pts as i64));
             } else if pts - previous <= SYNTH_PTS_STEP_MAX_US {
                 observed_frame_gap_us = Some(pts - previous);
             }
@@ -1065,12 +1054,12 @@ pub(crate) fn replayed_chunk_extent_us(frame_timestamps_s: &[f64]) -> i64 {
 /// backwards PTS; the floor degrades that to a 1 us ramp. A well-formed
 /// span already sits past the floor and passes through untouched.
 pub(crate) fn declared_span_with_extent_us(
-    chunk_frame_timestamps_s: &[f64],
-    next_first_timestamp_s: f64,
+    chunk_frame_timestamps: &[i64],
+    next_first_timestamp: i64,
     content_extent_us: i64,
 ) -> i64 {
-    let span_us = match chunk_frame_timestamps_s.first() {
-        Some(&first_timestamp_s) => declared_span_us(first_timestamp_s, next_first_timestamp_s),
+    let span_us = match chunk_frame_timestamps.first() {
+        Some(&first_timestamp) => declared_span_us(first_timestamp, next_first_timestamp),
         None => 0,
     };
     span_us
@@ -1081,13 +1070,13 @@ pub(crate) fn declared_span_with_extent_us(
 /// Declared span for a batch entry: [`declared_span_with_extent_us`] on the
 /// chunk's replayed content extent.
 pub(crate) fn declared_batch_span_us(
-    chunk_frame_timestamps_s: &[f64],
-    next_first_timestamp_s: f64,
+    chunk_frame_timestamps: &[i64],
+    next_first_timestamp: i64,
 ) -> i64 {
     declared_span_with_extent_us(
-        chunk_frame_timestamps_s,
-        next_first_timestamp_s,
-        replayed_chunk_extent_us(chunk_frame_timestamps_s),
+        chunk_frame_timestamps,
+        next_first_timestamp,
+        replayed_chunk_extent_us(chunk_frame_timestamps),
     )
 }
 
@@ -1102,10 +1091,10 @@ pub(crate) fn declared_batch_span_us(
 /// delta poisons its observed gap.
 pub(crate) fn batch_content_extent_us(
     spans_to_next_us: &[i64],
-    last_chunk_frame_timestamps_s: &[f64],
+    last_chunk_frame_timestamps: &[i64],
 ) -> i64 {
     let stacked_spans_us: i64 = spans_to_next_us.iter().sum();
-    stacked_spans_us.saturating_add(replayed_chunk_extent_us(last_chunk_frame_timestamps_s))
+    stacked_spans_us.saturating_add(replayed_chunk_extent_us(last_chunk_frame_timestamps))
 }
 
 /// Format a microsecond span as the exact decimal seconds a concat-list
@@ -2066,7 +2055,7 @@ mod tests {
         let tempdir = TempDir::new().unwrap();
         let frames_per_chunk: i64 = 48;
         let rgb = vec![128u8; 16 * 16 * 3];
-        let write_chunk = |path: &Path, jittery: bool| -> Vec<f64> {
+        let write_chunk = |path: &Path, jittery: bool| -> Vec<i64> {
             let mut writer = NutWriter::create(
                 path,
                 NutVideoConfig {
@@ -2077,7 +2066,7 @@ mod tests {
                 },
             )
             .expect("create NUT");
-            let mut timestamps_s = Vec::new();
+            let mut timestamps = Vec::new();
             let mut timestamp_us: i64 = 0;
             for index in 0..frames_per_chunk {
                 // ~59.9 fps; the jittery variant wobbles ±0.5 ms like real
@@ -2091,21 +2080,21 @@ mod tests {
                 writer
                     .write_frame(timestamp_us as u64, &rgb)
                     .expect("write frame");
-                timestamps_s.push(timestamp_us as f64 / 1e6);
+                timestamps.push(timestamp_us);
             }
             writer.finish().expect("finish NUT");
-            timestamps_s
+            timestamps
         };
 
         let encoder = VideoEncoder::new();
         let mut segments = Vec::new();
-        let mut segment_timestamps_s = Vec::new();
+        let mut segment_timestamps = Vec::new();
         for (chunk_index, jittery) in [true, false, true].into_iter().enumerate() {
             let raw = tempdir.path().join(format!("chunk_{chunk_index:04}.nut"));
             let lossy = tempdir
                 .path()
                 .join(format!("chunk_{chunk_index:04}_lossy.mp4"));
-            segment_timestamps_s.push(write_chunk(&raw, jittery));
+            segment_timestamps.push(write_chunk(&raw, jittery));
             encoder
                 .encode_chunk(
                     &ChunkEncodeRequest {
@@ -2127,7 +2116,7 @@ mod tests {
 
         // These fixture chunks re-anchor at each chunk open, so the spans
         // floor to each segment's extent plus 1 us; the merge must stay sound.
-        let spans_to_next_us: Vec<i64> = segment_timestamps_s
+        let spans_to_next_us: Vec<i64> = segment_timestamps
             .windows(2)
             .map(|pair| declared_batch_span_us(&pair[0], pair[1][0]))
             .collect();
@@ -2461,27 +2450,18 @@ mod tests {
     }
 
     #[test]
-    fn capture_timestamp_us_truncates_like_the_nut_writer() {
-        assert_eq!(capture_timestamp_us(1.0), 1_000_000);
-        assert_eq!(capture_timestamp_us(0.000001), 1);
-        // Truncation toward zero, not rounding: 1.9 us of capture time is
-        // still tick 1, exactly as the writer's ns-then-divide conversion.
-        assert_eq!(capture_timestamp_us(0.0000019), 1);
-    }
-
-    #[test]
     fn declared_span_never_goes_negative() {
-        assert_eq!(declared_span_us(0.0, 1.0), 1_000_000);
+        assert_eq!(declared_span_us(0, 1_000_000), 1_000_000);
         // A backwards announcement never yields a negative duration.
-        assert_eq!(declared_span_us(2.0, 1.0), 0);
+        assert_eq!(declared_span_us(2_000_000, 1_000_000), 0);
     }
 
     #[test]
     fn replayed_extent_matches_healthy_stamps() {
         // Monotonic stamps trigger no synthesis: the extent is the plain
-        // last-minus-first capture span in writer-truncated microseconds.
-        assert_eq!(replayed_chunk_extent_us(&[0.0, 0.016683, 0.033366]), 33_366);
-        assert_eq!(replayed_chunk_extent_us(&[1.0]), 0);
+        // last-minus-first capture span in ticks.
+        assert_eq!(replayed_chunk_extent_us(&[0, 16_683, 33_366]), 33_366);
+        assert_eq!(replayed_chunk_extent_us(&[1_000_000]), 0);
         assert_eq!(replayed_chunk_extent_us(&[]), 0);
     }
 
@@ -2490,106 +2470,93 @@ mod tests {
         // All-duplicate stamps: the writer synthesizes a step per frame from
         // the healthy gap it carried from earlier chunks. That gap is capped
         // at 100 ms, so the replay's worst-case seed never undershoots.
-        assert_eq!(replayed_chunk_extent_us(&[1.0, 1.0, 1.0]), 200_000);
+        assert_eq!(
+            replayed_chunk_extent_us(&[1_000_000, 1_000_000, 1_000_000]),
+            200_000
+        );
         // A healthy gap observed inside the chunk becomes the step for a
         // later duplicate, exactly as the writer applies it.
-        assert_eq!(replayed_chunk_extent_us(&[0.0, 0.016683, 0.016683]), 33_366);
+        assert_eq!(replayed_chunk_extent_us(&[0, 16_683, 16_683]), 33_366);
         // After a synthesized step the origin re-anchors on the regressed
         // frame, so later stamps resume true capture spacing from it.
         assert_eq!(
-            replayed_chunk_extent_us(&[0.0, 0.016683, 0.016683, 0.033366]),
+            replayed_chunk_extent_us(&[0, 16_683, 16_683, 33_366]),
             50_049
         );
         // A regression below the chunk origin clamps to PTS 0 first, then
         // synthesizes past the previous frame.
-        assert_eq!(replayed_chunk_extent_us(&[1.0, 0.5]), 100_000);
+        assert_eq!(replayed_chunk_extent_us(&[1_000_000, 500_000]), 100_000);
     }
 
     #[test]
     fn batch_span_floors_at_the_chunk_extent_plus_one() {
-        let capture_s = |us: i64| us as f64 / 1e6;
-        let chunk: Vec<f64> = [0, 16_683, 33_366]
-            .iter()
-            .map(|us| capture_s(*us))
-            .collect();
+        let chunk = [0, 16_683, 33_366];
         // Overlap: the next chunk's announced start sits inside this chunk's
         // content span; the declared span floors to the extent plus 1 us.
-        assert_eq!(declared_batch_span_us(&chunk, capture_s(20_000)), 33_367);
+        assert_eq!(declared_batch_span_us(&chunk, 20_000), 33_367);
         // A well-formed span is at least the extent plus one frame interval
         // and passes through unchanged.
-        assert_eq!(declared_batch_span_us(&chunk, capture_s(50_049)), 50_049);
+        assert_eq!(declared_batch_span_us(&chunk, 50_049), 50_049);
         // A synthesized-PTS chunk: the announced extent is zero, but the
         // NUT's real content extends up to one writer step per frame. The
         // floor tracks the replayed extent, not the announced one.
-        let duplicates = [1.0, 1.0, 1.0];
-        assert_eq!(
-            declared_batch_span_us(&duplicates, capture_s(1_005_000)),
-            200_001
-        );
+        let duplicates = [1_000_000, 1_000_000, 1_000_000];
+        assert_eq!(declared_batch_span_us(&duplicates, 1_005_000), 200_001);
         // A chunk whose own extent exceeds the boundary ceiling still floors
         // to extent plus one; the boundary delta stays 1 us.
-        let long_chunk = [0.0, 5_000.0];
-        assert_eq!(
-            declared_batch_span_us(&long_chunk, capture_s(20_000)),
-            5_000_000_001
-        );
+        let long_chunk = [0, 5_000_000_000];
+        assert_eq!(declared_batch_span_us(&long_chunk, 20_000), 5_000_000_001);
         // A chunk with no announced frames contributes extent zero and a
         // 1 us span instead of panicking.
-        assert_eq!(declared_batch_span_us(&[], capture_s(20_000)), 1);
+        assert_eq!(declared_batch_span_us(&[], 20_000), 1);
     }
 
     #[test]
     fn batch_span_ceilings_the_boundary_delta() {
-        let capture_s = |us: i64| us as f64 / 1e6;
         // A gap past ~35.8 minutes saturates the 32-bit mp4 boundary sample
         // delta: the declared span compresses so the step past the chunk's
         // content extent never exceeds MAX_BOUNDARY_DELTA_US.
         assert_eq!(
-            declared_batch_span_us(&[0.0], capture_s(5_000_000_000)),
+            declared_batch_span_us(&[0], 5_000_000_000),
             MAX_BOUNDARY_DELTA_US
         );
-        let chunk = [0.0, 0.016683];
+        let chunk = [0, 16_683];
         assert_eq!(
-            declared_batch_span_us(&chunk, capture_s(5_000_000_000)),
+            declared_batch_span_us(&chunk, 5_000_000_000),
             16_683 + MAX_BOUNDARY_DELTA_US
         );
     }
 
     #[test]
     fn span_with_extent_floors_and_ceilings_on_the_carried_extent() {
-        let capture_s = |us: i64| us as f64 / 1e6;
         // A segment whose announced stamps replay to 18000 us but whose real
         // placement extent is 33000 us: the raw span (19000 us) sits inside
         // the real content, so the floor binds.
-        let segment_stamps = [0.0, 0.016, 0.017, 0.0165];
+        let segment_stamps = [0, 16_000, 17_000, 16_500];
         assert_eq!(
-            declared_span_with_extent_us(&segment_stamps, capture_s(19_000), 33_000),
+            declared_span_with_extent_us(&segment_stamps, 19_000, 33_000),
             33_001
         );
         // A raw span past the real content passes through unchanged.
         assert_eq!(
-            declared_span_with_extent_us(&segment_stamps, capture_s(50_000), 33_000),
+            declared_span_with_extent_us(&segment_stamps, 50_000, 33_000),
             50_000
         );
         // The ceiling stays extent-relative.
         assert_eq!(
-            declared_span_with_extent_us(&segment_stamps, capture_s(5_000_000_000), 33_000),
+            declared_span_with_extent_us(&segment_stamps, 5_000_000_000, 33_000),
             33_000 + MAX_BOUNDARY_DELTA_US
         );
     }
 
     #[test]
     fn batch_content_extent_stacks_spans_and_last_chunk_extent() {
-        let capture_s = |us: i64| us as f64 / 1e6;
         // Batch of three with a floored middle boundary: chunk B's announced
         // start sits inside chunk A's content, so its duration line floors to
         // 33367 and the extent stacks both lines plus the last replayed extent.
-        let chunk_a: Vec<f64> = [0, 16_683, 33_366]
-            .iter()
-            .map(|us| capture_s(*us))
-            .collect();
-        let chunk_b: Vec<f64> = [20_000, 36_683].iter().map(|us| capture_s(*us)).collect();
-        let chunk_c: Vec<f64> = [40_000, 56_683].iter().map(|us| capture_s(*us)).collect();
+        let chunk_a = [0, 16_683, 33_366];
+        let chunk_b = [20_000, 36_683];
+        let chunk_c = [40_000, 56_683];
         let span_a_us = declared_batch_span_us(&chunk_a, chunk_b[0]);
         let span_b_us = declared_batch_span_us(&chunk_b, chunk_c[0]);
         assert_eq!(span_a_us, 33_367, "the overlapped boundary floors");
@@ -2601,12 +2568,12 @@ mod tests {
 
         // A batch of one carries no duration lines: the extent is the
         // chunk's own replayed extent.
-        assert_eq!(batch_content_extent_us(&[], &[0.0, 0.016683]), 16_683);
+        assert_eq!(batch_content_extent_us(&[], &[0, 16_683]), 16_683);
 
         // A last chunk with a regressing stamp: the replay steps by the
         // writer's step ceiling, so the extent cannot undershoot.
         assert_eq!(
-            batch_content_extent_us(&[17_000], &[0.017, 0.0165]),
+            batch_content_extent_us(&[17_000], &[17_000, 16_500]),
             17_000 + 100_000
         );
     }
@@ -2656,14 +2623,12 @@ mod tests {
     }
 
     /// Run the batch PTS gate for one fixture, whose `chunk_capture_us` holds
-    /// each chunk's frame times as batch-absolute microseconds. Every output
+    /// each chunk's frame times as batch-absolute ticks. Every output
     /// of both codec branches must decode to the batch-relative capture
     /// ladder exactly, frame-complete, monotonic, at the pinned timescale.
     async fn assert_batch_pts_gate(ffprobe: &Path, chunk_capture_us: &[Vec<i64>]) {
         // Mirror the production data flow: the announcement carries per-frame
-        // `timestamp_s` seconds; the spooled PTS and the batch spans both
-        // derive from them with the writer's truncation.
-        let capture_s = |us: i64| us as f64 / 1e6;
+        // ticks; the spooled PTS and the batch spans both derive from them.
         for codec in [
             LossyVideoCodec::LosslessPlusPreview,
             LossyVideoCodec::H264MediumLossyOnly,
@@ -2671,22 +2636,17 @@ mod tests {
             let tempdir = TempDir::new().unwrap();
             let mut inputs = Vec::new();
             for (index, chunk) in chunk_capture_us.iter().enumerate() {
-                let chunk_origin_us = capture_timestamp_us(capture_s(chunk[0]));
-                let relative_pts: Vec<i64> = chunk
-                    .iter()
-                    .map(|us| capture_timestamp_us(capture_s(*us)) - chunk_origin_us)
-                    .collect();
+                let relative_pts: Vec<i64> = chunk.iter().map(|tick| tick - chunk[0]).collect();
                 let raw_nut = tempdir.path().join(format!("chunk_{index:04}.nut"));
                 write_nut_chunk(&raw_nut, &relative_pts);
                 // Spans go through the same helper the worker uses, so a
                 // regression in the production span computation fails the
                 // gate.
-                let chunk_timestamps_s: Vec<f64> = chunk.iter().map(|us| capture_s(*us)).collect();
                 inputs.push(BatchNutInput {
                     raw_nut,
-                    span_to_next_us: chunk_capture_us.get(index + 1).map(|next| {
-                        declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0]))
-                    }),
+                    span_to_next_us: chunk_capture_us
+                        .get(index + 1)
+                        .map(|next| declared_batch_span_us(chunk, next[0])),
                     frame_count: chunk.len() as u32,
                     skip_frames: 0,
                 });
@@ -2704,11 +2664,11 @@ mod tests {
                 .await
                 .expect("batched transcode");
 
-            let batch_origin_us = capture_timestamp_us(capture_s(chunk_capture_us[0][0]));
+            let batch_origin_us = chunk_capture_us[0][0];
             let expected: Vec<i64> = chunk_capture_us
                 .iter()
                 .flatten()
-                .map(|us| capture_timestamp_us(capture_s(*us)) - batch_origin_us)
+                .map(|tick| tick - batch_origin_us)
                 .collect();
             let mut outputs = vec![lossy_out];
             if !codec.is_lossy_only() {
@@ -3018,8 +2978,8 @@ mod tests {
         // span clamps to the extent plus the largest safe step. The exact
         // ladder is unattainable; the output must stay monotonic and carry
         // every frame.
-        let chunk_a_timestamps = [0.0, 0.016683];
-        let span_us = declared_batch_span_us(&chunk_a_timestamps, 4_000.0);
+        let chunk_a_timestamps = [0, 16_683];
+        let span_us = declared_batch_span_us(&chunk_a_timestamps, 4_000_000_000);
         assert_eq!(
             span_us,
             16_683 + MAX_BOUNDARY_DELTA_US,
@@ -3082,10 +3042,8 @@ mod tests {
         // the boundary to a 1 us ramp, so the exact ladder is unattainable;
         // the output must stay monotonic and frame-complete, and chunk A's
         // frames must keep their exact capture PTS.
-        let capture_s = |us: i64| us as f64 / 1e6;
         let chunk_a_pts_us = [0i64, 16_683, 33_366];
-        let chunk_a_timestamps: Vec<f64> = chunk_a_pts_us.iter().map(|us| capture_s(*us)).collect();
-        let span_us = declared_batch_span_us(&chunk_a_timestamps, capture_s(20_000));
+        let span_us = declared_batch_span_us(&chunk_a_pts_us, 20_000);
         for codec in [
             LossyVideoCodec::LosslessPlusPreview,
             LossyVideoCodec::H264MediumLossyOnly,
@@ -3154,14 +3112,14 @@ mod tests {
             return;
         };
         // A synthesized-PTS chunk: the announced stamps are all the same
-        // 1.0 s duplicate, so the writer synthesized the monotonic NUT ladder
+        // 1 s duplicate, so the writer synthesized the monotonic NUT ladder
         // this test writes directly. The next chunk's announced start sits
         // inside that real content, so flooring only at the announced extent
         // would make the preset-medium encode store backwards PTS. The exact
         // ladder is degraded here; assert positive properties only.
-        let chunk_a_announced = [1.0, 1.0, 1.0];
+        let chunk_a_announced = [1_000_000, 1_000_000, 1_000_000];
         let chunk_a_nut_pts = [0i64, 16_683, 33_366];
-        let span_us = declared_batch_span_us(&chunk_a_announced, 1.005);
+        let span_us = declared_batch_span_us(&chunk_a_announced, 1_005_000);
         let tempdir = TempDir::new().unwrap();
         let chunk_a = tempdir.path().join("chunk_0000.nut");
         let chunk_b = tempdir.path().join("chunk_0001.nut");
@@ -3217,17 +3175,16 @@ mod tests {
         chunk_capture_us: &[Vec<i64>],
         segment_chunk_counts: &[usize],
         codec: LossyVideoCodec,
-    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<Vec<f64>>, Vec<i64>) {
+    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<Vec<i64>>, Vec<i64>) {
         assert_eq!(
             segment_chunk_counts.iter().sum::<usize>(),
             chunk_capture_us.len(),
             "fixture groups must cover every chunk"
         );
-        let capture_s = |us: i64| us as f64 / 1e6;
         let encoder = VideoEncoder::new();
         let mut lossy_segments = Vec::new();
         let mut lossless_segments = Vec::new();
-        let mut segment_timestamps_s: Vec<Vec<f64>> = Vec::new();
+        let mut segment_timestamps: Vec<Vec<i64>> = Vec::new();
         let mut segment_extents_us: Vec<i64> = Vec::new();
         let mut chunk_cursor = 0usize;
         for (segment_index, &chunk_count) in segment_chunk_counts.iter().enumerate() {
@@ -3238,19 +3195,14 @@ mod tests {
             for (offset, chunk) in group.iter().enumerate() {
                 // The spooled NUT re-anchors each chunk at its first frame;
                 // the announcement keeps the absolute stamps.
-                let chunk_origin_us = capture_timestamp_us(capture_s(chunk[0]));
-                let relative_pts: Vec<i64> = chunk
-                    .iter()
-                    .map(|us| capture_timestamp_us(capture_s(*us)) - chunk_origin_us)
-                    .collect();
+                let relative_pts: Vec<i64> = chunk.iter().map(|tick| tick - chunk[0]).collect();
                 let raw_nut = tempdir
                     .path()
                     .join(format!("chunk_{segment_index:04}_{offset}.nut"));
                 write_nut_chunk(&raw_nut, &relative_pts);
-                let chunk_timestamps_s: Vec<f64> = chunk.iter().map(|us| capture_s(*us)).collect();
                 let span_to_next_us = group
                     .get(offset + 1)
-                    .map(|next| declared_batch_span_us(&chunk_timestamps_s, capture_s(next[0])));
+                    .map(|next| declared_batch_span_us(chunk, next[0]));
                 if let Some(span_us) = span_to_next_us {
                     group_spans_us.push(span_us);
                 }
@@ -3283,22 +3235,16 @@ mod tests {
             if !codec.is_lossy_only() {
                 lossless_segments.push(lossless_out);
             }
-            segment_timestamps_s.push(group.iter().flatten().map(|us| capture_s(*us)).collect());
-            let last_chunk_timestamps_s: Vec<f64> = group
-                .last()
-                .expect("group covers at least one chunk")
-                .iter()
-                .map(|us| capture_s(*us))
-                .collect();
+            segment_timestamps.push(group.iter().flatten().copied().collect());
             segment_extents_us.push(batch_content_extent_us(
                 &group_spans_us,
-                &last_chunk_timestamps_s,
+                group.last().expect("group covers at least one chunk"),
             ));
         }
         (
             lossy_segments,
             lossless_segments,
-            segment_timestamps_s,
+            segment_timestamps,
             segment_extents_us,
         )
     }
@@ -3306,11 +3252,8 @@ mod tests {
     /// Compute the finalise `duration` spans the way the trace actor does:
     /// each segment's raw first-to-first capture span, floored and capped on
     /// the carried content extent.
-    fn finalise_spans_us(
-        segment_timestamps_s: &[Vec<f64>],
-        segment_extents_us: &[i64],
-    ) -> Vec<i64> {
-        segment_timestamps_s
+    fn finalise_spans_us(segment_timestamps: &[Vec<i64>], segment_extents_us: &[i64]) -> Vec<i64> {
+        segment_timestamps
             .windows(2)
             .zip(segment_extents_us)
             .map(|(pair, &extent_us)| declared_span_with_extent_us(&pair[0], pair[1][0], extent_us))
@@ -3325,16 +3268,15 @@ mod tests {
         chunk_capture_us: &[Vec<i64>],
         segment_chunk_counts: &[usize],
     ) {
-        let capture_s = |us: i64| us as f64 / 1e6;
         for codec in [
             LossyVideoCodec::LosslessPlusPreview,
             LossyVideoCodec::H264MediumLossyOnly,
         ] {
             let tempdir = TempDir::new().unwrap();
-            let (lossy_segments, lossless_segments, segment_timestamps_s, segment_extents_us) =
+            let (lossy_segments, lossless_segments, segment_timestamps, segment_extents_us) =
                 encode_finalise_segments(&tempdir, chunk_capture_us, segment_chunk_counts, codec)
                     .await;
-            let spans_to_next_us = finalise_spans_us(&segment_timestamps_s, &segment_extents_us);
+            let spans_to_next_us = finalise_spans_us(&segment_timestamps, &segment_extents_us);
 
             let encoder = VideoEncoder::new();
             let final_lossy = tempdir.path().join("lossy.mp4");
@@ -3352,11 +3294,11 @@ mod tests {
                 outputs.push(final_lossless);
             }
 
-            let trace_origin_us = capture_timestamp_us(capture_s(chunk_capture_us[0][0]));
+            let trace_origin_us = chunk_capture_us[0][0];
             let expected: Vec<i64> = chunk_capture_us
                 .iter()
                 .flatten()
-                .map(|us| capture_timestamp_us(capture_s(*us)) - trace_origin_us)
+                .map(|tick| tick - trace_origin_us)
                 .collect();
             for video in &outputs {
                 assert_merged_video_is_sound(ffprobe, video);
@@ -3489,9 +3431,9 @@ mod tests {
             LossyVideoCodec::H264MediumLossyOnly,
         ] {
             let tempdir = TempDir::new().unwrap();
-            let (lossy_segments, lossless_segments, segment_timestamps_s, segment_extents_us) =
+            let (lossy_segments, lossless_segments, segment_timestamps, segment_extents_us) =
                 encode_finalise_segments(&tempdir, &chunks, &segment_chunk_counts, codec).await;
-            let spans_to_next_us = finalise_spans_us(&segment_timestamps_s, &segment_extents_us);
+            let spans_to_next_us = finalise_spans_us(&segment_timestamps, &segment_extents_us);
             assert_eq!(
                 spans_to_next_us,
                 vec![50_049 + MAX_BOUNDARY_DELTA_US],

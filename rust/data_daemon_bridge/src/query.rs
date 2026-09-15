@@ -2,9 +2,11 @@
 //!
 //! The thin producer never mints recording identity — the daemon allocates the
 //! cloud id asynchronously after `/recording/start`. These helpers ask the
-//! daemon (identifying the recording by its source + capture `timestamp_ns`
+//! daemon (identifying the recording by its source + start tick `timestamp`
 //! marker) and return the id once minted.
 
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use data_daemon_shared::{
@@ -34,6 +36,46 @@ const VERSION_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const VERSION_RESPONSE_WAIT: Duration = Duration::from_millis(20);
 /// Poll cadence while waiting for one version reply.
 const VERSION_RECEIVE_POLL: Duration = Duration::from_millis(2);
+
+/// `(robot_id, robot_instance)` to `(start tick, publish_timestamp_ns)`.
+type PublishedStarts = HashMap<(String, i64), (i64, i64)>;
+
+/// The latest start this process published per source. Kept past the stop,
+/// because `stop_recording(wait=True)` resolves the cloud id around the stop.
+static PUBLISHED_STARTS: LazyLock<Mutex<PublishedStarts>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Record the start this process just published for a source.
+pub(crate) fn note_published_start(
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp: i64,
+    publish_timestamp_ns: i64,
+) {
+    PUBLISHED_STARTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(
+            (robot_id.to_string(), robot_instance),
+            (timestamp, publish_timestamp_ns),
+        );
+}
+
+/// The publish time of this process's latest start for a source, when that
+/// start carried `timestamp` as its marker. Any other marker was chosen by the
+/// caller and is matched on its own.
+pub(crate) fn published_start_for_marker(
+    robot_id: &str,
+    robot_instance: i64,
+    timestamp: i64,
+) -> Option<i64> {
+    PUBLISHED_STARTS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&(robot_id.to_string(), robot_instance))
+        .filter(|(start_timestamp, _)| *start_timestamp == timestamp)
+        .map(|(_, publish_timestamp_ns)| *publish_timestamp_ns)
+}
 
 fn bounded_timeout(timeout_s: f64) -> Duration {
     // Clamp before converting: `Duration::from_secs_f64` panics on a non-finite
@@ -258,4 +300,26 @@ pub(crate) fn query_recording_state(
             std::thread::sleep(RECORDING_STATE_RECEIVE_POLL);
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_latest_published_marker_carries_its_publish_time() {
+        note_published_start("robot-marker-test", 0, 0, 100);
+        note_published_start("robot-marker-test", 0, 0, 200);
+
+        assert_eq!(
+            published_start_for_marker("robot-marker-test", 0, 0),
+            Some(200)
+        );
+        assert_eq!(
+            published_start_for_marker("robot-marker-test", 0, 5),
+            None,
+            "a marker the caller chose itself matches on the marker only"
+        );
+        assert_eq!(published_start_for_marker("robot-marker-test", 1, 0), None);
+    }
 }

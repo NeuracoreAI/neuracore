@@ -19,22 +19,21 @@
 //!
 //! Envelopes are encoded with [`postcard`], a compact length-prefixed binary
 //! format. Payload bytes travel raw (length-prefix + bytes — no base64 or
-//! `[u8]→[i32]` expansion that JSON would force), and `f64` fields round-trip
-//! bit-exact because postcard writes the IEEE-754 byte pattern directly. The
-//! schema is forward-compatible: postcard's enum representation tags variants
-//! with a varint-encoded u32 discriminant (one byte for the first 128
-//! variants), so new envelope variants append cleanly.
+//! `[u8]→[i32]` expansion that JSON would force). The schema is
+//! forward-compatible: postcard's enum representation tags variants with a
+//! varint-encoded u32 discriminant (one byte for the first 128 variants), so
+//! new envelope variants append cleanly.
 //!
 //! # The thin-shipper model
 //!
 //! The producer is a *thin shipper*: it knows nothing about recordings. Every
 //! envelope is tagged only with its **source** (`robot_id`, `robot_instance`)
 //! and — for data — its **sensor** (`data_type`, `sensor_name`) and capture
-//! `timestamp_ns`. The producer publishes three fire-and-forget lifecycle
+//! `timestamp` in ticks. The producer publishes three fire-and-forget lifecycle
 //! events ([`Envelope::StartRecording`] / [`Envelope::StopRecording`] /
-//! [`Envelope::CancelRecording`]) carrying the lifecycle wall-clock timestamp,
-//! and the daemon decides — from its per-source active-window map — which
-//! recording (if any) each datum belongs to. There is no `recording_index`,
+//! [`Envelope::CancelRecording`]) carrying the lifecycle publish timestamp and
+//! the caller's tick, and the daemon decides from its per-source active-window
+//! map which recording (if any) each datum belongs to. There is no `recording_index`,
 //! `trace_id`, or `sequence_number` on the wire; the daemon assigns and
 //! stores those after routing. `StartRecording` carries an optional
 //! `cloud_recording_id` for the one case where the backend, not the daemon,
@@ -52,6 +51,11 @@ use thiserror::Error;
 pub mod config;
 pub mod ffmpeg;
 pub mod paths;
+
+/// Nanoseconds in one tick. A tick is one microsecond, the unit of every
+/// capture timestamp the daemon writes to `trace.json` and the video PTS.
+pub const NANOSECONDS_PER_TICK: i64 =
+    1_000_000_000 / service_name::VIDEO_SPOOL_TICKS_PER_SECOND as i64;
 
 /// Recording-window membership for the frames *inside* one video chunk.
 ///
@@ -224,17 +228,16 @@ pub mod service_name {
     ///
     /// All envelope payloads are now metadata-sized: non-video frames are
     /// small JSON, the integration matrix's 1000-joint batch encodes to
-    /// ~90 KiB, and `VideoChunkReady`'s `frame_timestamps_s` vector is
+    /// ~90 KiB, and `VideoChunkReady`'s `frame_timestamps` vector is
     /// ~30 KiB even for a 128 MiB 1080p chunk. 1 MiB leaves generous
     /// headroom for the worst case.
     pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
     /// Worst-case postcard size of one frame's contribution to a
-    /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
-    /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
-    /// `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes).
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
+    /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps`
+    /// element is an `i64` zigzag varint (≤10 bytes for a full-range value) and
+    /// a `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes).
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -247,7 +250,7 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_us`
+    /// per-frame `frame_timestamps` and `frame_publish_offsets_us`
     /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
@@ -266,7 +269,8 @@ pub mod service_name {
     /// send waits out this bound and settles on the source's silence instead.
     pub const VIDEO_CHUNK_MAX_OPEN_NS: i64 = 5 * 1_000_000_000;
 
-    /// The microsecond clock shared by every stage of the video path: the
+    /// The microsecond tick rate of every capture timestamp and of every stage
+    /// of the video path: a frame's PTS is its tick minus the chunk origin, the
     /// producer writes spool NUT chunks with a `1/1_000_000` time base, and
     /// the daemon pins its per-chunk encode outputs to the same clock
     /// (`-enc_time_base` / `-video_track_timescale`). Sharing one constant
@@ -422,7 +426,7 @@ pub mod service_name {
 ///
 /// Every variant is tagged with its **source** (`robot_id`, `robot_instance`).
 /// Data variants additionally carry their **sensor** (`data_type`,
-/// `sensor_name`) and capture `timestamp_ns`. No recording or trace identity
+/// `sensor_name`) and capture `timestamp` in ticks. No recording or trace identity
 /// travels on the wire — the daemon owns it (see the crate-level docs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Envelope {
@@ -447,11 +451,11 @@ pub enum Envelope {
         /// envelope. The **only** key used for window membership, so routing
         /// never depends on the caller's capture clock.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// start — the recording's *own* clock, or the publish time when the
-        /// caller supplied none. Stored as the row's `start_timestamp_ns` and
-        /// POSTed to the backend as `start_time`; never used for routing.
-        timestamp_ns: i64,
+        /// Caller-supplied start of the recording in ticks, on the caller's
+        /// data clock. Stored as the row's `start_timestamp`, returned by
+        /// `start_recording` as the recording's marker, and POSTed to the
+        /// backend as `start_timestamp`; never used for routing.
+        timestamp: i64,
         /// Optional cloud recording id the backend already minted.
         cloud_recording_id: Option<String>,
     },
@@ -466,11 +470,10 @@ pub enum Envelope {
         /// recording window closes — the exclusive upper bound of the
         /// membership range, on the same publish clock as the data envelopes.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// stop — or the publish time when the caller supplied none. Stored as
-        /// the row's `stop_timestamp_ns` and POSTed to the backend as
-        /// `end_time`; never used for routing.
-        timestamp_ns: i64,
+        /// Caller-supplied end of the recording in ticks. Stored as the row's
+        /// `stop_timestamp` and POSTed to the backend as `end_timestamp`;
+        /// never used for routing.
+        timestamp: i64,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -479,13 +482,15 @@ pub enum Envelope {
     CancelRecording {
         robot_id: String,
         robot_instance: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the cancel — or
-        /// the publish time when the caller supplied none. A cancel is a
+        /// Producer wall-clock publish time (Unix nanoseconds) of the cancel.
+        /// Not a window boundary, because cancelling drops the window outright;
+        /// the daemon POSTs it as the backend `end_time`.
+        publish_timestamp_ns: i64,
+        /// Caller-supplied end of the recording in ticks. A cancel is a
         /// recording stop that discards data, so the daemon stores this as the
-        /// row's `stop_timestamp_ns` and POSTs it as the backend `end_time`,
-        /// exactly like `StopRecording`. No window-boundary `publish_timestamp_ns`
-        /// is carried because cancelling drops the window outright.
-        timestamp_ns: i64,
+        /// row's `stop_timestamp` and POSTs it as the backend `end_timestamp`,
+        /// exactly like `StopRecording`.
+        timestamp: i64,
     },
     /// Producer delivers one sensor sample.
     ///
@@ -493,7 +498,7 @@ pub enum Envelope {
     /// according to `data_type` and writes it through the JSON writer. The
     /// daemon holds the datum for the configured holdback, then routes it into
     /// the source's window whose `[started_at_ns, stopped_at_ns)` contains
-    /// `timestamp_ns`.
+    /// `publish_timestamp_ns`.
     ///
     /// Video frames do *not* travel as `Data` envelopes — they are spooled to
     /// disk by the producer and announced via [`Envelope::VideoChunkReady`]
@@ -515,13 +520,9 @@ pub enum Envelope {
         /// of publish-clock timestamp, so a datum belongs to the window whose
         /// `[started_at_ns, stopped_at_ns)` brackets its publish time.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch —
-        /// the data's *own* clock, written into the trace content. Not used
-        /// for routing.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds (f64). Postcard
-        /// writes this bit-exact.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in ticks on the data's *own* clock,
+        /// written into the trace content. Not used for routing.
+        timestamp: i64,
         /// Opaque per-sample bytes. Postcard transports these as
         /// length-prefix + raw bytes (no expansion).
         payload: Vec<u8>,
@@ -533,8 +534,8 @@ pub enum Envelope {
     /// Collapsing N [`Envelope::Data`] envelopes into one IPC message cuts the
     /// per-call iceoryx2 publish count (and the pressure on the lifecycle
     /// buffer) by a factor of N. Because every item shares the batch's
-    /// `timestamp_ns`, the whole batch belongs to one window — the daemon
-    /// holds and routes it as a single unit.
+    /// `publish_timestamp_ns`, the whole batch belongs to one window, and the
+    /// daemon holds and routes it as a single unit.
     BatchedData {
         robot_id: String,
         robot_instance: i64,
@@ -547,12 +548,9 @@ pub enum Envelope {
         /// Producer wall-clock publish time (Unix nanoseconds), shared by every
         /// item. The sole key for window membership (see [`Envelope::Data`]).
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (ns), shared by every item — content,
-        /// not routing.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds, shared by every
-        /// item.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in ticks, shared by every item. It is
+        /// content, not routing.
+        timestamp: i64,
         /// Per-sensor samples; each routes to one trace actor.
         items: Vec<BatchedDataItem>,
     },
@@ -565,9 +563,8 @@ pub enum Envelope {
     /// threshold (or a lifecycle event rolls it) the producer finishes the NUT
     /// and publishes this envelope so the daemon can route the chunk into the
     /// right recording window (by `publish_timestamp_ns`), relink the NUT under
-    /// the recording, and encode it to a sealed MP4 segment. Per-frame `timestamp_s` values are
-    /// carried inline so the daemon-side `trace.json` sidecar matches the
-    /// bit-exact assertion.
+    /// the recording, and encode it to a sealed MP4 segment. Per-frame ticks
+    /// are carried inline for the daemon-side `trace.json` sidecar.
     VideoChunkReady {
         robot_id: String,
         robot_instance: i64,
@@ -599,14 +596,10 @@ pub enum Envelope {
         byte_count: u64,
         /// Number of frames packed into this chunk.
         frame_count: u32,
-        /// Per-frame capture time in nanoseconds since the Unix epoch, in
-        /// arrival order. Length equals `frame_count`. Capture-clock content for
-        /// the trace sidecar; routing uses `frame_publish_offsets_us`.
-        frame_timestamps_ns: Vec<i64>,
-        /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
-        /// Length equals `frame_count`; values round-trip bit-exact through
-        /// postcard for the metadata sidecar.
-        frame_timestamps_s: Vec<f64>,
+        /// Per-frame capture time in ticks, in arrival order. Length equals
+        /// `frame_count`. Capture-clock content for the trace sidecar and the
+        /// spooled PTS; routing uses `frame_publish_offsets_us`.
+        frame_timestamps: Vec<i64>,
         /// Original dtype of every frame in this chunk (never mixed — the
         /// producer seals and reopens a chunk on a dtype change, mirroring a
         /// geometry change). The daemon never decodes pixels; it threads this
@@ -711,8 +704,8 @@ impl FrameDtype {
 
 /// One sensor's sample inside an [`Envelope::BatchedData`] batch.
 ///
-/// Carries only the fields that differ between items — `data_type`,
-/// `timestamp_ns` and `timestamp_s` are hoisted onto the parent envelope
+/// Carries only the fields that differ between items: `data_type` and
+/// `timestamp` are hoisted onto the parent envelope
 /// because every sensor in a batch shares them (one `log_*` call, one sensor
 /// group, one capture instant). Each item self-tags its `sensor_name` because
 /// there is no pre-registered trace to look up.
@@ -778,16 +771,24 @@ pub enum EnvelopeCodecError {
 /// recording's daemon-owned cloud `recording_id`.
 ///
 /// The recording is identified exactly the way the daemon stored it: the
-/// `(robot_id, robot_instance)` source plus `timestamp_ns` — the producer's
-/// capture marker returned by `start_recording`, persisted verbatim as the
-/// recording row's `start_timestamp_ns`. Matching on the marker (not `<=`)
-/// resolves precisely that recording, never an earlier one for the same source.
+/// `(robot_id, robot_instance)` source plus `timestamp`, the caller's start
+/// tick returned by `start_recording`, persisted verbatim as the recording
+/// row's `start_timestamp`. Matching on the marker (not `<=`) resolves
+/// precisely that recording, never an earlier one for the same source.
+///
+/// Callers such as importers start every recording at tick 0, so the marker
+/// alone can match an earlier recording of the same source whose row already
+/// exists. The producer that published the start therefore also sends that
+/// start's `publish_timestamp_ns`, which the row stores verbatim.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordingIdQuery {
     pub robot_id: String,
     pub robot_instance: i64,
-    /// The recording's capture marker (Unix nanoseconds).
-    pub timestamp_ns: i64,
+    /// The recording's start marker in ticks.
+    pub timestamp: i64,
+    /// The start envelope's publish time, when this producer published the
+    /// start with this marker. `None` matches on the marker only.
+    pub start_publish_timestamp_ns: Option<i64>,
 }
 
 /// Reply to a [`RecordingIdQuery`].
@@ -820,8 +821,8 @@ pub struct LiveRecording {
     /// The cloud handle, once `/recording/start` has been notified. `None`
     /// while the recording is still local-only.
     pub recording_id: Option<String>,
-    /// The recording's capture-clock start (Unix nanoseconds), when known.
-    pub start_timestamp_ns: Option<i64>,
+    /// The recording's start marker in ticks, when known.
+    pub start_timestamp: Option<i64>,
 }
 
 /// Reply to a [`RecordingStateQuery`].
@@ -1011,7 +1012,7 @@ mod tests {
             dataset_id: Some("ds-1".into()),
             dataset_name: Some("warehouse".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
             cloud_recording_id: None,
         };
         let bytes = original.encode().expect("encode");
@@ -1028,8 +1029,7 @@ mod tests {
             data_type: "JOINT_POSITIONS".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_000_000,
-            timestamp_s: None,
+            timestamp: 1_000_000,
             payload: vec![1, 2, 3, 4, 5, 6],
         };
         let bytes = original.encode().expect("encode");
@@ -1039,32 +1039,24 @@ mod tests {
     }
 
     #[test]
-    fn data_timestamp_s_is_bit_exact_over_postcard_wire() {
-        // Postcard writes `f64` as 8 raw IEEE-754 bytes, so values that
-        // would shift under a decimal parser (e.g. `7/60`) round-trip
-        // bit-identically — required for the integration matrix's
-        // exact-match assertion on the video sidecar timestamps.
+    fn data_timestamp_tick_round_trips_over_postcard_wire() {
+        let tick = 1_747_740_000_123_457_i64;
         let original = Envelope::Data {
             robot_id: "robot-1".into(),
             robot_instance: 0,
             data_type: "RGB_IMAGES".into(),
             sensor_name: Some("camera_right".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 116_666_666,
-            timestamp_s: Some(7.0_f64 / 60.0_f64),
+            timestamp: tick,
             payload: vec![0xAA, 0xBB],
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");
         assert_eq!(original, decoded);
-        if let Envelope::Data { timestamp_s, .. } = decoded {
-            assert_eq!(
-                timestamp_s.map(f64::to_bits),
-                Some((7.0_f64 / 60.0_f64).to_bits()),
-            );
-        } else {
+        let Envelope::Data { timestamp, .. } = decoded else {
             panic!("decoded envelope was not Data");
-        }
+        };
+        assert_eq!(timestamp, tick);
     }
 
     #[test]
@@ -1080,8 +1072,7 @@ mod tests {
             data_type: "RGB_IMAGES".into(),
             sensor_name: None,
             publish_timestamp_ns: 0,
-            timestamp_ns: 0,
-            timestamp_s: None,
+            timestamp: 0,
             payload: vec![0xAB; PAYLOAD_LEN],
         };
         let bytes = original.encode().expect("encode");
@@ -1104,16 +1095,15 @@ mod tests {
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_s: Some(1_700_000_000.5),
+            timestamp: 1_700_000_000_500_000,
             items: vec![
                 BatchedDataItem {
                     sensor_name: Some("joint-0".into()),
-                    payload: br#"{"timestamp":1.0,"value":0.5}"#.to_vec(),
+                    payload: br#"{"timestamp":1000000,"value":0.5}"#.to_vec(),
                 },
                 BatchedDataItem {
                     sensor_name: Some("joint-1".into()),
-                    payload: br#"{"timestamp":1.0,"value":-0.25}"#.to_vec(),
+                    payload: br#"{"timestamp":1000000,"value":-0.25}"#.to_vec(),
                 },
             ],
         };
@@ -1133,7 +1123,7 @@ mod tests {
         let items: Vec<BatchedDataItem> = (0..1000)
             .map(|index| BatchedDataItem {
                 sensor_name: Some(format!("vx300s_left_joint_{index:04}")),
-                payload: br#"{"timestamp":1747740000.1234567,"value":-1.234567890123}"#.to_vec(),
+                payload: br#"{"timestamp":1747740000123457,"value":-1.234567890123}"#.to_vec(),
             })
             .collect();
         let envelope = Envelope::BatchedData {
@@ -1141,8 +1131,7 @@ mod tests {
             robot_instance: 0,
             data_type: "JOINT_POSITIONS".into(),
             publish_timestamp_ns: 1_747_740_000_123_456_700,
-            timestamp_ns: 1_747_740_000_123_456_700,
-            timestamp_s: Some(1_747_740_000.123_456_7),
+            timestamp: 1_747_740_000_123_457,
             items,
         };
         let bytes = envelope.encode().expect("encode");
@@ -1160,7 +1149,7 @@ mod tests {
             robot_id: "robot-1".into(),
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
@@ -1169,7 +1158,8 @@ mod tests {
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
         };
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
@@ -1211,17 +1201,11 @@ mod tests {
             height: 1080,
             byte_count: 128 * 1024 * 1024,
             frame_count: 4,
-            frame_timestamps_ns: vec![
-                1_700_000_000_000_000_000,
-                1_700_000_000_016_666_700,
-                1_700_000_000_033_333_300,
-                1_700_000_000_050_000_000,
-            ],
-            frame_timestamps_s: vec![
-                1_700_000_000.0,
-                1_700_000_000.016_666_7,
-                1_700_000_000.033_333_3,
-                7.0_f64 / 60.0_f64,
+            frame_timestamps: vec![
+                1_700_000_000_000_000,
+                1_700_000_000_016_667,
+                1_700_000_000_033_333,
+                1_700_000_000_050_000,
             ],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us: vec![0, 16, 33, 50],
@@ -1254,8 +1238,7 @@ mod tests {
                 height: 128,
                 byte_count: 4096,
                 frame_count: 1,
-                frame_timestamps_ns: vec![1_700_000_000_000_000_000],
-                frame_timestamps_s: vec![1_700_000_000.0],
+                frame_timestamps: vec![1_700_000_000_000_000],
                 dtype,
                 frame_publish_offsets_us: vec![0],
             };
@@ -1297,10 +1280,9 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // Two timestamps plus a publish offset per frame stays well under
+        // A tick plus a publish offset per frame stays well under
         // COMMANDS_MAX_PAYLOAD_BYTES even at an implausible frame count.
-        let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
-        let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let frame_timestamps: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1313,9 +1295,8 @@ mod tests {
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
-            frame_count: frame_timestamps_ns.len() as u32,
-            frame_timestamps_ns,
-            frame_timestamps_s,
+            frame_count: frame_timestamps.len() as u32,
+            frame_timestamps,
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
@@ -1332,14 +1313,13 @@ mod tests {
     fn video_chunk_ready_at_frame_cap_fits_commands_slice() {
         // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
         // announcement always fits one commands sample. Prove the cap holds at
-        // the absolute worst case: every per-frame ns timestamp a full-range
+        // the absolute worst case: every per-frame tick a full-range
         // i64 (10-byte postcard zigzag varint), every publish offset a
         // full-range u32 (5-byte varint), and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
-        let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
-        let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let frame_timestamps: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1353,8 +1333,7 @@ mod tests {
             height: u32::MAX,
             byte_count: u64::MAX,
             frame_count: count as u32,
-            frame_timestamps_ns,
-            frame_timestamps_s,
+            frame_timestamps,
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
