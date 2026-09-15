@@ -6,6 +6,8 @@ duplicate runner processes are created. These tests force online mode so
 startup never inherits an offline profile.
 """
 
+import queue
+import time
 import uuid
 
 import psutil
@@ -31,17 +33,35 @@ from tests.integration.platform.data_daemon.shared.runners import (
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     has_configured_org,
 )
+from tests.integration.platform.data_daemon.shared.test_case.child_process import (
+    ChildProcess,
+)
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     MAX_TIME_TO_START_S,
+    REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+)
+from tests.integration.platform.data_daemon.shared.test_case.recording_control import (
+    PEER_AWAIT_OPEN,
+    ControlProcessSpec,
+    OpenAck,
+    peer_control_process,
+    remote_control_post,
+)
+from tests.integration.platform.data_daemon.shared.test_infrastructure import (
+    cloud_resource_deleter,
 )
 
 
 def test_connect_robot_starts_the_daemon() -> None:
-    """Verify that connecting a robot starts the daemon within the connect budget.
+    """Verify a connect starts the daemon, and that it picks up an open recording.
 
     A producer that only connects and logs never calls ``start_recording``, so
-    this launch is the only one a web-started recording gets. Nothing starts a
-    daemon ahead of the connect, so the test gets what a user gets.
+    this launch is the only one a web-started recording gets. The backend's
+    announcement is one-shot: a daemon that was not running when it fired hears
+    of the recording only in the snapshot it is sent on subscribing, and
+    without that it reports the source idle for the recording's whole life.
+    Nothing starts a daemon ahead of either connect, so the test gets what a
+    user gets, and the second one connects with the window already open.
     """
     if not has_configured_org():
         pytest.skip(
@@ -49,18 +69,92 @@ def test_connect_robot_starts_the_daemon() -> None:
             " or a saved current organization."
         )
 
+    robot_name = f"startup_robot_{uuid.uuid4().hex[:10]}"
+    dataset_name = f"testing_dataset_startup_{uuid.uuid4().hex[:6]}"
+
     with scoped_daemon_storage_env(), scoped_online_mode():
-        try:
-            stop_daemon_and_verify()
+        with cloud_resource_deleter(dataset_name, [robot_name]):
+            peer = ChildProcess("peer-startup-control")
+            commands = peer.queue()
+            acks = peer.queue()
+            peer_started = False
+            peer_retired = False
+            recording_id = None
+            try:
+                stop_daemon_and_verify()
+                nc.create_dataset(dataset_name)
+                dataset_id = nc.get_dataset(dataset_name).id
 
-            with Timer(MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True):
-                nc.connect_robot(
-                    f"startup_robot_{uuid.uuid4().hex[:10]}", overwrite=False
+                with Timer(
+                    MAX_TIME_TO_START_S, label="nc.connect_robot", always_log=True
+                ):
+                    robot = nc.connect_robot(robot_name, overwrite=False)
+
+                assert_exactly_one_daemon_pid()
+
+                robot_id, instance = str(robot.id), int(robot.instance)
+                stop_daemon_and_verify()
+
+                pending = remote_control_post(
+                    "/recording/start",
+                    {
+                        "robot_id": robot_id,
+                        "instance": instance,
+                        "dataset_id": dataset_id,
+                        "start_time": time.time(),
+                    },
                 )
+                recording_id = str(pending["id"])
 
-            assert_exactly_one_daemon_pid()
-        finally:
-            stop_daemon_and_verify()
+                peer.start(
+                    peer_control_process,
+                    (
+                        # The peer only ever waits here, so the fields the stop
+                        # orders read are never used.
+                        ControlProcessSpec(
+                            robot_name=robot_name,
+                            wait=True,
+                            stop_sla_s=MAX_TIME_TO_START_S,
+                            assert_deadline=False,
+                        ),
+                        peer.ready_event,
+                        commands,
+                        acks,
+                        peer.result_queue,
+                    ),
+                )
+                peer_started = True
+                assert peer.await_ready(), (
+                    "the peer never connected, so nothing launched a daemon: "
+                    f"{peer.collect().failure}"
+                )
+                assert_exactly_one_daemon_pid()
+
+                commands.put((PEER_AWAIT_OPEN, float(pending["start_time"])))
+                failure = ""
+                try:
+                    opened = acks.get(
+                        timeout=REMOTE_CONTROL_REQUEST_TIMEOUT_S + MAX_TIME_TO_START_S
+                    )
+                except queue.Empty:
+                    opened = None
+                    peer_retired = True
+                    failure = peer.collect().failure
+                assert isinstance(opened, OpenAck), (
+                    f"recording {recording_id} was minted while no daemon was "
+                    "running, and never reached the daemon the peer's connect "
+                    f"launched:\n{failure or opened!r}"
+                )
+            finally:
+                if recording_id is not None:
+                    remote_control_post(
+                        "/recording/stop",
+                        {"recording_id": recording_id, "end_time": time.time()},
+                    )
+                if peer_started and not peer_retired:
+                    commands.put(None)
+                    peer.collect()
+                stop_daemon_and_verify()
 
 
 def test_ensure_single_daemon_process() -> None:

@@ -11,7 +11,8 @@
 //!
 //! Availability, not correctness: producer-bracketed recordings work whether or
 //! not this task is connected. A dropped connection is retried with capped
-//! backoff.
+//! backoff, and every subscribe opens with the backend's `INIT` snapshot, so
+//! the recordings that were minted while nothing was listening arrive too.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -186,11 +187,10 @@ async fn consume(
     {
         buffer.extend_from_slice(&chunk);
         for frame in take_frames(&mut buffer) {
-            let Some(command) = parse_notification(&frame) else {
-                continue;
-            };
-            if tx.send(command).await.is_err() {
-                return Err(StreamEnded::Closed);
+            for command in parse_notification(&frame) {
+                if tx.send(command).await.is_err() {
+                    return Err(StreamEnded::Closed);
+                }
             }
         }
         if buffer.len() > MAX_FRAME_BYTES {
@@ -281,36 +281,45 @@ struct StopPayload {
     recording_id: String,
 }
 
-/// Turn one frame's JSON into a command, or `None` for anything this daemon
-/// does not act on (an unparsable frame, or a lifecycle type it ignores).
-fn parse_notification(data: &str) -> Option<RecordingCommand> {
+/// Turn one frame's JSON into commands, empty for anything this daemon does
+/// not act on (an unparsable frame, or a lifecycle type it ignores).
+fn parse_notification(data: &str) -> Vec<RecordingCommand> {
     let notification: Notification = match serde_json::from_str(data) {
         Ok(notification) => notification,
         Err(error) => {
             tracing::debug!(%error, "ignoring unparsable recording notification");
-            return None;
+            return Vec::new();
         }
     };
 
     match notification.kind.as_str() {
-        "START" => {
-            let payload: StartPayload = serde_json::from_value(notification.payload).ok()?;
-            Some(RecordingCommand::Open {
-                recording_id: payload.recording_id,
-                robot_id: payload.robot_id,
-                robot_instance: payload.instance,
-                dataset_id: payload.dataset_ids.into_iter().next(),
-                start_timestamp_ns: seconds_to_nanos(payload.start_time),
-            })
-        }
+        "START" => serde_json::from_value::<StartPayload>(notification.payload)
+            .map(|payload| vec![open_command(payload)])
+            .unwrap_or_default(),
+        "INIT" => serde_json::from_value::<Vec<StartPayload>>(notification.payload)
+            .map(|payloads| payloads.into_iter().map(open_command).collect())
+            .unwrap_or_default(),
         "STOP" | "DISCARDED" | "EXPIRED" => {
-            let payload: StopPayload = serde_json::from_value(notification.payload).ok()?;
-            Some(RecordingCommand::Close {
-                recording_id: payload.recording_id,
-                observed_at_ns: wall_clock_ns(),
-            })
+            serde_json::from_value::<StopPayload>(notification.payload)
+                .map(|payload| {
+                    vec![RecordingCommand::Close {
+                        recording_id: payload.recording_id,
+                        observed_at_ns: wall_clock_ns(),
+                    }]
+                })
+                .unwrap_or_default()
         }
-        _ => None,
+        _ => Vec::new(),
+    }
+}
+
+fn open_command(payload: StartPayload) -> RecordingCommand {
+    RecordingCommand::Open {
+        recording_id: payload.recording_id,
+        robot_id: payload.robot_id,
+        robot_instance: payload.instance,
+        dataset_id: payload.dataset_ids.into_iter().next(),
+        start_timestamp_ns: seconds_to_nanos(payload.start_time),
     }
 }
 
@@ -358,43 +367,77 @@ mod tests {
 
     #[test]
     fn start_becomes_an_open_naming_its_recording() {
-        let command = parse_notification(
+        let commands = parse_notification(
             r#"{"type":"START","payload":{"recording_id":"rec-1","robot_id":"robot-1",
                "instance":2,"created_by":"someone","dataset_ids":["ds-1"],
                "start_time":1.5}}"#,
-        )
-        .expect("a start command");
+        );
         assert_eq!(
-            command,
-            RecordingCommand::Open {
+            commands,
+            vec![RecordingCommand::Open {
                 recording_id: "rec-1".into(),
                 robot_id: "robot-1".into(),
                 robot_instance: 2,
                 dataset_id: Some("ds-1".into()),
                 start_timestamp_ns: 1_500_000_000,
-            }
+            }]
         );
+    }
+
+    #[test]
+    fn init_opens_every_recording_already_running() {
+        let commands = parse_notification(
+            r#"{"type":"INIT","payload":[
+               {"recording_id":"rec-1","robot_id":"robot-1","instance":0,
+                "created_by":"someone","dataset_ids":["ds-1"],"start_time":1.5},
+               {"recording_id":"rec-2","robot_id":"robot-2","instance":1,
+                "created_by":"someone","dataset_ids":[],"start_time":2.0}]}"#,
+        );
+        assert_eq!(
+            commands,
+            vec![
+                RecordingCommand::Open {
+                    recording_id: "rec-1".into(),
+                    robot_id: "robot-1".into(),
+                    robot_instance: 0,
+                    dataset_id: Some("ds-1".into()),
+                    start_timestamp_ns: 1_500_000_000,
+                },
+                RecordingCommand::Open {
+                    recording_id: "rec-2".into(),
+                    robot_id: "robot-2".into(),
+                    robot_instance: 1,
+                    dataset_id: None,
+                    start_timestamp_ns: 2_000_000_000,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_init_opens_nothing() {
+        assert!(parse_notification(r#"{"type":"INIT","payload":[]}"#).is_empty());
     }
 
     #[test]
     fn every_terminal_type_becomes_a_close() {
         for kind in ["STOP", "DISCARDED", "EXPIRED"] {
-            let command = parse_notification(&format!(
+            let commands = parse_notification(&format!(
                 r#"{{"type":"{kind}","payload":{{"recording_id":"rec-1",
                    "robot_id":"robot-1","instance":0}}}}"#
-            ))
-            .expect("a close command");
-            match command {
-                RecordingCommand::Close { recording_id, .. } => assert_eq!(recording_id, "rec-1"),
+            ));
+            match commands.as_slice() {
+                [RecordingCommand::Close { recording_id, .. }] => {
+                    assert_eq!(recording_id, "rec-1")
+                }
                 other => panic!("{kind} produced {other:?}"),
             }
         }
     }
 
     #[test]
-    fn ignores_init_and_unparsable_frames() {
-        assert!(parse_notification(r#"{"type":"INIT","payload":[]}"#).is_none());
-        assert!(parse_notification("not json").is_none());
-        assert!(parse_notification(r#"{"type":"SAVED","payload":{}}"#).is_none());
+    fn ignores_unparsable_and_unhandled_frames() {
+        assert!(parse_notification("not json").is_empty());
+        assert!(parse_notification(r#"{"type":"SAVED","payload":{}}"#).is_empty());
     }
 }
