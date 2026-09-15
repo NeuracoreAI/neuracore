@@ -146,6 +146,8 @@ def reset_neuracore():
     original_active_robot = global_state._active_robot
     original_active_dataset_id = global_state._active_dataset_id
     original_has_validated_version = global_state._has_validated_version
+    original_robots = dict(nc.core.robot._robots)
+    original_robot_name_id_mapping = dict(nc.core.robot._robot_name_id_mapping)
 
     nc.api._active_robot = None
     nc.api._active_dataset_id = None
@@ -153,6 +155,8 @@ def reset_neuracore():
     global_state._active_robot = None
     global_state._active_dataset_id = None
     global_state._has_validated_version = False
+    nc.core.robot._robots.clear()
+    nc.core.robot._robot_name_id_mapping.clear()
 
     nc.core.auth._auth = nc.core.auth.Auth()
 
@@ -162,6 +166,10 @@ def reset_neuracore():
     global_state._active_robot = original_active_robot
     global_state._active_dataset_id = original_active_dataset_id
     global_state._has_validated_version = original_has_validated_version
+    nc.core.robot._robots.clear()
+    nc.core.robot._robots.update(original_robots)
+    nc.core.robot._robot_name_id_mapping.clear()
+    nc.core.robot._robot_name_id_mapping.update(original_robot_name_id_mapping)
 
 
 @pytest.fixture
