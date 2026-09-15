@@ -58,6 +58,24 @@ class ControlBracket:
     settled_at: float
 
 
+def remote_control_post(path: str, payload: dict) -> dict:
+    """POST to this org's API, as an authenticated web client would.
+
+    Deliberately without the transient-status retry the SDK uses for reads:
+    every accepted ``/recording/start`` mints a *fresh* recording, so a retry
+    after the write committed would leave two windows behind.
+    """
+    session = thread_local_session()
+    response = session.post(
+        f"{API_URL}/org/{get_current_org()}{path}",
+        json=payload,
+        headers=get_auth().get_headers(),
+        timeout=REMOTE_CONTROL_REQUEST_TIMEOUT_S,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
 def await_gate(
     robot: object,
     *,
@@ -187,25 +205,7 @@ class RemoteRecordingController(RecordingController):
     def __init__(self, spec: ContextSpec, robot: object) -> None:
         super().__init__(spec, robot)
         self._dataset_id = nc.get_dataset(spec.dataset_name).id
-        self._org_id = get_current_org()
         self._cloud_recording_id: str | None = None
-
-    def _post(self, path: str, payload: dict) -> dict:
-        """POST to this org's API, as an authenticated web client would.
-
-        Deliberately without the transient-status retry the SDK uses for reads:
-        every accepted ``/recording/start`` mints a *fresh* recording, so a
-        retry after the write committed would leave two windows behind.
-        """
-        session = thread_local_session()
-        response = session.post(
-            f"{API_URL}/org/{self._org_id}{path}",
-            json=payload,
-            headers=get_auth().get_headers(),
-            timeout=REMOTE_CONTROL_REQUEST_TIMEOUT_S,
-        )
-        response.raise_for_status()
-        return response.json()
 
     def open(self, capture_start_s: float) -> ControlBracket:
         """Ask the backend to start a recording, then wait to be told it did."""
@@ -216,7 +216,7 @@ class RemoteRecordingController(RecordingController):
             always_log=True,
             assert_deadline=self.spec.assert_deadline,
         ):
-            pending = self._post(
+            pending = remote_control_post(
                 "/recording/start",
                 {
                     "robot_id": str(self.robot.id),
@@ -261,7 +261,7 @@ class RemoteRecordingController(RecordingController):
             always_log=True,
             assert_deadline=self.spec.assert_deadline,
         ):
-            self._post(
+            remote_control_post(
                 "/recording/stop",
                 {
                     "recording_id": self._cloud_recording_id,
@@ -283,7 +283,7 @@ class RemoteRecordingController(RecordingController):
         return ControlBracket(called_at=called_at, settled_at=settled_at)
 
 
-_PEER_AWAIT_OPEN = "await-open"
+PEER_AWAIT_OPEN = "await-open"
 _PEER_STOP = "stop"
 _PEER_CANCEL = "cancel"
 
@@ -300,7 +300,7 @@ class ControlProcessSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class _OpenAck:
+class OpenAck:
     """When the peer learned a window it did not open had opened."""
 
     gate_opened_at: float
@@ -322,7 +322,7 @@ class _CancelAck:
     returned_at: float
 
 
-def _peer_control_process(
+def peer_control_process(
     spec: ControlProcessSpec,
     ready_event: Any,
     commands: Any,
@@ -347,7 +347,7 @@ def _peer_control_process(
             if command is None:
                 break
             order, timestamp = command
-            if order == _PEER_AWAIT_OPEN:
+            if order == PEER_AWAIT_OPEN:
                 acks.put(_await_peer_open(spec, robot, announced_start_s=timestamp))
             elif order == _PEER_CANCEL:
                 acks.put(_cancel_from_peer(spec, robot, capture_stop_s=timestamp))
@@ -370,7 +370,7 @@ def _peer_control_process(
 
 def _await_peer_open(
     spec: ControlProcessSpec, robot: object, *, announced_start_s: float
-) -> _OpenAck:
+) -> OpenAck:
     """Wait until the announcement of a window opened elsewhere lands here.
 
     ``nc.stop_recording`` refuses — silently — in a process whose gate never
@@ -378,7 +378,7 @@ def _await_peer_open(
     brings the peer's daemon channel up, the notification handler publishing
     the start.
     """
-    return _OpenAck(
+    return OpenAck(
         gate_opened_at=await_gate(
             robot,
             open_gate=True,
@@ -454,7 +454,7 @@ class SplitProcessRecordingController(RecordingController):
         self._peer_retired = False
         self._window_start_s = 0.0
         self._peer.start(
-            _peer_control_process,
+            peer_control_process,
             (
                 ControlProcessSpec(
                     robot_name=spec.robot_name,
@@ -492,7 +492,7 @@ class SplitProcessRecordingController(RecordingController):
                 robot_name=self.spec.robot_name, timestamp=capture_start_s
             )
         self._window_start_s = capture_start_s
-        self._commands.put((_PEER_AWAIT_OPEN, capture_start_s))
+        self._commands.put((PEER_AWAIT_OPEN, capture_start_s))
         return ControlBracket(called_at=called_at, settled_at=time.time())
 
     def close(self, capture_stop_s: float) -> ControlBracket:
@@ -566,9 +566,9 @@ class SplitProcessRecordingController(RecordingController):
         Nothing the peer can do names a recording until this lands, so both
         ways of ending one wait on it, and both assert the same SLA.
         """
-        opened: _OpenAck = self._await_ack(
-            _PEER_AWAIT_OPEN,
-            _OpenAck,
+        opened: OpenAck = self._await_ack(
+            PEER_AWAIT_OPEN,
+            OpenAck,
             deadline=time.time() + REMOTE_CONTROL_REQUEST_TIMEOUT_S,
         )
         peer_start_lag_s = opened.gate_opened_at - self._window_start_s
