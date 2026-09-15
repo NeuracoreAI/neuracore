@@ -6,7 +6,6 @@ live data streaming. It maintains global state for active robots and
 recording sessions.
 """
 
-import logging
 import time
 from warnings import warn
 
@@ -19,6 +18,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils import backend_utils
+from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
 from ..core.data.dataset import Dataset
@@ -27,8 +27,6 @@ from ..core.robot import Robot, get_robot
 from ..core.robot import init as _init_robot
 from ..core.robot import update_robot_name as _update_robot_name
 from .globals import GlobalSingleton
-
-logger = logging.getLogger(__name__)
 
 _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S = 60 * 15
 _RECORDING_UPLOAD_POLL_INTERVAL_S = 0.2
@@ -168,6 +166,10 @@ def connect_robot(
 
     Returns:
         The initialized and connected robot instance.
+
+    Raises:
+        RobotError: If the robot could not be initialized.
+        DaemonLifecycleError: If the data daemon could not be started.
     """
     robot = _init_robot(robot_name, instance, urdf_path, mjcf_path, overwrite, shared)
     GlobalSingleton()._active_robot = robot
@@ -179,6 +181,8 @@ def connect_robot(
     if robot.id is None:
         raise RobotError("Robot not initialized. Call init() first.")
     StreamManagerOrchestrator().get_provider_manager(robot.id, robot.instance)
+    # Only the daemon hears a recording started from the web.
+    ensure_daemon_running()
     return robot
 
 
