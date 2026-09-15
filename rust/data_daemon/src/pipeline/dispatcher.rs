@@ -2987,6 +2987,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn re_announcing_an_open_recording_changes_nothing() {
+        // Every subscribe replays the backend's snapshot of what is open, so a
+        // recording already running here is announced again on each reconnect.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 120, 2), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(2))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1, "the replay opened a second recording");
+        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        assert!(
+            entry.closing.is_empty(),
+            "the replay retired the live window"
+        );
+        assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 100);
+    }
+
+    #[tokio::test]
     async fn a_node_that_has_published_nothing_still_reads_its_recording_as_open() {
         // Started on another machine: this daemon learns the recording from the
         // notification stream alone. A process here must read "recording"
