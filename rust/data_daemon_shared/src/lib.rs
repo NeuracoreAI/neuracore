@@ -404,6 +404,20 @@ pub mod service_name {
     pub const MAX_REQUEST_RESPONSE_SERVERS_PER_SERVICE: usize = 1;
 }
 
+/// Who a message or a recording belongs to: `(robot_id, robot_instance)`.
+///
+/// The one identity the producer and the daemon both speak — every [`Envelope`]
+/// is tagged with it and [`RecordingStateQuery`] carries both halves — so it
+/// belongs here rather than being re-declared privately on each side of the
+/// wire.
+///
+/// An alias rather than a struct because the two sides use it differently: the
+/// daemon keys a map with it, while the bridge passes it as a message and
+/// deliberately nests its maps instead of keying on it (a tuple key cannot be
+/// looked up by borrow, which would put a `String` allocation on the log path).
+/// A struct would inherit that same limitation without paying for itself.
+pub type Source = (String, i64);
+
 /// A single message exchanged between the producer and the daemon.
 ///
 /// Every variant is tagged with its **source** (`robot_id`, `robot_instance`).
