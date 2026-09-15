@@ -58,7 +58,9 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use dashmap::DashMap;
-use data_daemon_shared::{video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording};
+use data_daemon_shared::{
+    video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording, Source,
+};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
@@ -124,9 +126,6 @@ const TRACE_QUEUE_CAPACITY: usize = 256;
 
 /// Bounded listener → dispatcher channel.
 const DISPATCHER_INBOX_CAPACITY: usize = 1024;
-
-/// Source identity: `(robot_id, robot_instance)`.
-type Source = (String, i64);
 
 /// Resolve the configured holdback, honouring the `NCD_HOLDBACK_MS` override.
 fn configured_holdback() -> Duration {
