@@ -45,11 +45,11 @@ def main(args):
             obs = env.reset()
 
             # Start recording if enabled
+            t = time.time()
             if record:
-                nc.start_recording()
+                nc.start_recording(timestamp=t)
 
             # Log initial state
-            t = time.time()
             CUSTOM_DATA = np.array([1, 2, 3, 4, 5])
             CAM_NAME = "angle"
             nc.log_custom_1d("my_custom_data", CUSTOM_DATA, timestamp=t)
@@ -83,7 +83,7 @@ def main(args):
             # Stop recording if enabled
             if record:
                 print("Finishing recording...")
-                nc.stop_recording()
+                nc.stop_recording(timestamp=t)
                 print("Finished recording!")
 
             print(f"Episode {episode_idx} done")

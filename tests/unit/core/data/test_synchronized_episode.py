@@ -166,6 +166,9 @@ class TestSynchronizedRecording:
         assert synced_recording._episode_length == len(synced_data.observations)
         assert synced_recording.start_time == synced_data.start_time
         assert synced_recording.end_time == synced_data.end_time
+        assert synced_recording.start_timestamp == synced_data.start_timestamp
+        assert synced_recording.end_timestamp == synced_data.end_timestamp
+        assert synced_recording.ticks_per_second == synced_data.ticks_per_second
 
     def test_episode_retrieval_makes_three_requests(
         self,

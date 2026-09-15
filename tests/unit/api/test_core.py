@@ -1,5 +1,6 @@
 import json
-from unittest.mock import Mock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import requests
@@ -7,10 +8,13 @@ import requests_mock
 
 import neuracore as nc
 from neuracore.api import core as api_core
+from neuracore.api.globals import GlobalSingleton
 from neuracore.core import robot as core_robot
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.exceptions import AuthenticationError, VersionMismatchError
+from neuracore.core.robot import Robot
+from neuracore.data_daemon import bridge as recording_context
 
 
 def test_login_with_api_key(temp_config_dir, monkeypatch):
@@ -363,7 +367,7 @@ def test_stop_recording_forwards_wait_flag_to_robot(monkeypatch) -> None:
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(self, timestamp: float | None = None) -> None:
+        def stop_recording(self, timestamp: int) -> None:
             nonlocal stops
             stops += 1
 
@@ -401,7 +405,7 @@ def test_stop_recording_wait_times_out_when_upload_never_completes(
         def get_cloud_recording_id(self) -> str:
             return "rec-123"
 
-        def stop_recording(self, timestamp: float | None = None) -> None:
+        def stop_recording(self, timestamp: int) -> None:
             pass
 
     def upload_never_completes(recording_id: str) -> bool:
@@ -459,3 +463,102 @@ def test_version_check_sends_sdk_and_types_versions():
         "neuracore_types_version": [types_version.lower()],
         "neuracore_version": [nc.__version__.lower()],
     }
+
+
+PATCHED_NOW_TICKS = 42_000_000
+
+
+@pytest.fixture
+def recording_robot(monkeypatch):
+    """A recording robot whose daemon bridge echoes the start marker it is given."""
+    robot = Robot("test_robot", instance=0, org_id="org-1")
+    robot.id = "robot-1"
+    native = MagicMock()
+    native.start_recording.side_effect = lambda *args: args[5]
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    monkeypatch.setattr(recording_context, "ensure_daemon_running", lambda: None)
+    monkeypatch.setattr(api_core, "_get_robot", lambda *_args: robot)
+    monkeypatch.setattr(robot, "is_recording", lambda: True)
+    monkeypatch.setattr(GlobalSingleton(), "_active_dataset_id", "dataset-1")
+    monkeypatch.setattr(
+        GlobalSingleton(),
+        "_active_dataset",
+        SimpleNamespace(id="dataset-1", name="dataset", is_shared=False),
+    )
+    monkeypatch.setattr(
+        "neuracore.core.utils.ticks.now_ticks", lambda: PATCHED_NOW_TICKS
+    )
+    yield robot, native
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
+def test_start_recording_forwards_ticks_and_matches_them_as_the_marker(
+    recording_robot,
+) -> None:
+    _, native = recording_robot
+
+    nc.start_recording(timestamp=12.5)
+    nc.get_cloud_recording_id()
+
+    assert native.start_recording.call_args.args[5] == 12_500_000
+    assert native.get_recording_id.call_args.args[2] == 12_500_000
+
+
+@pytest.mark.parametrize("start_timestamp", [12.5, 12_500_000])
+def test_get_cloud_recording_id_matches_the_start_timestamp_given_to_start(
+    recording_robot, start_timestamp
+) -> None:
+    _, native = recording_robot
+    nc.start_recording(timestamp=99.0)
+
+    nc.get_cloud_recording_id(start_timestamp=start_timestamp)
+
+    assert native.get_recording_id.call_args.args[2] == 12_500_000
+
+
+def test_get_cloud_recording_id_refuses_a_bool_start_timestamp(
+    recording_robot,
+) -> None:
+    with pytest.raises(TypeError):
+        nc.get_cloud_recording_id(start_timestamp=True)
+
+
+def test_start_recording_defaults_to_the_monotonic_clock(recording_robot) -> None:
+    _, native = recording_robot
+
+    nc.start_recording()
+
+    assert native.start_recording.call_args.args[5] == PATCHED_NOW_TICKS
+
+
+@pytest.mark.parametrize(
+    "timestamp,expected_ticks",
+    [(None, PATCHED_NOW_TICKS), (12.5, 12_500_000), (12_500_000, 12_500_000)],
+)
+def test_stop_and_cancel_recording_forward_ticks(
+    recording_robot, timestamp, expected_ticks
+) -> None:
+    _, native = recording_robot
+
+    nc.stop_recording(timestamp=timestamp)
+    nc.cancel_recording(timestamp=timestamp)
+
+    assert native.stop_recording.call_args.args[2] == expected_ticks
+    assert native.cancel_recording.call_args.args[2] == expected_ticks
+
+
+@pytest.mark.parametrize(
+    "lifecycle_call", [nc.start_recording, nc.stop_recording, nc.cancel_recording]
+)
+def test_recording_lifecycle_refuses_a_bool_timestamp_before_the_robot_lookup(
+    monkeypatch, lifecycle_call
+) -> None:
+    monkeypatch.setattr(
+        api_core,
+        "_get_robot",
+        Mock(side_effect=AssertionError("the robot must not be looked up")),
+    )
+
+    with pytest.raises(TypeError):
+        lifecycle_call(timestamp=True)
