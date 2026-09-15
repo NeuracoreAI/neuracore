@@ -492,3 +492,83 @@ NETWORK_PERFORMANCE_CASES = (
     *_with_wait_variants(PRE_NETWORK_PERFORMANCE_CASES),
     *NETWORK_ONLY_PERFORMANCE_CASES,
 )
+
+
+# Synchronisation memory sweep.
+#
+# Each group below varies one independent variable and pins every other, so the
+# server-side cost of `SynchronizationManager._synchronize_recording` can be
+# attributed to a single cause. Comparing cases across groups measures nothing.
+#
+# The independent variables, named for what they are in the system:
+#
+#   frames_per_trace      entries in one sensor's trace.json, set by
+#                         joint_fps * duration_sec
+#   joints_per_frame      joints recorded in each entry, i.e. its payload size
+#   traces_per_recording  how many trace.json files a recording has, one per
+#                         sensor stream
+#   recordings_per_dataset  recordings the dataset synchronises, one Cloud Task
+#                         each, so the only group where syncs run concurrently
+#
+# Joints run faster than video in every case here, so the densest-stream branch
+# of `_synchronize_nc_data` always picks a joint trace as the reference
+# timeline. `test_sync_memory` asserts it, because a camera overtaking the
+# joints would change frames_per_trace while we thought we were changing
+# traces_per_recording.
+#
+# `PACING_SATURATE` keeps frame counts off the wall clock: a case worth 160s of
+# frames does not cost 160s to record.
+_SYNC_MEMORY_CONTROL = Synchronous(
+    duration_sec=40,
+    joint_count=7,
+    joint_fps=200,
+    video_count=0,
+    recording_count=1,
+    parallel_contexts=1,
+    context_duration_mode=DURATION_MODE_FIXED,
+    producer_pacing=PACING_SATURATE,
+)
+
+# Independent variable: frames_per_trace, 2_000 to 32_000 entries. Five
+# points so the fit can show curvature rather than just a gradient.
+SYNC_MEMORY_FRAMES_PER_TRACE_CASES = tuple(
+    replace(_SYNC_MEMORY_CONTROL, duration_sec=duration)
+    for duration in (10, 20, 40, 80, 160)
+)
+
+# Independent variable: joints_per_frame. Frame count is pinned, so a rise here
+# is the cost of each entry carrying more joints, not of there being more
+# entries.
+SYNC_MEMORY_JOINTS_PER_FRAME_CASES = tuple(
+    replace(_SYNC_MEMORY_CONTROL, joint_count=joints)
+    for joints in (7, 28, 56, 112, 224)
+)
+
+# Independent variable: traces_per_recording. Each camera adds one trace.json
+# for `batch_get_files` to fetch and one entry in every synchronized
+# observation. The frames themselves go to mp4, not into the trace.
+SYNC_MEMORY_TRACES_PER_RECORDING_CASES = tuple(
+    replace(
+        _SYNC_MEMORY_CONTROL,
+        video_count=videos,
+        video_fps=30,
+        image_width=64,
+        image_height=64,
+        video_detail=DETAIL_FLAT,
+    )
+    for videos in (0, 1, 2, 4)
+)
+
+# Independent variable: recordings_per_dataset. Each recording becomes its own
+# Cloud Task, so this is the only group where syncs share a worker process and
+# `overlapped` samples are the measurement rather than contamination.
+SYNC_MEMORY_RECORDINGS_PER_DATASET_CASES = tuple(
+    replace(_SYNC_MEMORY_CONTROL, recording_count=count) for count in (1, 4, 8, 24)
+)
+
+SYNC_MEMORY_CASES = (
+    *SYNC_MEMORY_FRAMES_PER_TRACE_CASES,
+    *SYNC_MEMORY_JOINTS_PER_FRAME_CASES,
+    *SYNC_MEMORY_TRACES_PER_RECORDING_CASES,
+    *SYNC_MEMORY_RECORDINGS_PER_DATASET_CASES,
+)
