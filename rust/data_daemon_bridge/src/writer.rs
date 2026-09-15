@@ -42,9 +42,10 @@
 //! comes off the logging thread, not the writer: see [`note_video_activity`].
 //!
 //! A process that never brackets a recording of its own — a camera logging
-//! unconditionally while another process owns the window — publishes no marker
-//! until it exits, so the daemon's cap is what retires those windows. Its video
-//! has to reach the daemon on a cadence rather than at a lifecycle event: see
+//! unconditionally while another process owns the window — makes no call to
+//! hang a barrier off, so it reports off the recording state it already
+//! watches: see [`flush_source_detached`]. Its video still has to reach the
+//! daemon on a cadence rather than at a lifecycle event: see
 //! [`CHUNK_MAX_OPEN_NS`].
 //!
 //! ## Fork safety
@@ -58,7 +59,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, Once};
 use std::time::{Duration, Instant};
 
@@ -1529,6 +1530,36 @@ pub(crate) fn note_video_activity(robot_id: &str, robot_instance: i64, publish_n
         publish_timestamp_ns: publish_ns,
         producer_pid: std::process::id(),
     }));
+}
+
+/// Run this process's stop barrier for a source whose recording closed
+/// elsewhere, and do not wait for it.
+///
+/// Only the process that calls `stop_recording` runs a barrier, so a camera
+/// process logging into a window someone else brackets reports nothing and the
+/// daemon holds that window for a marker that is not coming. This is that
+/// process reporting for itself, driven by
+/// [`crate::recording_state_cache`]'s view of the source.
+///
+/// Silent for a process that has claimed no video here: it owes no marker, and
+/// reaching for [`writer_queue`] would spawn it a writer thread it has no use
+/// for. No ack is awaited because the caller is the shared refresh thread — the
+/// barrier publishes its own marker once it drains.
+pub(crate) fn flush_source_detached(robot_id: &str, robot_instance: i64) {
+    let owes_marker = with_video_registry(|registry| {
+        registry
+            .claims
+            .contains_key(&source_prefix(robot_id, robot_instance))
+    });
+    if !owes_marker {
+        return;
+    }
+    let (ack, _) = channel();
+    let _ = writer_queue().push(WriterMsg::FlushSource {
+        robot_id: robot_id.to_string(),
+        robot_instance,
+        ack,
+    });
 }
 
 #[cfg(test)]
