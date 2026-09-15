@@ -1,7 +1,7 @@
 //! Backend recording-stop notifier.
 //!
 //! Subscribes to [`DaemonEvent::RecordingStopped`] and POSTs
-//! `/org/{org}/recording/stop` (JSON body `{recording_id, end_time}`) to the
+//! `/org/{org}/recording/stop` (JSON body `{recording_id, end_time, end_timestamp}`) to the
 //! backend. The Python SDK
 //! used to make this call inline from `nc.stop_recording`, but the staging
 //! POST has a fat upper tail (occasional 1-2 s spikes on otherwise
@@ -88,6 +88,7 @@ pub fn spawn_recording_stop_notifier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LifecycleStamp;
 
     use std::time::Duration;
 
@@ -127,7 +128,7 @@ mod tests {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: LifecycleStamp::observed_at(1_700_000_000_000_000_000),
             })
             .await
             .expect("create recording")
@@ -148,6 +149,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recording_without_a_tick_rate_posts_no_end_timestamp() {
+        // A recording an older daemon created holds float-second traces, so
+        // its stop must not tell the backend an end in ticks.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-legacy-1").await;
+        store
+            .mark_recording_stopped(
+                index,
+                LifecycleStamp::observed_at(1_700_000_005_000_000_000),
+            )
+            .await
+            .expect("mark stopped");
+        sqlx::query("UPDATE recordings SET ticks_per_second = NULL WHERE recording_index = ?1")
+            .bind(index)
+            .execute(store.write_pool())
+            .await
+            .expect("mark legacy");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        let received = timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if !received.is_empty() {
+                    break received;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("sweep must POST within 3s");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "recording_id": "rec-legacy-1",
+                "end_time": 1_700_000_005.0,
+            })
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
     async fn posts_backend_stop_on_recording_stopped_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -161,8 +224,12 @@ mod tests {
 
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-stop-1").await;
+        let stop = LifecycleStamp {
+            publish_timestamp_ns: 1_700_000_005_000_000_000,
+            timestamp: Some(42),
+        };
         store
-            .mark_recording_stopped(index, 1)
+            .mark_recording_stopped(index, stop)
             .await
             .expect("mark stopped");
 
@@ -184,17 +251,27 @@ mod tests {
         });
 
         // Give the notifier task a moment to drain the event and call wiremock.
-        timeout(Duration::from_secs(3), async {
+        let received = timeout(Duration::from_secs(3), async {
             loop {
                 let received = server.received_requests().await.unwrap_or_default();
                 if !received.is_empty() {
-                    break;
+                    break received;
                 }
                 sleep(Duration::from_millis(20)).await;
             }
         })
         .await
         .expect("expected one POST within 3s");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "recording_id": "rec-stop-1",
+                "end_time": 1_700_000_005.0,
+                "end_timestamp": 42,
+            }),
+            "end_time is the stop's publish time and end_timestamp the caller's tick"
+        );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
@@ -219,7 +296,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-offline-1").await;
         store
-            .mark_recording_stopped(index, 1)
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(1))
             .await
             .expect("mark stopped");
 
@@ -316,14 +393,14 @@ mod tests {
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: LifecycleStamp::observed_at(1_700_000_000_000_000_000),
                 ..NewRecording::default()
             })
             .await
             .expect("create recording")
             .recording_index;
         store
-            .mark_recording_stopped(index, 1)
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(1))
             .await
             .expect("mark stopped");
 
@@ -374,7 +451,7 @@ mod tests {
         let (store, _dir) = open_store().await;
         let index = seed_notified_recording(&store, "rec-recovered-1").await;
         store
-            .mark_recording_stopped(index, 1)
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(1))
             .await
             .expect("mark stopped");
 

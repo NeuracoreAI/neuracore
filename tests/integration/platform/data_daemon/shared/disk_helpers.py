@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from neuracore_types.timestamps import TICKS_PER_SECOND, seconds_to_ticks
+
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CONDEMNED_PROVENANCE_MARGIN_S,
@@ -173,10 +175,10 @@ def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]
     ]
 
 
-def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
-    """Return mapping of trace file key (joint/camera name) to timestamps
-    from every trace.json under a recording dir."""
-    trace_timestamps: dict[str, list[float]] = {}
+def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[int]]:
+    """Return mapping of trace file key (joint/camera name) to integer tick
+    timestamps from every trace.json under a recording dir."""
+    trace_timestamps: dict[str, list[int]] = {}
     for trace_json_path in recording_dir.rglob(TRACE_JSON_NAME):
         # Key is the parent directory name (joint or camera name)
         key = trace_json_path.parent.name
@@ -190,8 +192,8 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[flo
         for frame in frames:
             if isinstance(frame, dict):
                 ts = frame.get("timestamp")
-                if isinstance(ts, (int, float)):
-                    ts_list.append(float(ts))
+                if isinstance(ts, int):
+                    ts_list.append(ts)
         trace_timestamps[key] = ts_list
     return trace_timestamps
 
@@ -200,14 +202,14 @@ def _assert_timestamps_match(
     *,
     recording_id: str,
     trace_key: str,
-    timestamps: list[float],
-    expected_timestamps: list[float],
+    timestamps: list[int],
+    expected_timestamps: list[int],
     failures: list[TraceFailure],
     durations: dict[str, float],
-    unknowable_timestamps: frozenset[float] = frozenset(),
-    condemned_timestamps: dict[float, str] | None = None,
+    unknowable_timestamps: frozenset[int] = frozenset(),
+    condemned_timestamps: dict[int, str] | None = None,
 ) -> None:
-    """Assert all timestamps exactly match the expected list (no tolerance).
+    """Assert all tick timestamps exactly match the expected list (no tolerance).
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
@@ -251,7 +253,7 @@ def _assert_timestamps_match(
     ]
     if mismatches:
         examples = "; ".join(
-            f"[{i}] actual={actual:.6f} expected={expected:.6f}"
+            f"[{i}] actual={actual} expected={expected}"
             for i, actual, expected in mismatches[:3]
         )
         body = (
@@ -262,17 +264,19 @@ def _assert_timestamps_match(
         return
 
     if timestamps:
-        durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
+        durations[f"{recording_id}:{trace_key}"] = (
+            timestamps[-1] - timestamps[0]
+        ) / TICKS_PER_SECOND
 
 
-def _render_timestamps(values: list[float], limit: int = 3) -> str:
+def _render_timestamps(values: list[int], limit: int = 3) -> str:
     """Render the first *limit* timestamps, noting how many were withheld."""
-    shown = ", ".join(f"{value:.6f}" for value in values[:limit])
+    shown = ", ".join(str(value) for value in values[:limit])
     remainder = len(values) - limit
     return shown + (f" (+{remainder} more)" if remainder > 0 else "")
 
 
-def _explain_surplus(values: list[float], condemned: dict[float, str]) -> str:
+def _explain_surplus(values: list[int], condemned: dict[int, str]) -> str:
     """Render *values* with the distinct reasons they were ruled out."""
     rendered = _render_timestamps(values)
     reasons = sorted({condemned[ts] for ts in values if ts in condemned})
@@ -287,9 +291,9 @@ def _explain_surplus(values: list[float], condemned: dict[float, str]) -> str:
 
 
 def _locate_count_mismatch(
-    timestamps: list[float],
-    expected_timestamps: list[float],
-    condemned: dict[float, str],
+    timestamps: list[int],
+    expected_timestamps: list[int],
+    condemned: dict[int, str],
 ) -> str:
     """Say where a count mismatch's surplus and shortfall sit, and why."""
     surplus = sorted((Counter(timestamps) - Counter(expected_timestamps)).elements())
@@ -314,7 +318,7 @@ def _locate_count_mismatch(
         ("past the last expected", [ts for ts in surplus if ts > last], last),
     ):
         if values:
-            distances = [abs(edge - ts) for ts in values]
+            distances = [abs(edge - ts) / TICKS_PER_SECOND for ts in values]
             parts.append(
                 f"{len(values)} surplus {min(distances):.3f}s-{max(distances):.3f}s"
                 f" {label}: {_explain_surplus(values, condemned)}"
@@ -333,7 +337,7 @@ def _locate_count_mismatch(
 def _assert_no_trailing_rgb_gap(
     *,
     trace_key: str,
-    timestamps: list[float],
+    timestamps: list[int],
     expected_stop_timestamp: float | None,
     video_fps: int,
     failures: list[TraceFailure],
@@ -343,7 +347,9 @@ def _assert_no_trailing_rgb_gap(
         return
     if not trace_key.startswith("RGB_IMAGES/"):
         return
-    gap_s = expected_stop_timestamp - max(timestamps)
+    gap_s = (
+        seconds_to_ticks(expected_stop_timestamp) - max(timestamps)
+    ) / TICKS_PER_SECOND
     tolerance_s = TRAILING_RGB_GAP_FRAME_TOLERANCE / video_fps
     if gap_s > tolerance_s:
         failures.append(
@@ -469,7 +475,7 @@ def assert_disk_recording_properties(
                 uuid_to_semantic[uuid] = key
 
             # Map trace_timestamps keys (UUIDs) to semantic keys for assertion
-            mapped_trace_timestamps: dict[str, list[float]] = {}
+            mapped_trace_timestamps: dict[str, list[int]] = {}
             for uuid, timestamps in trace_timestamps.items():
                 semantic = uuid_to_semantic.get(uuid, uuid)
                 mapped_trace_timestamps[semantic] = timestamps
@@ -509,13 +515,19 @@ def assert_disk_recording_properties(
                     recording_id=recording_key,
                     trace_key=trace_key,
                     timestamps=timestamps,
-                    expected_timestamps=classification.owed_timestamps,
+                    expected_timestamps=[
+                        seconds_to_ticks(ts) for ts in classification.owed_timestamps
+                    ],
                     failures=trace_failures,
                     durations=durations,
                     unknowable_timestamps=frozenset(
-                        classification.unknowable_timestamps
+                        seconds_to_ticks(ts)
+                        for ts in classification.unknowable_timestamps
                     ),
-                    condemned_timestamps=classification.condemned_reasons,
+                    condemned_timestamps={
+                        seconds_to_ticks(ts): reason
+                        for ts, reason in classification.condemned_reasons.items()
+                    },
                 )
                 _assert_no_trailing_rgb_gap(
                     trace_key=trace_key,

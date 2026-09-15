@@ -292,10 +292,8 @@ impl TraceActorContext {
 pub enum TraceActorMessage {
     /// One sensor sample routed to this trace after its holdback elapsed.
     Data {
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in ticks.
+        timestamp: i64,
         /// Opaque per-sample bytes.
         payload: Vec<u8>,
     },
@@ -320,8 +318,8 @@ pub enum TraceActorMessage {
         /// Leading frames of the chunk published before this recording's window
         /// opened, discarded by the encode.
         skip_frames: u32,
-        /// Per-frame `timestamp_s` for the metadata sidecar, in capture order.
-        frame_timestamps_s: Vec<f64>,
+        /// Per-frame capture ticks for the metadata sidecar, in capture order.
+        frame_timestamps: Vec<i64>,
         /// Original dtype of every frame in this chunk. The daemon never
         /// decodes pixels — this is threaded straight into the completed
         /// chunk and, for depth, the trace's `trace.json` sidecar.
@@ -394,9 +392,9 @@ struct QueuedChunk {
     /// [`BatchNutInput::skip_frames`]). A chunk with a head cut is never
     /// batched with another (see [`drain_encode_batch`]).
     skip_frames: u32,
-    /// Per-frame `timestamp_s` values in capture order. The first entry also
+    /// Per-frame capture ticks in capture order. The first entry also
     /// anchors the batch's inter-chunk duration spans.
-    frame_timestamps_s: Vec<f64>,
+    frame_timestamps: Vec<i64>,
     /// Original dtype of every frame in this chunk. A batch spans one dtype.
     dtype: FrameDtype,
 }
@@ -410,10 +408,10 @@ struct CompletedChunk {
     lossless_segment: PathBuf,
     /// Sum of both segments' on-disk byte counts.
     bytes: u64,
-    /// Per-frame `timestamp_s` values, the in-order concatenation of the
+    /// Per-frame capture ticks, the in-order concatenation of the
     /// batch's per-chunk vectors, applied to the metadata accumulator at
     /// finalise in chunk-index order.
-    frame_timestamps_s: Vec<f64>,
+    frame_timestamps: Vec<i64>,
     /// Total frames covered by this entry: the sum over the batch's chunks.
     frame_count: u32,
     /// The segment's real mp4 content extent, as the batch concat list
@@ -461,14 +459,8 @@ pub async fn run(
 
     while let Some(message) = inbox.recv().await {
         match message {
-            TraceActorMessage::Data {
-                timestamp_ns,
-                timestamp_s,
-                payload,
-            } => {
-                state
-                    .handle_data(&context, timestamp_ns, timestamp_s, payload)
-                    .await;
+            TraceActorMessage::Data { timestamp, payload } => {
+                state.handle_data(&context, timestamp, payload).await;
             }
             TraceActorMessage::Video {
                 chunk_index,
@@ -478,7 +470,7 @@ pub async fn run(
                 byte_count,
                 frame_count,
                 skip_frames,
-                frame_timestamps_s,
+                frame_timestamps,
                 dtype,
             } => {
                 state
@@ -491,7 +483,7 @@ pub async fn run(
                         byte_count,
                         frame_count,
                         skip_frames,
-                        frame_timestamps_s,
+                        frame_timestamps,
                         dtype,
                     )
                     .await;
@@ -561,8 +553,7 @@ impl ActorState {
     async fn handle_data(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
-        _timestamp_s: Option<f64>,
+        timestamp: i64,
         payload: Vec<u8>,
     ) {
         if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
@@ -575,7 +566,7 @@ impl ActorState {
         // UPDATE for this field; the bytes-written debouncer covers the rest.
         let bumped_status = self.frame_count == 0;
 
-        if let Err(error) = self.append_frame(context, timestamp_ns, payload) {
+        if let Err(error) = self.append_frame(context, timestamp, payload) {
             tracing::warn!(
                 %error,
                 trace_id = self.identity.trace_id,
@@ -660,7 +651,7 @@ impl ActorState {
     fn append_frame(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
+        timestamp: i64,
         payload: Vec<u8>,
     ) -> Result<(), FrameAppendError> {
         match &self.writer {
@@ -676,7 +667,7 @@ impl ActorState {
                 self.bytes_on_disk = self.bytes_on_disk.saturating_add(payload.len() as u64);
                 context
                     .json_writer
-                    .append(&self.identity.trace_id, timestamp_ns, payload);
+                    .append(&self.identity.trace_id, timestamp, payload);
                 Ok(())
             }
             TraceWriterKind::Video { .. } => {
@@ -708,7 +699,7 @@ impl ActorState {
         byte_count: u64,
         frame_count: u32,
         skip_frames: u32,
-        frame_timestamps_s: Vec<f64>,
+        frame_timestamps: Vec<i64>,
         dtype: FrameDtype,
     ) {
         let trace_dir = self.trace_directory(context);
@@ -793,7 +784,7 @@ impl ActorState {
                 byte_count,
                 frame_count,
                 skip_frames,
-                frame_timestamps_s,
+                frame_timestamps,
                 dtype,
             });
         unencoded_chunks.fetch_add(1, Ordering::Relaxed);
@@ -1095,9 +1086,9 @@ impl ActorState {
                 // existing RGB `trace.json` schema byte-for-byte unchanged.
                 let mut metadata = VideoMetadataAccumulator::new();
                 for chunk in completed_chunks.values() {
-                    for timestamp_s in &chunk.frame_timestamps_s {
+                    for timestamp in &chunk.frame_timestamps {
                         let mut entry = serde_json::Map::new();
-                        entry.insert("timestamp".to_string(), Value::from(*timestamp_s));
+                        entry.insert("timestamp".to_string(), Value::from(*timestamp));
                         entry.insert("width".to_string(), Value::from(width as u64));
                         entry.insert("height".to_string(), Value::from(height as u64));
                         if let Some(dtype_label) = chunk.dtype.depth_label() {
@@ -1368,7 +1359,7 @@ impl EncodeWorker {
         let spans_to_next_us: Vec<i64> = batch
             .windows(2)
             .map(|pair| {
-                declared_segment_span_us(&pair[0].frame_timestamps_s, &pair[1].frame_timestamps_s)
+                declared_segment_span_us(&pair[0].frame_timestamps, &pair[1].frame_timestamps)
             })
             .collect();
         // The placement those duration lines dictate is the segment's real
@@ -1378,7 +1369,7 @@ impl EncodeWorker {
             &batch
                 .last()
                 .expect("drained batch is never empty")
-                .frame_timestamps_s,
+                .frame_timestamps,
         );
         let inputs: Vec<BatchNutInput> = batch
             .iter()
@@ -1444,9 +1435,9 @@ impl EncodeWorker {
                     lossless_bytes = encode.lossless_bytes,
                     "video chunk batch encoded"
                 );
-                let frame_timestamps_s: Vec<f64> = batch
+                let frame_timestamps: Vec<i64> = batch
                     .into_iter()
-                    .flat_map(|chunk| chunk.frame_timestamps_s)
+                    .flat_map(|chunk| chunk.frame_timestamps)
                     .collect();
                 EncodeWorkerOutcome::Completed {
                     chunk_index: first_index,
@@ -1454,7 +1445,7 @@ impl EncodeWorker {
                         lossy_segment: request.lossy_out,
                         lossless_segment: request.lossless_out,
                         bytes: encode.lossy_bytes.saturating_add(encode.lossless_bytes),
-                        frame_timestamps_s,
+                        frame_timestamps,
                         frame_count,
                         content_extent_us,
                         dtype,
@@ -1473,13 +1464,13 @@ impl EncodeWorker {
 /// used by the batch worker and the drain span cap. A next chunk with no
 /// announced frames borrows this chunk's first stamp, so the span floors to
 /// this chunk's extent plus 1 us instead of indexing an empty vector.
-fn declared_segment_span_us(frame_timestamps_s: &[f64], next_frame_timestamps_s: &[f64]) -> i64 {
-    let next_first_timestamp_s = next_frame_timestamps_s
+fn declared_segment_span_us(frame_timestamps: &[i64], next_frame_timestamps: &[i64]) -> i64 {
+    let next_first_timestamp = next_frame_timestamps
         .first()
-        .or_else(|| frame_timestamps_s.first())
+        .or_else(|| frame_timestamps.first())
         .copied()
-        .unwrap_or(0.0);
-    declared_batch_span_us(frame_timestamps_s, next_first_timestamp_s)
+        .unwrap_or(0);
+    declared_batch_span_us(frame_timestamps, next_first_timestamp)
 }
 
 /// The declared finalise span from one encoded segment to the next. Flooring
@@ -1487,15 +1478,15 @@ fn declared_segment_span_us(frame_timestamps_s: &[f64], next_frame_timestamps_s:
 /// stamps, is what guarantees the next segment never starts inside this
 /// segment's real mp4 content.
 fn declared_finalise_span_us(segment: &CompletedChunk, next: &CompletedChunk) -> i64 {
-    let next_first_timestamp_s = next
-        .frame_timestamps_s
+    let next_first_timestamp = next
+        .frame_timestamps
         .first()
-        .or_else(|| segment.frame_timestamps_s.first())
+        .or_else(|| segment.frame_timestamps.first())
         .copied()
-        .unwrap_or(0.0);
+        .unwrap_or(0);
     declared_span_with_extent_us(
-        &segment.frame_timestamps_s,
-        next_first_timestamp_s,
+        &segment.frame_timestamps,
+        next_first_timestamp,
         segment.content_extent_us,
     )
 }
@@ -1515,7 +1506,7 @@ fn drain_encode_batch(queue: &mut VecDeque<QueuedChunk>) -> Vec<QueuedChunk> {
             break;
         }
         if batch.last().is_some_and(|last| {
-            declared_segment_span_us(&last.frame_timestamps_s, &front.frame_timestamps_s)
+            declared_segment_span_us(&last.frame_timestamps, &front.frame_timestamps)
                 > ENCODE_BATCH_MAX_SPAN_US
         }) {
             break;
@@ -1710,7 +1701,7 @@ mod tests {
     #[test]
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = crate::pipeline::json_writer::scalar_fallback_entry(123, &[0xFF, 0xFE]);
-        assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
+        assert_eq!(entry, json!({"timestamp": 123, "payload_len": 2}));
     }
 
     #[test]
@@ -1757,7 +1748,7 @@ mod tests {
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             state
-                .handle_data(&context, index * 1_000_000, None, payload)
+                .handle_data(&context, index * 1_000_000, payload)
                 .await;
         }
         state.finalise_trace(&context).await;
@@ -1852,8 +1843,9 @@ mod tests {
             assert!(status.success(), "synth NUT failed");
 
             let byte_count = spool_nut.metadata().unwrap().len();
-            let frame_timestamps_s: Vec<f64> =
-                (0..4u32).map(|i| (chunk_index * 4 + i) as f64).collect();
+            let frame_timestamps: Vec<i64> = (0..4u32)
+                .map(|i| i64::from(chunk_index * 4 + i) * 1_000_000)
+                .collect();
             state
                 .handle_video(
                     &context,
@@ -1864,7 +1856,7 @@ mod tests {
                     byte_count,
                     4,
                     0,
-                    frame_timestamps_s,
+                    frame_timestamps,
                     FrameDtype::Rgb8,
                 )
                 .await;
@@ -1953,8 +1945,9 @@ mod tests {
             assert!(status.success(), "synth NUT failed");
 
             let byte_count = spool_nut.metadata().unwrap().len();
-            let frame_timestamps_s: Vec<f64> =
-                (0..2u32).map(|i| (chunk_index * 2 + i) as f64).collect();
+            let frame_timestamps: Vec<i64> = (0..2u32)
+                .map(|i| i64::from(chunk_index * 2 + i) * 1_000_000)
+                .collect();
             state
                 .handle_video(
                     &context,
@@ -1965,7 +1958,7 @@ mod tests {
                     byte_count,
                     2,
                     0,
-                    frame_timestamps_s,
+                    frame_timestamps,
                     dtype,
                 )
                 .await;
@@ -2023,7 +2016,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         for _ in 0..3 {
-            state.handle_data(&context, 0, None, vec![0u8; 20]).await;
+            state.handle_data(&context, 0, vec![0u8; 20]).await;
         }
         state.finalise_trace(&context).await;
         context.trace_writer.flush().await;
@@ -2060,12 +2053,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         state
-            .handle_data(
-                &context,
-                0,
-                None,
-                serde_json::to_vec(&json!({"i": 0})).unwrap(),
-            )
+            .handle_data(&context, 0, serde_json::to_vec(&json!({"i": 0})).unwrap())
             .await;
         assert!(state.bytes_on_disk > 0, "the frame was accounted on disk");
 
@@ -2150,11 +2138,7 @@ mod tests {
             .iter()
             .map(|us| (us - chunk_origin) as u64)
             .collect();
-        let frame_timestamps_s: Vec<f64> = capture_us
-            .iter()
-            .take(owned_frames as usize)
-            .map(|us| *us as f64 / 1e6)
-            .collect();
+        let frame_timestamps = capture_us[..owned_frames as usize].to_vec();
         send_video_chunk_with_nut_pts(
             state,
             context,
@@ -2162,7 +2146,7 @@ mod tests {
             chunk_index,
             &relative_pts,
             owned_frames,
-            frame_timestamps_s,
+            frame_timestamps,
             dtype,
         )
         .await;
@@ -2180,7 +2164,7 @@ mod tests {
         chunk_index: u32,
         nut_pts_us: &[u64],
         frame_count: u32,
-        frame_timestamps_s: Vec<f64>,
+        frame_timestamps: Vec<i64>,
         dtype: FrameDtype,
     ) {
         let spool_nut = spool_dir.join(format!("spool_chunk_{chunk_index}.nut"));
@@ -2196,7 +2180,7 @@ mod tests {
                 byte_count,
                 frame_count,
                 0,
-                frame_timestamps_s,
+                frame_timestamps,
                 dtype,
             )
             .await;
@@ -2231,7 +2215,7 @@ mod tests {
                 byte_count: 0,
                 frame_count: 1,
                 skip_frames: 0,
-                frame_timestamps_s: vec![0.0],
+                frame_timestamps: vec![0],
                 dtype,
             }
         }
@@ -2275,7 +2259,7 @@ mod tests {
                 byte_count: 0,
                 frame_count: 1,
                 skip_frames,
-                frame_timestamps_s: vec![0.0],
+                frame_timestamps: vec![0],
                 dtype: FrameDtype::Rgb8,
             }
         }
@@ -2312,7 +2296,7 @@ mod tests {
                 byte_count: 0,
                 frame_count: frame_capture_us.len() as u32,
                 skip_frames: 0,
-                frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
+                frame_timestamps: frame_capture_us.to_vec(),
                 dtype: FrameDtype::Rgb8,
             }
         }
@@ -2410,10 +2394,9 @@ mod tests {
             let (first_index, completed) = completed_chunks.iter().next().unwrap();
             assert_eq!(*first_index, 0, "the batch is keyed by its first index");
             assert_eq!(completed.frame_count, 6, "frame_count is the batch sum");
-            let expected_timestamps: Vec<f64> =
-                chunks.iter().flatten().map(|us| *us as f64 / 1e6).collect();
+            let expected_timestamps: Vec<i64> = chunks.iter().flatten().copied().collect();
             assert_eq!(
-                completed.frame_timestamps_s, expected_timestamps,
+                completed.frame_timestamps, expected_timestamps,
                 "timestamps concatenate in chunk order"
             );
             assert_eq!(
@@ -2644,7 +2627,7 @@ mod tests {
                 19,
                 2,
                 0,
-                vec![0.1, 0.116683],
+                vec![100_000, 116_683],
                 FrameDtype::Rgb8,
             )
             .await;
@@ -2719,7 +2702,7 @@ mod tests {
                 assert_eq!(completed_chunks.len(), 1);
                 let completed = &completed_chunks[&0];
                 assert_eq!(completed.frame_count, 2);
-                assert_eq!(completed.frame_timestamps_s, vec![0.0, 0.016683]);
+                assert_eq!(completed.frame_timestamps, vec![0, 16_683]);
                 assert_eq!(
                     completed.content_extent_us, 16_683,
                     "a batch of one carries its chunk's replayed extent"
@@ -2795,7 +2778,7 @@ mod tests {
                 0,
                 &[0, 16_000],
                 2,
-                vec![0.0, 0.016],
+                vec![0, 16_000],
                 FrameDtype::Rgb8,
             )
             .await;
@@ -2806,7 +2789,7 @@ mod tests {
                 1,
                 &[0, 16_000],
                 2,
-                vec![0.017, 0.0165],
+                vec![17_000, 16_500],
                 FrameDtype::Rgb8,
             )
             .await;
@@ -2824,7 +2807,7 @@ mod tests {
                 2,
                 &[0, 16_000, 32_000],
                 3,
-                vec![0.019, 0.035, 0.051],
+                vec![19_000, 35_000, 51_000],
                 FrameDtype::Rgb8,
             )
             .await;

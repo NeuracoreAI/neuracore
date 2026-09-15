@@ -565,7 +565,7 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
         "secondary_gripper",
     )
     assert json.loads(args[4]) == sample.model_dump(mode="json")
-    assert args[5:] == (12_500_000_000, 12.5)
+    assert args[5:] == (12_500_000,)
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None

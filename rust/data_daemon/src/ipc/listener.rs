@@ -279,7 +279,8 @@ async fn serve_recording_id_queries(
             .resolve_recording_id_for_marker(
                 &query.robot_id,
                 query.robot_instance,
-                query.timestamp_ns,
+                query.timestamp,
+                query.start_publish_timestamp_ns,
             )
             .await
         {

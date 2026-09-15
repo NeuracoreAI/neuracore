@@ -177,7 +177,7 @@ async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx) {
 
 /// Which `/recording/*` endpoint a lifecycle notify targets. The stop and
 /// cancel notifiers run the *same* guard chain (row fetch → already-notified
-/// guard → cloud-id guard → org guard → `stop_timestamp_ns` guard → POST →
+/// guard → cloud-id guard → org guard → stop timestamps guard → POST →
 /// 404-as-success → mark-notified); only these per-kind bits differ.
 #[derive(Clone, Copy)]
 pub enum LifecycleKind {
@@ -260,28 +260,32 @@ pub async fn notify_recording_lifecycle(
         );
         return;
     };
-    let Some(stop_timestamp_ns) = row.stop_timestamp_ns else {
+    let (Some(end_timestamp), Some(stop_publish_timestamp_ns)) =
+        (row.stop_timestamp, row.stop_publish_timestamp_ns)
+    else {
         tracing::warn!(
             recording_index,
             recording_id,
-            "recording has no stop_timestamp_ns at {action} time; skipping backend notify"
+            "recording has no stop timestamps at {action} time; skipping backend notify"
         );
         return;
     };
-    // The producer captured this as the recording window's real upper bound;
-    // the backend requires it (seconds) and derives the reported duration from
-    // it, so a late notify still reports correctly.
-    let end_time = stop_timestamp_ns as f64 / 1_000_000_000.0;
+    // Both were captured by the producer at the stop, so a late notify still
+    // reports the recording's real end.
+    let end_time = unix_seconds(stop_publish_timestamp_ns);
+    // A recording without a tick rate has float-second traces; the backend
+    // must not be told its end in ticks.
+    let end_timestamp = row.ticks_per_second.map(|_| end_timestamp);
 
     let post_result = match kind {
         LifecycleKind::Stop => {
             client
-                .recording_stop(&org_id, &recording_id, end_time)
+                .recording_stop(&org_id, &recording_id, end_time, end_timestamp)
                 .await
         }
         LifecycleKind::Cancel => {
             client
-                .recording_cancel(&org_id, &recording_id, end_time)
+                .recording_cancel(&org_id, &recording_id, end_time, end_timestamp)
                 .await
         }
     };
@@ -312,6 +316,13 @@ pub async fn notify_recording_lifecycle(
             "backend notified of recording {action}"
         );
     }
+}
+
+/// A wall-clock publish time in Unix nanoseconds as the float seconds the
+/// backend's `start_time` / `end_time` fields take.
+pub fn unix_seconds(publish_timestamp_ns: i64) -> f64 {
+    const NANOSECONDS_PER_SECOND: f64 = 1_000_000_000.0;
+    publish_timestamp_ns as f64 / NANOSECONDS_PER_SECOND
 }
 
 /// Persist the "notified" timestamp for the given lifecycle kind.

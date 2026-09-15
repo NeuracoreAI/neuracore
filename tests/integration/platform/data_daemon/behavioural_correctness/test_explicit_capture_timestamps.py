@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import pytest
+from neuracore_types.timestamps import seconds_to_ticks
 
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
@@ -16,8 +17,8 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_INDEX,
-    COLUMN_START_TIMESTAMP_NS,
-    COLUMN_STOP_TIMESTAMP_NS,
+    COLUMN_START_TIMESTAMP,
+    COLUMN_STOP_TIMESTAMP,
     TRACE_WRITE_WRITTEN,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
@@ -210,20 +211,23 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
             )
 
             row = _fetch_only_recording(robot)
-            assert row[COLUMN_START_TIMESTAMP_NS] == int(capture_start_s * 1e9), (
+            assert row[COLUMN_START_TIMESTAMP] == seconds_to_ticks(capture_start_s), (
                 "Recording row did not store the capture start time passed to"
                 f" start_recording; row={row}"
             )
-            assert row[COLUMN_STOP_TIMESTAMP_NS] == int(capture_stop_s * 1e9), (
+            assert row[COLUMN_STOP_TIMESTAMP] == seconds_to_ticks(capture_stop_s), (
                 "Recording row did not store the capture stop time passed to"
                 f" stop_recording; row={row}"
             )
 
-            expected_timestamps = precompute_timestamps(
-                spec.timestamp_start_s,
-                spec.expected_joint_frames,
-                spec.case.joint_fps,
-            )
+            expected_timestamps = [
+                seconds_to_ticks(ts)
+                for ts in precompute_timestamps(
+                    spec.timestamp_start_s,
+                    spec.expected_joint_frames,
+                    spec.case.joint_fps,
+                )
+            ]
             recording_dir = get_daemon_recordings_root_path() / str(recording_index)
             on_disk = collect_trace_timestamps_per_file(recording_dir)
             assert on_disk, (
@@ -302,8 +306,8 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 "Both recordings must survive as their own rows; the second is"
                 f" not a continuation of the first. rows={sorted(rows)}"
             )
-            assert rows[earlier_index][COLUMN_START_TIMESTAMP_NS] == int(
-                _EARLIER_CAPTURE_START_S * 1e9
+            assert rows[earlier_index][COLUMN_START_TIMESTAMP] == seconds_to_ticks(
+                _EARLIER_CAPTURE_START_S
             ), (
                 "The later recording did not store its own, earlier capture"
                 f" start; row={rows[earlier_index]}"
@@ -318,11 +322,14 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 (earlier_index, earlier_spec.timestamp_start_s),
             ):
                 _wait_for_written_traces(recording_index)
-                expected_timestamps = precompute_timestamps(
-                    timeline_start_s,
-                    spec.expected_joint_frames,
-                    spec.case.joint_fps,
-                )
+                expected_timestamps = [
+                    seconds_to_ticks(ts)
+                    for ts in precompute_timestamps(
+                        timeline_start_s,
+                        spec.expected_joint_frames,
+                        spec.case.joint_fps,
+                    )
+                ]
                 recording_dir = get_daemon_recordings_root_path() / str(recording_index)
                 on_disk = collect_trace_timestamps_per_file(recording_dir)
                 assert on_disk, (

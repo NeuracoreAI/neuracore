@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
+use data_daemon_shared::NANOSECONDS_PER_TICK;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
 use thiserror::Error;
@@ -59,6 +61,30 @@ pub enum StateStoreError {
     },
 }
 
+/// One recording start, stop or cancel, as the producer published it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LifecycleStamp {
+    /// Producer wall-clock publish time (Unix nanoseconds), posted to the
+    /// backend as `start_time` / `end_time`.
+    pub publish_timestamp_ns: i64,
+    /// Caller's timestamp in ticks, posted to the backend as
+    /// `start_timestamp` / `end_timestamp`. `None` for a boundary the daemon
+    /// observed itself: the store then derives the tick on the recording's own
+    /// clock, a stop as the start tick plus the publish time elapsed since the
+    /// start, and a start as the publish time in ticks.
+    pub timestamp: Option<i64>,
+}
+
+impl LifecycleStamp {
+    /// A stamp for a boundary the daemon observed itself at `publish_timestamp_ns`.
+    pub fn observed_at(publish_timestamp_ns: i64) -> Self {
+        Self {
+            publish_timestamp_ns,
+            timestamp: None,
+        }
+    }
+}
+
 /// Parameters for inserting a new recording row.
 ///
 /// The daemon supplies the source identity and metadata from the
@@ -71,8 +97,8 @@ pub struct NewRecording<'a> {
     pub robot_instance: Option<i64>,
     /// Dataset identifier.
     pub dataset_id: Option<&'a str>,
-    /// Producer capture-clock window lower bound (Unix nanoseconds).
-    pub start_timestamp_ns: i64,
+    /// The recording's start.
+    pub start: LifecycleStamp,
 }
 
 /// Persistence interface for daemon state.
@@ -176,8 +202,8 @@ pub trait StateStore: Send + Sync {
         max_wait_secs: f64,
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
-    /// Mark a recording as stopped, setting `stopped_at` (wall clock) and
-    /// `stop_timestamp_ns` (producer capture clock).
+    /// Mark a recording as stopped, setting `stopped_at` (daemon wall clock)
+    /// and the `stop` stamp.
     ///
     /// Idempotent: re-stopping a recording that already has a `stopped_at`
     /// leaves the existing timestamps untouched so a duplicate `StopRecording`
@@ -185,19 +211,19 @@ pub trait StateStore: Send + Sync {
     async fn mark_recording_stopped(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<RecordingRow, StateStoreError>;
 
-    /// Refine a retired recording's `stop_timestamp_ns` to the true stop that
-    /// arrived after a later recording had already started (an inverted
-    /// start/stop pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
-    /// this overwrites `stop_timestamp_ns` even when already set, because the
-    /// stop that superseded it was the *earlier*, accurate one; `stopped_at`
-    /// (wall clock, already set when the recording was retired) is preserved.
+    /// Refine a retired recording's stop stamp to the true stop that arrived
+    /// after a later recording had already started (an inverted start/stop
+    /// pair). Unlike [`mark_recording_stopped`](Self::mark_recording_stopped)
+    /// this overwrites the stop stamp even when already set, because the stop
+    /// that superseded it was the *earlier*, accurate one; `stopped_at` (wall
+    /// clock, already set when the recording was retired) is preserved.
     async fn refine_recording_stop(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<RecordingRow, StateStoreError>;
 
     /// Stamp `backend_stop_notified_at = now` after the recording-stop
@@ -295,11 +321,12 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Vec<TraceRecord>, StateStoreError>;
 
     /// Resolve the cloud `recording_id` for the recording identified by
-    /// `(robot_id, robot_instance, start_timestamp_ns)`.
+    /// `(robot_id, robot_instance, start_timestamp)`.
     ///
     /// Backs the `queries` IPC service: the SDK asks the daemon for the id
-    /// instead of reading this DB directly. Matches `start_timestamp_ns`
-    /// exactly (the producer's capture marker, stored verbatim) and excludes
+    /// instead of reading this DB directly. Matches `start_timestamp`
+    /// exactly (the caller's start tick, stored verbatim), and also
+    /// `start_publish_timestamp_ns` when given, and excludes
     /// cancelled recordings, mirroring the previous client-side query. Returns
     /// `None` when no such recording exists or its cloud id has not been minted
     /// yet.
@@ -307,7 +334,8 @@ pub trait StateStore: Send + Sync {
         &self,
         robot_id: &str,
         robot_instance: i64,
-        start_timestamp_ns: i64,
+        start_timestamp: i64,
+        start_publish_timestamp_ns: Option<i64>,
     ) -> Result<Option<String>, StateStoreError>;
 
     /// Atomically transition `progress_reported` for `recording_id`.
@@ -376,9 +404,9 @@ pub trait StateStore: Send + Sync {
     /// (`write_status = failed`, `upload_status = failed`,
     /// `registration_status = failed` if not already `registered`).
     ///
-    /// A cancel is a recording stop that discards data, so it also stamps
-    /// `stop_timestamp_ns` (the cancel's capture time, → backend `end_time`)
-    /// just like [`mark_recording_stopped`](Self::mark_recording_stopped).
+    /// A cancel is a recording stop that discards data, so it also sets the
+    /// stop stamp just like
+    /// [`mark_recording_stopped`](Self::mark_recording_stopped).
     ///
     /// Idempotent: re-cancelling a recording that already has a `cancelled_at`
     /// leaves both timestamps untouched. Returns the recording row after the
@@ -388,7 +416,7 @@ pub trait StateStore: Send + Sync {
     async fn cancel_recording(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
 
     /// Delete a recording and all of its trace rows in a single transaction.
@@ -566,15 +594,17 @@ impl SqliteStateStore {
             .max_connections(1)
             .connect_with(options.clone())
             .await?;
+        // Migrations are writes, so they run on the write connection.
+        MIGRATOR.run(&write_pool).await?;
+
         // Reads run concurrently on their own pool so they never wait behind the
-        // writer.
+        // writer. Opened after the migrations: a connection that loaded the
+        // schema before them decodes `SELECT *` rows with the old column list
+        // (see `upgrade_splits_nanosecond_rows_into_ticks_and_publish_times`).
         let read_pool = SqlitePoolOptions::new()
             .max_connections(READ_POOL_CONNECTIONS)
             .connect_with(options)
             .await?;
-
-        // Migrations are writes — run them on the write connection.
-        MIGRATOR.run(&write_pool).await?;
 
         Ok(SqliteStateStore {
             read_pool,
@@ -754,14 +784,18 @@ impl StateStore for SqliteStateStore {
         let result = sqlx::query(
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
-                 start_timestamp_ns, created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                 start_timestamp, start_publish_timestamp_ns, ticks_per_second, \
+                 created_at, last_updated \
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?8, ?6, ?6)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
         .bind(new.dataset_id)
-        .bind(new.start_timestamp_ns)
+        .bind(new.start.timestamp)
+        .bind(new.start.publish_timestamp_ns)
         .bind(now)
+        .bind(NANOSECONDS_PER_TICK)
+        .bind(VIDEO_SPOOL_TICKS_PER_SECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -1101,7 +1135,7 @@ impl StateStore for SqliteStateStore {
     async fn mark_recording_stopped(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<RecordingRow, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
@@ -1109,13 +1143,16 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET stopped_at = COALESCE(stopped_at, ?2), \
-                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?3), \
+                    stop_timestamp = COALESCE(stop_timestamp, ?3, start_timestamp + (?4 - start_publish_timestamp_ns) / ?5), \
+                    stop_publish_timestamp_ns = COALESCE(stop_publish_timestamp_ns, ?4), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
         .bind(recording_index)
         .bind(now)
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_TICK)
         .execute(&mut *tx)
         .await?;
 
@@ -1130,21 +1167,24 @@ impl StateStore for SqliteStateStore {
     async fn refine_recording_stop(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<RecordingRow, StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
         let now = Utc::now().naive_utc();
         sqlx::query(
             "UPDATE recordings \
-                SET stop_timestamp_ns = ?3, \
+                SET stop_timestamp = COALESCE(?3, start_timestamp + (?4 - start_publish_timestamp_ns) / ?5), \
+                    stop_publish_timestamp_ns = ?4, \
                     stopped_at = COALESCE(stopped_at, ?2), \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
         )
         .bind(recording_index)
         .bind(now)
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_TICK)
         .execute(&mut *tx)
         .await?;
 
@@ -1322,17 +1362,20 @@ impl StateStore for SqliteStateStore {
         &self,
         robot_id: &str,
         robot_instance: i64,
-        start_timestamp_ns: i64,
+        start_timestamp: i64,
+        start_publish_timestamp_ns: Option<i64>,
     ) -> Result<Option<String>, StateStoreError> {
         let recording_id = sqlx::query_scalar::<_, Option<String>>(
             "SELECT recording_id FROM recordings \
-              WHERE robot_id = ?1 AND robot_instance = ?2 AND start_timestamp_ns = ?3 \
+              WHERE robot_id = ?1 AND robot_instance = ?2 AND start_timestamp = ?3 \
+                AND (?4 IS NULL OR start_publish_timestamp_ns = ?4) \
                 AND cancelled_at IS NULL \
            ORDER BY recording_index DESC LIMIT 1",
         )
         .bind(robot_id)
         .bind(robot_instance)
-        .bind(start_timestamp_ns)
+        .bind(start_timestamp)
+        .bind(start_publish_timestamp_ns)
         .fetch_optional(&self.read_pool)
         .await?;
         // Outer `Option` = row present; inner = the nullable column. A matching
@@ -1553,7 +1596,7 @@ impl StateStore for SqliteStateStore {
     async fn cancel_recording(
         &self,
         recording_index: i64,
-        stop_timestamp_ns: i64,
+        stop: LifecycleStamp,
     ) -> Result<(RecordingRow, u64), StateStoreError> {
         let mut tx = self.write_pool.begin().await?;
 
@@ -1561,7 +1604,8 @@ impl StateStore for SqliteStateStore {
         sqlx::query(
             "UPDATE recordings \
                 SET cancelled_at = COALESCE(cancelled_at, ?2), \
-                    stop_timestamp_ns = COALESCE(stop_timestamp_ns, ?4), \
+                    stop_timestamp = COALESCE(stop_timestamp, ?4, start_timestamp + (?5 - start_publish_timestamp_ns) / ?6), \
+                    stop_publish_timestamp_ns = COALESCE(stop_publish_timestamp_ns, ?5), \
                     progress_reported = ?3, \
                     last_updated = ?2 \
               WHERE recording_index = ?1",
@@ -1569,7 +1613,9 @@ impl StateStore for SqliteStateStore {
         .bind(recording_index)
         .bind(now)
         .bind(ProgressReportStatus::Reported.as_str())
-        .bind(stop_timestamp_ns)
+        .bind(stop.timestamp)
+        .bind(stop.publish_timestamp_ns)
+        .bind(NANOSECONDS_PER_TICK)
         .execute(&mut *tx)
         .await?;
 
@@ -1656,6 +1702,144 @@ mod tests {
         (store, tempdir)
     }
 
+    #[tokio::test]
+    async fn upgrade_splits_nanosecond_rows_into_ticks_and_publish_times() {
+        // A recording still pending a backend notify survives a daemon
+        // upgrade: its nanosecond start and stop become the publish times, and
+        // the caller's value becomes ticks.
+        let tempdir = TempDir::new().expect("tempdir");
+        let path = tempdir.path().join("state.db");
+        let earlier_migrations = tempdir.path().join("migrations");
+        std::fs::create_dir(&earlier_migrations).unwrap();
+        for name in ["0001_initial.sql", "0002_trace_completion_reported.sql"] {
+            let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("migrations")
+                .join(name);
+            std::fs::copy(source, earlier_migrations.join(name)).unwrap();
+        }
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::migrate::Migrator::new(earlier_migrations.as_path())
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "INSERT INTO recordings (start_timestamp_ns, stop_timestamp_ns, created_at, last_updated) \
+             VALUES (1700000000123456789, 1700000005123456789, ?1, ?1)",
+        )
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let store = SqliteStateStore::open(&path).await.expect("open store");
+        let row = store.list_recordings().await.unwrap().remove(0);
+        assert_eq!(
+            (row.start_timestamp, row.start_publish_timestamp_ns),
+            (Some(1_700_000_000_123_456), Some(1_700_000_000_123_456_789))
+        );
+        assert_eq!(
+            (row.stop_timestamp, row.stop_publish_timestamp_ns),
+            (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
+        );
+        assert_eq!(row.ticks_per_second, None, "its traces hold float seconds");
+
+        let new_index = seed_recording(&store, 0).await;
+        let new_row = store.get_recording(new_index).await.unwrap().unwrap();
+        assert_eq!(new_row.ticks_per_second, Some(1_000_000));
+    }
+
+    #[tokio::test]
+    async fn the_start_publish_time_tells_recordings_with_one_marker_apart() {
+        // An importer starts every episode at tick 0. The previous episode's
+        // row must not answer for the next one before its row exists.
+        let (store, _tempdir) = open_store().await;
+        let start = |publish_timestamp_ns| NewRecording {
+            robot_id: Some("robot-1"),
+            robot_instance: Some(0),
+            start: LifecycleStamp {
+                publish_timestamp_ns,
+                timestamp: Some(0),
+            },
+            ..NewRecording::default()
+        };
+        let first = store.create_recording(start(100)).await.unwrap();
+        store
+            .mark_recording_start_notified(first.recording_index, "cloud-first")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store
+                .resolve_recording_id_for_marker("robot-1", 0, 0, Some(200))
+                .await
+                .unwrap(),
+            None,
+            "the second episode's row does not exist yet"
+        );
+
+        let second = store.create_recording(start(200)).await.unwrap();
+        store
+            .mark_recording_start_notified(second.recording_index, "cloud-second")
+            .await
+            .unwrap();
+        for (publish_timestamp_ns, expected) in [
+            (Some(100), "cloud-first"),
+            (Some(200), "cloud-second"),
+            (None, "cloud-second"),
+        ] {
+            assert_eq!(
+                store
+                    .resolve_recording_id_for_marker("robot-1", 0, 0, publish_timestamp_ns)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some(expected)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_observed_stop_keeps_the_caller_clock_of_the_start() {
+        // A start on a zero-based caller clock, stopped by the daemon itself 2 s
+        // of publish time later: the stop tick continues the caller's clock.
+        let (store, _tempdir) = open_store().await;
+        let recording_index = store
+            .create_recording(NewRecording {
+                robot_id: Some("robot-1"),
+                start: LifecycleStamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp: Some(5),
+                },
+                ..NewRecording::default()
+            })
+            .await
+            .unwrap()
+            .recording_index;
+
+        let row = store
+            .mark_recording_stopped(
+                recording_index,
+                LifecycleStamp::observed_at(1_700_000_002_000_000_000),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (row.stop_timestamp, row.stop_publish_timestamp_ns),
+            (Some(2_000_005), Some(1_700_000_002_000_000_000))
+        );
+    }
+
     /// Insert a recording for `(robot-1, instance)` and return its index.
     async fn seed_recording(store: &SqliteStateStore, instance: i64) -> i64 {
         store
@@ -1663,7 +1847,7 @@ mod tests {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(instance),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: LifecycleStamp::observed_at(1_700_000_000_000_000_000),
             })
             .await
             .expect("create_recording")
@@ -1798,7 +1982,10 @@ mod tests {
     async fn stop_notify_sweep_requires_a_cloud_id() {
         let (store, _tempdir) = open_store().await;
         let index = seed_recording(&store, 0).await;
-        store.mark_recording_stopped(index, 2).await.unwrap();
+        store
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(2))
+            .await
+            .unwrap();
         // Stopped but no cloud id yet → not eligible for the stop sweep.
         assert!(store
             .recordings_pending_stop_notify()
@@ -2134,15 +2321,19 @@ mod tests {
             .await
             .unwrap();
 
+        let cancel = LifecycleStamp {
+            publish_timestamp_ns: 5_000_000_000,
+            timestamp: Some(42),
+        };
         let (row, touched) = store
-            .cancel_recording(recording_index, 5_000_000_000)
+            .cancel_recording(recording_index, cancel)
             .await
             .unwrap();
         assert!(row.cancelled_at.is_some(), "cancelled_at must be stamped");
         assert_eq!(
-            row.stop_timestamp_ns,
-            Some(5_000_000_000),
-            "a cancel stamps stop_timestamp_ns like a stop"
+            (row.stop_publish_timestamp_ns, row.stop_timestamp),
+            (Some(5_000_000_000), Some(42)),
+            "a cancel stamps the stop like a stop"
         );
         assert_eq!(row.progress_reported, ProgressReportStatus::Reported);
         assert_eq!(touched, 1, "only the non-Written trace's write was touched");
@@ -2181,20 +2372,20 @@ mod tests {
             .unwrap();
 
         let (first, _) = store
-            .cancel_recording(recording_index, 5_000_000_000)
+            .cancel_recording(recording_index, LifecycleStamp::observed_at(5_000_000_000))
             .await
             .unwrap();
         let first_at = first.cancelled_at.expect("cancelled_at set");
         // Sleep across a clock tick to make a date change observable.
         std::thread::sleep(std::time::Duration::from_millis(10));
         let (second, _) = store
-            .cancel_recording(recording_index, 9_000_000_000)
+            .cancel_recording(recording_index, LifecycleStamp::observed_at(9_000_000_000))
             .await
             .unwrap();
         assert_eq!(
-            second.stop_timestamp_ns,
-            Some(5_000_000_000),
-            "subsequent cancels must not slide stop_timestamp_ns forward"
+            (second.stop_publish_timestamp_ns, second.stop_timestamp),
+            (Some(5_000_000_000), Some(5_000_000)),
+            "subsequent cancels must not slide the stop forward"
         );
         assert_eq!(
             second.cancelled_at,
@@ -2340,7 +2531,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped(index, 1).await.unwrap();
+        store
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(1))
+            .await
+            .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();
         store.set_expected_trace_count(index, 1).await.unwrap();
         store
@@ -2377,7 +2571,10 @@ mod tests {
             .mark_recording_start_notified(cancelled, "cloud-c")
             .await
             .unwrap();
-        store.cancel_recording(cancelled, 1).await.unwrap();
+        store
+            .cancel_recording(cancelled, LifecycleStamp::observed_at(1))
+            .await
+            .unwrap();
         store
             .mark_recording_cancel_notified(cancelled)
             .await
