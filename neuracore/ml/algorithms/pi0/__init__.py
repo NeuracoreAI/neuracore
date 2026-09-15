@@ -12,52 +12,13 @@ The patching includes:
 """
 
 import importlib
-
-# cspell:ignore adarms
-import inspect
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
-
-
-def check_whether_transformers_replace_is_installed_correctly() -> bool:
-    """Check whether transformers has been patched with PI0 modifications.
-
-    Verifies that the installed `transformers` library has been patched by checking
-    runtime symbols and call signatures that are added by PI0.
-
-    Returns:
-        True if patches are detected, False otherwise.
-    """
-    try:
-        from transformers.models.gemma import modeling_gemma
-        from transformers.models.gemma.configuration_gemma import GemmaConfig
-        from transformers.models.gemma.modeling_gemma import GemmaDecoderLayer
-
-        cfg_init_params = inspect.signature(GemmaConfig.__init__).parameters
-        if "use_adarms" not in cfg_init_params:
-            return False
-        if "adarms_cond_dim" not in cfg_init_params:
-            return False
-
-        cfg = GemmaConfig(use_adarms=True)
-        if not getattr(cfg, "use_adarms", False):
-            return False
-        if getattr(cfg, "adarms_cond_dim", None) is None:
-            return False
-
-        if not callable(getattr(modeling_gemma, "_gated_residual", None)):
-            return False
-
-        decoder_forward_params = inspect.signature(GemmaDecoderLayer.forward).parameters
-        if "adarms_cond" not in decoder_forward_params:
-            return False
-        return True
-    except Exception:
-        return False
 
 
 def _patch_transformers_args_doc() -> None:
@@ -103,12 +64,27 @@ def _patch_transformers_args_doc() -> None:
         return
 
 
-def _patch_transformers() -> None:
-    """Automatically patch transformers with custom modifications.
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """Copy `src` over `dst` without ever exposing a partially written file.
 
-    Checks if patching is needed, then copies files from transformers_replace/
-    to the installed transformers library. The process is idempotent and works
-    across different installation methods.
+    Every patcher writes the same bytes, so renaming into place leaves a
+    concurrent reader with either the old file or the new one, never a
+    truncated one.
+    """
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _patch_transformers() -> None:
+    """Copy transformers_replace/ into the installed transformers library.
+
+    Patching is unconditional. A symbol check cannot distinguish a fully
+    patched install from one where only some of the replaced modules landed,
+    so the files are copied and the affected modules reloaded on every import.
 
     Raises:
         ValueError: If patching/reloading transformers fails.
@@ -116,22 +92,17 @@ def _patch_transformers() -> None:
     # Must be applied before importing/reloading Gemma modules on Python 3.10.
     _patch_transformers_args_doc()
 
-    if check_whether_transformers_replace_is_installed_correctly():
-        _reload_transformers_modules()
-        return  # Already patched
-    else:
-        logger.info("Transformers not patched; attempting to patch now.")
-
     try:
         import transformers
 
         src = Path(__file__).parent / "transformers_replace"
         dst = Path(transformers.__file__).parent
         if src.exists():
+            logger.debug("Patching transformers at %s", dst)
             for f in src.rglob("*.py"):
                 target = dst / f.relative_to(src)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(f, target)
+                _atomic_copy(f, target)
             _reload_transformers_modules()
     except Exception as e:
         raise ValueError(f"Failed to patch/reload transformers: {e}") from e
@@ -140,9 +111,8 @@ def _patch_transformers() -> None:
 def _reload_transformers_modules() -> None:
     """Reload patched transformers modules if they were already imported.
 
-    `check_whether_transformers_replace_is_installed_correctly()` imports Gemma
-    modules before patching. If patching is needed, those stale module objects
-    remain in `sys.modules` and hide copied updates unless reloaded.
+    Modules imported before the copy hold the stock source, so they are
+    reloaded to pick up the replacements.
     """
     importlib.invalidate_caches()
     module_names = [
