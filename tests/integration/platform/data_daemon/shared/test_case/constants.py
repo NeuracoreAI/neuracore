@@ -4,6 +4,10 @@ import time
 from pathlib import Path
 from typing import Literal
 
+from neuracore.api.core import (
+    _RECORDING_UPLOAD_POLL_INTERVAL_S as RECORDING_UPLOAD_POLL_INTERVAL_S,
+)
+
 # cspell:ignore PACINGS
 # ---------------------------------------------------------------------------
 # Test-state directories and path constants
@@ -268,12 +272,13 @@ CAMERA_1 = camera_name(1)
 DEPTH_CAMERA_0 = depth_camera_name(0)
 
 MAX_TIME_TO_START_S = 20.0
-STOP_RECORDING_OVERHEAD_PER_SEC = 0.5
 MAX_RECORDING_DURATION_S = 60 * 5
 
 STOP_RECORDING_NO_WAIT_SLA_S = 1.0
 STOP_RECORDING_UPLOAD_SLA_PER_JOINT_SAMPLE_S = 1.3e-4
 STOP_RECORDING_UPLOAD_SLA_PER_VIDEO_PIXEL_S = 3.0e-7
+# Backend upload completion latency and wait=True polling interval
+STOP_RECORDING_WAIT_OBSERVATION_S = 5.0 + RECORDING_UPLOAD_POLL_INTERVAL_S
 
 # Pause after the last stop_recording, so post-stop frames are logged.
 PER_THREAD_LOGGING_TAIL_S = 2.0
