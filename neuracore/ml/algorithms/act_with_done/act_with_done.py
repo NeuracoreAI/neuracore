@@ -23,6 +23,7 @@ from neuracore_types import (
     Custom1DDataStats,
     DataItemStats,
     DataType,
+    GPUType,
     JointDataStats,
     ModelInitDescription,
     ParallelGripperOpenAmountDataStats,
@@ -223,15 +224,23 @@ class ACTWithDone(NeuracoreModel):
                 list[Custom1DDataStats],
                 self.output_dataset_statistics[DataType.CUSTOM_1D],
             )
+            custom_means: list[float] = []
             for stat in custom_stats:
                 slot_dim = len(stat.data.mean)
                 self.custom_1d_slot_dims.append(slot_dim)
                 self.custom_1d_dim += slot_dim
+                custom_means.extend(stat.data.mean.tolist())
             if self.custom_1d_dim == 0:
                 raise ValueError(
                     "CUSTOM_1D is configured as an output but has zero feature "
                     "dimensions in the dataset statistics."
                 )
+            # Binary done labels are rare; mean ≈ positive rate so
+            # pos_weight = (1 - p) / p rebalances BCE toward the positive class.
+            pos_rate = torch.tensor(custom_means, dtype=torch.float32).clamp(
+                1e-4, 1.0 - 1e-4
+            )
+            self.register_buffer("done_pos_weight", (1.0 - pos_rate) / pos_rate)
 
         # Action embedding
         self.action_embed = nn.Linear(self.max_output_size, hidden_dim)
@@ -804,6 +813,9 @@ class ACTWithDone(NeuracoreModel):
     def _predict_done_logits(self, vision_cond: torch.Tensor) -> torch.Tensor:
         """Predict done-flag logits from pooled vision features.
 
+        Vision features are detached so the done BCE does not update the shared
+        image backbone (reserved for the ACT action objective).
+
         Args:
             vision_cond: Pooled image features with shape (B, vision_cond_dim).
 
@@ -812,7 +824,7 @@ class ACTWithDone(NeuracoreModel):
         """
         assert self.done_head is not None
         batch_size = vision_cond.shape[0]
-        logits = self.done_head(vision_cond)
+        logits = self.done_head(vision_cond.detach())
         return logits.view(
             batch_size, self.output_prediction_horizon, self.custom_1d_dim
         )
@@ -865,7 +877,8 @@ class ACTWithDone(NeuracoreModel):
         Encodes action sequences to latent space, predicts actions, and computes
         L1 reconstruction loss plus KL divergence regularization. When CUSTOM_1D
         outputs are configured, also computes a masked BCE loss on the done-flag
-        classification head.
+        classification head, with ``pos_weight`` from dataset positive rates to
+        counter class imbalance.
 
         Args:
             batch: Training batch with inputs and targets
@@ -982,7 +995,10 @@ class ACTWithDone(NeuracoreModel):
 
             done_mask = self._build_done_mask(batch)  # (B, D)
             bce = F.binary_cross_entropy_with_logits(
-                done_logits, done_targets.clamp(0.0, 1.0), reduction="none"
+                done_logits,
+                done_targets.clamp(0.0, 1.0),
+                reduction="none",
+                pos_weight=self.done_pos_weight,
             )
             done_bce_loss = (bce * done_mask.unsqueeze(1)).sum() / torch.clamp(
                 done_mask.sum() * done_logits.shape[1], min=1.0
@@ -1038,3 +1054,15 @@ class ACTWithDone(NeuracoreModel):
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
             DataType.CUSTOM_1D,
         }
+
+    @staticmethod
+    def get_supported_gpus() -> frozenset[GPUType]:
+        """Get the GPU types supported for training this model.
+
+        Returns:
+            frozenset[GPUType]: Set of supported GPU types
+        """
+        return frozenset({
+            GPUType.NVIDIA_A100_80GB,
+            GPUType.NVIDIA_TESLA_V100,
+        })

@@ -19,6 +19,7 @@ from neuracore_types import (
     Custom1DDataStats,
     DataItemStats,
     DataType,
+    GPUType,
     JointDataStats,
     ModelInitDescription,
     ParallelGripperOpenAmountDataStats,
@@ -258,15 +259,23 @@ class DiffusionPolicyWithDone(NeuracoreModel):
                 list[Custom1DDataStats],
                 self.output_dataset_statistics[DataType.CUSTOM_1D],
             )
+            custom_means: list[float] = []
             for stat in custom_stats:
                 slot_dim = len(stat.data.mean)
                 self.custom_1d_slot_dims.append(slot_dim)
                 self.custom_1d_dim += slot_dim
+                custom_means.extend(stat.data.mean.tolist())
             if self.custom_1d_dim == 0:
                 raise ValueError(
                     "CUSTOM_1D is configured as an output but has zero feature "
                     "dimensions in the dataset statistics."
                 )
+            # Binary done labels are rare; mean ≈ positive rate so
+            # pos_weight = (1 - p) / p rebalances BCE toward the positive class.
+            pos_rate = torch.tensor(custom_means, dtype=torch.float32).clamp(
+                1e-4, 1.0 - 1e-4
+            )
+            self.register_buffer("done_pos_weight", (1.0 - pos_rate) / pos_rate)
 
         # Setup normalizers
         # Only create proprio_normalizer if there are proprioception stats
@@ -646,6 +655,9 @@ class DiffusionPolicyWithDone(NeuracoreModel):
     def _predict_done_logits(self, global_cond: torch.Tensor) -> torch.Tensor:
         """Predict done-flag logits from vision features in global conditioning.
 
+        Vision features are detached so the done BCE does not update the shared
+        image backbone (reserved for the action diffusion / flow objective).
+
         Args:
             global_cond: Global conditioning with shape (B, global_cond_dim).
                 Only the image-feature suffix is passed to the done head.
@@ -655,7 +667,7 @@ class DiffusionPolicyWithDone(NeuracoreModel):
         """
         assert self.done_head is not None
         batch_size = global_cond.shape[0]
-        logits = self.done_head(self._vision_cond(global_cond))
+        logits = self.done_head(self._vision_cond(global_cond).detach())
         return logits.view(
             batch_size, self.output_prediction_horizon, self.custom_1d_dim
         )
@@ -880,7 +892,9 @@ class DiffusionPolicyWithDone(NeuracoreModel):
 
         Adds noise to the target actions and computes the masked MSE between the
         network output and its target. When CUSTOM_1D outputs are configured,
-        also computes a masked BCE loss on the done-flag classification head.
+        also computes a masked BCE loss on the done-flag classification head,
+        with ``pos_weight`` from dataset positive rates to counter class
+        imbalance.
 
         Args:
             batch: Training batch with inputs and targets
@@ -984,7 +998,10 @@ class DiffusionPolicyWithDone(NeuracoreModel):
 
             done_mask = self._build_done_mask(batch)  # (B, D)
             bce = F.binary_cross_entropy_with_logits(
-                done_logits, done_targets.clamp(0.0, 1.0), reduction="none"
+                done_logits,
+                done_targets.clamp(0.0, 1.0),
+                reduction="none",
+                pos_weight=self.done_pos_weight,
             )
             done_bce_loss = (bce * done_mask.unsqueeze(1)).sum() / torch.clamp(
                 done_mask.sum() * done_logits.shape[1], min=1.0
@@ -1068,3 +1085,15 @@ class DiffusionPolicyWithDone(NeuracoreModel):
             DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
             DataType.CUSTOM_1D,
         }
+
+    @staticmethod
+    def get_supported_gpus() -> frozenset[GPUType]:
+        """Get the GPU types supported for training this model.
+
+        Returns:
+            frozenset[GPUType]: Set of supported GPU types
+        """
+        return frozenset({
+            GPUType.NVIDIA_A100_80GB,
+            GPUType.NVIDIA_TESLA_V100,
+        })
