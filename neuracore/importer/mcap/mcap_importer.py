@@ -56,6 +56,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         random_sample: int | None = None,
         shared: bool = False,
         debug_target_ee_frame: str | None = None,
+        robot_id: str | None = None,
     ) -> None:
         """Initialize the MCAP dataset importer."""
         super().__init__(
@@ -73,6 +74,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             random_sample=random_sample,
             shared=shared,
             debug_target_ee_frame=debug_target_ee_frame,
+            robot_id=robot_id,
         )
         if max_workers is not None and max_workers > 1:
             self.logger.warning(
