@@ -1,7 +1,7 @@
 """Tests for shared RLDS/TFDS importer behavior and RLDS overrides."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from neuracore_types import DataType, JointPositionInputTypeConfig
@@ -79,6 +79,40 @@ def test_rlds_handle_step_error_non_step_mode_returns_false():
     importer._log_worker_error.assert_not_called()
 
 
+def test_rlds_import_item_logs_steps_on_a_tick_grid():
+    """Steps are logged at integer ticks on the dataset frequency from zero."""
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.ik_init_config = None
+    importer._episode_iter = iter([{"steps": [{"v": 1}, {"v": 2}]}])
+    importer.frequency = 30.0
+    importer._worker_id = 0
+    importer._instance_base = 0
+    importer.num_episodes = 1
+    importer.robot_name = "test_robot"
+    importer.dry_run = False
+    importer.logger = MagicMock()
+    importer._emit_progress = MagicMock()
+    importer._record_step = MagicMock()
+
+    with (
+        patch(
+            "neuracore.importer.rlds_tfds_importer.nc.start_recording"
+        ) as start_recording,
+        patch(
+            "neuracore.importer.rlds_tfds_importer.nc.stop_recording"
+        ) as stop_recording,
+    ):
+        importer.import_item(ImportItem(index=0))
+
+    ticks = [call.args[1] for call in importer._record_step.call_args_list]
+    assert ticks == [33_333, 66_666]
+    assert all(type(tick) is int for tick in ticks)
+    start_recording.assert_called_once_with(
+        robot_name="test_robot", instance=0, timestamp=0
+    )
+    assert stop_recording.call_args.kwargs["timestamp"] == 100_000
+
+
 def test_rlds_record_step_supports_empty_source_path_for_language():
     """RLDS _record_step should allow empty source path and string language values."""
     importer = object.__new__(RLDSDatasetImporter)
@@ -100,14 +134,14 @@ def test_rlds_record_step_supports_empty_source_path_for_language():
     importer.ordered_import_configs = [(DataType.LANGUAGE, import_config)]
     importer._log_data = MagicMock()
 
-    importer._record_step({"instruction": "pick up block"}, timestamp=12.5)
+    importer._record_step({"instruction": "pick up block"}, timestamp=12_500_000)
 
     importer._log_data.assert_called_once_with(
         DataType.LANGUAGE,
         "pick up block",
         mapping_item,
         import_format,
-        12.5,
+        12_500_000,
         extrinsics=None,
         intrinsics=None,
     )
@@ -138,14 +172,16 @@ def test_rlds_record_step_converts_tensor_to_numpy_for_non_language():
     importer.ordered_import_configs = [(DataType.JOINT_POSITIONS, import_config)]
     importer._log_data = MagicMock()
 
-    importer._record_step({"joint_positions": _FakeTensor([1.0, 2.0])}, timestamp=3.0)
+    importer._record_step(
+        {"joint_positions": _FakeTensor([1.0, 2.0])}, timestamp=3_000_000
+    )
 
     importer._log_data.assert_called_once_with(
         DataType.JOINT_POSITIONS,
         [1.0, 2.0],
         mapping_item,
         import_format,
-        3.0,
+        3_000_000,
         extrinsics=None,
         intrinsics=None,
     )
@@ -371,7 +407,7 @@ def test_record_step_resolves_mixed_dot_delimited_source_and_source_name():
                 "steps": {"robot": {"joint_positions": _FakeTensor([0.1, 0.2, 0.3])}}
             }
         },
-        timestamp=1.25,
+        timestamp=1_250_000,
     )
 
     importer._log_data.assert_called_once_with(
@@ -379,7 +415,7 @@ def test_record_step_resolves_mixed_dot_delimited_source_and_source_name():
         [0.1, 0.2, 0.3],
         mapping_item,
         import_format,
-        1.25,
+        1_250_000,
         extrinsics=None,
         intrinsics=None,
     )

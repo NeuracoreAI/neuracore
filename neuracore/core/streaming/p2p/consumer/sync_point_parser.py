@@ -10,6 +10,7 @@ from neuracore_types import (
     RobotStreamTrack,
     SynchronizedPoint,
 )
+from neuracore_types.timestamps import now_ticks
 from pydantic import ValidationError
 
 from neuracore.core.utils.image_string_encoder import ImageStringEncoder
@@ -75,7 +76,7 @@ def merge_sync_points(*args: SynchronizedPoint) -> SynchronizedPoint:
         SynchronizedPoint: A new SynchronizedPoint object containing the merged data.
     """
     if len(args) == 0:
-        return SynchronizedPoint()
+        return SynchronizedPoint(timestamp=now_ticks())
 
     # Sort by timestamp so that later points override earlier ones.
     sorted_points = sorted(args, key=lambda x: x.timestamp)

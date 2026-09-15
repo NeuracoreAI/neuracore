@@ -28,6 +28,7 @@ from neuracore_types import (
     SynchronizedPoint,
     VideoFormat,
 )
+from neuracore_types.timestamps import now_ticks
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -136,7 +137,7 @@ class PeerToPeerConsumerConnection:
             if track is not None:
                 self._connect_data_channel(channel, track)
 
-        self.latest_data = SynchronizedPoint()
+        self.latest_data = SynchronizedPoint(timestamp=now_ticks())
 
     def fully_connected(self) -> bool:
         """Get whether all expected remote tracks are connected.

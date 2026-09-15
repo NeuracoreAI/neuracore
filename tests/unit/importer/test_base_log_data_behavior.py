@@ -1,6 +1,5 @@
 """Unit tests for NeuracoreDatasetImporter data logging and config ordering."""
 
-import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -13,6 +12,7 @@ from neuracore_types.importer.config import (
     JointPositionInputTypeConfig,
 )
 
+from neuracore.core.streaming.data_stream import JointDataStream
 from neuracore.importer.core.base import NeuracoreDatasetImporter
 from neuracore.importer.core.exceptions import (
     DataValidationError,
@@ -99,7 +99,7 @@ def test_log_data_logs_basic_datatypes(data_type, source_data):
     item = _make_item(name="joint1", source_name="ee")
     format_cfg = _make_format()
 
-    importer._log_data(data_type, source_data, item, format_cfg, timestamp=12.0)
+    importer._log_data(data_type, source_data, item, format_cfg, timestamp=12_000_000)
 
     item.transforms.assert_called_once_with(source_data)
     importer._log_transformed_data.assert_called_once()
@@ -382,27 +382,58 @@ def _make_importer_for_timestamp_guard() -> NeuracoreDatasetImporter:
     return importer
 
 
-def test_strictly_increasing_timestamp_nudges_colliding_float():
+def test_strictly_increasing_timestamp_logs_a_repeated_tick_one_tick_later():
     importer = _make_importer_for_timestamp_guard()
-    collided = 1788363776958256896 / 1e9
-    assert collided == 1788363776958257000 / 1e9
 
     first = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=collided
+        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=1_000
     )
     second = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=collided
+        data_type=DataType.RGB_IMAGES, name="head_camera2", timestamp=1_000
     )
 
-    assert first == collided
-    assert second > first
-    assert second == math.nextafter(first, math.inf)
+    assert (first, second) == (1_000, 1_001)
+
+
+def test_strictly_increasing_timestamp_nudges_a_chain_of_repeated_ticks():
+    importer = _make_importer_for_timestamp_guard()
+
+    logged = [
+        importer._strictly_increasing_timestamp(
+            data_type=DataType.RGB_IMAGES, name="cam", timestamp=1_000
+        )
+        for _ in range(3)
+    ]
+
+    assert logged == [1_000, 1_001, 1_002]
+
+
+def test_strictly_increasing_timestamp_does_not_nudge_a_fourth_repeated_tick():
+    """The nudge only covers a tick at most one behind the last one logged, so
+    a fourth identical source tick passes through and the stream rejects it."""
+    importer = _make_importer_for_timestamp_guard()
+    stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j")
+
+    logged = []
+    for _ in range(3):
+        tick = importer._strictly_increasing_timestamp(
+            data_type=DataType.JOINT_POSITIONS, name="j", timestamp=1_000
+        )
+        stream.record_scalar(tick, 0.5, recording_epoch=1)
+        logged.append(tick)
+    fourth = importer._strictly_increasing_timestamp(
+        data_type=DataType.JOINT_POSITIONS, name="j", timestamp=1_000
+    )
+
+    assert logged + [fourth] == [1_000, 1_001, 1_002, 1_000]
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        stream.record_scalar(fourth, 0.5, recording_epoch=1)
 
 
 def test_strictly_increasing_timestamp_leaves_increasing_input_untouched():
     importer = _make_importer_for_timestamp_guard()
 
-    values = [100.0, 100.5, 101.0]
+    values = [100_000_000, 100_500_000, 101_000_000]
     logged = [
         importer._strictly_increasing_timestamp(
             data_type=DataType.RGB_IMAGES, name="cam", timestamp=value
@@ -417,58 +448,45 @@ def test_strictly_increasing_timestamp_tracks_streams_independently():
     importer = _make_importer_for_timestamp_guard()
 
     first = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam_a", timestamp=100.0
+        data_type=DataType.RGB_IMAGES, name="cam_a", timestamp=100_000_000
     )
     other_name = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam_b", timestamp=100.0
+        data_type=DataType.RGB_IMAGES, name="cam_b", timestamp=100_000_000
     )
     other_type = importer._strictly_increasing_timestamp(
-        data_type=DataType.DEPTH_IMAGES, name="cam_a", timestamp=100.0
+        data_type=DataType.DEPTH_IMAGES, name="cam_a", timestamp=100_000_000
     )
 
-    assert first == other_name == other_type == 100.0
+    assert first == other_name == other_type == 100_000_000
 
 
 def test_strictly_increasing_timestamp_passes_through_large_regression():
     importer = _make_importer_for_timestamp_guard()
     importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam", timestamp=9.22e9
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=9_220_000
     )
 
     out_of_order = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam", timestamp=1.79e9
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=1_790_000
     )
 
-    assert out_of_order == 1.79e9
-
-
-def test_strictly_increasing_timestamp_does_not_nudge_from_infinity():
-    importer = _make_importer_for_timestamp_guard()
-    importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam", timestamp=math.inf
-    )
-
-    following = importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam", timestamp=1.79e9
-    )
-
-    assert following == 1.79e9
+    assert out_of_order == 1_790_000
 
 
 def test_reset_episode_state_clears_timestamp_guard():
     importer = _make_importer_for_timestamp_guard()
     importer.ik_init_config = None
     importer._strictly_increasing_timestamp(
-        data_type=DataType.RGB_IMAGES, name="cam", timestamp=100.0
+        data_type=DataType.RGB_IMAGES, name="cam", timestamp=100_000_000
     )
 
     importer._reset_episode_state()
 
     assert (
         importer._strictly_increasing_timestamp(
-            data_type=DataType.RGB_IMAGES, name="cam", timestamp=100.0
+            data_type=DataType.RGB_IMAGES, name="cam", timestamp=100_000_000
         )
-        == 100.0
+        == 100_000_000
     )
 
 
@@ -483,7 +501,7 @@ def test_log_transformed_data_applies_timestamp_guard(monkeypatch):
         "neuracore.importer.core.base.nc", SimpleNamespace(log_rgb=logged)
     )
 
-    collided = 1788363776958256896 / 1e9
+    collided = 1_788_363_776_958_256
     for _ in range(2):
         importer._log_transformed_data(
             data_type=DataType.RGB_IMAGES,
@@ -493,4 +511,5 @@ def test_log_transformed_data_applies_timestamp_guard(monkeypatch):
         )
 
     stamps = [call.kwargs["timestamp"] for call in logged.call_args_list]
-    assert stamps[1] > stamps[0]
+    assert stamps == [collided, collided + 1]
+    assert all(type(stamp) is int for stamp in stamps)

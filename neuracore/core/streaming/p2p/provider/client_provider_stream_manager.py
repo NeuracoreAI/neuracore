@@ -18,6 +18,7 @@ from neuracore_types import (
     RobotStreamTrack,
     VideoFormat,
 )
+from neuracore_types.timestamps import TICKS_PER_SECOND
 
 from neuracore.core.auth import Auth, get_auth
 from neuracore.core.config.get_current_org import get_current_org
@@ -192,6 +193,7 @@ class ClientProviderStreamManager(BaseP2PStreamManager):
             mid=mid,
             data_type=data_type,
             label=label,
+            ticks_per_second=TICKS_PER_SECOND,
         )
         self.track_metadata[track.id] = track
 

@@ -15,6 +15,7 @@ from neuracore_types import (
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
 )
+from neuracore_types.timestamps import TICKS_PER_SECOND
 from omegaconf import OmegaConf
 
 from neuracore.core.data.synced_dataset import SynchronizedDataset
@@ -243,7 +244,7 @@ def synchronization_point() -> SynchronizedPoint:
 
     return SynchronizedPoint(
         robot_id=ROBOT_ID,
-        timestamp=1234567890.0,
+        timestamp=1_234_567_890_000_000,
         data={
             data_type: {
                 f"{data_type.value}_{i}": DATA_TYPE_TO_NC_DATA_CLASS[data_type].sample()
@@ -445,7 +446,7 @@ def synchronization_point_with_depth() -> SynchronizedPoint:
 
     return SynchronizedPoint(
         robot_id=ROBOT_ID,
-        timestamp=1234567890.0,
+        timestamp=1_234_567_890_000_000,
         data={
             data_type: {
                 f"{data_type.value}_{i}": DATA_TYPE_TO_NC_DATA_CLASS[data_type].sample()
@@ -1105,7 +1106,7 @@ class TestOutputTimestepAlignment:
     def _sync_point_at_timestep(timestep: int) -> SynchronizedPoint:
         return SynchronizedPoint(
             robot_id=ROBOT_ID,
-            timestamp=float(timestep),
+            timestamp=timestep * TICKS_PER_SECOND,
             data={
                 data_type: {
                     f"{data_type.value}_{i}": _create_nc_data_at_timestep(

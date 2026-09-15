@@ -19,11 +19,13 @@ from typing import TYPE_CHECKING
 
 import requests
 from neuracore_types import DataType, RobotInstanceIdentifier
+from neuracore_types.timestamps import timestamp_to_ticks
 
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.streaming.data_stream import DataStream
 from neuracore.core.utils.http_errors import extract_error_detail
 from neuracore.core.utils.http_session import thread_local_session
+from neuracore.core.utils.ticks import resolve_ticks
 from neuracore.data_daemon import bridge as recording_context
 
 from .auth import Auth, get_auth
@@ -255,7 +257,9 @@ class Robot:
         """
         return self._data_streams
 
-    def start_recording(self, dataset_id: str, timestamp: float | None = None) -> None:
+    def start_recording(
+        self, dataset_id: str, timestamp: float | int | None = None
+    ) -> None:
         """Start recording data from all active streams to a dataset.
 
         Asks the daemon to open a recording window; it owns recording identity
@@ -264,13 +268,15 @@ class Robot:
 
         Args:
             dataset_id: Unique identifier of the dataset to record into.
-            timestamp: Optional capture time (Unix seconds) for the recording's
-                start, matching the ``log_*`` methods.
+            timestamp: Optional start of the recording on the data clock of the
+                ``log_*`` methods, float seconds or integer ticks. Defaults to
+                the monotonic clock.
 
         Raises:
             RobotError: If the robot is not initialized or if
                 the recording fails to start.
         """
+        timestamp = resolve_ticks(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
@@ -286,7 +292,7 @@ class Robot:
     def stop_recording(
         self,
         recording_id: str | None = None,
-        timestamp: float | None = None,
+        timestamp: float | int | None = None,
     ) -> None:
         """Stop an active recording session.
 
@@ -296,14 +302,16 @@ class Robot:
         Args:
             recording_id: Unused — the daemon stops the active recording for
                 this source. Retained for call-site compatibility.
-            timestamp: Optional capture time (Unix seconds) for the recording's
-                stop, matching the ``log_*`` methods. It is the reported stop
-                time, not the window's upper bound, which the daemon takes from
-                the publish stamp at the send.
+            timestamp: Optional stop of the recording on the data clock of the
+                ``log_*`` methods, float seconds or integer ticks. Defaults to
+                the monotonic clock. It is the reported stop, not the window's
+                upper bound, which the daemon takes from the publish stamp at
+                the send.
 
         Raises:
             RobotError: If the robot is not initialized.
         """
+        timestamp = resolve_ticks(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 
@@ -313,7 +321,7 @@ class Robot:
     def _notify_daemon_of_stop(
         self,
         recording_id: str | None,
-        timestamp: float | None = None,
+        timestamp: int,
     ) -> None:
         """Send the recording-stopped IPC message to the daemon."""
         try:
@@ -384,20 +392,24 @@ class Robot:
         return recording.recording_id if recording is not None else None
 
     def get_cloud_recording_id(
-        self, timestamp_ns: int | None = None, timeout_s: float = 30.0
+        self, start_timestamp: float | int | None = None, timeout_s: float = 30.0
     ) -> str | None:
         """Resolve the daemon-owned cloud recording id for a recording window.
 
         The daemon allocates the cloud recording id asynchronously, so this asks
-        the daemon (it may block) for the id of the recording whose window
-        brackets ``timestamp_ns`` for this source (defaulting to the most
-        recently started recording). For non-performance-critical use only
+        the daemon (it may block) for the id of the recording of this source
+        that started at ``start_timestamp``, float seconds or integer ticks as
+        given to :meth:`start_recording` (defaulting to the most recently
+        started recording). For non-performance-critical use only
         (tests, ``stop_recording(wait=True)``).
         """
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
+        start_ticks = (
+            None if start_timestamp is None else timestamp_to_ticks(start_timestamp)
+        )
         return self._get_daemon_recording_context().get_recording_id(
-            timestamp_ns=timestamp_ns, timeout_s=timeout_s
+            start_timestamp=start_ticks, timeout_s=timeout_s
         )
 
     def _package_urdf(self) -> dict:
@@ -655,17 +667,18 @@ class Robot:
         return joint_info
 
     def cancel_recording(
-        self, recording_id: str | None = None, timestamp: float | None = None
+        self, recording_id: str | None = None, timestamp: float | int | None = None
     ) -> None:
         """Cancel an active recording without saving any data.
 
         Args:
             recording_id: Unused — the daemon cancels the active recording for
                 this source. Retained for call-site compatibility.
-            timestamp: Optional capture time (Unix seconds) for the cancel,
-                mirroring ``stop_recording``: the recording's captured stop
-                time, with the producer stamping now when omitted.
+            timestamp: Optional stop of the recording, as for
+                ``stop_recording``, float seconds or integer ticks. Defaults to
+                the monotonic clock.
         """
+        timestamp = resolve_ticks(timestamp)
         if not self.id:
             raise RobotError("Robot not initialized. Call init() first.")
 

@@ -20,9 +20,10 @@ import neuracore as nc
 def visualize_episode(
     joint_positions: list[dict[str, JointData]],
     camera_data: list[dict[str, RGBCameraData]],
-    timestamps: list[float],
-    start_time: float = 0.0,
-    end_time: float = 0.0,
+    timestamps: list[int],
+    start_timestamp: int,
+    end_timestamp: int,
+    ticks_per_second: int,
 ):
     """Visualize an episode with joint positions and camera images side by side."""
     # Extract joint values from the first joint in the dict at each timestep
@@ -40,13 +41,17 @@ def visualize_episode(
         [camera_data[t][first_camera_name].frame for t in range(len(camera_data))]
     )
 
-    # Calculate relative times from timestamps
-    relative_times = np.array([t - start_time for t in timestamps])
+    # Calculate relative times in seconds from timestamps in ticks
+    relative_times = np.array(
+        [(t - start_timestamp) / ticks_per_second for t in timestamps]
+    )
 
     # Add a "fake" point at the end using end_time
     jps = np.vstack([jps, jps[-1:]])
     images = np.vstack([images, images[-1:]])
-    relative_times = np.append(relative_times, end_time - start_time)
+    relative_times = np.append(
+        relative_times, (end_timestamp - start_timestamp) / ticks_per_second
+    )
 
     # Create a more compact figure
     fig = plt.figure(figsize=(12, 4))
@@ -142,9 +147,17 @@ def main():
             camera_data.append(step[DataType.RGB_IMAGES])
             timestamps.append(step.timestamp)
 
-    print(f"Episode length t: {episode.end_time - episode.start_time} seconds")
+    episode_seconds = (
+        episode.end_timestamp - episode.start_timestamp
+    ) / episode.ticks_per_second
+    print(f"Episode length t: {episode_seconds} seconds")
     visualize_episode(
-        joint_positions, camera_data, timestamps, episode.start_time, episode.end_time
+        joint_positions,
+        camera_data,
+        timestamps,
+        episode.start_timestamp,
+        episode.end_timestamp,
+        episode.ticks_per_second,
     )
 
 

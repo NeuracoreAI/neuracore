@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from neuracore_types import DataType, RobotStreamTrack
+from neuracore_types.timestamps import TICKS_PER_SECOND
 
 from neuracore.core.const import STREAM_API_URL
 from neuracore.core.streaming.p2p.enabled_manager import EnabledManager
@@ -224,3 +225,15 @@ def test_pending_tracks_are_dropped_on_close(
     wait_past_flush()
 
     assert client_session.posts == []
+
+
+def test_registered_tracks_carry_the_tick_rate(
+    manager: ClientProviderStreamManager, client_session: RecordingClientSession
+):
+    manager.get_json_source("joints", DataType.JOINT_POSITIONS, "joints")
+
+    posts = wait_for_posts(client_session, 1)
+
+    assert [track["ticks_per_second"] for track in posts[0][1]["tracks"]] == [
+        TICKS_PER_SECOND
+    ]
