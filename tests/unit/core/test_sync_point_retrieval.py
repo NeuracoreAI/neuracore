@@ -11,6 +11,10 @@ from neuracore_types.nc_data import DATA_TYPE_TO_NC_DATA_CLASS
 import neuracore as nc
 from neuracore.api.logging import ExperimentalPointCloudWarning
 from neuracore.core.const import API_URL
+from neuracore.core.exceptions import RobotError
+from neuracore.core.get_latest_sync_point import (
+    get_latest_sync_point as core_get_latest_sync_point,
+)
 
 
 @dataclass(frozen=True)
@@ -285,3 +289,43 @@ def test_log_and_retrieve_sync_point(
                     f"for {expected_nc_data_class.__name__}"
                 )
                 assert_field_equal(getattr(nc_data, field_name), expected_value)
+
+
+def _register_robot_with_unique_id(request, context):
+    context.status_code = 200
+    return {
+        "robot_id": f"{request.json()['name']}-id",
+        "has_urdf": False,
+        "archived": False,
+    }
+
+
+def test_sync_point_uses_the_requested_robot(
+    temp_config_dir,
+    mock_auth_requests,
+    reset_neuracore,
+    mocked_org_id,
+):
+    """Test each robot's sync point holds only that robot's data."""
+    nc.login("test_api_key")
+    mock_auth_requests.post(
+        re.compile(f"{API_URL}/org/[^/]+/robots(\\?.*)?"),
+        json=_register_robot_with_unique_id,
+    )
+    nc.connect_robot("robot-a")
+    nc.connect_robot("robot-b")
+
+    nc.log_joint_positions({"joint_on_a": 1.0}, robot_name="robot-a")
+    nc.log_joint_positions({"joint_on_b": 2.0}, robot_name="robot-b")
+
+    sync_point_a = nc.get_latest_sync_point(robot_name="robot-a", include_remote=False)
+    sync_point_b = nc.get_latest_sync_point(robot_name="robot-b", include_remote=False)
+
+    assert set(sync_point_a.data[DataType.JOINT_POSITIONS]) == {"joint_on_a"}
+    assert set(sync_point_b.data[DataType.JOINT_POSITIONS]) == {"joint_on_b"}
+
+
+def test_sync_point_without_a_connected_robot_raises_robot_error(reset_neuracore):
+    """Test collecting a sync point with no connected robot raises RobotError."""
+    with pytest.raises(RobotError, match="No active robot"):
+        core_get_latest_sync_point(include_remote=False)
