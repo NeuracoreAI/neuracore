@@ -327,9 +327,64 @@ mod tests {
                 "instance": 7,
                 "dataset_id": "ds-1",
                 "start_time": 1_700_000_000.0,
+                "start_timestamp": 42,
+                "ticks_per_second": 1_000_000,
             }),
-            "start_time is the start's publish time"
+            "start_time is the start's publish time; start_timestamp is the caller's tick"
         );
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_recording_without_a_tick_rate_posts_no_tick_fields() {
+        // A recording an older daemon created holds float-second traces; the
+        // backend converts them only when the start carries no tick fields.
+        let server = MockServer::start().await;
+        start_ok_mock("cloud-rec-legacy").mount(&server).await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_recording(&store).await;
+        sqlx::query("UPDATE recordings SET ticks_per_second = NULL WHERE recording_index = ?1")
+            .bind(index)
+            .execute(store.write_pool())
+            .await
+            .expect("mark legacy");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_start_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        let received = timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if !received.is_empty() {
+                    break received;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("sweep must POST within 3s");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "robot_id": "robot-1",
+                "instance": 7,
+                "dataset_id": "ds-1",
+                "start_time": 1_700_000_000.0,
+            })
+        );
+
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
     }

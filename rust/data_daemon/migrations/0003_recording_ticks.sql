@@ -2,7 +2,8 @@
 -- (one microsecond) on its data clock, posted as the backend
 -- `start_timestamp` / `end_timestamp`, and the producer's wall-clock publish
 -- time in nanoseconds, posted as the backend `start_time` / `end_time`.
--- A NULL `ticks_per_second` marks a recording whose traces hold float seconds.
+-- `ticks_per_second` is set on every row the daemon creates from now on; a
+-- NULL marks a recording whose traces hold float seconds.
 ALTER TABLE recordings RENAME COLUMN start_timestamp_ns TO start_timestamp;
 ALTER TABLE recordings RENAME COLUMN stop_timestamp_ns TO stop_timestamp;
 ALTER TABLE recordings ADD COLUMN start_publish_timestamp_ns INTEGER;
