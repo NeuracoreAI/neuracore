@@ -15,7 +15,9 @@ use iceoryx2::node::Node;
 use iceoryx2::prelude::ipc;
 
 use crate::lifecycle::pidfile::{pid_is_running, read_pid_from_file};
-use crate::state::{SqliteStateStore, StateStore, StateStoreError, TraceWriteStatus};
+use crate::state::{
+    LifecycleStamp, SqliteStateStore, StateStore, StateStoreError, TraceWriteStatus,
+};
 
 /// `last_updated` age (in seconds) below which a `writing` /
 /// `pending_metadata` / `initializing` trace row is left alone by the
@@ -210,10 +212,13 @@ async fn sweep_partial_recordings(
         }
 
         // Recovery has no producer cancel timestamp; use the recovery wall
-        // clock as the discarded recording's stop time (→ backend end_time).
-        let cancel_stop_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default();
+        // clock as the discarded recording's stop (→ backend end_time).
+        let cancelled_at_ns = Utc::now().timestamp_nanos_opt().unwrap_or_default();
         if let Err(error) = store
-            .cancel_recording(recording.recording_index, cancel_stop_ns)
+            .cancel_recording(
+                recording.recording_index,
+                LifecycleStamp::observed_at(cancelled_at_ns),
+            )
             .await
         {
             tracing::warn!(

@@ -53,6 +53,11 @@ pub mod config;
 pub mod ffmpeg;
 pub mod paths;
 
+/// Nanoseconds in one tick. A tick is one microsecond, the unit of every
+/// capture timestamp the daemon writes to `trace.json` and the video PTS.
+pub const NANOSECONDS_PER_TICK: i64 =
+    1_000_000_000 / service_name::VIDEO_SPOOL_TICKS_PER_SECOND as i64;
+
 /// Recording-window membership for the frames *inside* one video chunk.
 ///
 /// A chunk is a NUT file appended to until something seals it, so frames logged
