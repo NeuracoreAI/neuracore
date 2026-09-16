@@ -31,7 +31,7 @@ if TYPE_CHECKING:
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.exceptions import InsufficientSynchronizedPointError
 from neuracore.core.get_latest_sync_point import get_latest_sync_point
-from neuracore.core.utils.download import download_with_progress
+from neuracore.core.utils.download import download_to_cache
 from neuracore.ml.logging.endpoint_log_streamer import EndpointLogStreamer
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.endpoint_storage_handler import EndpointStorageHandler
@@ -813,18 +813,13 @@ def _download_model(job_id: str, org_id: str) -> Path:
     data = response.json()
     train_run_name = data["train_run_name"]
     destination = Path(tempfile.gettempdir()) / job_id / f"{train_run_name}.nc.zip"
-    if destination.exists():
-        print(f"Model already downloaded at {destination}. Skipping download.")
-        return destination
-    destination.parent.mkdir(parents=True, exist_ok=True)
 
-    print("Downloading model from training run...")
-    model_path = download_with_progress(
+    model_path = download_to_cache(
         data["url"],
+        destination,
         "Downloading model...",
-        destination=destination,
     )
-    print(f"Model download complete. Saved to {model_path}")
+    print(f"Model available at {model_path}")
     return model_path
 
 

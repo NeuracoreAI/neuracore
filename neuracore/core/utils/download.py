@@ -1,5 +1,6 @@
 """Utility functions for downloading files over the shared pooled session."""
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -63,11 +64,35 @@ def download_bytes(url: str) -> bytes:
         return response.content
 
 
+def remote_content_length(url: str) -> int | None:
+    """Return the byte length the server reports for a URL.
+
+    Returns None when the server omits Content-Length.
+
+    Args:
+        url: URL to query.
+
+    Returns:
+        The advertised body length, or None when the server omits it.
+
+    Raises:
+        requests.RequestException: The request failed.
+        ValueError: The server sent a Content-Length that is not a number.
+    """
+    session = thread_local_session(retry_transient=True, retry_read_timeout=True)
+    with session.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT_S) as response:
+        response.raise_for_status()
+        length = response.headers.get("Content-Length")
+        return int(length) if length is not None else None
+
+
 def download_with_progress(
     url: str, description: str, destination: Path | None = None
 ) -> Path:
     """Download a file from a URL with a progress bar.
 
+    Write the body to a sibling staging file and move it onto destination once
+    the transfer completes.
     Args:
         url: URL of the file to download.
         description: Description for the progress bar.
@@ -92,8 +117,39 @@ def download_with_progress(
             "[{elapsed}<{remaining}, {rate_fmt}]"
         ),
     )
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent, suffix=".part", delete=False
+    ) as handle:
+        staging = Path(handle.name)
     try:
-        stream_to_file(url, destination, progress=progress_bar)
+        stream_to_file(url, staging, progress=progress_bar)
+        os.replace(staging, destination)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
     finally:
         progress_bar.close()
     return destination
+
+
+def download_to_cache(url: str, destination: Path, description: str) -> Path:
+    """Download a URL to a cache path unless a complete copy is already there.
+
+    Keep a cached file only when its size matches the length the server
+    reports, and download it again otherwise.
+
+    Args:
+        url: URL of the file to download.
+        destination: Cache path the file is kept at.
+        description: Description for the progress bar.
+
+    Returns:
+        Path to the cached file.
+    """
+    destination = Path(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        expected = remote_content_length(url)
+        if destination.stat().st_size == expected:
+            return destination
+    return download_with_progress(url, description, destination=destination)

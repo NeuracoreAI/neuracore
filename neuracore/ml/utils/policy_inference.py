@@ -17,7 +17,7 @@ from neuracore_types import (
 
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
-from neuracore.core.utils.download import download_with_progress
+from neuracore.core.utils.download import download_to_cache
 from neuracore.core.utils.embodiment_description_utils import (
     resolve_embodiment_descriptions_with_override,
 )
@@ -210,16 +210,11 @@ class PolicyInference:
             else:
                 checkpoint_name = f"checkpoint_{epoch}.pt"
                 checkpoint_url = self._get_checkpoint_url(checkpoint_name)
-            checkpoint_path = (
-                Path(tempfile.gettempdir()) / self.job_id / checkpoint_name
+            checkpoint_path = download_to_cache(
+                checkpoint_url,
+                Path(tempfile.gettempdir()) / self.job_id / checkpoint_name,
+                f"Downloading checkpoint {checkpoint_name}",
             )
-            if not checkpoint_path.exists():
-                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                checkpoint_path = download_with_progress(
-                    checkpoint_url,
-                    f"Downloading checkpoint {checkpoint_name}",
-                    destination=checkpoint_path,
-                )
         elif checkpoint_file is not None:
             checkpoint_path = Path(checkpoint_file)
         else:
