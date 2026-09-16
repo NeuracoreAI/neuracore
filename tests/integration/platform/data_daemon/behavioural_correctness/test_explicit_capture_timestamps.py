@@ -220,11 +220,14 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
                 f" stop_recording; row={row}"
             )
 
-            expected_timestamps = precompute_timestamps(
-                spec.timestamp_start_s,
-                spec.expected_joint_frames,
-                spec.case.joint_fps,
-            )
+            expected_timestamps = [
+                seconds_to_ticks(ts)
+                for ts in precompute_timestamps(
+                    spec.timestamp_start_s,
+                    spec.expected_joint_frames,
+                    spec.case.joint_fps,
+                )
+            ]
             recording_dir = get_daemon_recordings_root_path() / str(recording_index)
             on_disk = collect_trace_timestamps_per_file(recording_dir)
             assert on_disk, (
@@ -319,11 +322,14 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 (earlier_index, earlier_spec.timestamp_start_s),
             ):
                 _wait_for_written_traces(recording_index)
-                expected_timestamps = precompute_timestamps(
-                    timeline_start_s,
-                    spec.expected_joint_frames,
-                    spec.case.joint_fps,
-                )
+                expected_timestamps = [
+                    seconds_to_ticks(ts)
+                    for ts in precompute_timestamps(
+                        timeline_start_s,
+                        spec.expected_joint_frames,
+                        spec.case.joint_fps,
+                    )
+                ]
                 recording_dir = get_daemon_recordings_root_path() / str(recording_index)
                 on_disk = collect_trace_timestamps_per_file(recording_dir)
                 assert on_disk, (
