@@ -13,8 +13,8 @@
 //! Two writers keep it current, and they cover different ground:
 //!
 //! * **This process's own lifecycle calls.** `start_recording` returns the very
-//!   capture timestamp the daemon stores as
-//!   [`data_daemon_shared::LiveRecording::start_timestamp_ns`], so a recording
+//!   start tick the daemon stores as
+//!   [`data_daemon_shared::LiveRecording::start_timestamp`], so a recording
 //!   bracketed here is known exactly, the instant it opens, with no IPC at all.
 //! * **A refresh through the `recording_state` query**, scheduled off the log
 //!   path when an entry goes stale. This is what finds a recording started
@@ -86,7 +86,7 @@ type Entries = HashMap<String, HashMap<i64, Entry>>;
 fn is_other(held: &LiveRecording, found: &LiveRecording) -> bool {
     match (held.recording_index, found.recording_index) {
         (Some(held_index), Some(found_index)) => held_index != found_index,
-        _ => held.start_timestamp_ns != found.start_timestamp_ns,
+        _ => held.start_timestamp != found.start_timestamp,
     }
 }
 
@@ -226,10 +226,10 @@ fn read(robot_id: &str, robot_instance: i64) -> Option<Option<LiveRecording>> {
 
 /// Record the recording this process just opened for `source`.
 ///
-/// `started_at_ns` is `start_recording`'s return value, which is exactly what
+/// `start_timestamp` is `start_recording`'s return value, which is exactly what
 /// the daemon stores as the recording's start — so this entry already agrees
 /// with what a refresh would fetch, bar the ids the daemon has yet to mint.
-pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_ns: i64) {
+pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, start_timestamp: i64) {
     let mut entries = ENTRIES.write().unwrap_or_else(|p| p.into_inner());
     let entry = entry_mut(&mut entries, robot_id, robot_instance);
     // Unconditional, unlike a refresh: this call *is* a new recording, whatever
@@ -238,7 +238,7 @@ pub(crate) fn note_local_start(robot_id: &str, robot_instance: i64, started_at_n
     entry.open = Some(LiveRecording {
         recording_index: None,
         recording_id: None,
-        start_timestamp_ns: Some(started_at_ns),
+        start_timestamp: Some(start_timestamp),
     });
     entry.seq = entry.seq.wrapping_add(1);
     entry.written_at = Some(Instant::now());
@@ -451,23 +451,23 @@ mod tests {
         lookup(&entries, source).map(|entry| entry.seq).unwrap_or(0)
     }
 
-    fn opened(recording_index: Option<i64>, started_at_ns: i64) -> Option<LiveRecording> {
+    fn opened(recording_index: Option<i64>, start_timestamp: i64) -> Option<LiveRecording> {
         Some(LiveRecording {
             recording_index,
             recording_id: None,
-            start_timestamp_ns: Some(started_at_ns),
+            start_timestamp: Some(start_timestamp),
         })
     }
 
     fn opened_with_id(
         recording_index: Option<i64>,
-        started_at_ns: i64,
+        start_timestamp: i64,
         recording_id: &str,
     ) -> Option<LiveRecording> {
         Some(LiveRecording {
             recording_index,
             recording_id: Some(recording_id.to_string()),
-            start_timestamp_ns: Some(started_at_ns),
+            start_timestamp: Some(start_timestamp),
         })
     }
 
