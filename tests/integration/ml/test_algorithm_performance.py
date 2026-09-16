@@ -290,6 +290,15 @@ class TestAlgorithmPerformance:
             raise
 
         logger.info(f"[{algorithm_name}] success_rate={success_rate:.2%}")
+
+        # Written before the threshold check below so a run that fails its
+        # threshold still reports the rate it achieved. The CI dashboard reads
+        # this back off the job's ci-manifest artifact.
+        github_output = os.environ.get("GITHUB_OUTPUT")
+        if github_output:
+            with open(github_output, "a") as f:
+                f.write(f"success_rate={success_rate}\n")
+
         nc.delete_endpoint(endpoint_id)
         nc.delete_training_job(training_job_id)
 

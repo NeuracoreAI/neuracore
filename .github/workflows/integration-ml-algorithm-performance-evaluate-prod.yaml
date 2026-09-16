@@ -133,11 +133,14 @@ jobs:
         extras: dev,ml,examples
 
     - name: Resolve test harness
+      id: harness
       run: |
         echo "TEST_HARNESS_PATH=tests/integration/ml/test_algorithm_performance.py" >> "$GITHUB_ENV"
+        harness_sha="$(git rev-parse HEAD)"
+        echo "sha=$harness_sha" >> "$GITHUB_OUTPUT"
         echo "Test harness environment: production"
         echo "Test harness ref: $TEST_HARNESS_REF"
-        echo "Test harness commit: $(git rev-parse HEAD)"
+        echo "Test harness commit: $harness_sha"
         echo "Test harness path: tests/integration/ml/test_algorithm_performance.py"
         python - << 'EOF'
         import neuracore
@@ -146,6 +149,7 @@ jobs:
         EOF
 
     - name: Run Evaluation
+      id: evaluate
       env:
         NEURACORE_API_URL: https://api.neuracore.com/api
         NEURACORE_API_KEY: ${{ secrets.PROD_SERVICE_API_KEY }}
@@ -158,3 +162,19 @@ jobs:
         sudo apt-get install -y libxml2-utils xvfb libgl1-mesa-dev libgl1 libosmesa6-dev
         Xvfb $DISPLAY -screen 0 1280x1024x24 &
         pytest -o log_cli=true --log-cli-level=INFO -v -k test_evaluate "$TEST_HARNESS_PATH"
+
+    # The evaluated rate, published as structured data for the CI dashboard so
+    # it does not have to read it back out of this job's log.
+    - name: Publish CI manifest
+      if: always()
+      uses: NeuracoreAI/shared-workflows/actions/publish-ci-manifest@main
+      with:
+        kind: integration-test
+        service: neuracore
+        environment: production
+        artifact-label: evaluate-${{ matrix.algorithm }}
+        built-ref: ${{ env.TEST_HARNESS_REF }}
+        built-sha: ${{ steps.harness.outputs.sha || github.sha }}
+        extra: >-
+          {"algorithm": "${{ matrix.algorithm }}",
+          "success_rate": "${{ steps.evaluate.outputs.success_rate }}"}
