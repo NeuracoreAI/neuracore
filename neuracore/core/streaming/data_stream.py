@@ -41,7 +41,7 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._recording_epoch: int | None = None
-        self._last_logged_timestamp: float | None = None
+        self._last_logged_timestamp: int | None = None
 
     @property
     def data_type(self) -> DataType:
@@ -57,7 +57,7 @@ class DataStream(ABC):
         return self._latest_data
 
     def _enforce_monotonic_timestamp(
-        self, timestamp: float, recording_epoch: int | None
+        self, timestamp: int, recording_epoch: int | None
     ) -> None:
         """Reject a timestamp that does not strictly increase within a recording.
 
@@ -75,7 +75,7 @@ class DataStream(ABC):
         recordings must not be failed for it.
 
         Args:
-            timestamp: Capture timestamp, in seconds, of the sample being logged.
+            timestamp: Capture time, in ticks, of the sample being logged.
             recording_epoch: Identity of the source's open recording, or ``None``.
 
         Raises:
@@ -145,12 +145,12 @@ class JointDataStream(JsonDataStream):
     def __init__(self, data_type: DataType, data_type_name: str) -> None:
         """Initialize the joint data stream."""
         super().__init__(data_type=data_type, data_type_name=data_type_name)
-        self._pending_timestamp: float = 0.0
+        self._pending_timestamp: int = 0
         self._pending_value: float = 0.0
         self._has_pending_latest = False
 
     def record_scalar(
-        self, timestamp: float, value: float, recording_epoch: int | None = None
+        self, timestamp: int, value: float, recording_epoch: int | None = None
     ) -> None:
         """Stash the latest scalar sample without building a ``JointData``.
 

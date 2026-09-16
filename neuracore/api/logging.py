@@ -7,7 +7,6 @@ All logging functions support optional robot identification and timestamping.
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 from itertools import islice
 from warnings import filterwarnings, warn
@@ -46,6 +45,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.core.utils.ticks import resolve_ticks
 from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.bridge import notify_daemon_config_changed
 from neuracore.data_daemon.video_codec import set_active_profile_video_codec
@@ -199,7 +199,7 @@ def _record_json_to_daemon(
         | LanguageData
         | PointCloudData
     ),
-    timestamp: float,
+    timestamp: int,
 ) -> None:
     """Forward one JSON sample to the daemon's recording pipeline.
 
@@ -214,7 +214,7 @@ def _record_json_to_daemon(
         data_type: Wire label for the sample's trace.
         storage_name: Sensor name the trace is stored under.
         data: Data object to serialize and persist.
-        timestamp: Capture timestamp in seconds.
+        timestamp: Capture time in ticks.
     """
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
     robot._get_daemon_recording_context().log_json(
@@ -276,7 +276,7 @@ def _log_group_of_joint_data(
     joint_data: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint data for a robot.
@@ -287,15 +287,15 @@ def _log_group_of_joint_data(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
         ValueError: If joint_data is not a dictionary of floats
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(joint_data, dict):
         raise ValueError("Joint data must be a dictionary of floats")
     if dry_run:
@@ -478,7 +478,7 @@ def log_custom_1d(
     data: np.ndarray,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log arbitrary data for a robot.
@@ -488,7 +488,8 @@ def log_custom_1d(
         data: Data to log (must be a numpy ndarray)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -499,8 +500,7 @@ def log_custom_1d(
         raise ValueError("Data must be a numpy ndarray")
     if data.ndim != 1:
         raise ValueError("Data must be a 1D numpy ndarray")
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
 
     storage_name = validate_safe_name(name)
     if dry_run:
@@ -531,7 +531,7 @@ def log_joint_positions(
     positions: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint positions for a robot.
@@ -541,7 +541,8 @@ def log_joint_positions(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -563,7 +564,7 @@ def log_joint_position(
     position: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint positions for a robot.
@@ -573,7 +574,8 @@ def log_joint_position(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -594,7 +596,7 @@ def log_joint_target_positions(
     target_positions: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint target positions for a robot.
@@ -605,7 +607,8 @@ def log_joint_target_positions(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -627,7 +630,7 @@ def log_joint_target_position(
     target_position: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint target position for a robot.
@@ -638,7 +641,8 @@ def log_joint_target_position(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -659,7 +663,7 @@ def log_joint_velocities(
     velocities: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint velocities for a robot.
@@ -669,7 +673,8 @@ def log_joint_velocities(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -691,7 +696,7 @@ def log_joint_velocity(
     velocity: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint velocity for a robot.
@@ -702,7 +707,8 @@ def log_joint_velocity(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -723,7 +729,7 @@ def log_joint_torques(
     torques: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint torques for a robot.
@@ -733,7 +739,8 @@ def log_joint_torques(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -755,7 +762,7 @@ def log_joint_torque(
     torque: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log joint torque for a robot.
@@ -766,7 +773,8 @@ def log_joint_torque(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -787,7 +795,7 @@ def log_visual_joint_positions(
     positions: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log visual joint positions for a robot.
@@ -801,7 +809,8 @@ def log_visual_joint_positions(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -823,7 +832,7 @@ def log_visual_joint_position(
     position: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log visual joint position for a robot.
@@ -838,7 +847,8 @@ def log_visual_joint_position(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -860,7 +870,7 @@ def log_pose(
     pose: np.ndarray,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log pose data for a robot.
@@ -871,15 +881,15 @@ def log_pose(
         robot_name: Optional robot name.
             If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
         ValueError: If pose is not a 7-element numpy array
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(pose, np.ndarray):
         raise ValueError(
             f"Pose must be a numpy array, got {type(pose).__name__} for '{name}'."
@@ -916,7 +926,7 @@ def log_end_effector_pose(
     pose: np.ndarray,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log end-effector pose data for a robot.
@@ -926,11 +936,11 @@ def log_end_effector_pose(
         pose: 7-element numpy array: [x, y, z, qx, qy, qz, qw]
         robot_name: Optional robot ID
         instance: Optional instance number
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
 
     if not isinstance(pose, np.ndarray):
         raise ValueError(
@@ -981,7 +991,7 @@ def log_parallel_gripper_open_amount(
     value: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
@@ -991,11 +1001,11 @@ def log_parallel_gripper_open_amount(
         value: Open amount (0.0 = closed, 1.0 = fully open)
         robot_name: Optional robot ID
         instance: Optional instance number
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -1048,7 +1058,7 @@ def log_parallel_gripper_open_amounts(
     values: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log parallel gripper open amount data for a robot.
@@ -1058,11 +1068,11 @@ def log_parallel_gripper_open_amounts(
             (0.0 = closed, 1.0 = fully open)
         robot_name: Optional robot ID
         instance: Optional instance number
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     for name, value in values.items():
         log_parallel_gripper_open_amount(
             name=name,
@@ -1079,7 +1089,7 @@ def log_parallel_gripper_target_open_amount(
     value: float,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log parallel gripper target open amount data for a robot.
@@ -1092,11 +1102,11 @@ def log_parallel_gripper_target_open_amount(
         value: Target open amount (0.0 = closed, 1.0 = fully open)
         robot_name: Optional robot ID
         instance: Optional instance number
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -1153,7 +1163,7 @@ def log_parallel_gripper_target_open_amounts(
     values: dict[str, float],
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log parallel gripper target open amount data for a robot.
@@ -1166,11 +1176,11 @@ def log_parallel_gripper_target_open_amounts(
             (0.0 = closed, 1.0 = fully open)
         robot_name: Optional robot ID
         instance: Optional instance number
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     for name, value in values.items():
         log_parallel_gripper_target_open_amount(
             name=name,
@@ -1187,7 +1197,7 @@ def log_language(
     language: str,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log language annotation for a robot.
@@ -1197,15 +1207,15 @@ def log_language(
         language: A language string associated with this timestep
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
         RobotError: If no robot is active and no robot_name provided
         ValueError: If language is not a string
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
 
@@ -1240,7 +1250,7 @@ def log_rgb(
     intrinsics: np.ndarray | None = None,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log RGB image from a camera.
@@ -1252,7 +1262,8 @@ def log_rgb(
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -1264,8 +1275,7 @@ def log_rgb(
     if rgb.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     rgb_camera_data = RGBCameraData(
         timestamp=timestamp,
         extrinsics=extrinsics,
@@ -1290,7 +1300,7 @@ def log_depth(
     intrinsics: np.ndarray | None = None,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log depth image from a camera.
@@ -1302,7 +1312,8 @@ def log_depth(
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -1322,8 +1333,7 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     depth_camera_data = DepthCameraData(
         timestamp=timestamp,
         extrinsics=extrinsics,
@@ -1349,7 +1359,7 @@ def log_point_cloud(
     intrinsics: np.ndarray | None = None,
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     dry_run: bool = False,
 ) -> None:
     """Log point cloud data from a camera.
@@ -1362,7 +1372,8 @@ def log_point_cloud(
         intrinsics: Optional intrinsics matrix (3x3)
         robot_name: Optional robot ID. If not provided, uses the last initialized robot
         instance: Optional instance number of the robot
-        timestamp: Optional timestamp
+        timestamp: Optional capture time, float seconds or integer ticks.
+            Defaults to the monotonic clock.
         dry_run: If True, skip actual logging (validation only)
 
     Raises:
@@ -1373,8 +1384,7 @@ def log_point_cloud(
         "Point cloud logging is experimental and may change in future releases.",
         ExperimentalPointCloudWarning,
     )
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp = resolve_ticks(timestamp)
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")
     if points.dtype != np.float16:

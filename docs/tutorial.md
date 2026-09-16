@@ -56,11 +56,11 @@ nc.create_dataset(
     description="Example dataset with multiple data types"
 )
 
-# Start recording
-nc.start_recording()
+# Start recording on the same clock as the logged data
+t = time.time()
+nc.start_recording(timestamp=t)
 
 # Log various data types with timestamps
-t = time.time()
 nc.log_joint_positions(positions={'joint1': 0.5, 'joint2': -0.3}, timestamp=t)
 nc.log_joint_velocities(velocities={'joint1': 0.1, 'joint2': -0.05}, timestamp=t)
 nc.log_joint_target_positions(target_positions={'joint1': 0.6, 'joint2': -0.2}, timestamp=t)
@@ -80,8 +80,16 @@ custom_sensor_data = np.array([1.2, 3.4, 5.6])
 nc.log_custom_1d("force_sensor", custom_sensor_data, timestamp=t)
 
 # Stop recording
-nc.stop_recording()
+nc.stop_recording(timestamp=time.time())
 ```
+
+A `timestamp` is float seconds or integer ticks. A tick is one microsecond
+(`TICKS_PER_SECOND` in `neuracore_types.timestamps`). When you give no
+timestamp, the SDK uses the monotonic clock, `time.monotonic_ns() // 1000`.
+Use one clock for a recording: if the logged data uses `time.time()`, give the
+same clock to `start_recording` and `stop_recording`. Recorded and
+synchronized data holds integer ticks. To get seconds, divide by the episode's
+`ticks_per_second`.
 
 #### Live Data Streaming Control
 

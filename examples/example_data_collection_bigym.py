@@ -45,7 +45,7 @@ def run_episode(
     try:
         # Start neuracore recording if required
         if record:
-            nc.start_recording()
+            nc.start_recording(timestamp=t)
 
         for step in demo._steps:
             # Log current joint positions and velocities
@@ -93,7 +93,7 @@ def run_episode(
         if record:
             if success:
                 print("Episode successful → finalizing recording...")
-                nc.stop_recording(wait=True)
+                nc.stop_recording(wait=True, timestamp=t)
             else:
                 print("Episode failed → cancelling recording...")
                 nc.cancel_recording()
