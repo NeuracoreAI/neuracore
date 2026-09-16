@@ -245,7 +245,7 @@ class RecordingContext:
         height: int,
         dtype: str,
         payload: bytes | memoryview,
-        timestamp: float,
+        timestamp: float | int,
     ) -> None:
         """Forward one video frame to the daemon.
 
@@ -259,10 +259,10 @@ class RecordingContext:
                 depth. Parsed once at the native boundary so every internal
                 Rust component works with a strongly typed representation.
             payload: Raw video frame bytes.
-            timestamp: the Unix timestamp of the sample.
+            timestamp: the frame's capture time, float seconds or integer ticks.
         """
         robot_id = self._require_source("log_frame")
-        timestamp_ns = int(timestamp * 1_000_000_000)
+        ticks = timestamp_to_ticks(timestamp)
         native = _load_native()
         try:
             native.log_frame(
@@ -274,8 +274,7 @@ class RecordingContext:
                 int(height),
                 dtype,
                 payload,
-                timestamp_ns,
-                timestamp,
+                ticks,
             )
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error
