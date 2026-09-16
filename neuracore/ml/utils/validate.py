@@ -9,7 +9,6 @@ the Neuracore training and inference infrastructure.
 import gc
 import logging
 import tempfile
-import time
 import traceback
 from pathlib import Path
 
@@ -22,6 +21,7 @@ from neuracore_types import (
     NCData,
     SynchronizedPoint,
 )
+from neuracore_types.timestamps import now_ticks
 from pydantic import BaseModel
 from torch.utils.data import DataLoader
 
@@ -320,7 +320,6 @@ def run_validation(
                     )
 
                 try:
-                    t = time.time()
                     sync_data: dict[DataType, dict[str, NCData]] = {}
                     for data_type, list_batched_nc_data in batch.inputs.items():
                         names = input_embodiment_description[data_type]
@@ -331,7 +330,9 @@ def run_validation(
                             ].sample()
 
                     sync_point = SynchronizedPoint(
-                        timestamp=t, robot_id=dataset.robot.id, data=sync_data
+                        timestamp=now_ticks(),
+                        robot_id=dataset.robot.id,
+                        data=sync_data,
                     )
 
                     # Test the policy prediction

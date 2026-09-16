@@ -18,6 +18,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils import backend_utils
+from neuracore.core.utils.ticks import resolve_ticks
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 from ..core.auth import get_auth
@@ -255,7 +256,7 @@ def is_recording(robot_name: str | None = None, instance: int = 0) -> bool:
 def start_recording(
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
 ) -> None:
     """Start recording data for a specific robot.
 
@@ -267,15 +268,16 @@ def start_recording(
         robot_name: Robot identifier. If not provided, uses the currently
             active robot from the global state.
         instance: Instance number of the robot for multi-instance scenarios.
-        timestamp: Optional capture time (Unix seconds) for the recording's
-            start, matching the ``log_*`` methods. When omitted, the current
-            time is captured.
+        timestamp: Optional start of the recording on the data clock of the
+            ``log_*`` methods, float seconds or integer ticks. Defaults to the
+            monotonic clock.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided,
             if a recording is already in progress, or if no active dataset
             has been set.
     """
+    timestamp = resolve_ticks(timestamp)
     robot = _get_robot(robot_name, instance)
     active_dataset_id = GlobalSingleton()._active_dataset_id
     if active_dataset_id is None:
@@ -309,7 +311,7 @@ def stop_recording(
     robot_name: str | None = None,
     instance: int = 0,
     wait: bool = False,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
     wait_timeout_s: float = _DEFAULT_STOP_RECORDING_WAIT_TIMEOUT_S,
 ) -> None:
     """Stop recording data for a specific robot.
@@ -323,15 +325,16 @@ def stop_recording(
         instance: Instance number of the robot for multi-instance scenarios.
         wait: Whether to block until all data streams have finished uploading
             to the backend storage.
-        timestamp: Optional capture time (Unix seconds) for the recording's
-            stop, matching the ``log_*`` methods. When omitted, the current
-            time is captured.
+        timestamp: Optional stop of the recording on the data clock of the
+            ``log_*`` methods, float seconds or integer ticks. Defaults to the
+            monotonic clock.
         wait_timeout_s: Maximum number of seconds to wait for recording uploads
             to complete when ``wait=True``.
 
     Raises:
         RobotError: If no robot is active and no robot_name is provided.
     """
+    timestamp = resolve_ticks(timestamp)
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
         warn(
@@ -415,18 +418,18 @@ def stop_live_data(robot_name: str | None = None, instance: int = 0) -> None:
 def cancel_recording(
     robot_name: str | None = None,
     instance: int = 0,
-    timestamp: float | None = None,
+    timestamp: float | int | None = None,
 ) -> None:
     """Cancel the current recording for a specific robot without saving any data.
 
     Args:
         robot_name: Robot identifier.
         instance: Instance number of the robot for multi-instance scenarios.
-        timestamp: Optional capture time (Unix seconds) for the cancel,
-            mirroring ``stop_recording``. When omitted, the current time is
-            captured.
+        timestamp: Optional stop of the recording, as for ``stop_recording``,
+            float seconds or integer ticks. Defaults to the monotonic clock.
 
     """
+    timestamp = resolve_ticks(timestamp)
     robot = _get_robot(robot_name, instance)
     if not robot.is_recording():
         return

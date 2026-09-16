@@ -64,6 +64,21 @@ class TestParseSyncPointJointData:
         assert parsed_joint.value == 0.75
 
 
+class TestParseSyncPointLegacyFloatTimestamp:
+    """Tests for messages from an SDK that streams float seconds."""
+
+    def test_float_seconds_timestamp_yields_the_converted_tick(self):
+        message_data = '{"type": "JointData", "timestamp": 1.5, "value": 0.75}'
+        track = _create_track(DataType.JOINT_POSITIONS, label="arm_joint")
+
+        result = parse_sync_point(message_data, track)
+
+        assert result.timestamp == 1_500_000
+        assert result.data[DataType.JOINT_POSITIONS]["arm_joint"].timestamp == (
+            1_500_000
+        )
+
+
 class TestParseSyncPointLanguageData:
     """Tests for parsing language data."""
 
