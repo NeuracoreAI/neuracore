@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 import pytest
+from neuracore_types.timestamps import seconds_to_ticks
 
 import neuracore as nc
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
@@ -210,11 +211,11 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
             )
 
             row = _fetch_only_recording(robot)
-            assert row[COLUMN_START_TIMESTAMP] == int(capture_start_s * 1e9), (
+            assert row[COLUMN_START_TIMESTAMP] == seconds_to_ticks(capture_start_s), (
                 "Recording row did not store the capture start time passed to"
                 f" start_recording; row={row}"
             )
-            assert row[COLUMN_STOP_TIMESTAMP] == int(capture_stop_s * 1e9), (
+            assert row[COLUMN_STOP_TIMESTAMP] == seconds_to_ticks(capture_stop_s), (
                 "Recording row did not store the capture stop time passed to"
                 f" stop_recording; row={row}"
             )
@@ -302,8 +303,8 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 "Both recordings must survive as their own rows; the second is"
                 f" not a continuation of the first. rows={sorted(rows)}"
             )
-            assert rows[earlier_index][COLUMN_START_TIMESTAMP] == int(
-                _EARLIER_CAPTURE_START_S * 1e9
+            assert rows[earlier_index][COLUMN_START_TIMESTAMP] == seconds_to_ticks(
+                _EARLIER_CAPTURE_START_S
             ), (
                 "The later recording did not store its own, earlier capture"
                 f" start; row={rows[earlier_index]}"
