@@ -16,7 +16,7 @@
 //! `(robot_id, robot_instance)`:
 //!
 //! - [`start_recording`] / [`stop_recording`] / [`cancel_recording`] publish
-//!   one lifecycle envelope each, carrying the lifecycle
+//!   one lifecycle envelope each, carrying the lifecycle wall-clock
 //!   `publish_timestamp_ns` and the caller's tick.
 //! - [`log_joints`] / [`log_json`] publish data envelopes tagged with the
 //!   sensor `(data_type, sensor_name)` and capture `timestamp` in ticks.
@@ -195,7 +195,7 @@ pyo3::create_exception!(
 /// component downstream (the writer, the daemon) works with the strongly
 /// typed [`FrameDtype`] rather than re-validating a string.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, width, height, dtype, payload, timestamp))]
 #[allow(clippy::too_many_arguments)]
 fn log_frame(
     py: Python<'_>,
@@ -207,8 +207,7 @@ fn log_frame(
     height: u32,
     dtype: &str,
     payload: PyBuffer<u8>,
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
+    timestamp: i64,
 ) -> PyResult<()> {
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
@@ -232,7 +231,6 @@ fn log_frame(
     // looks (silent data loss) or panicking across the FFI boundary.
     crate::paths::recordings_root()
         .map_err(|message| PyRuntimeError::new_err(message.to_string()))?;
-    let resolved_timestamp_s = timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
 
     // SAFETY: PyO3 holds the GIL here, the buffer is validated `u8` and
     // C-contiguous, the length comes from `PyBuffer::item_count`, and we only
@@ -254,8 +252,7 @@ fn log_frame(
         // Stamped on the caller's thread while the owning recording is open,
         // not on the writer thread, which may reach the frame after the stop.
         publish_ns: now_ns(),
-        timestamp_ns,
-        timestamp_s: resolved_timestamp_s,
+        timestamp,
         data,
     };
 
