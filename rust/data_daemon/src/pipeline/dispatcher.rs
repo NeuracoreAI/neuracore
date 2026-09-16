@@ -383,20 +383,18 @@ struct Held {
     payload: HeldPayload,
 }
 
-/// The data carried by a held envelope. `timestamp_ns` / `timestamp_s` here are
-/// the data's *own* capture clock (content), never routing.
+/// The data carried by a held envelope. `timestamp` here is a tick on the
+/// data's *own* capture clock (content), never routing.
 enum HeldPayload {
     Data {
         data_type: String,
         sensor_name: Option<String>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp: i64,
         payload: Vec<u8>,
     },
     Batch {
         data_type: String,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp: i64,
         items: Vec<BatchedDataItem>,
     },
     Video {
@@ -588,8 +586,7 @@ impl Dispatcher {
                 data_type,
                 sensor_name,
                 publish_timestamp_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 payload,
             } => {
                 let source = (robot_id, robot_instance);
@@ -601,8 +598,7 @@ impl Dispatcher {
                     payload: HeldPayload::Data {
                         data_type,
                         sensor_name,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp,
                         payload,
                     },
                 });
@@ -612,8 +608,7 @@ impl Dispatcher {
                 robot_instance,
                 data_type,
                 publish_timestamp_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 items,
             } => {
                 let source = (robot_id, robot_instance);
@@ -624,8 +619,7 @@ impl Dispatcher {
                     publish_timestamp_ns,
                     payload: HeldPayload::Batch {
                         data_type,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp,
                         items,
                     },
                 });
@@ -1371,8 +1365,7 @@ impl Dispatcher {
             HeldPayload::Data {
                 data_type,
                 sensor_name,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 payload,
             } => {
                 self.route_data(
@@ -1380,16 +1373,14 @@ impl Dispatcher {
                     publish_ts,
                     data_type,
                     sensor_name,
-                    timestamp_ns,
-                    timestamp_s,
+                    timestamp,
                     payload,
                 )
                 .await;
             }
             HeldPayload::Batch {
                 data_type,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 items,
             } => {
                 for item in items {
@@ -1398,8 +1389,7 @@ impl Dispatcher {
                         publish_ts,
                         data_type.clone(),
                         item.sensor_name,
-                        timestamp_ns,
-                        timestamp_s,
+                        timestamp,
                         item.payload,
                     )
                     .await;
@@ -1530,8 +1520,7 @@ impl Dispatcher {
         publish_ts: i64,
         data_type: String,
         sensor_name: Option<String>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp: i64,
         payload: Vec<u8>,
     ) {
         let Some(entry) = self.windows.get_mut(source) else {
@@ -1552,11 +1541,7 @@ impl Dispatcher {
         .sender
         .clone();
         if sender
-            .send(TraceActorMessage::Data {
-                timestamp_ns,
-                timestamp_s,
-                payload,
-            })
+            .send(TraceActorMessage::Data { timestamp, payload })
             .await
             .is_err()
         {
@@ -2014,8 +1999,7 @@ mod tests {
             data_type: "joints".into(),
             sensor_name: Some("waist".into()),
             publish_timestamp_ns: publish_ts,
-            timestamp_ns: content_ts,
-            timestamp_s: None,
+            timestamp: content_ts,
             payload: serde_json::to_vec(&serde_json::json!({ "i": value })).unwrap(),
         }
     }

@@ -19,7 +19,7 @@
 //!   one lifecycle envelope each, carrying the lifecycle
 //!   `publish_timestamp_ns` and the caller's tick.
 //! - [`log_joints`] / [`log_json`] publish data envelopes tagged with the
-//!   sensor `(data_type, sensor_name)` and capture `timestamp_ns`.
+//!   sensor `(data_type, sensor_name)` and capture `timestamp` in ticks.
 //! - [`log_frame`] spools raw RGB into per-`(source, sensor)` NUT chunk files
 //!   under a recording-independent inbox and announces each finished chunk
 //!   with [`VideoChunkReady`](data_daemon_shared::Envelope::VideoChunkReady); the
@@ -131,7 +131,7 @@ fn start_recording(
 /// (~1000 joints ≈ 2 ms). The names are split and zipped with the values on the
 /// publisher thread, off this path.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, names, values, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, names, values, timestamp))]
 #[allow(clippy::too_many_arguments)]
 fn log_joints(
     py: Python<'_>,
@@ -140,8 +140,7 @@ fn log_joints(
     data_type: &str,
     names: &str,
     values: Vec<f64>,
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
+    timestamp: i64,
 ) -> PyResult<()> {
     if robot_id.is_empty() || data_type.is_empty() {
         return Err(PyValueError::new_err(
@@ -167,8 +166,7 @@ fn log_joints(
             data_type,
             joined_names,
             values,
-            timestamp_ns,
-            timestamp_s,
+            timestamp,
             publish_timestamp_ns,
         });
     });
@@ -288,7 +286,7 @@ fn log_frame(
 /// here unchanged. The daemon classifies the label downstream
 /// (see `content_type_for`); it imposes no allowlist.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, data_type, name, payload, timestamp_ns, timestamp_s = None))]
+#[pyo3(signature = (robot_id, robot_instance, data_type, name, payload, timestamp))]
 #[allow(clippy::too_many_arguments)]
 fn log_json(
     py: Python<'_>,
@@ -297,8 +295,7 @@ fn log_json(
     data_type: &str,
     name: &str,
     payload: &[u8],
-    timestamp_ns: i64,
-    timestamp_s: Option<f64>,
+    timestamp: i64,
 ) -> PyResult<()> {
     if robot_id.is_empty() || data_type.is_empty() || name.is_empty() {
         return Err(PyValueError::new_err(
@@ -319,8 +316,7 @@ fn log_json(
             data_type,
             sensor_name: name,
             payload: owned_payload,
-            timestamp_ns,
-            timestamp_s,
+            timestamp,
             publish_timestamp_ns,
         });
     });
