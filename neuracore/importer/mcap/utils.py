@@ -181,7 +181,7 @@ class MCAPSourceEvent:
     source_data: Any
     item: MappingItem
     format: DataFormat
-    timestamp: float
+    timestamp: int
     source_topic: str = ""
 
 
@@ -1213,7 +1213,7 @@ def iter_mcap_source_events(
     *,
     topic_map: TopicMap,
     logger: logging.Logger,
-    timestamp: float,
+    timestamp: int,
     video_decoders: dict[str, H264StreamDecoder] | None = None,
 ) -> Iterator[MCAPSourceEvent]:
     """Yield source events for each mapping config, ready for _log_data.
@@ -1223,7 +1223,7 @@ def iter_mcap_source_events(
         decoded_data: The decoded message.
         topic_map: Topic lookup built by :func:`build_topic_map`.
         logger: Logger for decode diagnostics.
-        timestamp: Neuracore timestamp for this message.
+        timestamp: Neuracore timestamp for this message in ticks.
         video_decoders: Per-episode registry of H.264 decoders keyed by topic,
             owned by the importer so that inter-frame streams stay continuous.
             Required only when a configured image topic carries H.264 payloads.

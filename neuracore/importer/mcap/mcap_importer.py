@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ import numpy as np
 from mcap.reader import make_reader
 from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import NANOSECONDS_PER_TICK
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -181,21 +181,19 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )
 
-        recording_start_timestamp = time.time()
-        recording_stop_timestamp = recording_start_timestamp
+        recording_stop_timestamp = 0
 
         if not self.dry_run:
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=instance,
-                timestamp=recording_start_timestamp,
+                timestamp=0,
             )
         try:
             message_count, recording_stop_timestamp = self._stream_episode_file(
                 episode_file_path=file_path,
                 item=item,
                 label=label,
-                recording_start_timestamp=recording_start_timestamp,
             )
         finally:
             if not self.dry_run:
@@ -208,7 +206,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
 
-    def _record_step(self, step: dict, timestamp: float) -> None:
+    def _record_step(self, step: dict, timestamp: int) -> None:
         """Log decoded data from each MCAP source topic in this step."""
         for topic, decoded_data in step.items():
             for event in iter_mcap_source_events(
@@ -232,8 +230,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         episode_file_path: Path,
         item: ImportItem,
         label: str,
-        recording_start_timestamp: float,
-    ) -> tuple[int, float]:
+    ) -> tuple[int, int]:
         """Stream messages from one MCAP episode file."""
         topics = get_mcap_topics(topic_map=self.topic_map)
         # Fresh decoder factories per episode. mcap decoder factories cache
@@ -241,7 +238,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         # so a factory reused across files decodes with the wrong class.
         factories = list_decoder_factories(logger=self.logger)
         source_start_timestamp_ns: int | None = None
-        recording_stop_timestamp = recording_start_timestamp
+        recording_stop_timestamp = 0
         message_count = 0
         # Fresh video decoders per episode: state must never carry across files.
         self._video_decoders = {}
@@ -271,7 +268,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 relative_timestamp_ns = max(
                     0, decoded_message.timestamp_ns - source_start_timestamp_ns
                 )
-                timestamp = recording_start_timestamp + relative_timestamp_ns / 1e9
+                timestamp = relative_timestamp_ns // NANOSECONDS_PER_TICK
                 recording_stop_timestamp = max(recording_stop_timestamp, timestamp)
 
                 decoded_data = convert_decoded_mcap_data(
@@ -318,7 +315,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         data_type: DataType,
         transformed_data: Any,
         name: str,
-        timestamp: float,
+        timestamp: int,
         *,
         extrinsics: np.ndarray | None = None,
         intrinsics: np.ndarray | None = None,

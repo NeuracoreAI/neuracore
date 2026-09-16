@@ -238,12 +238,8 @@ def test_mcap_importer_build_work_items(monkeypatch, tmp_path: Path):
 def test_mcap_importer_import_item_starts_and_stops_recording(
     monkeypatch, tmp_path: Path
 ):
-    calls: list[tuple[str, float]] = []
+    calls: list[tuple[str, int]] = []
 
-    monkeypatch.setattr(
-        "neuracore.importer.mcap.mcap_importer.time.time",
-        lambda: 100.0,
-    )
     monkeypatch.setattr(
         "neuracore.importer.mcap.mcap_importer.nc.start_recording",
         lambda robot_name, instance, timestamp: calls.append(("start", timestamp)),
@@ -255,15 +251,13 @@ def test_mcap_importer_import_item_starts_and_stops_recording(
 
     importer = _make_importer(monkeypatch, tmp_path)
 
-    def _stream_episode_file(*_args, **kwargs):
-        assert kwargs["recording_start_timestamp"] == 100.0
-        return 3, 105.0
-
-    monkeypatch.setattr(importer, "_stream_episode_file", _stream_episode_file)
+    monkeypatch.setattr(
+        importer, "_stream_episode_file", lambda *_args, **_kwargs: (3, 5_000)
+    )
 
     importer.import_item(importer.build_work_items()[0])
 
-    assert calls == [("start", 100.0), ("stop", 105.0)]
+    assert calls == [("start", 0), ("stop", 5_000)]
 
 
 def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
@@ -281,7 +275,7 @@ def test_mcap_importer_dry_run_skips_recording(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(
         importer,
         "_stream_episode_file",
-        lambda *_args, **_kwargs: (0, 100.0),
+        lambda *_args, **_kwargs: (0, 0),
     )
 
     importer.import_item(importer.build_work_items()[0])
@@ -314,7 +308,7 @@ def test_mcap_importer_record_step_logs_each_event(monkeypatch, tmp_path: Path):
 
     importer._record_step(  # noqa: SLF001
         step={"/topic": {"values": {"a": 1.0, "b": 2.0}}},
-        timestamp=0.5,
+        timestamp=500_000,
     )
 
     assert len(logged) == 2
@@ -620,7 +614,7 @@ def test_iter_mcap_source_events_yields_source_event():
             decoded_data,
             topic_map=topic_map,
             logger=logging.getLogger(__name__),
-            timestamp=1.0,
+            timestamp=1_000_000,
         )
     )
 
@@ -647,7 +641,7 @@ def test_iter_mcap_source_events_unknown_topic_yields_nothing():
             {},
             topic_map=topic_map,
             logger=logging.getLogger(__name__),
-            timestamp=0.0,
+            timestamp=0,
         )
     )
 
@@ -669,7 +663,7 @@ def test_mcap_importer_log_transformed_clips_depth(monkeypatch, tmp_path):
         data_type=DataType.DEPTH_IMAGES,
         transformed_data=oversized,
         name="depth",
-        timestamp=0.0,
+        timestamp=0,
     )
     assert len(logged) == 1
     assert float(np.max(logged[0][1])) <= MAX_DEPTH
@@ -1003,7 +997,7 @@ def test_iter_mcap_source_events_skips_messages_before_keyframe():
                 decoded_data={"data": packet, "format": "h264"},
                 topic_map=topic_map,
                 logger=logger,
-                timestamp=0.0,
+                timestamp=0,
                 video_decoders=decoders,
             )
         )
@@ -1023,7 +1017,7 @@ def test_iter_mcap_source_events_decodes_h264_once_per_message():
             decoded_data={"data": packets[0], "format": "h264"},
             topic_map=topic_map,
             logger=logging.getLogger(__name__),
-            timestamp=0.0,
+            timestamp=0,
             video_decoders=decoders,
         )
     )
@@ -1068,7 +1062,7 @@ def test_iter_mcap_source_events_applies_index_range_to_absolute_source():
             decoded_data=message,
             topic_map=topic_map,
             logger=logging.getLogger(__name__),
-            timestamp=0.0,
+            timestamp=0,
         )
     )
     by_name = {event.item.name: event.source_data for event in events}
@@ -1193,7 +1187,6 @@ def test_stream_episode_file_decodes_each_file_with_its_own_schema_ids(
             episode_file_path=path,
             item=ImportItem(index=0, description=path.name, metadata={}),
             label=path.name,
-            recording_start_timestamp=100.0,
         )
 
     expected = {"/cam": "demo.CompressedImage", "/jnt": "demo.JointState"}
@@ -1267,3 +1260,51 @@ def test_validate_work_items_raises_on_topic_type_change(monkeypatch, tmp_path: 
     assert "demo.JointState" in message
     assert "ep1.mcap" in message
     assert "ep2.mcap" in message
+
+
+def test_stream_episode_file_logs_source_nanoseconds_as_ticks(
+    monkeypatch, tmp_path: Path
+):
+    path = tmp_path / "ep.mcap"
+    source_start_ns = 1_788_363_776_958_256_896
+    message_name, file_name, fields, payload = _MCAP_TEST_TYPES["/jnt"]
+    with path.open("wb") as handle:
+        writer = Writer(handle)
+        writer.start()
+        schema_id = writer.register_schema(
+            name=f"demo.{message_name}",
+            encoding="protobuf",
+            data=_protobuf_schema_bytes(file_name, message_name, fields),
+        )
+        channel_id = writer.register_channel(
+            topic="/jnt", message_encoding="protobuf", schema_id=schema_id
+        )
+        for delta_ns in (0, 1_500, 2_500):
+            writer.add_message(
+                channel_id,
+                log_time=source_start_ns + delta_ns,
+                data=payload,
+                publish_time=source_start_ns + delta_ns,
+            )
+        writer.finish()
+
+    importer = _make_importer(monkeypatch, tmp_path, dry_run=True)
+    monkeypatch.setattr(
+        "neuracore.importer.mcap.mcap_importer.get_mcap_topics",
+        lambda topic_map: ["/jnt"],
+    )
+    logged: list[int] = []
+    monkeypatch.setattr(
+        importer, "_record_step", lambda step, timestamp: logged.append(timestamp)
+    )
+
+    message_count, stop_timestamp = importer._stream_episode_file(
+        episode_file_path=path,
+        item=ImportItem(index=0, description=path.name, metadata={}),
+        label=path.name,
+    )
+
+    assert message_count == 3
+    assert logged == [0, 1, 2]
+    assert all(type(tick) is int for tick in logged)
+    assert stop_timestamp == 2
