@@ -87,7 +87,7 @@ class TrainingStorageHandler(UploadStorageMixin):
         # progress stalled behind it.
         self._progress_executor: ThreadPoolExecutor | None = None
         self._progress_lock = threading.Lock()
-        self._pending_progress: tuple[int, int] | None = None
+        self._pending_progress: tuple[int, int, float | None] | None = None
         self._progress_future: Future | None = None
         self._progress_worker_running = False
 
@@ -382,7 +382,12 @@ class TrainingStorageHandler(UploadStorageMixin):
                     delete_on_success=False,
                 )
 
-    def update_training_progress(self, epoch: int, step: int) -> None:
+    def update_training_progress(
+        self,
+        epoch: int,
+        step: int,
+        seconds_per_epoch: float | None = None,
+    ) -> None:
         """Queue a training epoch/step progress update for cloud storage.
 
         Called from inside the training loop, so the HTTP PUT runs on a
@@ -393,12 +398,14 @@ class TrainingStorageHandler(UploadStorageMixin):
         Args:
             epoch: Current training epoch.
             step: Current training step.
+            seconds_per_epoch: Wall-clock seconds for the latest completed
+                post-warmup epoch, if measured.
         """
         if not self.log_to_cloud:
             return
 
         with self._progress_lock:
-            self._pending_progress = (epoch, step)
+            self._pending_progress = (epoch, step, seconds_per_epoch)
             if self._progress_worker_running:
                 # A worker is already draining and will observe what was just
                 # stored. The flag is cleared under this same lock, so a worker
@@ -428,12 +435,24 @@ class TrainingStorageHandler(UploadStorageMixin):
                     return
             self._send_training_progress(*pending)
 
-    def _send_training_progress(self, epoch: int, step: int) -> None:
+    def _send_training_progress(
+        self,
+        epoch: int,
+        step: int,
+        seconds_per_epoch: float | None = None,
+    ) -> None:
         """Send one progress update, logging rather than raising on failure."""
+        payload: dict[str, int | float | None] = {
+            "epoch": epoch,
+            "step": step,
+            "error": None,
+        }
+        if seconds_per_epoch is not None:
+            payload["seconds_per_epoch"] = seconds_per_epoch
         try:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",
-                json={"epoch": epoch, "step": step, "error": None},
+                json=payload,
             )
         except Exception:
             logger.error("Failed to update training progress to cloud.", exc_info=True)

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import cast
 
@@ -345,7 +346,9 @@ class DistributedTrainer:
                 if isinstance(self.train_loader.sampler, DistributedSampler):
                     self.train_loader.sampler.set_epoch(epoch)
 
+                epoch_t0 = time.perf_counter()
                 train_loss_metrics = self.train_epoch(epoch)
+                train_elapsed = time.perf_counter() - epoch_t0
 
                 # Save checkpoint and artifacts periodically (only from rank 0)
                 if self.rank == 0 and epoch % self.save_freq == 0:
@@ -357,14 +360,21 @@ class DistributedTrainer:
                         output_dir=self.output_dir,
                     )
 
+                validate_t0 = time.perf_counter()
                 with torch.no_grad():
                     self.validate(epoch)
 
-                # Save metadata
+                seconds_per_epoch = train_elapsed + (time.perf_counter() - validate_t0)
+
+                # Save metadata. Skip duration on the first epoch of this
+                # process — it includes cache warmup.
                 if self.rank == 0:
                     self.storage_handler.update_training_progress(
                         epoch=epoch,
                         step=self.global_train_step,
+                        seconds_per_epoch=(
+                            seconds_per_epoch if epoch > start_epoch else None
+                        ),
                     )
                     # Flush logger to ensure data is written
                     if hasattr(self.training_logger, "flush"):
