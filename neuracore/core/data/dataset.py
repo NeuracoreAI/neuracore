@@ -152,6 +152,8 @@ class Dataset:
             metadata=recording_model.metadata,
             data_types=recording_model.data_types,
             encoding=recording_model.encoding,
+            sensor_manifest=recording_model.sensor_manifest,
+            deleted=recording_model.deleted,
         )
 
     def _initialize_num_recordings(self) -> None:
@@ -475,7 +477,7 @@ class Dataset:
             if response.status_code != 200:
                 if non_exist_ok:
                     return None
-                raise DatasetError(f"Dataset '{name}' not found.")
+                raise DatasetError(f"Dataset '{name}' not found, in org {org_id}.")
             dataset_model = DatasetModel.model_validate(response.json())
             return Dataset(
                 id=dataset_model.id,
