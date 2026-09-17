@@ -6,8 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from neuracore.exporter import export as workflow
-from neuracore.exporter.export import DatasetExporter, ExportFile, export_dataset
+from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
 
 class CombinedExporter(DatasetExporter):
@@ -38,7 +37,7 @@ class CombinedExporter(DatasetExporter):
     def write_recording(self, index, recording):
         if self.fail_at == "write":
             raise KeyboardInterrupt()
-        self.ids.append(recording.recording.id)
+        self.ids.append(recording.id)
         return []
 
     def finalize(self):
@@ -59,23 +58,22 @@ class CombinedExporter(DatasetExporter):
 
 
 @pytest.fixture
-def dataset(monkeypatch):
+def dataset():
     class Dataset(list):
         id = "dataset-1"
         name = "Demo"
         org_id = "org-1"
 
-    def source(org_id, recording_id):
-        return SimpleNamespace(metadata=lambda: {"id": recording_id})
-
-    monkeypatch.setattr(workflow, "RecordingSource", source)
-    return Dataset([SimpleNamespace(id="rec-1"), SimpleNamespace(id="rec-2")])
+    return Dataset([
+        SimpleNamespace(id="rec-1", name="rec-1"),
+        SimpleNamespace(id="rec-2", name="rec-2"),
+    ])
 
 
 def test_format_can_publish_shared_files_at_finalization(dataset, tmp_path):
     writer = CombinedExporter()
     progress = Mock()
-    path = export_dataset(dataset, tmp_path / "out", writer, progress)
+    path = export_recordings(dataset, list(dataset), tmp_path / "out", writer, progress)
     manifest = json.loads(path.read_text())
     assert manifest["format"] == "combined-test"
     assert manifest["status"] == "succeeded"
@@ -100,7 +98,7 @@ def test_lifecycle_failure_aborts_and_marks_incomplete(dataset, tmp_path, stage,
     writer = CombinedExporter(fail_at=stage)
     output = tmp_path / "out"
     with pytest.raises(error):
-        export_dataset(dataset, output, writer)
+        export_recordings(dataset, list(dataset), output, writer)
     assert writer.aborted
     assert not (output / "episodes.partial").exists()
     assert json.loads((output / "manifest.json").read_text())["status"] == "incomplete"
@@ -109,7 +107,9 @@ def test_lifecycle_failure_aborts_and_marks_incomplete(dataset, tmp_path, stage,
 def test_format_validation_precedes_output_creation(dataset, tmp_path):
     output = tmp_path / "out"
     with pytest.raises(ValueError, match="invalid input"):
-        export_dataset(dataset, output, CombinedExporter(fail_at="validate"))
+        export_recordings(
+            dataset, list(dataset), output, CombinedExporter(fail_at="validate")
+        )
     assert not output.exists()
 
 
@@ -118,5 +118,14 @@ def test_cleanup_error_does_not_hide_original_failure(dataset, tmp_path):
     writer.abort = Mock(side_effect=OSError("cleanup failed"))
     output = tmp_path / "out"
     with pytest.raises(RuntimeError, match="finalize failed"):
-        export_dataset(dataset, output, writer)
+        export_recordings(dataset, list(dataset), output, writer)
     assert json.loads((output / "manifest.json").read_text())["status"] == "incomplete"
+
+
+def test_existing_output_is_untouched(dataset, tmp_path):
+    sentinel = tmp_path / "out"
+    sentinel.mkdir()
+    (sentinel / "keep.txt").write_text("keep")
+    with pytest.raises(FileExistsError):
+        export_recordings(dataset, list(dataset), sentinel, CombinedExporter())
+    assert (sentinel / "keep.txt").read_text() == "keep"
