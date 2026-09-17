@@ -482,7 +482,14 @@ class TestDatasetRetrieval:
             status_code=404,
         )
 
-        with pytest.raises(DatasetError, match="Dataset 'nonexistent' not found"):
+        mock_data_requests.get(
+            f"{API_URL}/org-management/my-orgs",
+            json=[{"org": {"id": mocked_org_id, "name": "Robotics Lab"}}],
+        )
+
+        with pytest.raises(
+            DatasetError, match="Dataset 'nonexistent' not found in Robotics Lab"
+        ):
             Dataset.get_by_name("nonexistent")
 
     def test_get_by_name_non_exist_ok(self, mock_data_requests, mocked_org_id):

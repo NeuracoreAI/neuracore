@@ -28,6 +28,7 @@ from neuracore.core.data.synced_dataset import SynchronizedDataset
 from ..auth import Auth, get_auth
 from ..const import API_URL, DEFAULT_RECORDING_CACHE_DIR
 from ..exceptions import AuthenticationError, DatasetError
+from ..organizations import list_my_orgs
 from ..utils.http_errors import extract_error_detail
 from ..utils.http_session import thread_local_session
 
@@ -477,7 +478,11 @@ class Dataset:
             if response.status_code != 200:
                 if non_exist_ok:
                     return None
-                raise DatasetError(f"Dataset '{name}' not found, in org {org_id}.")
+                org_name = next(
+                    (org.name for org in list_my_orgs() if org.id == org_id),
+                    "the current organization",
+                )
+                raise DatasetError(f"Dataset '{name}' not found in {org_name}.")
             dataset_model = DatasetModel.model_validate(response.json())
             return Dataset(
                 id=dataset_model.id,
