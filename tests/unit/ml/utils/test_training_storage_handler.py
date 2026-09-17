@@ -557,6 +557,31 @@ class TestUpdateTrainingProgress:
         assert len(put_requests) == 1
         assert put_requests[0].json() == {"epoch": 3, "step": 150, "error": None}
 
+    def test_includes_seconds_per_epoch_when_provided(self, handler, requests_mock):
+        requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
+
+        handler.update_training_progress(epoch=3, step=150, seconds_per_epoch=12.5)
+        handler.wait_for_pending_progress_updates()
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert len(put_requests) == 1
+        assert put_requests[0].json() == {
+            "epoch": 3,
+            "step": 150,
+            "error": None,
+            "seconds_per_epoch": 12.5,
+        }
+
+    def test_omits_seconds_per_epoch_when_none(self, handler, requests_mock):
+        requests_mock.put(f"{BASE_JOB_URL}/update", status_code=200)
+
+        handler.update_training_progress(epoch=1, step=10, seconds_per_epoch=None)
+        handler.wait_for_pending_progress_updates()
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert put_requests[0].json() == {"epoch": 1, "step": 10, "error": None}
+        assert "seconds_per_epoch" not in put_requests[0].json()
+
     def test_does_not_log_in_again_on_401(self, handler, requests_mock, monkeypatch):
         login = MagicMock()
         monkeypatch.setattr("neuracore.login", login)
@@ -604,6 +629,30 @@ class TestUpdateTrainingProgress:
 
         put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
         assert [r.json()["step"] for r in put_requests] == [10, 30]
+
+    def test_coalesces_seconds_per_epoch_with_latest_payload(
+        self, handler, requests_mock
+    ):
+        first_put_started = threading.Event()
+        release_first_put = threading.Event()
+
+        def _blocking_response(request, context):
+            if not first_put_started.is_set():
+                first_put_started.set()
+                release_first_put.wait(timeout=5)
+            context.status_code = 200
+            return ""
+
+        requests_mock.put(f"{BASE_JOB_URL}/update", text=_blocking_response)
+
+        handler.update_training_progress(epoch=2, step=10, seconds_per_epoch=11.0)
+        assert first_put_started.wait(timeout=5)
+        handler.update_training_progress(epoch=3, step=20, seconds_per_epoch=9.5)
+        release_first_put.set()
+        handler.wait_for_pending_progress_updates()
+
+        put_requests = [r for r in requests_mock.request_history if r.method == "PUT"]
+        assert [r.json().get("seconds_per_epoch") for r in put_requests] == [11.0, 9.5]
 
     def test_a_failing_update_does_not_propagate(self, handler, requests_mock):
         """Progress reporting is best-effort; it must not fail a training run."""
