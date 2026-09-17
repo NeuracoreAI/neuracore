@@ -53,7 +53,6 @@ from common.base_env import BimanualViperXTask
 from common.rollout_utils import rollout_policy
 from common.transfer_cube import BIMANUAL_VIPERX_URDF_PATH
 
-from tests.integration.ml.shared.dataset import delete_recording_from_dataset
 from tests.integration.platform.data_daemon.shared.assertions import (
     assert_exactly_one_daemon_pid,
 )
@@ -386,7 +385,7 @@ def test_dataset_synchronization_after_mutation() -> None:
             deleted_ids = {str(recording.id) for recording in recordings_to_delete}
             for recording in recordings_to_delete:
                 logger.info("[STEP 3] Deleting recording %s", recording.id)
-                delete_recording_from_dataset(dataset=dataset, recording=recording)
+                dataset.delete_recording(recording_id=recording.id)
 
             remaining = RECORDINGS_PER_DATASET - RECORDINGS_TO_REMOVE
             wait_for_dataset_ready(
