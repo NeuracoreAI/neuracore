@@ -18,9 +18,10 @@ from neuracore_types.nc_data import DatasetImportConfig
 from rich.logging import RichHandler
 
 import neuracore as nc
+from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.exceptions import DatasetError
-from neuracore.core.robot import Robot
+from neuracore.core.robot import Robot, list_organization_robots
 from neuracore.importer.core.dataset_detector import (
     DatasetDetector,
     iter_first_two_levels,
@@ -144,6 +145,16 @@ def _resolve_robot_descriptions(
     return urdf_path, mjcf_path
 
 
+def _robot_exists(robot_name: str) -> bool:
+    """Return whether a robot with the given name already exists (incl. archived)."""
+    org_id = get_current_org()
+    for is_shared in (False, True):
+        robots = list_organization_robots(org_id, is_shared=is_shared, mode="mixed")
+        if any(robot.get("name") == robot_name for robot in robots):
+            return True
+    return False
+
+
 def _run_import(
     dataset_config: Path,
     dataset_dir: Path,
@@ -264,6 +275,7 @@ def _run_import(
         logger.warning("Both URDF and MJCF files found. Using URDF file.")
         mjcf_path = None
 
+    robot_existed_before = _robot_exists(robot_config.name)
     robot = nc.connect_robot(
         robot_name=robot_config.name,
         urdf_path=urdf_path,
@@ -317,6 +329,23 @@ def _run_import(
     finally:
         if args.dry_run and dry_run_cleanup_dataset:
             _cleanup_dry_run_dataset(dataset_name=dataset_name, dataset=dataset)
+        # Only clean up robots created by this import. Shared robots and
+        # pre-existing robots (including archived) are left alone.
+        if not robot_existed_before and not robot.shared:
+            if args.dry_run:
+                logger.info(
+                    "Dry-run complete; deleting temporary robot '%s' (id=%s).",
+                    robot.name,
+                    robot.id,
+                )
+                robot.delete()
+            else:
+                logger.info(
+                    "Import complete; archiving robot '%s' (id=%s).",
+                    robot.name,
+                    robot.id,
+                )
+                robot.set_archived(True)
 
     logger.info("Finished importing dataset.")
 
@@ -357,6 +386,7 @@ def _run_dataset_import(
             storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
+            robot_id=robot.id,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.MCAP:
@@ -377,6 +407,7 @@ def _run_dataset_import(
             storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
+            robot_id=robot.id,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.RLDS:
@@ -397,6 +428,7 @@ def _run_dataset_import(
             storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
+            robot_id=robot.id,
         )
         importer.import_all()
     elif dataset_type == DatasetTypeConfig.LEROBOT:
@@ -417,6 +449,7 @@ def _run_dataset_import(
             storage_limit=args.storage_limit,
             shared=args.shared,
             debug_target_ee_frame=args.debug_target_ee_frame,
+            robot_id=robot.id,
         )
         importer.import_all()
     else:
