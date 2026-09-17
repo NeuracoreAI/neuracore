@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 
 from .api.core import *  # noqa: F403
+from .api.data_synthesis import *  # noqa: F403
 from .api.datasets import *  # noqa: F403
 from .api.endpoints import *  # noqa: F403
 from .api.logging import *  # noqa: F403
