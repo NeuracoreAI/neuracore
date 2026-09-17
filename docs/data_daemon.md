@@ -292,8 +292,24 @@ These variables control where the daemon runtime artifacts live:
 | PID file path | `NEURACORE_DAEMON_PID_PATH` | `~/.neuracore/daemon.pid` |
 | SQLite DB path | `NEURACORE_DAEMON_DB_PATH` | `~/.neuracore/data_daemon/state.db` |
 | Recordings root | `NEURACORE_DAEMON_RECORDINGS_ROOT` | sibling of DB path (`<db_dir>/recordings`) |
+| Log file | `NEURACORE_DAEMON_LOG_PATH` | sibling of DB path (`<db_dir>/daemon.log`) |
 | Profile for launch/auto-start | `NEURACORE_DAEMON_PROFILE` | unset |
 | Enable debug mode | `NDD_DEBUG` | `false` |
+
+The log rotates by size and is appended to across restarts, so a daemon that
+stops and starts again does not lose the previous run's output:
+
+| Purpose | Environment variable | Default |
+|---|---|---|
+| Size at which the log rotates | `NCD_LOG_MAX_SIZE` | `10mb` |
+| Rotated generations kept | `NCD_LOG_MAX_FILES` | `5` |
+
+Rotated files sit beside the active one as `daemon.log.1` … `daemon.log.5`,
+oldest pruned first, so the log occupies a bounded amount of disk.
+
+A launch that fails before the daemon's logging is up, and any panic, is
+appended to the same file, so a daemon started by the SDK (whose stderr is
+discarded) still records why it exited.
 
 Recommended for containers/dev environments:
 

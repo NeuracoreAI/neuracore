@@ -75,6 +75,63 @@ def attach_json(name: str, value: object) -> None:
         )
 
 
+# Cap on an attached log. Allure builds the report with `--single-file`, which
+# base64-inlines every attachment into one HTML page; a few unbounded logs make
+# it too large to open.
+ATTACHED_LOG_TAIL_BYTES = 512 * 1024
+
+
+def attach_file_tail(name: str, path: Path, tail_bytes: int | None = None) -> bool:
+    """Attach the tail of ``path`` to the active Allure test when available.
+
+    Args:
+        name: Attachment name shown in the report.
+        path: File to attach. A missing or empty file attaches nothing.
+        tail_bytes: Bytes to keep from the end; defaults to
+            :data:`ATTACHED_LOG_TAIL_BYTES`.
+
+    Returns:
+        Whether anything was attached.
+    """
+    allure = _allure_module()
+    if allure is None:
+        return False
+    limit = ATTACHED_LOG_TAIL_BYTES if tail_bytes is None else tail_bytes
+    try:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(size - limit, 0))
+            content = handle.read()
+    except OSError:
+        return False
+    if not content:
+        return False
+    prefix = (
+        b"" if size <= limit else f"[truncated to the last {limit} bytes]\n".encode()
+    )
+    allure.attach(
+        (prefix + content).decode(errors="replace"),
+        name=name,
+        attachment_type=allure.attachment_type.TEXT,
+    )
+    return True
+
+
+def attach_log_files(name: str, path: Path) -> None:
+    """Attach ``path`` and its rotated siblings, newest generation first.
+
+    Rotation names them ``<path>.1``, ``.2``, ... and a SIGKILL between the
+    rotation rename and its background publish can leave a ``.pending.N``, so
+    the glob is deliberately wider than the numbered archives.
+    """
+    attach_file_tail(name, path)
+    siblings = sorted(
+        sibling for sibling in path.parent.glob(f"{path.name}.*") if sibling.is_file()
+    )
+    for sibling in siblings:
+        attach_file_tail(f"{name} ({sibling.suffix.lstrip('.')})", sibling)
+
+
 def record_performance_event(
     phase: str,
     event: str,
@@ -509,6 +566,7 @@ class PerformanceReport:
     parameter = staticmethod(report_parameter)
     attach_text = staticmethod(attach_text)
     attach_json = staticmethod(attach_json)
+    attach_log_files = staticmethod(attach_log_files)
 
 
 @dataclass
@@ -529,6 +587,7 @@ class PerformanceReportContext:
     parameter = staticmethod(report_parameter)
     attach_text = staticmethod(attach_text)
     attach_json = staticmethod(attach_json)
+    attach_log_files = staticmethod(attach_log_files)
 
     def __enter__(self) -> PerformanceReportContext:
         self._started_at = time.perf_counter()

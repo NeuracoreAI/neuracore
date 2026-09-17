@@ -38,8 +38,6 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     DATA_DAEMON_TEST_ARTIFACTS_DIR,
-    DATA_DAEMON_TEST_STATE_ROOT,
-    LOG_DELETE,
     STORAGE_STATE_DELETE,
     STORAGE_STATE_EMPTY,
     STORAGE_STATE_PRESERVE,
@@ -72,30 +70,47 @@ ISOLATION_TEST_STARTED: dict[str, bool] = {"value": False}
 DATA_DAEMON_TEST_ARTIFACT_COUNTER: dict[str, int] = {"value": 0}
 """Monotonic counter used to number per-test artifact directories."""
 
+CURRENT_TEST_ARTIFACT_DIR: dict[str, Path | None] = {"value": None}
+"""Directory :func:`open_per_test_artifact_dir` created for the running test."""
+
 
 # ---------------------------------------------------------------------------
 # Per-test artifact directories
 # ---------------------------------------------------------------------------
 
 
-def setup_per_test_artifact_dirs(
-    test_label: str,
-) -> tuple[Path, Path]:
-    """Create a numbered per-test artifact directory and configure env vars.
+def open_per_test_artifact_dir(test_label: str) -> Path:
+    """Create the numbered artifact directory for the test about to run.
 
     Args:
         test_label: A short human-readable label appended to the directory
             name (e.g. the case ID).
 
     Returns:
-        A ``(per_test_artifacts_dir, per_test_recordings_dir)`` tuple.
+        The absolute per-test artifact directory.
     """
-    DATA_DAEMON_TEST_ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
     DATA_DAEMON_TEST_ARTIFACT_COUNTER["value"] += 1
     test_number = DATA_DAEMON_TEST_ARTIFACT_COUNTER["value"]
     per_test_artifacts_dir = (
         DATA_DAEMON_TEST_ARTIFACTS_DIR / f"[{test_number}]-{test_label}"
-    )
+    ).resolve()
+    per_test_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    CURRENT_TEST_ARTIFACT_DIR["value"] = per_test_artifacts_dir
+    return per_test_artifacts_dir
+
+
+def setup_per_test_artifact_dirs() -> tuple[Path, Path]:
+    """Move the daemon's DB and recordings into this test's artifact directory.
+
+    Returns:
+        A ``(per_test_artifacts_dir, per_test_recordings_dir)`` tuple.
+    """
+    per_test_artifacts_dir = CURRENT_TEST_ARTIFACT_DIR["value"]
+    if per_test_artifacts_dir is None:
+        raise RuntimeError(
+            "No per-test artifact directory is open; the autouse fixture that "
+            "creates one did not run."
+        )
     per_test_recordings_dir = per_test_artifacts_dir / "recordings"
     per_test_recordings_dir.mkdir(parents=True, exist_ok=True)
     os.environ["NEURACORE_DAEMON_DB_PATH"] = str(per_test_artifacts_dir / "state.db")
@@ -114,7 +129,7 @@ def scoped_storage_state(
     case: DataDaemonTestCase,
     specs: Sequence[ContextSpec] = (),
 ) -> Generator[None]:
-    """Apply local storage, daemon-log, and cloud cleanup around the block.
+    """Apply local storage and cloud cleanup around the block.
 
     ``"delete"`` removes the DB file and recordings folder, ``"empty"`` clears
     DB tables and recordings folder contents, and ``"preserve"`` leaves both
@@ -122,8 +137,8 @@ def scoped_storage_state(
     whether the body succeeds or raises.
 
     Args:
-        case: Test case whose ``storage_state_action`` and ``daemon_log_action``
-            decide what is cleaned.
+        case: Test case whose ``storage_state_action`` decides what is
+            cleaned.
         specs: Context specs naming the cloud dataset and robots to delete.
             Empty skips cloud cleanup entirely.
 
@@ -151,8 +166,7 @@ def scoped_storage_state(
             ):
                 apply_storage_state_action(case.storage_state_action)
         try:
-            with scoped_daemon_log_action(case):
-                yield
+            yield
         finally:
             with report_step("Clean local daemon storage"):
                 with Timer(
@@ -165,16 +179,6 @@ def scoped_storage_state(
             assert_post_test_storage_state(
                 storage_state_action=case.storage_state_action,
             )
-
-
-@contextmanager
-def scoped_daemon_log_action(case: DataDaemonTestCase) -> Generator[None]:
-    """Delete the shared ``daemon.log`` after the block, when the case asks."""
-    try:
-        yield
-    finally:
-        if case.daemon_log_action == LOG_DELETE:
-            (DATA_DAEMON_TEST_STATE_ROOT / "daemon.log").unlink(missing_ok=True)
 
 
 def apply_storage_state_action(storage_state_action: str) -> None:

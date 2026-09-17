@@ -26,6 +26,11 @@ pub const RECORDINGS_ROOT_ENV: &str = "NEURACORE_DAEMON_RECORDINGS_ROOT";
 /// `recordings` sibling.
 pub const DB_PATH_ENV: &str = "NEURACORE_DAEMON_DB_PATH";
 
+/// Env var overriding the daemon's log file; defaults to the `daemon.log`
+/// sibling of [`DB_PATH_ENV`]. Also selects *whether* a foreground daemon logs
+/// to a file at all (see `cli::launch`).
+pub const LOG_PATH_ENV: &str = "NEURACORE_DAEMON_LOG_PATH";
+
 /// Raised when a path can only be resolved from the home directory and the home
 /// directory cannot be determined.
 #[derive(Debug, Error)]
@@ -81,6 +86,29 @@ pub fn recordings_root() -> Result<PathBuf, HomeDirUnavailable> {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("recordings"))
+}
+
+/// The explicit log-file override, or `None` when [`LOG_PATH_ENV`] is unset.
+pub fn log_path_override() -> Option<PathBuf> {
+    non_empty_env(LOG_PATH_ENV).and_then(|value| expand_user(&value).ok())
+}
+
+/// Resolve the daemon's log file: [`LOG_PATH_ENV`] if set, otherwise the
+/// `daemon.log` sibling of [`db_path`].
+pub fn log_path() -> Result<PathBuf, HomeDirUnavailable> {
+    let candidate = match log_path_override() {
+        Some(path) => Some(path),
+        None => db_path()?.parent().map(|parent| parent.join("daemon.log")),
+    };
+    if let Some(path) = candidate {
+        if path.is_absolute() {
+            return Ok(path);
+        }
+    }
+    Ok(home_dir()?
+        .join(".neuracore")
+        .join("data_daemon")
+        .join("daemon.log"))
 }
 
 /// Sum the byte count of every regular file beneath `root`, recursively.
@@ -142,10 +170,12 @@ mod tests {
     fn resolution_precedence() {
         let saved_root = std::env::var_os(RECORDINGS_ROOT_ENV);
         let saved_db = std::env::var_os(DB_PATH_ENV);
+        let saved_log = std::env::var_os(LOG_PATH_ENV);
 
         // Explicit recordings-root override wins outright.
         std::env::set_var(RECORDINGS_ROOT_ENV, "/data/records");
         std::env::set_var(DB_PATH_ENV, "/var/lib/ncd/state.db");
+        std::env::remove_var(LOG_PATH_ENV);
         assert_eq!(recordings_root().unwrap(), PathBuf::from("/data/records"));
 
         // Empty override is treated as unset → falls through to the db sibling.
@@ -156,6 +186,40 @@ mod tests {
         );
         assert_eq!(db_path().unwrap(), PathBuf::from("/var/lib/ncd/state.db"));
 
+        // The log defaults to the db sibling, with no override reported.
+        assert_eq!(log_path_override(), None);
+        assert_eq!(
+            log_path().unwrap(),
+            PathBuf::from("/var/lib/ncd/daemon.log")
+        );
+
+        // An explicit log override wins over the db sibling.
+        std::env::set_var(LOG_PATH_ENV, "/var/log/ncd/custom.log");
+        assert_eq!(
+            log_path_override(),
+            Some(PathBuf::from("/var/log/ncd/custom.log"))
+        );
+        assert_eq!(
+            log_path().unwrap(),
+            PathBuf::from("/var/log/ncd/custom.log")
+        );
+
+        // Empty is unset here too.
+        std::env::set_var(LOG_PATH_ENV, "");
+        assert_eq!(log_path_override(), None);
+
+        // A relative override cannot be honoured: the daemonized grandchild
+        // chdir("/")s, so it would resolve against the filesystem root.
+        std::env::set_var(LOG_PATH_ENV, "daemon.log");
+        assert!(log_path().unwrap().is_absolute());
+        assert_ne!(log_path().unwrap(), PathBuf::from("/daemon.log"));
+
+        // Same for a relative db path, whose parent() is "" rather than None.
+        std::env::remove_var(LOG_PATH_ENV);
+        std::env::set_var(DB_PATH_ENV, "state.db");
+        assert!(log_path().unwrap().is_absolute());
+        assert_ne!(log_path().unwrap(), PathBuf::from("/daemon.log"));
+
         // Restore the environment for other tests.
         match saved_root {
             Some(value) => std::env::set_var(RECORDINGS_ROOT_ENV, value),
@@ -164,6 +228,10 @@ mod tests {
         match saved_db {
             Some(value) => std::env::set_var(DB_PATH_ENV, value),
             None => std::env::remove_var(DB_PATH_ENV),
+        }
+        match saved_log {
+            Some(value) => std::env::set_var(LOG_PATH_ENV, value),
+            None => std::env::remove_var(LOG_PATH_ENV),
         }
     }
 

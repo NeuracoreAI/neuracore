@@ -53,3 +53,16 @@ def get_daemon_recordings_root_path() -> Path:
             str(default_root),
         )
     )
+
+
+def get_daemon_log_path(db_path: Path | None = None) -> Path:
+    """Return the daemon's rotating log file."""
+    env_path = os.getenv("NEURACORE_DAEMON_LOG_PATH")
+    if env_path:
+        candidate = Path(env_path).expanduser()
+    else:
+        base = db_path if db_path is not None else get_daemon_db_path()
+        candidate = base.parent / "daemon.log"
+    if candidate.is_absolute():
+        return candidate
+    return Path.home() / ".neuracore" / "data_daemon" / "daemon.log"

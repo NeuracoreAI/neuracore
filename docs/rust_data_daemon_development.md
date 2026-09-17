@@ -193,13 +193,16 @@ To avoid polluting your real `~/.neuracore`, override the runtime paths (also do
 export NEURACORE_DAEMON_PID_PATH=~/tmp/ndd-dev/daemon.pid
 export NEURACORE_DAEMON_DB_PATH=~/tmp/ndd-dev/state.db
 export NEURACORE_DAEMON_RECORDINGS_ROOT=~/tmp/ndd-dev/recordings
+export NEURACORE_DAEMON_LOG_PATH=~/tmp/ndd-dev/daemon.log
 cargo run -p data-daemon -- launch
 ```
 
 ### Foreground vs background
 
-- **Foreground** (default): logs stream to stderr, Ctrl-C triggers graceful shutdown. Use this for almost everything during development.
-- **Background** (`launch --background`): double-forks via [lifecycle::daemonize](../rust/data_daemon/src/lifecycle/daemonize.rs); logs go to a `daemon.log` sibling of the SQLite DB. Use this when you specifically need to test the daemonized path or PID-file handling.
+- **Foreground** (default): logs stream to stderr, Ctrl-C triggers graceful shutdown. Use this for almost everything during development. Set `NEURACORE_DAEMON_LOG_PATH` to send them to a rotating file instead, which is how the SDK gets a log out of a daemon it did not daemonize.
+- **Background** (`launch --background`): double-forks via [lifecycle::daemonize](../rust/data_daemon/src/lifecycle/daemonize.rs); it has no stderr, so it always logs to a file: `NEURACORE_DAEMON_LOG_PATH`, or a `daemon.log` sibling of the SQLite DB. Use this when you specifically need to test the daemonized path or PID-file handling.
+
+The log is appended to across restarts and rotates by size (`NCD_LOG_MAX_SIZE`, `NCD_LOG_MAX_FILES`; see [data_daemon.md](data_daemon.md#runtime-path-environment-variables)).
 
 ### Debug logging
 

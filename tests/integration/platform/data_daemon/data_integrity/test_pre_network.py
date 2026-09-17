@@ -23,7 +23,6 @@ from tests.integration.platform.data_daemon.shared.runners import offline_daemon
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     DataDaemonTestBatch,
     DataDaemonTestCase,
-    case_id,
     case_ids,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -81,7 +80,7 @@ def test_disk_db_data_integrity(
       (isolation post-condition)
     """
     if case.preserve_artifacts_per_test:
-        setup_per_test_artifact_dirs(case_id(case))
+        setup_per_test_artifact_dirs()
 
     results: list[ContextResult] = []
     dataset_name = create_testing_dataset_name(case)
