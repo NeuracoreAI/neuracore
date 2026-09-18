@@ -279,7 +279,8 @@ fn log_frame(
     .map_err(|_| {
         LoggingStalledError::new_err(
             "video logging stalled: the data daemon is not draining the spool \
-             backlog (frame rejected after 1s of backpressure)",
+             backlog (frame rejected after 1s of backpressure); see \
+             https://github.com/NeuracoreAI/neuracore/blob/main/docs/diagnosing_backpressure.md",
         )
     })?;
     Ok(())
