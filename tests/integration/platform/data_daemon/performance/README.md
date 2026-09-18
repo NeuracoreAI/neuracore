@@ -58,14 +58,30 @@ The run directory also retains `daemon-phase-events.jsonl`, `pytest.log`, the
 daemon's `daemon.log`, JUnit XML, and one metrics JSON file per test case.
 
 The staging data-daemon workflow enables capture on scheduled runs and publishes
-two artifacts from each matrix job. The unarchived HTML artifact contains only
-the self-contained report and can be opened directly in a browser. The
-diagnostics artifact contains the daemon logs and SQLite state that exist after
-pytest, along with the configured Allure results/report, JUnit XML, metrics JSON,
-and structured phase events. It uses explicit paths and does not upload raw
-recordings. Both artifacts are linked from the job summary and retained for 14
-days. Manual workflow dispatches expose a **performance-metrics** checkbox to
-turn structured capture off while still producing the standard Allure report.
+two artifacts from each matrix job. The report artifact contains only the
+self-contained Allure page. The diagnostics artifact contains the daemon logs
+and SQLite state that exist after pytest, along with the configured Allure
+results/report, JUnit XML, metrics JSON, and structured phase events. It uses
+explicit paths and does not upload raw recordings. Both artifacts are linked
+from the job summary and retained for 14 days. Manual workflow dispatches expose
+a **performance-metrics** checkbox to turn structured capture off while still
+producing the standard Allure report.
+
+Both artifacts are ordinary zips. The report artifact was briefly uploaded with
+`archive: false`, which lets GitHub render the HTML inline in the browser, but
+`gh run download` cannot fetch an unarchived artifact at all -- it has no "do
+not extract" flag, fails with `zip: not a valid zip file`, and aborts the rest
+of the run's download on the first failure instead of skipping it
+(cli/cli#13012). That made every artifact behind it invisible to anything
+driving the CLI, so the report is archived again until the CLI catches up.
+
+To pull one report without the much larger diagnostics bundle:
+
+```bash
+gh run download <run-id> -n data-daemon-staging-performance-report-<os>-py<version>-run<run-id>-attempt<n>
+```
+
+The exact name is printed in the job summary next to the download link.
 
 Phase totals sum per-trace work. Traces execute concurrently, so those totals
 can exceed wall time; use the exact timeline and maximum duration to find the
