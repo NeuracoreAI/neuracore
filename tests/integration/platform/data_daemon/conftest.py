@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Callable, Iterator
@@ -27,6 +28,7 @@ from tests.integration.platform.data_daemon.shared.profiles import (
 from tests.integration.platform.data_daemon.shared.reporting import (
     PerformanceReportContext,
     attach_json,
+    attach_log_files,
     attach_text,
     build_performance_metrics,
     format_event_timeline,
@@ -42,6 +44,7 @@ from tests.integration.platform.data_daemon.shared.test_case.build_test_case imp
     SESSION_RUNS,
     DataDaemonTestCase,
     _format_timer_stats_line,
+    case_id,
     has_configured_org,
 )
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
@@ -49,6 +52,7 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
 )
 from tests.integration.platform.data_daemon.shared.test_infrastructure import (
     apply_storage_state_action,
+    open_per_test_artifact_dir,
     set_case_analysis_report,
 )
 
@@ -102,6 +106,33 @@ def pytest_configure(config: pytest.Config) -> None:
         raise pytest.UsageError(
             f"cannot write NCD_PERF_EVENTS_PATH {event_path}: {error}"
         ) from error
+
+
+@pytest.fixture(autouse=True)
+def per_test_daemon_log(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Give every test its own daemon log, and attach it when the test ends."""
+    case = request.getfixturevalue("case") if "case" in request.fixturenames else None
+    label = case_id(case) if case is not None else _name_slug(request.node.name)
+    log_path = open_per_test_artifact_dir(label) / "daemon.log"
+    previous = os.environ.get("NEURACORE_DAEMON_LOG_PATH")
+    os.environ["NEURACORE_DAEMON_LOG_PATH"] = str(log_path)
+    try:
+        yield
+    finally:
+        attach_log_files("daemon.log", log_path)
+        if previous is None:
+            os.environ.pop("NEURACORE_DAEMON_LOG_PATH", None)
+        else:
+            os.environ["NEURACORE_DAEMON_LOG_PATH"] = previous
+
+
+def _name_slug(name: str) -> str:
+    """Filesystem-safe label for a test that is not case-driven.
+
+    The test's own name rather than its node id: the ``[N]-`` prefix already
+    makes the directory unique, so the path does not need the module as well.
+    """
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")[:120]
 
 
 @pytest.fixture(autouse=True)

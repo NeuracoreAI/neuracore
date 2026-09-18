@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch};
 
 use crate::cli::coordinators::{build_api_client, spawn_cloud_coordinators};
-use crate::cli::launch_logging::{init_tracing, log_path_for, report_failure};
+use crate::cli::launch_logging::{
+    init_tracing, install_panic_logger, log_launch_failure, report_failure,
+};
 use crate::cloud::{
     read_org_id_from_config, spawn_config_watcher, spawn_recording_reaper, ConfigRefreshRequest,
 };
@@ -33,6 +35,7 @@ use crate::pipeline::dispatcher::{self, DispatcherContext};
 use crate::pipeline::trace_actor::TraceActorContext;
 use crate::state::{EventBus, SqliteStateStore};
 use crate::storage::budget::{StorageBudget, StoragePolicy};
+use data_daemon_shared::paths;
 
 /// Upper bound on how long we wait for the signal-capture task after the
 /// listener returns. In normal operation it has already completed; the
@@ -48,12 +51,30 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
     let runtime_env = RuntimeEnv::from_env();
     let profiles = ProfileManager::new();
 
+    // Resolved first: it depends only on the environment, and every failure
+    // below needs somewhere to report itself.
+    let log_file = if background {
+        match paths::log_path() {
+            Ok(path) => Some(path),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        paths::log_path_override()
+    };
+    install_panic_logger(log_file.clone());
+
     // Ensure the default profile exists before resolving config. A missing
     // *named* profile needs no separate existence pre-check: the
     // `resolve_effective_config` call below surfaces it as
     // `ProfileError::NotFound`, handled in the same match arm.
     if let Err(error) = ensure_default_profile_exists(&profiles) {
-        eprintln!("Failed to create default profile '{DEFAULT_PROFILE_NAME}': {error}");
+        log_launch_failure(
+            log_file.as_deref(),
+            &format!("Failed to create default profile '{DEFAULT_PROFILE_NAME}': {error}"),
+        );
         std::process::exit(1);
     }
 
@@ -64,7 +85,7 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
     let config = match resolve_effective_config(&profiles, Some(&selected_profile), None) {
         Ok(config) => config,
         Err(error) => {
-            eprintln!("{error}");
+            log_launch_failure(log_file.as_deref(), &error.to_string());
             std::process::exit(1);
         }
     };
@@ -76,7 +97,6 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
         // redirect so the subscriber writes to a real destination instead of
         // /dev/null. The original parent doesn't need tracing — it only
         // prints status.
-        let log_path = log_path_for(&runtime_env);
         match daemonize().context("failed to daemonize")? {
             DaemonizeOutcome::Parent(reader) => handle_parent_readiness(reader),
             DaemonizeOutcome::Child(reporter) => run_daemon(
@@ -85,7 +105,7 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
                 selected_profile,
                 effective_debug,
                 Some(reporter),
-                Some(log_path),
+                log_file,
             ),
         }
     } else {
@@ -96,7 +116,7 @@ pub fn run(profile: Option<String>, background: bool, debug: bool) -> Result<()>
             selected_profile,
             effective_debug,
             None,
-            None,
+            log_file,
         )
     }
 }
@@ -123,9 +143,9 @@ fn handle_parent_readiness(reader: crate::lifecycle::daemonize::ReadinessReader)
 /// Run the daemon main loop until a shutdown signal arrives.
 ///
 /// `reporter` is `Some` in background mode and must receive a single ready or
-/// fail message before the original caller unblocks. `log_file` is `Some` in
-/// background mode and points at the file the grandchild routes tracing to,
-/// because its stderr has already been redirected to /dev/null.
+/// fail message before the original caller unblocks. `log_file` names the
+/// rotating log to write tracing to; it is always set in background mode, whose
+/// stderr has already been redirected to /dev/null.
 fn run_daemon(
     runtime_env: RuntimeEnv,
     config: DaemonConfig,
@@ -134,15 +154,6 @@ fn run_daemon(
     reporter: Option<ReadinessReporter>,
     log_file: Option<PathBuf>,
 ) -> Result<()> {
-    if let Err(error) = init_tracing(debug, log_file.as_deref()) {
-        let message = format!("failed to initialise logging: {error}");
-        report_failure(reporter, &message);
-        return Err(error.context("failed to initialise logging"));
-    }
-    if debug {
-        tracing::debug!(?config, "effective configuration resolved");
-    }
-
     // Sweep a stale PID file *before* acquire so the next `status` command (or
     // diagnostics that read the file without taking the flock) doesn't report
     // a misleading "running" against a dead PID in the window between SIGKILL
@@ -150,13 +161,35 @@ fn run_daemon(
     // recover via flock + truncate even without this — but doing it eagerly
     // keeps the on-disk PID file consistent for everyone, not just the
     // launcher.
-    match reclaim_stale_pid_file(&runtime_env.pid_path) {
+
+    let reclaim = reclaim_stale_pid_file(&runtime_env.pid_path);
+    let cleaned = cleanup_stale_ipc();
+
+    let pid_file = match PidFile::acquire(&runtime_env.pid_path) {
+        Ok(pid_file) => pid_file,
+        Err(PidFileError::AlreadyRunning(pid)) => {
+            let message = format!("Daemon already running (pid={pid})");
+            log_launch_failure(log_file.as_deref(), &message);
+            report_failure(reporter, &message);
+            std::process::exit(1);
+        }
+        Err(PidFileError::Io(error)) => {
+            let context = format!("failed to acquire {}", runtime_env.pid_path.display());
+            let message = format!("{context}: {error}");
+            log_launch_failure(log_file.as_deref(), &message);
+            report_failure(reporter, &message);
+            return Err(anyhow::Error::from(error).context(context));
+        }
+    };
+
+    init_tracing(debug, log_file.as_deref());
+    match reclaim {
         Ok(PidReclaim::RemovedStale(prev)) => {
             tracing::info!(previous_pid = ?prev, "removed stale pid file from prior unclean exit");
         }
         Ok(PidReclaim::StillRunning(_) | PidReclaim::Absent) => {}
         Err(error) => {
-            // Non-fatal: `PidFile::acquire` below still recovers via flock +
+            // Non-fatal: `PidFile::acquire` above still recovers via flock +
             // truncate. But a failure here (e.g. a permissions problem on the
             // pid dir) is worth surfacing rather than silently discarding.
             tracing::warn!(
@@ -166,29 +199,12 @@ fn run_daemon(
             );
         }
     }
-    let cleaned = cleanup_stale_ipc();
     if cleaned > 0 {
         tracing::info!(count = cleaned, "cleaned stale ipc artefacts");
     }
-
-    // Acquire the single-instance PID file *before* starting the Tokio runtime
-    // so a duplicate-launch error is reported promptly and doesn't leak a
-    // half-built runtime.
-    let pid_file = match PidFile::acquire(&runtime_env.pid_path) {
-        Ok(pid_file) => pid_file,
-        Err(PidFileError::AlreadyRunning(pid)) => {
-            let message = format!("Daemon already running (pid={pid})");
-            tracing::error!("{message}");
-            report_failure(reporter, &message);
-            std::process::exit(1);
-        }
-        Err(PidFileError::Io(error)) => {
-            let context = format!("failed to acquire {}", runtime_env.pid_path.display());
-            tracing::error!(%error, "{context}");
-            report_failure(reporter, &format!("{context}: {error}"));
-            return Err(anyhow::Error::from(error).context(context));
-        }
-    };
+    if debug {
+        tracing::debug!(?config, "effective configuration resolved");
+    }
 
     // Verify ffmpeg is present and supports the options the encoder depends on
     // *before* standing up the runtime — an incompatible build (e.g. one that

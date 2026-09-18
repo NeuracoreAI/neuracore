@@ -7,7 +7,7 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import IO, cast
+from typing import cast
 
 import pytest
 
@@ -37,9 +37,14 @@ def contain_daemon_path_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> 
     a later integration test then reads it as the daemon's pid and stops "the
     daemon" by signalling us. Pre-setting both via ``monkeypatch`` makes the
     ``setdefault`` a no-op and restores them on teardown.
+
+    ``NEURACORE_DAEMON_LOG_PATH`` is cleared rather than set: it is resolved
+    from the ``db_path`` each test launches with, and an ambient value would
+    override that.
     """
     monkeypatch.setenv("NEURACORE_DAEMON_PID_PATH", str(tmp_path / "env-daemon.pid"))
     monkeypatch.setenv("NEURACORE_DAEMON_DB_PATH", str(tmp_path / "env-state.db"))
+    monkeypatch.delenv("NEURACORE_DAEMON_LOG_PATH", raising=False)
 
 
 class _FakePopen:
@@ -204,13 +209,9 @@ def test_launch_runs_bundled_binary_and_redirects_stdio(
     assert captured["start_new_session"] is True
     assert captured["stdin"] is daemon_control.subprocess.DEVNULL
     assert captured["stdout"] is daemon_control.subprocess.DEVNULL
-    # Background stderr is routed to a sibling log file (not an undrained PIPE
-    # that would deadlock the daemon, nor DEVNULL that would hide failures).
-    stderr_target = captured["stderr"]
-    assert stderr_target is not daemon_control.subprocess.PIPE
-    assert stderr_target is not daemon_control.subprocess.DEVNULL
-    assert Path(stderr_target.name) == db_path.parent / "daemon.log"
-    assert (db_path.parent / "daemon.log").exists()
+    # Background stderr is discarded rather than left on an undrained PIPE
+    # that would deadlock the daemon; the daemon logs its own failures.
+    assert captured["stderr"] is daemon_control.subprocess.DEVNULL
     assert captured["close_fds"] is True
     assert captured["cwd"] == str(Path.cwd())
 
@@ -218,6 +219,9 @@ def test_launch_runs_bundled_binary_and_redirects_stdio(
     assert isinstance(env, dict)
     assert env["NEURACORE_DAEMON_PID_PATH"] == str(pid_path)
     assert env["NEURACORE_DAEMON_DB_PATH"] == str(db_path)
+    # The daemon writes its own log, so it has to be told where. Naming it is
+    # also what makes a foreground daemon log to a file rather than stderr.
+    assert env["NEURACORE_DAEMON_LOG_PATH"] == str(db_path.parent / "daemon.log")
     # The daemon owns its PID file, so the parent must not write it itself.
     assert not pid_path.exists()
 
@@ -257,17 +261,23 @@ def test_launch_keeps_foreground_stdio_attached(
     assert not pid_path.exists()
 
 
-def test_launch_premature_exit_includes_stderr(
+def _append_to_daemon_log(popen_kwargs: dict[str, object], message: bytes) -> None:
+    """Write to the log the daemon was told to use, as the real one would."""
+    environment = cast(dict[str, str], popen_kwargs["env"])
+    with open(environment["NEURACORE_DAEMON_LOG_PATH"], "ab") as handle:
+        handle.write(message)
+
+
+def test_launch_premature_exit_includes_the_daemon_log(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     pid_path = tmp_path / "daemon.pid"
     db_path = tmp_path / "state.db"
 
     def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
-        # The real daemon writes its failure to the stderr target before it
-        # exits; emulate that so the parent can read it back from the log file.
-        stderr_target = cast(IO[bytes], kwargs["stderr"])
-        stderr_target.write(b"failed to open iceoryx2 service")
+        # The real daemon appends its failure to its own log before it exits;
+        # emulate that so the parent can read it back.
+        _append_to_daemon_log(kwargs, b"failed to open iceoryx2 service")
         return _FakePopen(pid=99999, poll_value=1)
 
     monkeypatch.setattr(daemon_control.subprocess, "Popen", fake_popen)
@@ -279,6 +289,61 @@ def test_launch_premature_exit_includes_stderr(
     message = str(exc_info.value)
     assert "exit code 1" in message
     assert "failed to open iceoryx2 service" in message
+
+
+def test_launch_does_not_truncate_the_daemon_log(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A restart must leave the previous daemon's log intact.
+
+    The regression this whole path exists to prevent: the launcher used to open
+    ``daemon.log`` with ``"wb"``, so every start erased the log of the run
+    before it.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    daemon_log = db_path.parent / "daemon.log"
+    daemon_log.write_bytes(b"from the previous daemon\n")
+
+    monkeypatch.setattr(
+        daemon_control.subprocess,
+        "Popen",
+        lambda command, **kwargs: _FakePopen(pid=54321, poll_value=None),
+    )
+    monkeypatch.setattr(daemon_control.time, "sleep", lambda _: None)
+    monkeypatch.setattr(daemon_control, "_daemon_ready", lambda *_, **__: True)
+
+    launch_daemon_subprocess(pid_path=pid_path, db_path=db_path, background=True)
+
+    # The launcher never opens the daemon's log at all.
+    assert daemon_log.read_bytes() == b"from the previous daemon\n"
+
+
+def test_launch_failure_detail_ignores_the_previous_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An appended log must not make a startup error quote an older daemon.
+
+    ``daemon.log`` grows across restarts, so the detail is read from the offset
+    it had before this launch.
+    """
+    pid_path = tmp_path / "daemon.pid"
+    db_path = tmp_path / "state.db"
+    (db_path.parent / "daemon.log").write_bytes(b"the previous daemon shut down\n")
+
+    def fake_popen(command: list[str], **kwargs: object) -> _FakePopen:
+        _append_to_daemon_log(kwargs, b"this launch could not bind")
+        return _FakePopen(pid=99999, poll_value=1)
+
+    monkeypatch.setattr(daemon_control.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(daemon_control.time, "sleep", lambda _: None)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        launch_daemon_subprocess(pid_path=pid_path, db_path=db_path, background=True)
+
+    message = str(exc_info.value)
+    assert "this launch could not bind" in message
+    assert "the previous daemon shut down" not in message
 
 
 def _install_fake_bridge(

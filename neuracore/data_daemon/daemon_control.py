@@ -10,7 +10,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import IO, Any, cast
+from typing import Any, cast
 
 import filelock
 
@@ -21,7 +21,11 @@ from neuracore.data_daemon.binary import (
     require_data_daemon_binary,
 )
 from neuracore.data_daemon.const import DEFAULT_DAEMON_STARTUP_TIMEOUT_SECONDS
-from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_pid_path
+from neuracore.data_daemon.helpers import (
+    get_daemon_db_path,
+    get_daemon_log_path,
+    get_daemon_pid_path,
+)
 
 # Reported for a daemon that answers the health probe but has no version
 # service, which is every daemon built before that service existed.
@@ -220,17 +224,19 @@ def _build_daemon_launch_env(
     *,
     pid_path: Path,
     db_path: Path,
+    log_path: Path,
     env_overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Build the environment for launching the daemon subprocess.
 
-    The daemon manages its own PID file (see
+    The daemon manages its own PID file and its own log (see
     [rust/data_daemon/src/cli/launch.rs](../../rust/data_daemon/src/cli/launch.rs)),
-    so the parent only tells it where that file lives.
+    so the parent only tells it where both live.
     """
     environment = os.environ.copy()
     environment["NEURACORE_DAEMON_PID_PATH"] = str(pid_path)
     environment["NEURACORE_DAEMON_DB_PATH"] = str(db_path)
+    environment["NEURACORE_DAEMON_LOG_PATH"] = str(log_path)
     if env_overrides:
         environment.update(env_overrides)
     return cast(dict[str, str], environment)
@@ -243,52 +249,33 @@ def _start_daemon_subprocess(
     env_overrides: dict[str, str] | None = None,
     stdout: int | None = None,
     stderr: int | None = None,
-) -> tuple[subprocess.Popen, Path | None]:
+) -> subprocess.Popen:
     """Start the daemon subprocess with the requested terminal mode.
 
-    Returns the process together with the log path its stderr was routed to
-    in background mode (``None`` in the foreground). A long-lived background
-    daemon must not inherit an undrained ``subprocess.PIPE`` — once the pipe
-    buffer fills, the daemon blocks on its next stderr write and hangs. Sending
-    stderr to ``DEVNULL`` avoids that, but throws away the reason for a startup
-    failure. Routing to a file gets both: writes never block, and the caller
-    can read the daemon's own error output back if it exits prematurely.
+    A long-lived background daemon must not inherit an undrained
+    ``subprocess.PIPE``: once the pipe buffer fills, the daemon blocks on its
+    next stderr write and hangs. Its stderr is discarded instead, because the
+    daemon appends its own launch failures and panics to the log at
+    ``NEURACORE_DAEMON_LOG_PATH``, which is where the caller reads them back
+    from if it exits prematurely.
 
     The binary's ``launch`` subcommand stays in the foreground of the spawned
     process so the parent keeps ordinary ``Popen`` semantics over it.
     """
+    log_path = get_daemon_log_path(db_path)
     environment = _build_daemon_launch_env(
         pid_path=pid_path,
         db_path=db_path,
+        log_path=log_path,
         env_overrides=env_overrides,
     )
     command = [str(require_data_daemon_binary()), "launch"]
     current_working_directory = str(Path.cwd())
 
-    daemon_log_path: Path | None = None
-    daemon_log_handle: IO[bytes] | None = None
-    if background:
-        candidate_log_path = db_path.parent / "daemon.log"
-        try:
-            candidate_log_path.parent.mkdir(parents=True, exist_ok=True)
-            # Truncate so the log reflects this run only; the daemon's own
-            # stderr (tracing output / early eprintln failures) lands here.
-            daemon_log_handle = open(
-                candidate_log_path, "wb", buffering=0
-            )  # noqa: SIM115
-        except OSError:
-            # Fall back to discarding stderr rather than failing the launch.
-            daemon_log_handle = None
-        else:
-            daemon_log_path = candidate_log_path
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     try:
         if background:
-            stderr_target: int | IO[bytes] = (
-                daemon_log_handle
-                if daemon_log_handle is not None
-                else subprocess.DEVNULL
-            )
             process = subprocess.Popen(
                 command,
                 close_fds=True,
@@ -297,7 +284,7 @@ def _start_daemon_subprocess(
                 start_new_session=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
-                stderr=stderr_target,
+                stderr=subprocess.DEVNULL,
             )
         else:
             process = subprocess.Popen(
@@ -310,13 +297,9 @@ def _start_daemon_subprocess(
                 stderr=stderr,
             )
     except OSError as error:
-        if daemon_log_handle is not None:
-            daemon_log_handle.close()
         raise RuntimeError(f"Failed to start daemon: {error}") from error
 
-    if daemon_log_handle is not None:
-        daemon_log_handle.close()
-    return process, daemon_log_path
+    return process
 
 
 # Cap on how much of the daemon log we fold into a premature-exit error, so a
@@ -324,24 +307,53 @@ def _start_daemon_subprocess(
 _DAEMON_FAILURE_DETAIL_TAIL_BYTES = 8192
 
 
+def _file_size(path: Path | None) -> int:
+    """Return ``path``'s size, or 0 when it is missing or unreadable."""
+    if path is None:
+        return 0
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _read_tail_from(path: Path, start_offset: int) -> str:
+    """Return the tail of ``path`` written at or after ``start_offset``.
+
+    ``start_offset`` is where the file ended before this launch, so a file that
+    grows across restarts still yields only this launch's output. A file that
+    shrank (it rotated, or was replaced) is read from the beginning instead.
+    """
+    try:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(start_offset if start_offset <= size else 0)
+            written = handle.read()
+    except OSError:
+        return ""
+    return written[-_DAEMON_FAILURE_DETAIL_TAIL_BYTES:].decode(errors="replace").strip()
+
+
 def _read_daemon_failure_detail(
-    process: subprocess.Popen, daemon_log_path: Path | None
+    process: subprocess.Popen,
+    daemon_log_path: Path | None,
+    daemon_log_offset: int = 0,
 ) -> str:
     """Return the trailing daemon output to append to a premature-exit error.
 
-    Background launches route the daemon's stderr to ``daemon_log_path``;
-    foreground launches may instead expose a readable ``process.stderr`` pipe.
-    Returns a newline-prefixed snippet, or an empty string when no output is
-    available.
+    A background launch discards the daemon's stderr, so its reason for exiting
+    comes from the daemon's own log, which it appends launch failures and panics
+    to before its tracing is up. Foreground launches may instead expose a
+    readable ``process.stderr`` pipe. Returns a newline-prefixed snippet, or an
+    empty string when no output is available.
+
+    The log is read from the offset it had before this launch, because it is
+    appended to across restarts; without that, this would quote the previous
+    daemon's shutdown as the reason this one failed to start.
     """
     output = ""
     if daemon_log_path is not None:
-        try:
-            log_bytes = daemon_log_path.read_bytes()
-        except OSError:
-            log_bytes = b""
-        tail = log_bytes[-_DAEMON_FAILURE_DETAIL_TAIL_BYTES:]
-        output = tail.decode(errors="replace").strip()
+        output = _read_tail_from(daemon_log_path, daemon_log_offset)
     elif process.stderr is not None:
         output = process.stderr.read().decode(errors="replace").strip()
     return f"\n{output}" if output else ""
@@ -363,7 +375,9 @@ def launch_daemon_subprocess(
     parent must not overwrite it.
     """
     pid_path.parent.mkdir(parents=True, exist_ok=True)
-    process, daemon_log_path = _start_daemon_subprocess(
+    daemon_log_path = get_daemon_log_path(db_path)
+    daemon_log_offset = _file_size(daemon_log_path)
+    process = _start_daemon_subprocess(
         pid_path=pid_path,
         db_path=db_path,
         background=background,
@@ -376,7 +390,11 @@ def launch_daemon_subprocess(
 
     while time.monotonic() < daemon_startup_timeout_s:
         if process.poll() is not None:
-            detail = _read_daemon_failure_detail(process, daemon_log_path)
+            detail = _read_daemon_failure_detail(
+                process,
+                daemon_log_path if background else None,
+                daemon_log_offset=daemon_log_offset,
+            )
             raise RuntimeError(
                 f"Daemon process exited unexpectedly during startup "
                 f"(exit code {process.returncode}).{detail}"

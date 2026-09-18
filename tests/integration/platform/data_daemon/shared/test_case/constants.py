@@ -1,5 +1,6 @@
 """Shared constants for data-daemon test configuration."""
 
+import os
 import time
 from pathlib import Path
 from typing import Literal
@@ -17,9 +18,11 @@ DATA_DAEMON_TEST_STATE_ROOT = Path(".data_daemon_test_state")
 """Root directory for all test-local daemon state (DB, recordings, artifacts)."""
 
 DATA_DAEMON_TEST_ARTIFACTS_DIR = (
-    DATA_DAEMON_TEST_STATE_ROOT / "artifacts" / time.strftime("%Y%m%d_%H%M%S")
-)
-"""Timestamped directory where per-test artifact copies are stored."""
+    DATA_DAEMON_TEST_STATE_ROOT
+    / "artifacts"
+    / (time.strftime("%Y%m%d_%H%M%S") + os.environ.get("PYTEST_XDIST_WORKER", ""))
+).resolve()
+"""Timestamped directory holding one subdirectory of artifacts per test."""
 
 OFFLINE_RECORDINGS_ROOT = DATA_DAEMON_TEST_STATE_ROOT / "recordings"
 """Directory used as the offline daemon's recordings root in tests."""
@@ -41,10 +44,6 @@ STOP_METHOD_SIGKILL = "sigkill"
 STORAGE_STATE_PRESERVE = "preserve"
 STORAGE_STATE_EMPTY = "empty"
 STORAGE_STATE_DELETE = "delete"
-
-# daemon_log_action (the shared daemon.log, independent of storage_state_action)
-LOG_PRESERVE = "preserve"
-LOG_DELETE = "delete"
 
 # mode
 MODE_SEQUENTIAL = "sequential"
@@ -106,7 +105,6 @@ STORAGE_STATE_ACTIONS = (
     STORAGE_STATE_PRESERVE,
     STORAGE_STATE_EMPTY,
 )
-LOG_ACTIONS = (LOG_DELETE, LOG_PRESERVE)
 MODES = (MODE_SEQUENTIAL, MODE_STAGGERED)
 PRODUCER_CHANNELS = (PRODUCER_SYNCHRONOUS, PRODUCER_PER_THREAD, PRODUCER_MULTI_PROCESS)
 DURATION_MODES = (DURATION_MODE_FIXED, DURATION_MODE_VARIABLE)
@@ -123,7 +121,6 @@ StorageStateAction = Literal["delete", "preserve", "empty"]
 DepthMode = Literal["float16", "float32"]
 """Depth camera sample dtype, matching the wire labels `nc.log_depth()`
 derives from the array's own dtype (`image.dtype.name`)."""
-LogAction = Literal["preserve", "delete"]
 VideoDetail = Literal["realistic", "flat"]
 ProducerPacing = Literal["deadline", "burst-video", "saturate"]
 RecordingControl = Literal["local", "remote", "split"]

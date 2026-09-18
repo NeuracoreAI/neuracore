@@ -39,16 +39,17 @@ def _attach_daemon_diagnostics() -> Generator[None]:
         import allure
     except ImportError:
         return
-    from neuracore.data_daemon.helpers import get_daemon_db_path
+    from neuracore.data_daemon.helpers import get_daemon_db_path, get_daemon_log_path
 
     db_path = get_daemon_db_path()
-    log_path = db_path.parent / "daemon.log"
-    if log_path.exists():
-        allure.attach.file(
-            str(log_path),
-            name="daemon.log",
-            attachment_type=allure.attachment_type.TEXT,
-        )
+    log_path = get_daemon_log_path()
+    for path in [log_path, *sorted(log_path.parent.glob(f"{log_path.name}.*"))]:
+        if path.is_file():
+            allure.attach.file(
+                str(path),
+                name=path.name,
+                attachment_type=allure.attachment_type.TEXT,
+            )
     if db_path.exists():
         allure.attach.file(str(db_path), name="state.db", extension="db")
 

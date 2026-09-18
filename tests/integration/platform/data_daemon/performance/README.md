@@ -54,8 +54,9 @@ The command prints the exact output directory. Open
 - **Performance metrics (JSON)**: workload, producer/end-to-end throughput,
   pytest timers, and the structured phase aggregates in one stable document.
 
-The run directory also retains `daemon-phase-events.jsonl`, `pytest.log`, the
-daemon's `daemon.log`, JUnit XML, and one metrics JSON file per test case.
+The run directory also retains `daemon-phase-events.jsonl`, `pytest.log`, JUnit
+XML, and one metrics JSON file per test case. Each test's own `daemon.log` lives
+beside its other artifacts, under `.data_daemon_test_state/artifacts/`.
 
 The staging data-daemon workflow enables capture on scheduled runs and publishes
 two artifacts from each matrix job. The report artifact contains only the
