@@ -15,7 +15,7 @@ use crate::config::DaemonConfig;
 const YES_VALUES: [&str; 4] = ["1", "true", "yes", "y"];
 
 /// Default backend API URL, from `const.py::API_URL`.
-const DEFAULT_API_URL: &str = "https://api.neuracore.app/api";
+const DEFAULT_API_URL: &str = "https://api.neuracore.com/api";
 
 /// Parse a byte quantity from an integer-or-unit-suffixed string.
 ///

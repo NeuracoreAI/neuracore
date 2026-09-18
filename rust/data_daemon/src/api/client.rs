@@ -32,7 +32,7 @@ pub const RETRYABLE_STATUS_CODES: &[u16] = &[408, 425, 429, 500, 502, 503, 504];
 /// Construction-time configuration for [`ApiClient`].
 #[derive(Debug, Clone)]
 pub struct ApiClientOptions {
-    /// Base URL, e.g. `https://api.neuracore.app/api`.
+    /// Base URL, e.g. `https://api.neuracore.com/api`.
     pub base_url: String,
     /// Per-request timeout. Defaults to 30 seconds.
     pub timeout: Duration,
