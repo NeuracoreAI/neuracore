@@ -12,7 +12,9 @@ Stages run in this order:
 4. Retrieve logs while the job is RUNNING.
 5. Assert the job COMPLETED.
 6-8. Serve the trained model via all three inference paths (direct, local
-   server, remote endpoint). These only need the job from steps 3-5, so
+   server, remote endpoint), each with both explicit embodiment
+   descriptions and the robot_name path that resolves embodiments from
+   the trained model archive. These only need the job from steps 3-5, so
    they run before the resume step and never depend on it.
 9. Resume the same job for additional epochs. Deliberately placed after
    inference: if resuming is flaky, it must not prevent the already-proven
@@ -265,7 +267,7 @@ class TestMLLifecycle:
     collected_dataset: Dataset | None = None
     merged_dataset: Dataset | None = None
     job_id: str | None = None
-    endpoint_id: str | None = None
+    endpoint_ids: list[str]
     deletion_relaunch_job_id: str | None = None
     addition_relaunch_job_id: str | None = None
 
@@ -280,7 +282,7 @@ class TestMLLifecycle:
         cls.collected_dataset = None
         cls.merged_dataset = None
         cls.job_id = None
-        cls.endpoint_id = None
+        cls.endpoint_ids = []
         cls.deletion_relaunch_job_id = None
         cls.addition_relaunch_job_id = None
         nc.login()
@@ -292,12 +294,12 @@ class TestMLLifecycle:
                 "Skipping TestMLLifecycle teardown cleanup: one or more steps failed"
             )
             return
-        if cls.endpoint_id:
+        for endpoint_id in cls.endpoint_ids:
             try:
-                nc.delete_endpoint(cls.endpoint_id)
+                nc.delete_endpoint(endpoint_id)
             except Exception:
                 logger.warning(
-                    f"Failed to delete endpoint {cls.endpoint_id}", exc_info=True
+                    f"Failed to delete endpoint {endpoint_id}", exc_info=True
                 )
         for job_id in (
             cls.job_id,
@@ -491,6 +493,29 @@ class TestMLLifecycle:
             f" (run name='{self.training_name}' id={self.job_id})"
         )
 
+    def test_step06_direct_inference_robot_name(self) -> None:
+        """Resolve embodiments from the model via robot_name (no explicit specs)."""
+        assert self.job_id is not None, "[STEP 3] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        policy = nc.policy(
+            train_run_name=self.training_name,
+            robot_name=ROBOT_NAME,
+        )
+        run_policy_inference(
+            policy=policy,
+            joint_names=JOINT_NAMES,
+            gripper_names=GRIPPER_NAMES,
+            language_label=LANGUAGE_LABEL,
+            nc_cam_name=NC_CAM_NAME,
+            mj_cam_name=MJ_CAM_NAME,
+            output_data_types=OUTPUT_DATA_TYPES,
+        )
+        logger.info(
+            f"[STEP 6] [PASSED] Direct Inference With robot_name Succeeded"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.training_name}' id={self.job_id})"
+        )
+
     def test_step07_local_server_inference(self) -> None:
         assert self.job_id is not None, "[STEP 3] Did Not Complete"
         policy = nc.policy_local_server(
@@ -513,6 +538,30 @@ class TestMLLifecycle:
             f" (run name='{self.training_name}' id={self.job_id})"
         )
 
+    def test_step07_local_server_inference_robot_name(self) -> None:
+        """Local server resolves embodiments via robot_name (no explicit specs)."""
+        assert self.job_id is not None, "[STEP 3] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        policy = nc.policy_local_server(
+            train_run_name=self.training_name,
+            robot_name=ROBOT_NAME,
+            port=LOCAL_SERVER_PORT,
+        )
+        run_policy_inference(
+            policy=policy,
+            joint_names=JOINT_NAMES,
+            gripper_names=GRIPPER_NAMES,
+            language_label=LANGUAGE_LABEL,
+            nc_cam_name=NC_CAM_NAME,
+            mj_cam_name=MJ_CAM_NAME,
+            output_data_types=OUTPUT_DATA_TYPES,
+        )
+        logger.info(
+            f"[STEP 7] [PASSED] Local Server Inference With robot_name Succeeded"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.training_name}' id={self.job_id})"
+        )
+
     def test_step08_deploy_remote_endpoint(self) -> None:
         assert self.job_id is not None, "[STEP 3] Did Not Complete"
         endpoint_name = unique_name(prefix="lifecycle_endpoint")
@@ -523,15 +572,38 @@ class TestMLLifecycle:
             output_embodiment_description=OUTPUT_EMBODIMENT_DESCRIPTION,
             ttl=ENDPOINT_TTL_SECONDS,
         )
-        self.__class__.endpoint_id = endpoint_data["id"]
-        assert self.endpoint_id is not None
-        final_status = wait_for_endpoint(endpoint_id=self.endpoint_id)
+        endpoint_id = endpoint_data["id"]
+        self.__class__.endpoint_ids.append(endpoint_id)
+        final_status = wait_for_endpoint(endpoint_id=endpoint_id)
         assert (
             final_status == "active"
         ), f"Endpoint did not become active, status: {final_status!r}"
         logger.info(
-            f"[STEP 8] [PASSED] Endpoint {self.endpoint_id} Is Active"
+            f"[STEP 8] [PASSED] Endpoint {endpoint_id} Is Active"
             f" (run name='{self.training_name}' id={self.job_id})"
+        )
+
+    def test_step08_deploy_remote_endpoint_robot_name(self) -> None:
+        """Deploy resolves embodiments via robot_name (no explicit specs)."""
+        assert self.job_id is not None, "[STEP 3] Did Not Complete"
+        nc.connect_robot(robot_name=ROBOT_NAME)
+        endpoint_name = unique_name(prefix="lifecycle_endpoint_robot_name")
+        endpoint_data = nc.deploy_model(
+            job_id=self.job_id,
+            name=endpoint_name,
+            robot_name=ROBOT_NAME,
+            ttl=ENDPOINT_TTL_SECONDS,
+        )
+        endpoint_id = endpoint_data["id"]
+        self.__class__.endpoint_ids.append(endpoint_id)
+        final_status = wait_for_endpoint(endpoint_id=endpoint_id)
+        assert (
+            final_status == "active"
+        ), f"Endpoint did not become active, status: {final_status!r}"
+        logger.info(
+            f"[STEP 8] [PASSED] Endpoint {endpoint_id} With robot_name Is Active"
+            f" (robot_name={ROBOT_NAME!r}"
+            f" run name='{self.training_name}' id={self.job_id})"
         )
 
     # -- 9. Resume -----------------------------------------------------
