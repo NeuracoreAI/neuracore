@@ -1,0 +1,63 @@
+name: Manual ML Staging Test
+
+# Ad hoc staging ML runs on any branch. Deliberately outside the code-freeze
+# gate's selection (filename doesn't start with "integration", name doesn't
+# end in "(Staging)"), so a failure here never freezes main - unlike running
+# the nightly integration-ml-*-staging.yaml workflows by hand, which does.
+
+on:
+  workflow_dispatch:
+    inputs:
+      test-path:
+        description: "Suite to run, or all of them"
+        required: true
+        type: choice
+        options:
+          - all
+          - tests/integration/ml/test_algorithm_validation.py
+          - tests/integration/ml/test_back_to_back_training.py
+          - tests/integration/ml/test_dataset_datatype_validation.py
+          - tests/integration/ml/test_dataset_mutation_training.py
+          - tests/integration/ml/test_deleted_dataset_on_resume_training.py
+          - tests/integration/ml/test_failure_reporting.py
+          - tests/integration/ml/test_ml_lifecycle.py
+          - tests/integration/ml/test_multi_node_policy_inference.py
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      test-paths: ${{ steps.plan.outputs.test-paths }}
+    steps:
+      - id: plan
+        env:
+          TEST_PATH: ${{ inputs.test-path }}
+        run: |
+          all='[
+            "tests/integration/ml/test_algorithm_validation.py",
+            "tests/integration/ml/test_back_to_back_training.py",
+            "tests/integration/ml/test_dataset_datatype_validation.py",
+            "tests/integration/ml/test_dataset_mutation_training.py",
+            "tests/integration/ml/test_deleted_dataset_on_resume_training.py",
+            "tests/integration/ml/test_failure_reporting.py",
+            "tests/integration/ml/test_ml_lifecycle.py",
+            "tests/integration/ml/test_multi_node_policy_inference.py"
+          ]'
+          if [ "$TEST_PATH" = "all" ]; then
+            test_paths="$(echo "$all" | jq -c .)"
+          else
+            test_paths="$(jq -cn --arg p "$TEST_PATH" '[$p]')"
+          fi
+          echo "test-paths=$test_paths" >> "$GITHUB_OUTPUT"
+
+  test:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        test-path: ${{ fromJson(needs.plan.outputs.test-paths) }}
+    uses: NeuracoreAI/shared-workflows/.github/workflows/integration-ml-test.yaml@main
+    with:
+      environment: staging
+      test-path: ${{ matrix.test-path }}
+    secrets: inherit
