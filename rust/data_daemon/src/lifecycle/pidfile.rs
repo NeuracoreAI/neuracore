@@ -136,9 +136,9 @@ fn read_pid_from_open_file(file: &File) -> Option<i32> {
 /// Return `true` when `pid` is a live, non-zombie process the current user can
 /// signal.
 ///
-/// `kill(pid, 0)` probes existence, and (on Linux) `/proc/<pid>/stat` is
-/// consulted to exclude zombies. On non-Linux targets the zombie filter is a
-/// no-op — the daemon is Linux-first.
+/// The zombie probe is per-platform because POSIX exposes none: Linux reads
+/// `/proc/<pid>/stat`, macOS the Darwin-only `libproc` call, and any other
+/// target skips the filter.
 pub fn pid_is_running(pid: i32) -> bool {
     match nix::sys::signal::kill(Pid::from_raw(pid), None) {
         Ok(()) => !is_zombie(pid),
@@ -161,13 +161,36 @@ fn is_zombie(pid: i32) -> bool {
     after_comm.split_whitespace().next() == Some("Z")
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn is_zombie(pid: i32) -> bool {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, which is
+    // a live, correctly sized `proc_bsdinfo`.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    // A short or failed read leaves the status unknown; treat it as not a
+    // zombie so the caller falls back to the `kill` probe's answer.
+    written == size && info.pbi_status == libc::SZOMB
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn is_zombie(_pid: i32) -> bool {
     false
 }
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
     use super::*;
     use tempfile::tempdir;
 
@@ -249,5 +272,31 @@ mod tests {
         // already rejects 0/negative values, so we do not need to guard
         // against `kill(0, 0)`'s broadcast-to-process-group semantics here.
         assert!(!pid_is_running(i32::MAX));
+    }
+
+    #[test]
+    fn pid_is_running_false_for_an_unreaped_zombie_child() {
+        // `stop` signals a daemon it did not spawn, so it can never reap the
+        // corpse; the real parent may stay blocked for seconds. A zombie has to
+        // read as not-running or `stop` waits out its graceful and SIGKILL
+        // timeouts on a process that already exited.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pid_is_running(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let still_running = pid_is_running(pid);
+
+        child.wait().expect("reap");
+        assert!(
+            !still_running,
+            "exited-but-unreaped child reported as running"
+        );
     }
 }
