@@ -44,6 +44,7 @@ blowaway
 bodyless
 Brawner
 broadcastable
+bsdinfo
 buildtool
 bumpversion
 byteswap
@@ -272,6 +273,7 @@ libgl
 libglew
 libglib
 libosmesa
+libproc
 libx
 linalg
 lineno
@@ -375,6 +377,8 @@ pbtxt
 perceptrons
 pgoa
 pidfile
+pidinfo
+PIDTBSDINFO
 Pieb
 pinnochio
 PJRT
@@ -493,6 +497,7 @@ swscale
 synchronizable
 syncpoint
 syncpoints
+SZOMB
 targetbody
 tdefl
 TDVB
