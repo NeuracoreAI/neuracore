@@ -15,7 +15,6 @@ import neuracore as nc
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import SYNC_PROGRESS_POLL_INTERVAL_S, Dataset
-from neuracore.core.data.recording import Recording
 from neuracore.core.data.synced_dataset import SynchronizedDataset
 from neuracore.core.utils.embodiment_description_utils import (
     merge_cross_embodiment_description,
@@ -221,16 +220,6 @@ def collect_demo_data(
                 f"Episode {ep_idx + 1} recorded ({len(expanded_action_traj)} frames)"
             )
     return dataset
-
-
-def delete_recording_from_dataset(dataset: Dataset, recording: Recording) -> None:
-    """Remove a recording from a dataset via the platform API."""
-    session = thread_local_session()
-    response = session.delete(
-        f"{API_URL}/org/{dataset.org_id}/datasets/{dataset.id}/recording/{recording.id}",
-        headers=get_auth().get_headers(),
-    )
-    response.raise_for_status()
 
 
 def fetch_dataset_model(dataset: Dataset) -> DatasetModel:

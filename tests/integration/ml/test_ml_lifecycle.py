@@ -44,7 +44,6 @@ from neuracore.core.data.dataset import Dataset
 from neuracore.core.endpoint import Policy
 from tests.integration.ml.shared.dataset import (
     collect_demo_data,
-    delete_recording_from_dataset,
     wait_for_dataset_recording_count,
 )
 from tests.integration.ml.shared.training import (
@@ -595,7 +594,7 @@ class TestMLLifecycle:
                 f"Deleting recording {recording.id!r} ({recording.name!r})"
                 f" from dataset {self.collected_dataset_name!r}"
             )
-            delete_recording_from_dataset(dataset=dataset, recording=recording)
+            dataset.delete_recording(recording_id=recording.id)
 
         expected_after_deletion = (
             COLLECT_NUM_EPISODES - DATA_DELETION_RECORDINGS_TO_REMOVE

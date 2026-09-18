@@ -32,7 +32,6 @@ from tests.integration.ml.shared.dataset import (
     assert_active_recordings,
     assert_dataset_metadata,
     assert_synced_statistics,
-    delete_recording_from_dataset,
     wait_for_dataset_recording_count,
 )
 from tests.integration.ml.shared.training import (
@@ -494,7 +493,7 @@ class TestDatasetMutationTraining:
         }
         for recording in recordings_to_delete:
             logger.info(f"Deleting recording {recording.id!r}")
-            delete_recording_from_dataset(dataset=dataset, recording=recording)
+            dataset.delete_recording(recording_id=recording.id)
 
         remaining = INITIAL_RECORDINGS - MUTATION_DELETE
         self.__class__.dataset = wait_for_dataset_recording_count(
