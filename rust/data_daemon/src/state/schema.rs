@@ -159,10 +159,19 @@ pub struct RecordingRow {
     pub robot_instance: Option<i64>,
     /// Dataset identifier, when supplied.
     pub dataset_id: Option<String>,
-    /// Producer capture-clock window lower bound (Unix nanoseconds).
-    pub start_timestamp_ns: Option<i64>,
-    /// Producer capture-clock window upper bound (Unix nanoseconds).
-    pub stop_timestamp_ns: Option<i64>,
+    /// Caller's start of the recording in ticks, also the marker
+    /// `start_recording` returns.
+    pub start_timestamp: Option<i64>,
+    /// Producer wall-clock publish time of the start (Unix nanoseconds).
+    pub start_publish_timestamp_ns: Option<i64>,
+    /// Caller's stop or cancel of the recording in ticks.
+    pub stop_timestamp: Option<i64>,
+    /// Producer wall-clock publish time of the stop or cancel (Unix
+    /// nanoseconds).
+    pub stop_publish_timestamp_ns: Option<i64>,
+    /// Tick rate of the recording's timestamps. `None` for a recording
+    /// created before the daemon wrote ticks, whose traces hold float seconds.
+    pub ticks_per_second: Option<i64>,
     /// Expected number of traces, set when the producer declares it.
     pub expected_trace_count: Option<i64>,
     /// `1` once the expected trace count has been reported to the backend.
@@ -203,8 +212,11 @@ impl RecordingRow {
             robot_id: row.try_get("robot_id")?,
             robot_instance: row.try_get("robot_instance")?,
             dataset_id: row.try_get("dataset_id")?,
-            start_timestamp_ns: row.try_get("start_timestamp_ns")?,
-            stop_timestamp_ns: row.try_get("stop_timestamp_ns")?,
+            start_timestamp: row.try_get("start_timestamp")?,
+            start_publish_timestamp_ns: row.try_get("start_publish_timestamp_ns")?,
+            stop_timestamp: row.try_get("stop_timestamp")?,
+            stop_publish_timestamp_ns: row.try_get("stop_publish_timestamp_ns")?,
+            ticks_per_second: row.try_get("ticks_per_second")?,
             expected_trace_count: row.try_get("expected_trace_count")?,
             expected_trace_count_reported: row.try_get("expected_trace_count_reported")?,
             progress_reported,
