@@ -10,6 +10,7 @@ from neuracore.core.cli.generate_api_key import run as login
 from neuracore.core.cli.launch_server import run as launch_server
 from neuracore.core.cli.select_current_org import run as select_org
 from neuracore.data_daemon.binary import require_data_daemon_binary
+from neuracore.exporter.cli import export_app
 
 app = typer.Typer(add_completion=True, help="Neuracore command line interface.")
 
@@ -55,6 +56,7 @@ app.command("login")(login)
 app.command("select-org")(select_org)
 app.command("launch-server")(launch_server)
 app.add_typer(cache_app, name="cache")
+app.add_typer(export_app, name="export")
 
 
 @app.command(
