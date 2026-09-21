@@ -3,6 +3,7 @@
 import sys
 from typing import TYPE_CHECKING
 
+import requests
 from neuracore_types import Codec, CrossEmbodimentUnion, DataType
 from neuracore_types import Recording as RecordingModel
 from neuracore_types import RecordingMetadata, RecordingStatus, SynchronizationDetails
@@ -38,6 +39,8 @@ class Recording:
         metadata: RecordingMetadata,
         data_types: set[DataType] | None = None,
         encoding: Codec | None = None,
+        sensor_manifest: dict[DataType, list[str]] | None = None,
+        deleted: bool = False,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -54,6 +57,10 @@ class Recording:
             encoding: Codec used for this recording's RGB camera video. None
                 when there is nothing to report -- no RGB cameras, cameras
                 that disagreed on a codec, or a recording predating the field.
+            sensor_manifest: Sensor names recorded for each data type,
+                captured at finalize. Empty for recordings finalized before
+                this field existed.
+            deleted: Whether the recording has been deleted.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -66,6 +73,8 @@ class Recording:
         self.metadata = metadata
         self.data_types: set[DataType] = data_types or set()
         self.encoding = encoding
+        self.sensor_manifest: dict[DataType, list[str]] = sensor_manifest or {}
+        self.deleted = deleted
         self._raw = {
             "id": recording_id,
             "total_bytes": total_bytes,
@@ -79,6 +88,21 @@ class Recording:
             return self._raw[key]
         except KeyError:
             raise KeyError(f"Recording has no key '{key}'")
+
+    def download(self, filepath: str) -> bytes:
+        """Download an original file without sending API credentials to storage."""
+        url = f"{API_URL}/org/{self.dataset.org_id}/recording/{self.id}"
+        response = thread_local_session().get(
+            f"{url}/download_url",
+            params={"filepath": filepath},
+            headers=get_auth().get_headers(),
+            timeout=(10, 60),
+        )
+        response.raise_for_status()
+        # Use a separate unauthenticated request for signed storage URLs.
+        with requests.get(response.json()["url"], timeout=(10, 300)) as download:
+            download.raise_for_status()
+            return download.content
 
     def synchronize(
         self,
