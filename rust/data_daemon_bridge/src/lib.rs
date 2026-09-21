@@ -70,11 +70,12 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 /// The producer stamps the window's lower bound on the publish clock
 /// (`publish_timestamp_ns`, always wall-clock now) — that, never the caller's
 /// timestamp, is what the daemon uses for window membership, so a synthetic
-/// capture time can't shift the window or clip data. Separately, the recording's
-/// start tick (`timestamp` when supplied, else the publish time in ticks) is
-/// what the daemon stores as `start_timestamp` and POSTs as the backend
-/// `start_time`. The tick is returned because it is what tells this recording
-/// apart from its predecessor before either has a cloud id.
+/// capture time can't shift the window or clip data. The daemon POSTs the
+/// publish time as the backend `start_time`. Separately, the recording's start
+/// tick (`timestamp` when supplied, else the publish time in ticks) is what the
+/// daemon stores as `start_timestamp` and POSTs as the backend
+/// `start_timestamp`. The tick is returned because it is what tells this
+/// recording apart from its predecessor before either has a cloud id.
 ///
 /// `cloud_recording_id` is set only when the backend already minted the id
 /// itself (a recording started from the web frontend) — the daemon then
