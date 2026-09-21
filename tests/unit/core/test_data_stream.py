@@ -78,7 +78,7 @@ def test_joint_stream_materialises_deferred_scalar_on_demand() -> None:
 
     latest = stream.get_latest_data()
     assert isinstance(latest, JointData)
-    assert (latest.timestamp, latest.value) == (1.0, 0.5)
+    assert (latest.timestamp, latest.value) == (1_000_000, 0.5)
 
 
 def test_monotonic_check_is_per_stream() -> None:
