@@ -132,8 +132,7 @@ pub(crate) enum PublishMsg {
         /// the caller's GIL-held path).
         joined_names: String,
         values: Vec<f64>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp: i64,
         publish_timestamp_ns: i64,
     },
     /// One JSON sample to publish as a `Data` envelope.
@@ -143,8 +142,7 @@ pub(crate) enum PublishMsg {
         data_type: String,
         sensor_name: String,
         payload: Vec<u8>,
-        timestamp_ns: i64,
-        timestamp_s: Option<f64>,
+        timestamp: i64,
         publish_timestamp_ns: i64,
     },
     /// A pre-built `VideoChunkReady` envelope to announce (built by the writer
@@ -264,22 +262,16 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 data_type,
                 joined_names,
                 values,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 publish_timestamp_ns,
             } => {
-                let timestamp_for_json =
-                    timestamp_s.unwrap_or_else(|| timestamp_ns as f64 / 1_000_000_000.0);
                 let mut batch_items = Vec::with_capacity(values.len());
                 // Split the `\0`-joined names and pair each with its value — all
                 // on the publisher thread, off the caller's GIL-held path. The
                 // caller guarantees name/value counts match; `zip` is a safety
                 // net if they ever don't (it stops at the shorter).
                 for (name, value) in joined_names.split('\u{0}').zip(values) {
-                    match serde_json::to_vec(&ScalarFrameEntry {
-                        timestamp: timestamp_for_json,
-                        value,
-                    }) {
+                    match serde_json::to_vec(&ScalarFrameEntry { timestamp, value }) {
                         Ok(payload) => batch_items.push(BatchedDataItem {
                             sensor_name: Some(name.to_string()),
                             payload,
@@ -294,8 +286,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                     robot_instance,
                     data_type,
                     publish_timestamp_ns,
-                    timestamp_ns,
-                    timestamp_s,
+                    timestamp,
                     items: batch_items,
                 })
             }
@@ -305,8 +296,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 data_type,
                 sensor_name,
                 payload,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 publish_timestamp_ns,
             } => publish(&Envelope::Data {
                 robot_id,
@@ -314,8 +304,7 @@ fn publish_loop(rx: Receiver<PublishMsg>) {
                 data_type,
                 sensor_name: Some(sensor_name),
                 publish_timestamp_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
                 payload,
             }),
             PublishMsg::Announce(envelope) => publish(&envelope),
@@ -593,7 +582,8 @@ pub(crate) fn publish(envelope: &Envelope) -> Result<(), ProducerError> {
 /// Per-item JSON shape written to `trace.json` for scalar joint streams.
 #[derive(serde::Serialize)]
 struct ScalarFrameEntry {
-    timestamp: f64,
+    /// Capture time in ticks.
+    timestamp: i64,
     value: f64,
 }
 
@@ -601,18 +591,27 @@ struct ScalarFrameEntry {
 mod tests {
     use super::*;
 
-    /// Pin the joint-scalar float serialisation to Python's `json.dumps` shape:
-    /// serde_json (ryū) emits the shortest round-trip with at least one
-    /// fractional digit, so an integer-valued float keeps its `.0` rather than
-    /// collapsing to an int. The cloud-side data verification compares this text
-    /// exactly, so a silent change here would break it (see this crate's
-    /// Cargo.toml note on why we serialise via serde_json, not `write!`).
+    /// Pin the joint-scalar serialisation to Python's `json.dumps` shape: the
+    /// tick is an integer, and serde_json (ryū) emits the value as the shortest
+    /// round-trip with at least one fractional digit, so an integer-valued float
+    /// keeps its `.0` rather than collapsing to an int. The cloud-side data
+    /// verification compares this text exactly, so a silent change here would
+    /// break it (see this crate's Cargo.toml note on why we serialise via
+    /// serde_json, not `write!`).
     #[test]
-    fn scalar_frame_entry_float_repr_matches_python_json_dumps() {
+    fn scalar_frame_entry_repr_matches_python_json_dumps() {
         let cases = [
-            (1.0_f64, 0.5_f64, r#"{"timestamp":1.0,"value":0.5}"#),
-            (2.0_f64, -0.25_f64, r#"{"timestamp":2.0,"value":-0.25}"#),
-            (0.0_f64, 1.0_f64, r#"{"timestamp":0.0,"value":1.0}"#),
+            (
+                1_000_000_i64,
+                0.5_f64,
+                r#"{"timestamp":1000000,"value":0.5}"#,
+            ),
+            (
+                2_000_000_i64,
+                -0.25_f64,
+                r#"{"timestamp":2000000,"value":-0.25}"#,
+            ),
+            (0_i64, 1.0_f64, r#"{"timestamp":0,"value":1.0}"#),
         ];
         for (timestamp, value, expected) in cases {
             let bytes = serde_json::to_vec(&ScalarFrameEntry { timestamp, value }).expect("encode");
