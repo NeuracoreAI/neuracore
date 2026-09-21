@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import shutil
-import time
 import traceback
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
@@ -30,6 +29,7 @@ from neuracore_types.importer.data_config import (
     RGBCameraDataMappingItem,
 )
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import TICKS_PER_SECOND
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -152,8 +152,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
 
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
-        base_time = time.time()
-        recording_stop_timestamp = base_time
+        recording_stop_timestamp = 0
         worker_label = (
             f"worker {self._worker_id}" if self._worker_id is not None else "worker 0"
         )
@@ -168,7 +167,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
-                timestamp=base_time,
+                timestamp=0,
             )
         step_iter, total_steps = self._iter_episode_steps(self._dataset, episode_id)
         self._emit_progress(
@@ -176,8 +175,10 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
         )
         for step_idx, step_data in enumerate(step_iter, start=1):
             self._reset_step_state()
-            timestamp = base_time + (step_idx / self.frequency)
-            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
+            timestamp = int(step_idx * TICKS_PER_SECOND // self.frequency)
+            recording_stop_timestamp = int(
+                (step_idx + 1) * TICKS_PER_SECOND // self.frequency
+            )
             try:
                 self._record_step(step_data, timestamp)
             except Exception as exc:  # noqa: BLE001
@@ -309,7 +310,7 @@ class LeRobotDatasetImporter(NeuracoreDatasetImporter):
             return source
         return source[source_name]
 
-    def _record_step(self, step_data: dict, timestamp: float) -> None:
+    def _record_step(self, step_data: dict, timestamp: int) -> None:
         """Record a single step to Neuracore."""
         for data_type, import_config in self.ordered_import_configs:
             source_prefix = import_config.source

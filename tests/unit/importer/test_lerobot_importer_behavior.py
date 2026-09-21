@@ -119,10 +119,6 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
 
     with (
         patch(
-            "neuracore.importer.lerobot_importer.time.time",
-            return_value=100.0,
-        ),
-        patch(
             "neuracore.importer.lerobot_importer.nc.start_recording"
         ) as start_recording,
         patch(
@@ -131,7 +127,9 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     ):
         importer.import_item(ImportItem(index=0))
 
-    assert importer._record_step.call_count == 2
+    ticks = [call.args[1] for call in importer._record_step.call_args_list]
+    assert ticks == [100_000, 200_000]
+    assert all(type(tick) is int for tick in ticks)
     importer._error_queue.put.assert_called_once()
     queued_error = importer._error_queue.put.call_args.args[0]
     assert isinstance(queued_error, WorkerError)
@@ -149,7 +147,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     start_recording.assert_called_once_with(
         robot_name="test_robot",
         instance=2,
-        timestamp=100.0,
+        timestamp=0,
     )
 
     stop_recording.assert_called_once()
@@ -157,7 +155,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     assert stop_kwargs["robot_name"] == "test_robot"
     assert stop_kwargs["instance"] == 2
     assert stop_kwargs["wait"] is True
-    assert stop_kwargs["timestamp"] == pytest.approx(100.3)
+    assert stop_kwargs["timestamp"] == 300_000
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():
@@ -246,14 +244,14 @@ def test_lerobot_record_step_supports_empty_source_path_for_language():
     importer.ordered_import_configs = [(DataType.LANGUAGE, import_config)]
     importer._log_data = MagicMock()
 
-    importer._record_step({"instruction": "close gripper"}, timestamp=7.5)
+    importer._record_step({"instruction": "close gripper"}, timestamp=7_500_000)
 
     importer._log_data.assert_called_once_with(
         DataType.LANGUAGE,
         "close gripper",
         mapping_item,
         import_format,
-        7.5,
+        7_500_000,
         extrinsics=None,
         intrinsics=None,
     )
@@ -286,7 +284,7 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
 
     importer._record_step(
         {"observation.state": _FakeTensor([0.1, -0.2])},
-        timestamp=2.0,
+        timestamp=2_000_000,
     )
 
     importer._log_data.assert_called_once_with(
@@ -294,7 +292,7 @@ def test_lerobot_record_step_reads_dotted_source_key_and_converts_tensor():
         [0.1, -0.2],
         mapping_item,
         import_format,
-        2.0,
+        2_000_000,
         extrinsics=None,
         intrinsics=None,
     )
@@ -387,7 +385,7 @@ def test_lerobot_record_step_resolves_mixed_dot_delimited_source_and_source_name
 
     importer._record_step(
         {"episode.steps.robot.joint_positions": _FakeTensor([0.1, 0.2, 0.3])},
-        timestamp=1.5,
+        timestamp=1_500_000,
     )
 
     importer._log_data.assert_called_once_with(
@@ -395,7 +393,7 @@ def test_lerobot_record_step_resolves_mixed_dot_delimited_source_and_source_name
         [0.1, 0.2, 0.3],
         mapping_item,
         import_format,
-        1.5,
+        1_500_000,
         extrinsics=None,
         intrinsics=None,
     )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 import traceback
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,6 +23,7 @@ from neuracore_types.importer.data_config import (
     RGBCameraDataMappingItem,
 )
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import TICKS_PER_SECOND
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -222,13 +222,12 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
         total_steps = self._infer_total_steps(steps)
-        base_time = time.time()
-        recording_stop_timestamp = base_time
+        recording_stop_timestamp = 0
         if not self.dry_run:
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
-                timestamp=base_time,
+                timestamp=0,
             )
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
@@ -251,8 +250,10 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         )
         for idx, step in enumerate(steps, start=1):
             self._reset_step_state()
-            timestamp = base_time + (idx / self.frequency)
-            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
+            timestamp = int(idx * TICKS_PER_SECOND // self.frequency)
+            recording_stop_timestamp = int(
+                (idx + 1) * TICKS_PER_SECOND // self.frequency
+            )
             try:
                 self._record_step(step, timestamp)
             except Exception as exc:  # importer-specific policy hook
@@ -471,7 +472,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
             source = source[key]
         return source
 
-    def _record_step(self, step_data: dict, timestamp: float) -> None:
+    def _record_step(self, step_data: dict, timestamp: int) -> None:
         """Record a single step to Neuracore."""
         for data_type, import_config in self.ordered_import_configs:
 

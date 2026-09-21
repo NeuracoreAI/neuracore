@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import math
 import multiprocessing as mp
 import os
 import random
@@ -66,7 +65,6 @@ from .exceptions import (
 )
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
-TIMESTAMP_COLLISION_TOLERANCE_S = 1e-6
 
 
 @dataclass(frozen=True)
@@ -190,7 +188,7 @@ class NeuracoreDatasetImporter(ABC):
         self.random_sample = random_sample
         self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
-        self._last_logged_timestamps: dict[tuple[DataType, str], float] = {}
+        self._last_logged_timestamps: dict[tuple[DataType, str], int] = {}
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
@@ -255,7 +253,7 @@ class NeuracoreDatasetImporter(ABC):
         """Perform the dataset-specific import for a single item."""
 
     @abstractmethod
-    def _record_step(self, step: dict, timestamp: float) -> None:
+    def _record_step(self, step: dict, timestamp: int) -> None:
         """Record a single step of the dataset."""
 
     def _resolve_source_path(self, source: Any, source_name: str | None) -> Any:
@@ -570,7 +568,7 @@ class NeuracoreDatasetImporter(ABC):
         source_data: Any,
         item: MappingItem,
         format: DataFormat,
-        timestamp: float,
+        timestamp: int,
         *,
         extrinsics: np.ndarray | None = None,
         intrinsics: np.ndarray | None = None,
@@ -586,7 +584,7 @@ class NeuracoreDatasetImporter(ABC):
             source_data: The source data from the dataset.
             item: The mapping item to use for naming and transformation.
             format: The data format to use for validation.
-            timestamp: Time when the data was logged.
+            timestamp: Capture time of the data in ticks.
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
@@ -791,32 +789,28 @@ class NeuracoreDatasetImporter(ABC):
             raise
 
     def _strictly_increasing_timestamp(
-        self, data_type: DataType, name: str, timestamp: float
-    ) -> float:
-        """Return a timestamp strictly greater than the last one for this stream.
+        self, data_type: DataType, name: str, timestamp: int
+    ) -> int:
+        """Return a tick strictly greater than the last one for this stream.
 
         Track the last value per data type and name, matching the granularity
-        Neuracore enforces per stream. Distinct nanosecond capture times can
-        resolve to the same float64 at Unix epoch magnitudes, so raise a
-        timestamp that trails the previous one by at most
-        TIMESTAMP_COLLISION_TOLERANCE_S by one unit in the last place. Return a
-        larger regression unchanged, leaving Neuracore to reject it.
+        Neuracore enforces per stream. Distinct source capture times can
+        resolve to the same tick, so raise a tick that trails the previous one
+        by at most one tick to one tick after it. Return a larger regression
+        unchanged, leaving Neuracore to reject it.
 
         Args:
             data_type: The type of data being logged.
             name: The name of the data.
-            timestamp: The timestamp of the data.
+            timestamp: The capture time of the data in ticks.
 
         Returns:
-            float: The timestamp to log, nudged up only when it collides.
+            int: The tick to log, nudged up only when it collides.
         """
         key = (data_type, name)
         previous = self._last_logged_timestamps.get(key)
-        if (
-            previous is not None
-            and 0.0 <= previous - timestamp <= TIMESTAMP_COLLISION_TOLERANCE_S
-        ):
-            timestamp = math.nextafter(previous, math.inf)
+        if previous is not None and previous - 1 <= timestamp <= previous:
+            timestamp = previous + 1
         self._last_logged_timestamps[key] = timestamp
         return timestamp
 
@@ -825,7 +819,7 @@ class NeuracoreDatasetImporter(ABC):
         data_type: DataType,
         transformed_data: Any,
         name: str,
-        timestamp: float,
+        timestamp: int,
         *,
         extrinsics: np.ndarray | None = None,
         intrinsics: np.ndarray | None = None,
@@ -836,7 +830,7 @@ class NeuracoreDatasetImporter(ABC):
             data_type: The type of data to log.
             transformed_data: The transformed data to log.
             name: The name of the data.
-            timestamp: The timestamp of the data.
+            timestamp: The capture time of the data in ticks.
             extrinsics: Optional 4x4 camera extrinsics matrix for camera streams.
             intrinsics: Optional 3x3 camera intrinsics matrix for camera streams.
         """
