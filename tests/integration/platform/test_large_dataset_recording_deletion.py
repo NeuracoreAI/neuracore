@@ -15,31 +15,11 @@ from uuid import uuid4
 
 import neuracore as nc
 from neuracore import Dataset
-from neuracore.core.auth import get_auth
-from neuracore.core.const import API_URL
 from neuracore.core.data.dataset import PAGE_SIZE
-from neuracore.core.utils.http_session import thread_local_session
 
 SOURCE_DATASET_NAME = "Freiburg Franka Play - (TACO Play)"
 DELETE_TIMEOUT_S = 180.0
 POLL_INTERVAL_S = 2.0
-
-
-def delete_recording(dataset: Dataset, recording_id: str) -> None:
-    """Delete one recording through the API and surface the backend error."""
-    response = thread_local_session().delete(
-        f"{API_URL}/org/{dataset.org_id}/datasets/"
-        f"{dataset.id}/recording/{recording_id}",
-        headers=get_auth().get_headers(),
-        timeout=30,
-    )
-
-    if not response.ok:
-        # Include response content in CI output before raise_for_status discards
-        # useful backend context.
-        print(response.status_code, response.text)
-
-    response.raise_for_status()
 
 
 def recording_signature(recording: Any) -> tuple[Any, ...]:
@@ -161,7 +141,7 @@ def test_delete_recordings_from_cloned_large_dataset() -> None:
 
         # Loop over all recordings in the clone and delete all of them.
         for recording_id in clone_ids:
-            delete_recording(clone, recording_id)
+            clone.delete_recording(recording_id=recording_id)
 
         empty_clone = wait_for_dataset_ids(str(clone.id), set())
         assert len(empty_clone) == 0
