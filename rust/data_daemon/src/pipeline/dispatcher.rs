@@ -60,6 +60,7 @@ use chrono::Utc;
 use dashmap::DashMap;
 use data_daemon_shared::{
     video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording, Source,
+    NANOSECONDS_PER_TICK,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -190,7 +191,7 @@ impl RecordingState {
             .map(|announced| LiveRecording {
                 recording_index: announced.recording_index,
                 recording_id: announced.recording_id.clone(),
-                start_timestamp_ns: Some(announced.start_timestamp_ns),
+                start_timestamp: Some(announced.start_timestamp),
             })
     }
 }
@@ -208,8 +209,8 @@ struct AnnouncedRecording {
     dataset_id: Option<String>,
     /// The window's lower bound on the publish clock.
     open_at_ns: i64,
-    /// The recording's own capture-clock start → the row's `start_timestamp_ns`.
-    start_timestamp_ns: i64,
+    /// The recording's start in ticks → the row's `start_timestamp`.
+    start_timestamp: i64,
     /// The recording this announcement opened, once it has.
     recording_index: Option<i64>,
 }
@@ -230,7 +231,8 @@ pub enum RecordingCommand {
         robot_id: String,
         robot_instance: i64,
         dataset_id: Option<String>,
-        /// The recording's start on the backend's record (Unix nanoseconds).
+        /// The recording's start on the backend's record (Unix nanoseconds),
+        /// used to route data into the window.
         start_timestamp_ns: i64,
     },
     /// The named recording ended.
@@ -538,7 +540,7 @@ impl Dispatcher {
                 robot_instance,
                 dataset_id,
                 publish_timestamp_ns,
-                timestamp_ns,
+                timestamp,
                 recording_id,
                 ..
             } => {
@@ -548,7 +550,7 @@ impl Dispatcher {
                     dataset_id,
                     recording_id,
                     publish_timestamp_ns,
-                    timestamp_ns,
+                    timestamp,
                 )
                 .await;
                 // The envelope came over local IPC, so the producer that sent
@@ -561,12 +563,12 @@ impl Dispatcher {
                 robot_id,
                 robot_instance,
                 publish_timestamp_ns,
-                timestamp_ns,
+                timestamp,
             } => {
                 self.handle_stop(
                     (robot_id, robot_instance),
                     publish_timestamp_ns,
-                    timestamp_ns,
+                    timestamp,
                     recv_at,
                 )
                 .await;
@@ -574,9 +576,10 @@ impl Dispatcher {
             Envelope::CancelRecording {
                 robot_id,
                 robot_instance,
-                timestamp_ns,
+                timestamp,
+                ..
             } => {
-                self.handle_cancel((robot_id, robot_instance), timestamp_ns)
+                self.handle_cancel((robot_id, robot_instance), timestamp)
                     .await;
             }
             Envelope::Data {
@@ -746,7 +749,7 @@ impl Dispatcher {
         dataset_id: Option<String>,
         recording_id: Option<String>,
         publish_timestamp_ns: i64,
-        timestamp_ns: i64,
+        timestamp: i64,
     ) {
         // The same recording is announced more than once: every local process
         // connected to the source learns about a web-started recording
@@ -786,7 +789,7 @@ impl Dispatcher {
             recording_id,
             dataset_id,
             open_at_ns: publish_timestamp_ns,
-            start_timestamp_ns: timestamp_ns,
+            start_timestamp: timestamp,
             recording_index: None,
         };
         tracing::debug!(robot_id = source.0, "recording announced");
@@ -850,7 +853,7 @@ impl Dispatcher {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
-            start: caller_stamp(announced.start_timestamp_ns),
+            start: caller_stamp(announced.start_timestamp),
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -973,7 +976,7 @@ impl Dispatcher {
                     dataset_id,
                     Some(recording_id),
                     start_timestamp_ns,
-                    start_timestamp_ns,
+                    start_timestamp_ns / NANOSECONDS_PER_TICK,
                 )
                 .await;
             }
@@ -1038,7 +1041,7 @@ impl Dispatcher {
         &mut self,
         source: Source,
         publish_timestamp_ns: i64,
-        timestamp_ns: i64,
+        timestamp: i64,
         recv_at: Instant,
     ) {
         self.announced.0.remove(&source);
@@ -1077,7 +1080,7 @@ impl Dispatcher {
             // timestamp must be on disk first.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, caller_stamp(timestamp_ns))
+                .mark_recording_stopped(recording_index, caller_stamp(timestamp))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark recording stopped");
@@ -1121,7 +1124,7 @@ impl Dispatcher {
             // start`.
             if let Err(error) = self
                 .store
-                .refine_recording_stop(recording_index, caller_stamp(timestamp_ns))
+                .refine_recording_stop(recording_index, caller_stamp(timestamp))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
@@ -1157,7 +1160,7 @@ impl Dispatcher {
         }
     }
 
-    async fn handle_cancel(&mut self, source: Source, timestamp_ns: i64) {
+    async fn handle_cancel(&mut self, source: Source, timestamp: i64) {
         self.announced.0.remove(&source);
         let Some(entry) = self.windows.get_mut(&source) else {
             return;
@@ -1182,7 +1185,7 @@ impl Dispatcher {
         // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
         match self
             .store
-            .cancel_recording(recording_index, caller_stamp(timestamp_ns))
+            .cancel_recording(recording_index, caller_stamp(timestamp))
             .await
         {
             Ok((_, touched)) => {
@@ -1776,11 +1779,11 @@ struct ChunkClaim {
 }
 
 /// The stamp for a lifecycle boundary the caller timed, carrying the caller's
-/// capture clock in nanoseconds.
-fn caller_stamp(timestamp_ns: i64) -> LifecycleStamp {
+/// tick and the same instant in nanoseconds.
+fn caller_stamp(timestamp: i64) -> LifecycleStamp {
     LifecycleStamp {
-        publish_timestamp_ns: timestamp_ns,
-        timestamp: Some(timestamp_ns),
+        publish_timestamp_ns: timestamp.saturating_mul(NANOSECONDS_PER_TICK),
+        timestamp: Some(timestamp),
     }
 }
 
@@ -1968,7 +1971,7 @@ mod tests {
     }
 
     // Tests exercise window membership, which is keyed on the publish clock, so
-    // the helper sets the capture `timestamp_ns` to the same value.
+    // the helper sets the capture `timestamp` to the same value.
     fn start(robot: &str, publish_timestamp_ns: i64) -> Envelope {
         Envelope::StartRecording {
             robot_id: robot.into(),
@@ -1977,7 +1980,7 @@ mod tests {
             dataset_id: None,
             dataset_name: None,
             publish_timestamp_ns,
-            timestamp_ns: publish_timestamp_ns,
+            timestamp: publish_timestamp_ns,
             recording_id: None,
         }
     }
@@ -1987,7 +1990,7 @@ mod tests {
             robot_id: robot.into(),
             robot_instance: 0,
             publish_timestamp_ns,
-            timestamp_ns: publish_timestamp_ns,
+            timestamp: publish_timestamp_ns,
         }
     }
 
@@ -2904,7 +2907,8 @@ mod tests {
         tx.send(Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 0,
-            timestamp_ns: 120,
+            publish_timestamp_ns: 120,
+            timestamp: 120,
         })
         .await
         .unwrap();
@@ -3163,7 +3167,8 @@ mod tests {
         tx.send(Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 0,
-            timestamp_ns: 150,
+            publish_timestamp_ns: 150,
+            timestamp: 150,
         })
         .await
         .unwrap();
