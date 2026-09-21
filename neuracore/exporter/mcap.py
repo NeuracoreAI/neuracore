@@ -61,29 +61,6 @@ class McapExporter(DatasetExporter):
                 'pip install "neuracore[export]"'
             ) from exc
 
-    def validate_recording(self, recording: Recording) -> None:
-        """Require completed recordings with complete raw sensor manifests."""
-        if recording.end_time is None or recording.deleted:
-            raise ValueError(
-                f"Recording {recording.name} is not a completed recording."
-            )
-        manifest = recording.sensor_manifest
-        if not manifest or set(manifest) != set(recording.data_types):
-            raise ValueError(
-                f"Recording {recording.name} has no complete sensor manifest. "
-                "This exporter requires recordings with a stored sensor manifest. "
-                "Please delete this recording or contact support if you believe "
-                "this is an error."
-            )
-
-        for data_type, names in manifest.items():
-            DataType(data_type)
-            if not names or len(set(names)) != len(names):
-                raise ValueError(f"Invalid sensor manifest for {recording.name}.")
-            for name in names:
-                if not isinstance(name, str) or not name or name in (".", ".."):
-                    raise ValueError("Invalid sensor name in recording manifest.")
-
     def prepare(self, dataset: Dataset, output: Path) -> None:
         """Set the destination for this dataset's MCAP files."""
         self.output = output

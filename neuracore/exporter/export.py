@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from neuracore_types import DataType
+
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
@@ -42,10 +44,32 @@ class DatasetExporter(ABC):
         """Raise an actionable error if format dependencies are unavailable."""
         ...
 
-    @abstractmethod
     def validate_recording(self, recording: Recording) -> None:
-        """Check the format's requirements for one recording."""
-        ...
+        """Require a completed recording with a complete, well-formed sensor manifest.
+
+        This default covers every exporter's baseline requirement. Formats with
+        extra requirements (e.g. a schema shared across every recording) should
+        override this and call ``super().validate_recording(recording)`` first.
+        """
+        if recording.end_time is None or recording.deleted:
+            raise ValueError(
+                f"Recording {recording.name} is not a completed recording."
+            )
+        manifest = recording.sensor_manifest
+        if not manifest or set(manifest) != set(recording.data_types):
+            raise ValueError(
+                f"Recording {recording.name} has no complete sensor manifest. "
+                "This exporter requires recordings with a stored sensor manifest. "
+                "Please delete this recording or contact support if you believe "
+                "this is an error."
+            )
+        for data_type, names in manifest.items():
+            DataType(data_type)
+            if not names or len(set(names)) != len(names):
+                raise ValueError(f"Invalid sensor manifest for {recording.name}.")
+            for name in names:
+                if not isinstance(name, str) or not name or name in (".", ".."):
+                    raise ValueError("Invalid sensor name in recording manifest.")
 
     @abstractmethod
     def prepare(self, dataset: Dataset, output: Path) -> None:

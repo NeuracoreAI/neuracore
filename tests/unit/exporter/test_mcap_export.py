@@ -193,7 +193,7 @@ def test_cli_exports_selected_dataset(dataset, recording, tmp_path, monkeypatch)
     monkeypatch.setattr(cli, "get_dataset", Mock(return_value=dataset))
     output = tmp_path / "out"
     result = CliRunner().invoke(
-        cli.export_app, ["--dataset", "Demo", "-o", str(output)]
+        cli.export_app, ["mcap", "--dataset", "Demo", "-o", str(output)]
     )
     assert result.exit_code == 0, result.output
     assert "Export complete" in result.output
