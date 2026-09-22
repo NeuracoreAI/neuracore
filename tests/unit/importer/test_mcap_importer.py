@@ -16,7 +16,6 @@ from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
 from PIL import Image
 
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.importer.core.base import ImportItem
 from neuracore.importer.core.exceptions import ImportError
 from neuracore.importer.mcap.mcap_importer import MCAPDatasetImporter
@@ -29,7 +28,6 @@ from neuracore.importer.mcap.utils import (
     SkipMCAPMessage,
     TolerantProtobufDecoderFactory,
     build_topic_map,
-    clip_depth,
     convert_decoded_mcap_data,
     estimate_total_messages,
     flatten_numeric_protobuf,
@@ -479,11 +477,6 @@ def test_to_numpy_tensor_with_numpy_method():
     np.testing.assert_array_equal(to_numpy(_FakeTensor()), [7.0])
 
 
-@pytest.mark.parametrize("value", ["not an array", 42, None, [1, 2, 3]])
-def test_clip_depth_non_array_passthrough(value):
-    assert clip_depth(value) == value
-
-
 def test_read_image_data_non_image_type_passthrough():
     data = {"position": 1.0}
     assert (
@@ -652,27 +645,6 @@ def test_iter_mcap_source_events_unknown_topic_yields_nothing():
     )
 
     assert events == []
-
-
-def test_mcap_importer_log_transformed_clips_depth(monkeypatch, tmp_path):
-    importer = _make_importer(monkeypatch, tmp_path)
-    logged = []
-    monkeypatch.setattr(
-        type(importer).__mro__[1],
-        "_log_transformed_data",
-        lambda self, data_type, transformed_data, name, timestamp, **kw: logged.append(
-            (data_type, transformed_data)
-        ),
-    )
-    oversized = np.array([[MAX_DEPTH + 100.0]], dtype=np.float32)
-    importer._log_transformed_data(  # noqa: SLF001
-        data_type=DataType.DEPTH_IMAGES,
-        transformed_data=oversized,
-        name="depth",
-        timestamp=0.0,
-    )
-    assert len(logged) == 1
-    assert float(np.max(logged[0][1])) <= MAX_DEPTH
 
 
 # --------------------------------------------------------------------------

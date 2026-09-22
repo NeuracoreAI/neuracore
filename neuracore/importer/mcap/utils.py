@@ -31,7 +31,6 @@ from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
 
-from neuracore.core.utils.depth_utils import MAX_DEPTH
 from neuracore.importer.core.exceptions import ImportError
 
 
@@ -1460,28 +1459,6 @@ def to_numpy(data: Any) -> Any:
     if isinstance(data, (int, float)) and not isinstance(data, bool):
         return np.float64(data)
     return data
-
-
-def clip_depth(
-    data: Any,
-    logger: logging.Logger | None = None,
-) -> Any:
-    """Clip depth arrays to the backend-accepted meter range."""
-    if not isinstance(data, np.ndarray):
-        return data
-    float32 = data.astype(np.float32, copy=False)
-    needs_clip = (
-        np.any(np.isnan(float32))
-        or np.any(np.isinf(float32))
-        or float32.size > 0
-        and (float(float32.min()) < 0.0 or float(float32.max()) > MAX_DEPTH)
-    )
-    if needs_clip and logger is not None:
-        logger.warning(
-            f"Depth values outside valid range [0, {MAX_DEPTH:.1f} m] — clipping."
-        )
-    clipped = np.nan_to_num(float32, nan=0.0, posinf=MAX_DEPTH, neginf=0.0)
-    return np.clip(clipped, 0.0, MAX_DEPTH).astype(np.float16, copy=False)
 
 
 def _is_language_text(data_type: DataType, import_config: Any) -> bool:
