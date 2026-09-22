@@ -1,20 +1,25 @@
 """Export original Neuracore traces and media to generic JSON MCAP files."""
 
+import base64
+import io
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import quote
 
+import av
 import requests
 from neuracore_types import DataType
 from neuracore_types.utils.name_utils import to_safe_name
+from PIL import Image
 
 from neuracore import __version__
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.frame_cache import video_filename_preference
 from neuracore.core.data.recording import Recording
+from neuracore.core.utils.depth_utils import rgb_to_depth_storage
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
 
@@ -83,6 +88,43 @@ class McapExporter(DatasetExporter):
             for name in names:
                 if not isinstance(name, str) or not name or name in (".", ".."):
                     raise ValueError("Invalid sensor name in recording manifest.")
+
+    @staticmethod
+    def _samples(
+        trace: list[dict], data_type: DataType, media: tuple[str, str, bytes] | None
+    ) -> Iterator[dict]:
+        """Keep raw trace fields and embed independently decodable camera frames.
+
+        Original videos remain attachments. Inline PNG (RGB) and float TIFF
+        (depth in meters) let message-based importers read every image without
+        needing Neuracore-specific attachment handling.
+        """
+        if data_type not in (DataType.RGB_IMAGES, DataType.DEPTH_IMAGES):
+            yield from trace
+            return
+        if media is None:
+            raise ValueError("Camera trace has no video payload.")
+        with av.open(io.BytesIO(media[2])) as video:
+            frames = video.decode(video=0)
+            for index, item in enumerate(trace):
+                if item.get("frame_idx") != index:
+                    raise ValueError(f"Invalid frame index in {media[0]}: {item}.")
+                frame = next(frames, None)
+                if frame is None:
+                    raise ValueError(f"Missing video frame {index} in {media[0]}.")
+                pixels = frame.to_ndarray(format="rgb24")
+                image_format = "PNG"
+                if data_type == DataType.DEPTH_IMAGES:
+                    pixels = rgb_to_depth_storage(pixels)
+                    image_format = "TIFF"
+                with io.BytesIO() as encoded:
+                    Image.fromarray(pixels).save(encoded, format=image_format)
+                    yield {
+                        **item,
+                        "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
+                    }
+            if next(frames, None) is not None:
+                raise ValueError(f"Unreferenced video frames in {media[0]}.")
 
     def prepare(self, dataset: Dataset, output: Path) -> None:
         """Set the destination for this dataset's MCAP files."""
@@ -158,17 +200,19 @@ class McapExporter(DatasetExporter):
                                 data=payload,
                             )
                             channel_metadata["attachment"] = path
-                            del payload, media
+                            del payload
                         channel_id = writer.register_channel(
                             topic=(
                                 f"/neuracore/{data_type.value}/"
-                                f"{quote(name, safe='')}"
+                                f"{quote(name, safe='').replace('.', '%2E')}"
                             ),
                             message_encoding="json",
                             schema_id=schema_id,
                             metadata=channel_metadata,
                         )
-                        for sequence, item in enumerate(trace):
+                        for sequence, item in enumerate(
+                            self._samples(trace, data_type, media)
+                        ):
                             if not isinstance(item, dict) or "timestamp" not in item:
                                 raise ValueError(f"Invalid trace sample: {prefix}.")
                             timestamp = self._timestamp_ns(item["timestamp"])

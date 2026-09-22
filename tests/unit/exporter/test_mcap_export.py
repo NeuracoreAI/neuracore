@@ -1,10 +1,13 @@
 # cspell:ignore Fjoint
 """Read exported MCAPs back to verify data fidelity and failure handling."""
 
+import io
 import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import av
+import numpy as np
 import pytest
 import requests
 from neuracore_types import DataType
@@ -15,6 +18,22 @@ from neuracore.exporter.export import export_recordings
 from neuracore.exporter.mcap import McapExporter
 
 mcap_reader = pytest.importorskip("mcap.reader")
+
+
+def _video_bytes(pixels):
+    """Encode one lossless frame for the real exporter to decode."""
+    output = io.BytesIO()
+    with av.open(output, mode="w", format="mp4") as container:
+        stream = container.add_stream("libx264rgb", rate=10)
+        stream.width, stream.height = pixels.shape[1], pixels.shape[0]
+        stream.pix_fmt = "rgb24"
+        stream.options = {"crf": "0"}
+        frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+        for packet in stream.encode(frame):
+            container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return output.getvalue()
 
 
 @pytest.fixture
@@ -40,7 +59,9 @@ def recording():
         "POINT_CLOUDS/lidar/trace.json": json.dumps(
             [{"timestamp": 1.4, "frame_idx": 0, "offset": 0, "length": 4}]
         ).encode(),
-        "RGB_IMAGES/front/lossless.mp4": b"original-video-bytes",
+        "RGB_IMAGES/front/lossless.mp4": _video_bytes(
+            np.full((16, 16, 3), 73, dtype=np.uint8)
+        ),
         "POINT_CLOUDS/lidar/trace.bin": b"cloud-bytes",
     }
     return SimpleNamespace(
@@ -156,7 +177,9 @@ def test_rejects_incomplete_recordings_before_writing(
 def test_video_fallback_only_on_not_found(dataset, recording, tmp_path):
     files = dict(recording._files)
     del files["RGB_IMAGES/front/lossless.mp4"]
-    files["RGB_IMAGES/front/lossy.mp4"] = b"lossy-original"
+    files["RGB_IMAGES/front/lossy.mp4"] = recording._files[
+        "RGB_IMAGES/front/lossless.mp4"
+    ]
     response = requests.Response()
     response.status_code = 404
 
@@ -236,3 +259,63 @@ def test_second_recording_failure_retains_completed_file(dataset, recording, tmp
     ]
     assert (output / "nc_recording-1.mcap").exists()
     assert not list(output.glob("*.partial"))
+
+
+@pytest.mark.parametrize("kind", [DataType.RGB_IMAGES, DataType.DEPTH_IMAGES])
+def test_image_samples_are_readable_without_attachment_support(kind):
+    import logging
+
+    from neuracore.core.utils.depth_utils import (
+        depth_to_rgb_storage,
+        rgb_to_depth_storage,
+    )
+    from neuracore.importer.mcap.utils import read_image_data
+
+    pixels = np.full((16, 16, 3), 73, dtype=np.uint8)
+    if kind == DataType.DEPTH_IMAGES:
+        pixels = depth_to_rgb_storage(np.full((16, 16), 0.3, dtype=np.float32))
+    trace = [{"timestamp": 1.25, "frame_idx": 0, "frame": None}]
+    samples = list(
+        McapExporter._samples(
+            trace, kind, ("video.mp4", "video/mp4", _video_bytes(pixels))
+        )
+    )
+    assert samples[0]["timestamp"] == 1.25
+    assert samples[0]["frame_idx"] == 0
+    assert trace[0]["frame"] is None
+    decoded = read_image_data(
+        kind, samples[0], samples[0], logger=logging.getLogger(__name__)
+    )
+    expected = rgb_to_depth_storage(pixels) if kind == DataType.DEPTH_IMAGES else pixels
+    np.testing.assert_array_equal(decoded, expected)
+
+
+def test_camera_frame_count_mismatch_fails():
+    media = (
+        "video.mp4",
+        "video/mp4",
+        _video_bytes(np.zeros((16, 16, 3), dtype=np.uint8)),
+    )
+    with pytest.raises(ValueError, match="Missing video frame"):
+        list(
+            McapExporter._samples(
+                [{"frame_idx": 0}, {"frame_idx": 1}], DataType.RGB_IMAGES, media
+            )
+        )
+    with pytest.raises(ValueError, match="Unreferenced video frames"):
+        list(McapExporter._samples([], DataType.RGB_IMAGES, media))
+
+
+def test_dotted_sensor_name_does_not_conflict_with_importer_field_paths(
+    dataset, recording, tmp_path
+):
+    recording.data_types = {DataType.JOINT_POSITIONS}
+    recording.sensor_manifest = {DataType.JOINT_POSITIONS: ["joint_pos_-0.250"]}
+    recording.download = Mock(return_value=b'[{"timestamp":1.25,"value":-0.25}]')
+    manifest = export_recordings(
+        dataset, [recording], tmp_path / "export", McapExporter()
+    )
+    with (manifest.parent / "nc_recording-1.mcap").open("rb") as stream:
+        _, channel, _ = next(mcap_reader.make_reader(stream).iter_messages())
+    assert channel.topic == "/neuracore/JOINT_POSITIONS/joint_pos_-0%2E250"
+    assert channel.metadata["sensor_name"] == "joint_pos_-0.250"
