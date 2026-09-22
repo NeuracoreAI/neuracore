@@ -7,9 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 from mcap.reader import make_reader
-from neuracore_types import DataType
 from neuracore_types.nc_data import DatasetImportConfig
 
 import neuracore as nc
@@ -19,7 +17,6 @@ from neuracore.importer.core.exceptions import ImportError
 from neuracore.importer.mcap.utils import (
     H264StreamDecoder,
     build_topic_map,
-    clip_depth,
     convert_decoded_mcap_data,
     estimate_total_messages,
     get_mcap_topics,
@@ -314,28 +311,6 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 f"{label}: dropped leading frames before the first keyframe "
                 f"per video topic: {dropped}"
             )
-
-    def _log_transformed_data(
-        self,
-        data_type: DataType,
-        transformed_data: Any,
-        name: str,
-        timestamp: float,
-        *,
-        extrinsics: np.ndarray | None = None,
-        intrinsics: np.ndarray | None = None,
-    ) -> None:
-        """Clip depth arrays before delegating to the base logging path."""
-        if data_type == DataType.DEPTH_IMAGES:
-            transformed_data = clip_depth(data=transformed_data, logger=self.logger)
-        super()._log_transformed_data(
-            data_type=data_type,
-            transformed_data=transformed_data,
-            name=name,
-            timestamp=timestamp,
-            extrinsics=extrinsics,
-            intrinsics=intrinsics,
-        )
 
     @staticmethod
     def _discover_mcap_files(dataset_dir: Path) -> list[Path]:

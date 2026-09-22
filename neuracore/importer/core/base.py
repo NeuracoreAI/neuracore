@@ -1364,7 +1364,10 @@ class NeuracoreDatasetImporter(ABC):
     def _resolve_completed_items_file(self) -> Path:
         """Return the file path used to persist completed imports."""
         safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.output_dataset_id)
-        return self.dataset_dir / f".neuracore_import_completed_{safe_id}.txt"
+        base_dir = (
+            self.dataset_dir if self.dataset_dir.is_dir() else self.dataset_dir.parent
+        )
+        return base_dir / f".neuracore_import_completed_{safe_id}.txt"
 
     def _item_key(self, item: ImportItem) -> str:
         """Build a stable key for an import item."""
