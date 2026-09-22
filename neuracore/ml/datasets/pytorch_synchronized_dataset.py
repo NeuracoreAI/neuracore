@@ -13,8 +13,6 @@ from neuracore_types import (
     BatchedNCData,
     CrossEmbodimentDescription,
     DataType,
-    EmbodimentDescription,
-    EmbodimentUnion,
     NCDataStats,
     SynchronizedDatasetStatistics,
     SynchronizedPoint,
@@ -32,6 +30,10 @@ from neuracore.ml import BatchedTrainingSamples
 from neuracore.ml.datasets.batch_sample_cache import BatchSampleCache
 from neuracore.ml.datasets.pytorch_neuracore_dataset import PytorchNeuracoreDataset
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
+from neuracore.ml.utils.embodiment_names import (
+    convert_to_embodiment_description,
+    order_embodiment_items,
+)
 from neuracore.ml.utils.json_serialization import JsonValue, to_json_serializable
 from neuracore.ml.utils.memory_monitor import MemoryMonitor
 from neuracore.ml.utils.preprocessing import apply_preprocessing_methods
@@ -212,8 +214,8 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         # point does not re-sort the same keys for every one of the
         # output_prediction_horizon + 1 sync points a sample touches.
         self._merged_ordered_items = {
-            robot_id: self._order_embodiment_items(
-                self._convert_to_embodiment_description(embodiment_union)
+            robot_id: order_embodiment_items(
+                convert_to_embodiment_description(embodiment_union)
             )
             for robot_id, embodiment_union in (
                 self.merged_cross_embodiment_description.items()
@@ -270,18 +272,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                     highest_index.get(data_type, 0), *indexed_names, 0
                 )
         return {data_type: highest + 1 for data_type, highest in highest_index.items()}
-
-    @staticmethod
-    def _order_embodiment_items(
-        description: EmbodimentDescription,
-    ) -> dict[DataType, list[tuple[int, str]]]:
-        """Flatten an embodiment description into index-ordered (index, name) pairs."""
-        return {
-            data_type: [
-                (index, indexed_names[index]) for index in sorted(indexed_names)
-            ]
-            for data_type, indexed_names in description.items()
-        }
 
     def _get_num_training_observations(self) -> int:
         # The count attribute of the stats should give total number of training
@@ -363,50 +353,6 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
             episode_indices.extend([recording_idx] * (len(recording) - 1))
 
         return episode_indices, episode_start_offsets, episode_recording_ids
-
-    def _convert_to_embodiment_description(
-        self, value: EmbodimentUnion
-    ) -> EmbodimentDescription:
-        """Normalize list-based sensor specs into indexed embodiment mappings.
-
-        Converts:
-            {
-                DataType.JOINT_POSITIONS: ["joint1", "joint2"]
-            }
-
-        Into:
-            {
-                DataType.JOINT_POSITIONS: {
-                    0: "joint1",
-                    1: "joint2"
-                }
-            }
-
-        Guarantees:
-        - Order is preserved → index defines semantic position
-        - Deterministic mapping
-        - No mutation of input
-        """
-        if value is None:
-            return {}
-
-        embodiment_description: EmbodimentDescription = {}
-
-        for data_type, items in value.items():
-            if not isinstance(items, list):
-                raise TypeError(
-                    f"Expected list for {data_type}, got {type(items).__name__}"
-                )
-
-            # Optional: strict validation (useful for your pipeline)
-            if any(not isinstance(x, str) for x in items):
-                raise ValueError(f"All entries for {data_type} must be strings")
-
-            embodiment_description[data_type] = {
-                idx: name for idx, name in enumerate(items)
-            }
-
-        return embodiment_description
 
     @staticmethod
     def _project_sync_point(
