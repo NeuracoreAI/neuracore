@@ -2,9 +2,7 @@
 
 import logging
 import tempfile
-from collections import defaultdict
 from pathlib import Path
-from typing import cast
 
 import torch
 from neuracore_types import (
@@ -25,6 +23,7 @@ from neuracore.core.utils.http_session import thread_local_session
 from neuracore.ml import BatchedInferenceInputs
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.utils.device_utils import get_default_device
+from neuracore.ml.utils.embodiment_names import assign_names_to_model_outputs
 from neuracore.ml.utils.nc_archive import load_model_from_nc_archive
 from neuracore.ml.utils.preprocessing import (
     apply_preprocessing_methods,
@@ -32,16 +31,6 @@ from neuracore.ml.utils.preprocessing import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _indexed_names_from_description(
-    output_names: list[str] | dict[int, str] | dict[str, str],
-) -> list[tuple[int, str]]:
-    """Normalize output names to explicit tensor index/name pairs."""
-    if isinstance(output_names, list):
-        return list(enumerate(output_names))
-    indexed_output_names = cast(dict[int | str, str], output_names)
-    return sorted((int(index), name) for index, name in indexed_output_names.items())
 
 
 class PolicyInference:
@@ -284,36 +273,9 @@ class PolicyInference:
         Returns:
             SynchronizedPoint with processed outputs.
         """
-        outputs: dict[DataType, dict[str, BatchedNCData]] = defaultdict(dict)
-
-        # Map outputs to SynchronizedPoint fields based on output_mapping
-        for data_type, list_of_batched_ncdata in batch_output.items():
-            output_names = self.output_embodiment_description.get(data_type)
-
-            # Check that there are enough output names for the data type
-            if output_names is None:
-                raise ValueError(f"DataType {data_type} not in output configuration.")
-            indexed_output_names = _indexed_names_from_description(output_names)
-            required_tensor_count = (
-                max(index for index, _ in indexed_output_names) + 1
-                if indexed_output_names
-                else 0
-            )
-            # Dict-backed specs may be sparse, so preserve their absolute tensor
-            # indices instead of collapsing them into dense positions.
-            if len(list_of_batched_ncdata) < required_tensor_count:
-                raise ValueError(
-                    f"Not enough output names for DataType {data_type}. "
-                    "Expected at least "
-                    f"{required_tensor_count}, "
-                    f"but got {len(list_of_batched_ncdata)}."
-                )
-
-            for tensor_idx, name_of_tensor in indexed_output_names:
-                batched_nc_data = list_of_batched_ncdata[tensor_idx]
-                outputs[data_type][name_of_tensor] = batched_nc_data
-
-        return outputs
+        return assign_names_to_model_outputs(
+            batch_output, self.output_embodiment_description
+        )
 
     def _validate_input_sync_point(self, sync_point: SynchronizedPoint) -> None:
         """Validate the sync point with what the model had as input.
