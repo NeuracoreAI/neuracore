@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "data-daemon"
-version = "17.0.1"
+version = "17.0.2-alpha.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -468,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "data_daemon_bridge"
-version = "17.0.1"
+version = "17.0.2-alpha.91"
 dependencies = [
  "data_daemon_shared",
  "half",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "data_daemon_shared"
-version = "17.0.1"
+version = "17.0.2-alpha.91"
 dependencies = [
  "dirs",
  "nix",
