@@ -342,14 +342,12 @@ def stop_recording(
     if wait_timeout_s < 0:
         raise ValueError("wait_timeout_s must be non-negative")
 
-    wait_deadline = time.monotonic() + wait_timeout_s if wait else None
+    wait_deadline = time.monotonic() + wait_timeout_s
     cloud_recording_id = robot.get_cloud_recording_id() if wait else None
     robot.stop_recording(timestamp=timestamp)
     if not wait or not cloud_recording_id:
         return
     recording_id = cloud_recording_id
-
-    assert wait_deadline is not None
 
     while time.monotonic() < wait_deadline:
         if backend_utils.is_recording_upload_complete(recording_id):
