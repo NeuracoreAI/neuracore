@@ -935,10 +935,6 @@ def _split_train_val_dataset(
         ``(train_dataset, val_dataset)`` subsets from
         ``split_train_val_datasets``.
     """
-    dataset_size = len(dataset)
-    train_split = 1 - cfg.validation_split
-    train_size = int(train_split * dataset_size)
-    val_size = dataset_size - train_size
     (
         inference_input_preprocessing_config,
         inference_output_preprocessing_config,
@@ -948,8 +944,7 @@ def _split_train_val_dataset(
     )
     return split_train_val_datasets(
         dataset,
-        train_size=train_size,
-        val_size=val_size,
+        validation_split=cfg.validation_split,
         seed=cfg.seed,
         inference_input_preprocessing_config=inference_input_preprocessing_config,
         inference_output_preprocessing_config=inference_output_preprocessing_config,

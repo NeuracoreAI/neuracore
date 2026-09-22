@@ -398,36 +398,11 @@ def run_training(
             input_cross_embodiment_description, output_cross_embodiment_description
         )
 
-        # Split dataset
-        dataset_size = len(dataset)
-        train_split = 1 - cfg.validation_split
-        train_size = int(train_split * dataset_size)
-        val_size = dataset_size - train_size
-        if train_size == 0 and val_size == 0:
-            raise ValueError(
-                "The training and validation sets are both empty. "
-                "Try adding more recordings to the dataset, "
-                "or changing the validation split."
-            )
-        if train_size == 0:
-            raise ValueError(
-                "The training set is empty. "
-                "Try adding more recordings to the dataset, "
-                "or changing the validation split."
-            )
-        if val_size == 0:
-            raise ValueError(
-                "The validation set is empty. "
-                "Try adding more recordings to the dataset, "
-                "or changing the validation split."
-            )
-
         # Use random split with fixed seed for deterministic behavior.
         # Dataset already has train preprocessing; val is switched to inference.
         train_dataset, val_dataset = split_train_val_datasets(
             dataset,
-            train_size=train_size,
-            val_size=val_size,
+            validation_split=cfg.validation_split,
             seed=cfg.seed,
             inference_input_preprocessing_config=inference_input_preprocessing_config,
             inference_output_preprocessing_config=inference_output_preprocessing_config,

@@ -385,6 +385,19 @@ class RunTrainingTestSetup:
                 self.mock_tensorboard_logger,
             )
 
+        # These tests mock the dataset; they are not covering the episode split.
+        mock_train_dataset = Mock(unsafe=True)
+        mock_train_dataset.__len__ = Mock(return_value=80)
+        mock_val_dataset = Mock(unsafe=True)
+        mock_val_dataset.__len__ = Mock(return_value=20)
+        self.mock_split_train_val = Mock(
+            return_value=(mock_train_dataset, mock_val_dataset)
+        )
+        self.monkeypatch.setattr(
+            "neuracore.ml.train.split_train_val_datasets",
+            self.mock_split_train_val,
+        )
+
     def call_run_training(self, cfg, dataset):
         """Call run_training with the configured parameters."""
         inference_input, inference_output = resolve_input_output_preprocessing(
@@ -1885,7 +1898,7 @@ class TestRunTraining:
         )
         setup.setup_mocks()
 
-        def mock_split_side_effect(dataset, train_size, val_size, seed, **kwargs):
+        def mock_split_side_effect(dataset, validation_split, seed, **kwargs):
             return (mock_train_dataset, mock_val_dataset)
 
         mock_split = Mock(side_effect=mock_split_side_effect)
@@ -1895,18 +1908,9 @@ class TestRunTraining:
 
         assert mock_split.called
         call_kwargs = mock_split.call_args.kwargs
-        assert call_kwargs["train_size"] == 80
-        assert call_kwargs["val_size"] == 20
+        assert call_kwargs["validation_split"] == mock_cfg_training.validation_split
         assert call_kwargs["seed"] == mock_cfg_training.seed
 
-    @pytest.mark.parametrize(
-        ("dataset_size", "validation_split", "expected_message"),
-        [
-            (0, 0.2, "training and validation sets are both empty"),
-            (1, 0.2, "training set is empty"),
-            (3, 0.0, "validation set is empty"),
-        ],
-    )
     def test_run_training_raises_when_train_or_val_split_is_empty(
         self,
         mock_cfg_training,
@@ -1914,13 +1918,7 @@ class TestRunTraining:
         model_init_description,
         mock_model_class,
         monkeypatch,
-        dataset_size,
-        validation_split,
-        expected_message,
     ):
-        mock_cfg_training.validation_split = validation_split
-        mock_dataset.__len__ = Mock(return_value=dataset_size)
-
         setup = RunTrainingTestSetup(
             monkeypatch,
             model_init_description,
@@ -1928,13 +1926,17 @@ class TestRunTraining:
         )
         setup.setup_mocks()
 
-        mock_split = Mock()
+        mock_split = Mock(
+            side_effect=ValueError(
+                "Need at least 2 recordings to hold out a validation episode."
+            )
+        )
         monkeypatch.setattr("neuracore.ml.train.split_train_val_datasets", mock_split)
 
-        with pytest.raises(ValueError, match=expected_message):
+        with pytest.raises(ValueError, match="Need at least 2 recordings"):
             setup.call_run_training(mock_cfg_training, mock_dataset)
 
-        mock_split.assert_not_called()
+        mock_split.assert_called_once()
         setup.mock_trainer_class.assert_not_called()
 
     def test_autotune_and_training_use_same_dataloader_worker_counts(
@@ -1967,7 +1969,10 @@ class TestRunTraining:
         device = torch.device("cuda:0")
         autotune_model = mock_model_class(model_init_description)
 
-        def fake_split_autotune(dataset, train_size, val_size, seed, **kwargs):
+        def fake_split_autotune(dataset, validation_split, seed, **kwargs):
+            n = len(dataset)
+            train_size = int((1 - validation_split) * n)
+            val_size = n - train_size
             return (
                 torch.utils.data.TensorDataset(torch.zeros(train_size, 1)),
                 torch.utils.data.TensorDataset(torch.zeros(val_size, 1)),
@@ -2015,7 +2020,7 @@ class TestRunTraining:
         mock_val_dataset = Mock(unsafe=True)
         mock_val_dataset.__len__ = Mock(return_value=20)
 
-        def mock_split_train(dataset, train_size, val_size, seed, **kwargs):
+        def mock_split_train(dataset, validation_split, seed, **kwargs):
             return (mock_train_dataset, mock_val_dataset)
 
         monkeypatch.setattr("neuracore.ml.train.DataLoader", tracking_dataloader)

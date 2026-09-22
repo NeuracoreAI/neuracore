@@ -97,10 +97,9 @@ def test_find_optimal_batch_size_passes_default_min_max_to_batch_size_autotuner(
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
         assert len(dataset) == 100
-        assert train_size == 80
-        assert val_size == 20
+        assert validation_split == 0.2
         return (DummyDataset(80), DummyDataset(20))
 
     mock_autotuner_instance = MagicMock()
@@ -154,7 +153,10 @@ def test_find_optimal_batch_size_default_max_allows():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
+        n = len(dataset)
+        train_size = int((1 - validation_split) * n)
+        val_size = n - train_size
         return (DummyDataset(train_size), DummyDataset(val_size))
 
     mock_autotuner_instance = MagicMock()
@@ -563,9 +565,8 @@ def test_is_valid_batch_size_clamps_when_exceeding_train_dataset_size():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
-        assert train_size == 80
-        assert val_size == 20
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
+        assert validation_split == 0.2
         return (DummyDataset(80), DummyDataset(20))
 
     with (
@@ -618,7 +619,10 @@ def test_is_valid_batch_size_rejects_batch_that_fits_without_headroom():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
+        n = len(dataset)
+        train_size = int((1 - validation_split) * n)
+        val_size = n - train_size
         return (DummyDataset(train_size), DummyDataset(val_size))
 
     # Fits (no OOM) but peak reserved is 92% of total -- above the 0.9 * 0.7 =
@@ -667,7 +671,10 @@ def test_is_valid_batch_size_accepts_batch_within_headroom():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
+        n = len(dataset)
+        train_size = int((1 - validation_split) * n)
+        val_size = n - train_size
         return (DummyDataset(train_size), DummyDataset(val_size))
 
     # Fits at 50% of total, comfortably under the 63% budget * safety threshold.
@@ -715,7 +722,10 @@ def test_is_valid_batch_size_rejects_when_probe_ooms():
     device = torch.device("cuda:0")
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(dataset, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(dataset, validation_split, seed, **kwargs):
+        n = len(dataset)
+        train_size = int((1 - validation_split) * n)
+        val_size = n - train_size
         return (DummyDataset(train_size), DummyDataset(val_size))
 
     with (
@@ -888,7 +898,10 @@ def dummy_cfg_and_dataset():
     dataset.collate_fn = lambda x: x
     model_factory = functools.partial(DummyModel, device=device)
 
-    def fake_split_train_val(ds, train_size, val_size, seed, **kwargs):
+    def fake_split_train_val(ds, validation_split, seed, **kwargs):
+        n = len(ds)
+        train_size = int((1 - validation_split) * n)
+        val_size = n - train_size
         return (DummyDataset(train_size), DummyDataset(val_size))
 
     with (
