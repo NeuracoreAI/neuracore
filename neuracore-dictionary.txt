@@ -462,6 +462,7 @@ rtype
 rustls
 rustup
 Safetensors
+Sarthak
 savez
 scanline
 scanlines
