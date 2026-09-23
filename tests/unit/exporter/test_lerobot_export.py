@@ -100,7 +100,7 @@ def test_round_trip_writes_parquet_video_and_metadata(dataset, recording, tmp_pa
     assert manifest["status"] == "succeeded"
 
     root = manifest_path.parent
-    table = pq.read_table(root / "data" / "chunk-000" / "episode_000000.parquet")
+    table = pq.read_table(root / "data" / "chunk-000" / "file-000.parquet")
     # Columns are ordered by sorted joint name: "elbow" before "shoulder".
     np.testing.assert_allclose(
         table.column("observation.state").to_pylist(),
@@ -119,11 +119,7 @@ def test_round_trip_writes_parquet_video_and_metadata(dataset, recording, tmp_pa
     )
 
     video_path = (
-        root
-        / "videos"
-        / "chunk-000"
-        / "observation.images.front"
-        / "episode_000000.mp4"
+        root / "videos" / "observation.images.front" / "chunk-000" / "file-000.mp4"
     )
     assert video_path.exists()
     av = pytest.importorskip("av")
@@ -131,7 +127,7 @@ def test_round_trip_writes_parquet_video_and_metadata(dataset, recording, tmp_pa
         assert len(list(container.decode(video=0))) == 2
 
     info = json.loads((root / "meta" / "info.json").read_text())
-    assert info["codebase_version"] == "v2.1"
+    assert info["codebase_version"] == "v3.0"
     assert info["fps"] == 10
     assert info["total_episodes"] == 1
     assert info["total_frames"] == 2
@@ -139,40 +135,42 @@ def test_round_trip_writes_parquet_video_and_metadata(dataset, recording, tmp_pa
     assert info["features"]["action"]["names"] == ["elbow", "shoulder"]
     assert info["features"]["observation.images.front"]["shape"] == [4, 4, 3]
 
-    tasks = [
-        json.loads(line)
-        for line in (root / "meta" / "tasks.jsonl").read_text().splitlines()
-    ]
-    assert tasks == [{"task_index": 0, "task": "pick it up"}]
+    tasks = pq.read_table(root / "meta" / "tasks.parquet").to_pandas()
+    assert tasks.index.tolist() == ["pick it up"]
+    assert tasks["task_index"].tolist() == [0]
 
-    episodes = [
-        json.loads(line)
-        for line in (root / "meta" / "episodes.jsonl").read_text().splitlines()
-    ]
-    assert episodes == [{"episode_index": 0, "tasks": ["pick it up"], "length": 2}]
+    episodes = pq.read_table(
+        root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    ).to_pylist()
+    episode = episodes[0]
+    assert episode["episode_index"] == 0
+    assert episode["tasks"] == ["pick it up"]
+    assert episode["length"] == 2
+    assert episode["dataset_from_index"] == 0
+    assert episode["dataset_to_index"] == 2
+    assert episode["data/chunk_index"] == 0
+    assert episode["data/file_index"] == 0
+    assert episode["videos/observation.images.front/from_timestamp"] == 0.0
+    assert episode["videos/observation.images.front/to_timestamp"] == 0.2
+    assert np.array(episode["stats/observation.images.front/min"]).shape == (3, 1, 1)
+    assert episode["stats/observation.images.front/count"] == [2]
 
-    stats = [
-        json.loads(line)
-        for line in (root / "meta" / "episodes_stats.jsonl").read_text().splitlines()
-    ]
-    assert stats[0]["episode_index"] == 0
-    image_stats = stats[0]["stats"]["observation.images.front"]
-    assert np.array(image_stats["min"]).shape == (3, 1, 1)
-    assert np.array(image_stats["count"]) == [2]
+    stats = json.loads((root / "meta" / "stats.json").read_text())
+    assert stats["observation.images.front"]["count"] == [2]
 
     assert manifest["files"] == [
         {
-            "path": "data/chunk-000/episode_000000.parquet",
+            "path": "data/chunk-000/file-000.parquet",
             "recording_id": "recording-1",
         },
         {
-            "path": "videos/chunk-000/observation.images.front/episode_000000.mp4",
+            "path": "videos/observation.images.front/chunk-000/file-000.mp4",
             "recording_id": "recording-1",
         },
         {"path": "meta/info.json"},
-        {"path": "meta/tasks.jsonl"},
-        {"path": "meta/episodes.jsonl"},
-        {"path": "meta/episodes_stats.jsonl"},
+        {"path": "meta/tasks.parquet"},
+        {"path": "meta/episodes/chunk-000/file-000.parquet"},
+        {"path": "meta/stats.json"},
     ]
 
 
@@ -196,17 +194,41 @@ def test_second_episode_continues_indices_and_reuses_task(dataset, recording, tm
     assert info["total_episodes"] == 2
     assert info["total_frames"] == 3
 
-    second_table = pq.read_table(root / "data" / "chunk-000" / "episode_000001.parquet")
+    second_table = pq.read_table(root / "data" / "chunk-000" / "file-001.parquet")
     assert second_table.column("episode_index").to_pylist() == [1]
     assert second_table.column("frame_index").to_pylist() == [0]
     # "index" keeps counting across episodes: recording-1 already used indices 0-1.
     assert second_table.column("index").to_pylist() == [2]
 
-    tasks = [
-        json.loads(line)
-        for line in (root / "meta" / "tasks.jsonl").read_text().splitlines()
-    ]
-    assert tasks == [{"task_index": 0, "task": "pick it up"}]
+    tasks = pq.read_table(root / "meta" / "tasks.parquet").to_pandas()
+    assert tasks.index.tolist() == ["pick it up"]
+    assert tasks["task_index"].tolist() == [0]
+
+    episodes = pq.read_table(
+        root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    ).to_pylist()
+    assert episodes[1]["dataset_from_index"] == 2
+    assert episodes[1]["dataset_to_index"] == 3
+    assert episodes[1]["data/file_index"] == 1
+    assert episodes[1]["videos/observation.images.front/file_index"] == 1
+    assert episodes[1]["videos/observation.images.front/from_timestamp"] == 0.0
+    assert episodes[1]["videos/observation.images.front/to_timestamp"] == 0.1
+
+    stats = json.loads((root / "meta" / "stats.json").read_text())
+    states = np.array([[1.0, 0.0], [1.2, 0.2], [1.0, 1.0]])
+    np.testing.assert_allclose(stats["observation.state"]["mean"], states.mean(axis=0))
+    np.testing.assert_allclose(
+        stats["observation.state"]["std"], states.std(axis=0), atol=1e-7
+    )
+    assert stats["observation.state"]["count"] == [3]
+    image_stats = stats["observation.images.front"]
+    pixels = np.stack([_frame(0), _frame(50), _frame(0)]).astype(np.float64) / 255
+    np.testing.assert_allclose(
+        image_stats["mean"], pixels.mean(axis=(0, 1, 2)).reshape(3, 1, 1)
+    )
+    np.testing.assert_allclose(
+        image_stats["std"], pixels.std(axis=(0, 1, 2)).reshape(3, 1, 1)
+    )
 
 
 def test_rejects_mismatched_schema_across_recordings(dataset, recording, tmp_path):
@@ -238,7 +260,7 @@ def test_exports_camera_only_recording_without_joint_positions(dataset, tmp_path
     assert "action" not in info["features"]
     assert "observation.images.front" in info["features"]
 
-    table = pq.read_table(root / "data" / "chunk-000" / "episode_000000.parquet")
+    table = pq.read_table(root / "data" / "chunk-000" / "file-000.parquet")
     assert "observation.state" not in table.column_names
     assert "action" not in table.column_names
 
@@ -275,3 +297,63 @@ def test_cli_exports_lerobot_dataset(dataset, recording, tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert json.loads((output / "manifest.json").read_text())["status"] == "succeeded"
+
+
+def test_v3_dataset_loads_with_lerobot(dataset, recording, tmp_path):
+    lerobot = pytest.importorskip("lerobot")
+    from packaging.version import Version
+
+    if Version(lerobot.__version__) < Version("0.4.0"):
+        pytest.skip("LeRobot v3 requires lerobot>=0.4.0")
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    second = _make_recording(
+        "recording-2",
+        [
+            _point(
+                {"shoulder": 2.0, "elbow": 3.0},
+                {"shoulder": 2.1, "elbow": 3.1},
+                _frame(100),
+                "put it down",
+            )
+        ],
+    )
+    root = tmp_path / "export"
+    export_recordings(dataset, [recording, second], root, LeRobotExporter(fps=10))
+    loaded = LeRobotDataset("local/export", root=root, video_backend="pyav")
+    assert len(loaded) == 3
+    assert loaded.num_episodes == 2
+    assert loaded[0]["task"] == "pick it up"
+    assert loaded[2]["task"] == "put it down"
+    np.testing.assert_allclose(loaded[2]["observation.state"].numpy(), [3.0, 2.0])
+    assert tuple(loaded[2]["observation.images.front"].shape) == (3, 4, 4)
+    np.testing.assert_allclose(
+        loaded[2]["observation.images.front"].numpy(), 100 / 255, atol=3 / 255
+    )
+    assert loaded.meta.get_task_index("put it down") == 1
+    np.testing.assert_allclose(
+        loaded.meta.stats["observation.state"]["mean"], [5.2 / 3, 2.2 / 3]
+    )
+
+
+def test_file_paths_roll_over_to_next_chunk(dataset, recording, tmp_path, monkeypatch):
+    import neuracore.exporter.lerobot as module
+
+    monkeypatch.setattr(module, "CHUNK_SIZE", 1)
+    second = _make_recording("recording-2", recording.synchronize.return_value)
+    root = tmp_path / "export"
+    export_recordings(dataset, [recording, second], root, LeRobotExporter(fps=10))
+    info = json.loads((root / "meta" / "info.json").read_text())
+    episodes = pq.read_table(
+        root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    ).to_pylist()
+    episode = episodes[1]
+    assert episode["data/chunk_index"] == 1
+    assert episode["data/file_index"] == 0
+    assert (root / info["data_path"].format(chunk_index=1, file_index=0)).exists()
+    key = "observation.images.front"
+    assert episode[f"videos/{key}/chunk_index"] == 1
+    assert episode[f"videos/{key}/file_index"] == 0
+    assert (
+        root / info["video_path"].format(video_key=key, chunk_index=1, file_index=0)
+    ).exists()

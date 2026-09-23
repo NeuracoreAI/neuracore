@@ -1,4 +1,4 @@
-"""Export synchronized Neuracore recordings to LeRobot v2.1 dataset files."""
+"""Export synchronized Neuracore recordings to LeRobot v3.0 dataset files."""
 
 import json
 from collections.abc import Callable
@@ -13,16 +13,15 @@ from neuracore.core.data.dataset import Dataset
 from neuracore.core.data.recording import Recording
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
-LeRobot_Codebase = "v2.1"
-CHUNK = "chunk-000"
-DATA_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-VIDEO_PATH = (
-    "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-)
+LEROBOT_CODEBASE_VERSION = "v3.0"
+CHUNK_SIZE = 1000
+DATA_PATH = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+EPISODES_PATH = "meta/episodes/chunk-000/file-000.parquet"
 
 
 class LeRobotExporter(DatasetExporter):
-    """Write a LeRobot v2.1 dataset: one parquet and video set per recording.
+    """Write a LeRobot v3.0 dataset: one parquet and video set per recording.
 
     Every recording is synchronized at a fixed frequency and must share the same
     optional joint names (``JOINT_POSITIONS``, exported as ``observation.state``),
@@ -31,9 +30,13 @@ class LeRobotExporter(DatasetExporter):
     since LeRobot datasets require one feature layout across all episodes. Other
     Neuracore data types (grippers, end-effector poses, point clouds, depth) are
     not exported.
+
+    Each recording has its own data/video files to preserve atomic publication
+    and cleanup on failure. v3 metadata maps episodes to these files and records
+    their frame ranges and video offsets independently of file names.
     """
 
-    format_name = "neuracore-lerobot-v2.1"
+    format_name = "neuracore-lerobot-v3.0"
 
     def __init__(self, fps: int) -> None:
         """Create a writer that synchronizes every recording at ``fps`` Hz."""
@@ -85,10 +88,6 @@ class LeRobotExporter(DatasetExporter):
         }
 
     @staticmethod
-    def _write_jsonl(path: Path, rows: list[dict]) -> None:
-        path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-    @staticmethod
     def _write_atomic(destination: Path, write_fn: Callable[[Path], None]) -> None:
         """Write via a sibling ``.partial`` file, publishing only on success."""
         partial = destination.with_suffix(destination.suffix + ".partial")
@@ -100,8 +99,9 @@ class LeRobotExporter(DatasetExporter):
             raise
 
     def check_dependencies(self) -> None:
-        """Require only parquet support; video encoding uses the core av package."""
+        """Require parquet and task-table support; video encoding uses core av."""
         try:
+            import pandas  # noqa: F401
             import pyarrow  # noqa: F401
         except ImportError as exc:
             raise RuntimeError(
@@ -134,11 +134,6 @@ class LeRobotExporter(DatasetExporter):
             raise RuntimeError("Validate recordings before preparing the exporter.")
         self.output = output
         (output / "meta").mkdir(parents=True)
-        (output / "data" / CHUNK).mkdir(parents=True)
-        videos = output / "videos" / CHUNK
-        _, _, camera_names = self._schema
-        for name in camera_names:
-            (videos / f"observation.images.{to_safe_name(name)}").mkdir(parents=True)
 
     def _encode_video(self, frames: list[np.ndarray], path: Path) -> None:
         import av
@@ -223,18 +218,21 @@ class LeRobotExporter(DatasetExporter):
         if actions is not None:
             columns["action"] = pa.array(actions.tolist(), type=float_list)
 
-        parquet_name = f"episode_{index:06d}.parquet"
-        parquet_path = self.output / "data" / CHUNK / parquet_name
+        chunk_index, file_index = divmod(index, CHUNK_SIZE)
+        parquet_path = self.output / DATA_PATH.format(
+            chunk_index=chunk_index, file_index=file_index
+        )
         video_paths = {
-            name: (
-                self.output
-                / "videos"
-                / CHUNK
-                / f"observation.images.{to_safe_name(name)}"
-                / f"episode_{index:06d}.mp4"
+            name: self.output
+            / VIDEO_PATH.format(
+                video_key=f"observation.images.{to_safe_name(name)}",
+                chunk_index=chunk_index,
+                file_index=file_index,
             )
             for name in camera_names
         }
+        for path in [parquet_path, *video_paths.values()]:
+            path.parent.mkdir(parents=True, exist_ok=True)
 
         written: list[Path] = []
         try:
@@ -253,11 +251,25 @@ class LeRobotExporter(DatasetExporter):
                 path.unlink(missing_ok=True)
             raise
 
-        self._episodes.append({
+        episode = {
             "episode_index": index,
             "tasks": [task_text],
             "length": num_frames,
-        })
+            "dataset_from_index": self._total_frames,
+            "dataset_to_index": self._total_frames + num_frames,
+            "data/chunk_index": chunk_index,
+            "data/file_index": file_index,
+            "meta/episodes/chunk_index": 0,
+            "meta/episodes/file_index": 0,
+        }
+        for name in camera_names:
+            prefix = f"videos/observation.images.{to_safe_name(name)}"
+            episode.update({
+                f"{prefix}/chunk_index": chunk_index,
+                f"{prefix}/file_index": file_index,
+                f"{prefix}/from_timestamp": 0.0,
+                f"{prefix}/to_timestamp": num_frames / self.fps,
+            })
         stats = {
             "timestamp": self._scalar_stats(timestamp.astype(np.float64)),
             "frame_index": self._scalar_stats(frame_index.astype(np.float64)),
@@ -273,14 +285,41 @@ class LeRobotExporter(DatasetExporter):
             stats[f"observation.images.{to_safe_name(name)}"] = self._image_stats(
                 camera_frames[name]
             )
-        self._episode_stats.append({"episode_index": index, "stats": stats})
+        self._episode_stats.append(stats)
+        for feature, feature_stats in stats.items():
+            for statistic, value in feature_stats.items():
+                episode[f"stats/{feature}/{statistic}"] = value
+        self._episodes.append(episode)
         self._total_frames += num_frames
 
-        files = [ExportFile(f"data/{CHUNK}/{parquet_name}", recording.id)]
+        files = [ExportFile(str(parquet_path.relative_to(self.output)), recording.id)]
         for video_path in video_paths.values():
             relative_path = str(video_path.relative_to(self.output))
             files.append(ExportFile(relative_path, recording.id))
         return files
+
+    def _aggregate_stats(self) -> dict[str, dict[str, list]]:
+        """Combine episode moments, weighted by their frame counts."""
+        aggregated = {}
+        for feature in self._episode_stats[0]:
+            stats = [episode[feature] for episode in self._episode_stats]
+            means = np.asarray([stat["mean"] for stat in stats], dtype=np.float64)
+            variances = (
+                np.asarray([stat["std"] for stat in stats], dtype=np.float64) ** 2
+            )
+            counts = np.asarray([stat["count"][0] for stat in stats])
+            weights = counts.reshape((-1,) + (1,) * (means.ndim - 1))
+            count = int(counts.sum())
+            mean = (means * weights).sum(axis=0) / count
+            variance = ((variances + (means - mean) ** 2) * weights).sum(axis=0) / count
+            aggregated[feature] = {
+                "min": np.min([stat["min"] for stat in stats], axis=0).tolist(),
+                "max": np.max([stat["max"] for stat in stats], axis=0).tolist(),
+                "mean": mean.tolist(),
+                "std": np.sqrt(variance).tolist(),
+                "count": [count],
+            }
+        return aggregated
 
     def finalize(self) -> list[ExportFile]:
         """Write dataset-wide metadata and finish the export."""
@@ -327,30 +366,38 @@ class LeRobotExporter(DatasetExporter):
         })
 
         info = {
-            "codebase_version": LeRobot_Codebase,
+            "codebase_version": LEROBOT_CODEBASE_VERSION,
             "robot_type": self._robot_type,
             "total_episodes": len(self._episodes),
             "total_frames": self._total_frames,
             "total_tasks": len(self._tasks),
-            "total_videos": len(self._episodes) * len(camera_names),
-            "total_chunks": 1,
-            "chunks_size": 1000,
+            "chunks_size": CHUNK_SIZE,
+            "data_files_size_in_mb": 100,
+            "video_files_size_in_mb": 200,
             "fps": self.fps,
             "splits": {"train": f"0:{len(self._episodes)}"},
             "data_path": DATA_PATH,
             "video_path": VIDEO_PATH if camera_names else None,
             "features": features,
         }
-        tasks = [{"task_index": idx, "task": text} for text, idx in self._tasks.items()]
+        import pandas as pd
+        import pyarrow as pa
+        import pyarrow.parquet as pq
 
+        # LeRobot looks up task text through the pandas index, not a data column.
+        tasks = pd.DataFrame(
+            {"task_index": list(self._tasks.values())}, index=list(self._tasks)
+        )
+        episodes = pa.Table.from_pylist(self._episodes)
+        stats = self._aggregate_stats()
         meta = self.output / "meta"
-        episode_stats = self._episode_stats
+        episodes_path = self.output / EPISODES_PATH
+        episodes_path.parent.mkdir(parents=True, exist_ok=True)
         files = {
             meta / "info.json": lambda p: p.write_text(json.dumps(info, indent=4)),
-            meta / "tasks.jsonl": lambda p: self._write_jsonl(p, tasks),
-            meta / "episodes.jsonl": lambda p: self._write_jsonl(p, self._episodes),
-            meta
-            / "episodes_stats.jsonl": lambda p: self._write_jsonl(p, episode_stats),
+            meta / "tasks.parquet": lambda p: tasks.to_parquet(p),
+            episodes_path: lambda p: pq.write_table(episodes, p),
+            meta / "stats.json": lambda p: p.write_text(json.dumps(stats, indent=4)),
         }
         written: list[Path] = []
         try:
