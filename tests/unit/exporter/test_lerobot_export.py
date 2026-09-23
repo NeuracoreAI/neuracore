@@ -334,26 +334,3 @@ def test_v3_dataset_loads_with_lerobot(dataset, recording, tmp_path):
     np.testing.assert_allclose(
         loaded.meta.stats["observation.state"]["mean"], [5.2 / 3, 2.2 / 3]
     )
-
-
-def test_file_paths_roll_over_to_next_chunk(dataset, recording, tmp_path, monkeypatch):
-    import neuracore.exporter.lerobot as module
-
-    monkeypatch.setattr(module, "CHUNK_SIZE", 1)
-    second = _make_recording("recording-2", recording.synchronize.return_value)
-    root = tmp_path / "export"
-    export_recordings(dataset, [recording, second], root, LeRobotExporter(fps=10))
-    info = json.loads((root / "meta" / "info.json").read_text())
-    episodes = pq.read_table(
-        root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
-    ).to_pylist()
-    episode = episodes[1]
-    assert episode["data/chunk_index"] == 1
-    assert episode["data/file_index"] == 0
-    assert (root / info["data_path"].format(chunk_index=1, file_index=0)).exists()
-    key = "observation.images.front"
-    assert episode[f"videos/{key}/chunk_index"] == 1
-    assert episode[f"videos/{key}/file_index"] == 0
-    assert (
-        root / info["video_path"].format(video_key=key, chunk_index=1, file_index=0)
-    ).exists()

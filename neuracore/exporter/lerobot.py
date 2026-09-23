@@ -14,9 +14,8 @@ from neuracore.core.data.recording import Recording
 from neuracore.exporter.export import DatasetExporter, ExportFile, export_recordings
 
 LEROBOT_CODEBASE_VERSION = "v3.0"
-CHUNK_SIZE = 1000
-DATA_PATH = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
-VIDEO_PATH = "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+DATA_PATH = "data/chunk-000/file-{file_index:03d}.parquet"
+VIDEO_PATH = "videos/{video_key}/chunk-000/file-{file_index:03d}.mp4"
 EPISODES_PATH = "meta/episodes/chunk-000/file-000.parquet"
 
 
@@ -33,7 +32,7 @@ class LeRobotExporter(DatasetExporter):
 
     Each recording has its own data/video files to preserve atomic publication
     and cleanup on failure. v3 metadata maps episodes to these files and records
-    their frame ranges and video offsets independently of file names.
+    their frame ranges and video offsets. All files use a single chunk directory.
     """
 
     format_name = "neuracore-lerobot-v3.0"
@@ -60,17 +59,6 @@ class LeRobotExporter(DatasetExporter):
             "max": np.max(array, axis=0).tolist(),
             "mean": np.mean(array, axis=0).tolist(),
             "std": np.std(array, axis=0).tolist(),
-            "count": [len(array)],
-        }
-
-    @staticmethod
-    def _scalar_stats(array: np.ndarray) -> dict[str, list]:
-        """min/max/mean/std/count for an ``(n,)`` array, kept as length-1 vectors."""
-        return {
-            "min": [float(array.min())],
-            "max": [float(array.max())],
-            "mean": [float(array.mean())],
-            "std": [float(array.std())],
             "count": [len(array)],
         }
 
@@ -218,16 +206,12 @@ class LeRobotExporter(DatasetExporter):
         if actions is not None:
             columns["action"] = pa.array(actions.tolist(), type=float_list)
 
-        chunk_index, file_index = divmod(index, CHUNK_SIZE)
-        parquet_path = self.output / DATA_PATH.format(
-            chunk_index=chunk_index, file_index=file_index
-        )
+        parquet_path = self.output / DATA_PATH.format(file_index=index)
         video_paths = {
             name: self.output
             / VIDEO_PATH.format(
                 video_key=f"observation.images.{to_safe_name(name)}",
-                chunk_index=chunk_index,
-                file_index=file_index,
+                file_index=index,
             )
             for name in camera_names
         }
@@ -257,25 +241,28 @@ class LeRobotExporter(DatasetExporter):
             "length": num_frames,
             "dataset_from_index": self._total_frames,
             "dataset_to_index": self._total_frames + num_frames,
-            "data/chunk_index": chunk_index,
-            "data/file_index": file_index,
+            "data/chunk_index": 0,
+            "data/file_index": index,
             "meta/episodes/chunk_index": 0,
             "meta/episodes/file_index": 0,
         }
         for name in camera_names:
             prefix = f"videos/observation.images.{to_safe_name(name)}"
             episode.update({
-                f"{prefix}/chunk_index": chunk_index,
-                f"{prefix}/file_index": file_index,
+                f"{prefix}/chunk_index": 0,
+                f"{prefix}/file_index": index,
                 f"{prefix}/from_timestamp": 0.0,
                 f"{prefix}/to_timestamp": num_frames / self.fps,
             })
         stats = {
-            "timestamp": self._scalar_stats(timestamp.astype(np.float64)),
-            "frame_index": self._scalar_stats(frame_index.astype(np.float64)),
-            "episode_index": self._scalar_stats(episode_index.astype(np.float64)),
-            "index": self._scalar_stats(dataset_index.astype(np.float64)),
-            "task_index": self._scalar_stats(task_index_col.astype(np.float64)),
+            name: self._vector_stats(values.astype(np.float64).reshape(-1, 1))
+            for name, values in {
+                "timestamp": timestamp,
+                "frame_index": frame_index,
+                "episode_index": episode_index,
+                "index": dataset_index,
+                "task_index": task_index_col,
+            }.items()
         }
         if states is not None:
             stats["observation.state"] = self._vector_stats(states)
@@ -308,16 +295,16 @@ class LeRobotExporter(DatasetExporter):
                 np.asarray([stat["std"] for stat in stats], dtype=np.float64) ** 2
             )
             counts = np.asarray([stat["count"][0] for stat in stats])
-            weights = counts.reshape((-1,) + (1,) * (means.ndim - 1))
-            count = int(counts.sum())
-            mean = (means * weights).sum(axis=0) / count
-            variance = ((variances + (means - mean) ** 2) * weights).sum(axis=0) / count
+            mean = np.average(means, axis=0, weights=counts)
+            variance = np.average(
+                variances + (means - mean) ** 2, axis=0, weights=counts
+            )
             aggregated[feature] = {
                 "min": np.min([stat["min"] for stat in stats], axis=0).tolist(),
                 "max": np.max([stat["max"] for stat in stats], axis=0).tolist(),
                 "mean": mean.tolist(),
                 "std": np.sqrt(variance).tolist(),
-                "count": [count],
+                "count": [int(counts.sum())],
             }
         return aggregated
 
@@ -371,7 +358,7 @@ class LeRobotExporter(DatasetExporter):
             "total_episodes": len(self._episodes),
             "total_frames": self._total_frames,
             "total_tasks": len(self._tasks),
-            "chunks_size": CHUNK_SIZE,
+            "chunks_size": max(1000, len(self._episodes)),
             "data_files_size_in_mb": 100,
             "video_files_size_in_mb": 200,
             "fps": self.fps,
