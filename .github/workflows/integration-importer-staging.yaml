@@ -1,4 +1,4 @@
-name: Integration PF - Importer (Staging)
+name: Integration PF - Importer / Exporter (Staging)
 
 on:
   schedule:
@@ -98,7 +98,7 @@ jobs:
         with:
           checkout: "false"
           path: "."
-          extras: dev,import
+          extras: dev,import,export
           pytorch-cpu: "true"
 
       # torchcodec dlopens libavutil etc. directly (never the ffmpeg CLI, left at 9.0), so only these shared libs need to be an older version.
@@ -112,7 +112,7 @@ jobs:
           LD_LIBRARY_PATH="$RUNNER_TEMP/ffmpeg-shared-libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
             python3 -c "import ctypes; ctypes.CDLL('libavutil.so.60')"
 
-      - name: Run Importer Integration Tests
+      - name: Run Importer / Exporter Integration Tests
         env:
           NEURACORE_API_URL: https://staging.api.neuracore.com/api
           NEURACORE_API_KEY: ${{ secrets.STAGING_SERVICE_API_KEY }}
@@ -127,7 +127,11 @@ jobs:
             --log-cli-date-format="%H:%M:%S"
             -v
           )
-          pytest "${pytest_args[@]}" "tests/integration/importer_exporter/test_${{ matrix.suite }}_dataset_import.py"
+          test_paths=("tests/integration/importer_exporter/test_${{ matrix.suite }}_dataset_import.py")
+          if [[ "${{ matrix.suite }}" == "mcap" ]]; then
+            test_paths+=("tests/integration/importer_exporter/test_importer_exporter.py")
+          fi
+          pytest "${pytest_args[@]}" "${test_paths[@]}"
 
       - name: Upload data-daemon diagnostics
         if: always()
