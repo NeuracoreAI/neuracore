@@ -346,6 +346,14 @@ class DistributedTrainer:
                 if isinstance(self.train_loader.sampler, DistributedSampler):
                     self.train_loader.sampler.set_epoch(epoch)
 
+                if self.rank == 0 and epoch == start_epoch:
+                    logger.info(
+                        "Epoch %s/%s started. Uncached samples will be prepared "
+                        "and cached as training runs.",
+                        epoch,
+                        self.num_epochs,
+                    )
+
                 epoch_t0 = time.perf_counter()
                 train_loss_metrics = self.train_epoch(epoch)
                 train_elapsed = time.perf_counter() - epoch_t0
