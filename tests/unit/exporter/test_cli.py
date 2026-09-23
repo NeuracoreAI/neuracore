@@ -28,7 +28,7 @@ def test_cli_validates_before_login(command, existing_output, tmp_path, monkeypa
     result = CliRunner().invoke(cli.export_app, args)
 
     assert result.exit_code == 2
-    expected = "already exists" if existing_output else "Provide exactly one"
+    expected = "already exists" if existing_output else "Missing option"
     assert expected in result.output
     login.assert_not_called()
 

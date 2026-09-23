@@ -23,12 +23,10 @@ export_app = typer.Typer(help="Export datasets to local files.")
 
 def _export_dataset(
     output: Path,
-    dataset_name: str | None,
+    dataset_name: str,
     exporter_factory: Callable[[], DatasetExporter],
 ) -> None:
     """Run the shared validation, authentication and export CLI workflow."""
-    if dataset_name is None:
-        raise typer.BadParameter("Provide exactly one of --dataset")
     if output.exists():
         raise typer.BadParameter(f"Output directory already exists: {output}")
 
@@ -61,7 +59,7 @@ def _export_dataset(
 @export_app.command("mcap")
 def export_mcap(
     output: Path = typer.Option(..., "--output", "-o", help="New output directory."),
-    dataset_name: str | None = typer.Option(None, "--dataset", help="Dataset name."),
+    dataset_name: str = typer.Option(..., "--dataset", help="Dataset name."),
 ) -> None:
     """Export a dataset to JSON MCAP files with original media attachments."""
     _export_dataset(output, dataset_name, McapExporter)
@@ -70,7 +68,7 @@ def export_mcap(
 @export_app.command("lerobot")
 def export_lerobot(
     output: Path = typer.Option(..., "--output", "-o", help="New output directory."),
-    dataset_name: str | None = typer.Option(None, "--dataset", help="Dataset name."),
+    dataset_name: str = typer.Option(..., "--dataset", help="Dataset name."),
     fps: int = typer.Option(
         ..., "--fps", help="Frequency (Hz) to synchronize each recording at."
     ),
