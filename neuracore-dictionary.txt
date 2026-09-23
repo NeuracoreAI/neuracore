@@ -400,6 +400,7 @@ proprio
 proprios
 psutil
 pthread
+pyarrow
 pyav
 pycache
 pydantic

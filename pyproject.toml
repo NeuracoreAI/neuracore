@@ -61,7 +61,7 @@ dependencies = [
 Homepage = "https://github.com/neuracoreai/neuracore"
 
 [project.optional-dependencies]
-export = ["mcap>=1.3.1,<2"]
+export = ["mcap>=1.3.1,<2", "pyarrow>=14", "pandas>=2"]
 examples = ["matplotlib>=3.3.0", "mujoco==2.3.7", "pyquaternion>=0.9.5"]
 mjcf = ["mujoco>3"]
 ml = [
