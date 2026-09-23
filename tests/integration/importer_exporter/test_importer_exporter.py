@@ -3,19 +3,6 @@
 Exports, imports with the existing importer, and checks every recording lands.
 """
 
-# ruff: noqa: E402
-
-import os
-
-API_URL = (
-    "https://staging.api.neuracore.com/api"  # Production: https://api.neuracore.com/api
-)
-ORG_NAME = "Sarthak Das's Project"  # Enter your organization name.
-DATASET_NAME = "Data Upload Integrity Check"
-
-# The SDK reads the API URL at import time.
-os.environ["NEURACORE_API_URL"] = API_URL
-
 import json
 import shutil
 import subprocess
@@ -33,10 +20,12 @@ from neuracore_types.nc_data import (
 )
 
 import neuracore as nc
-from neuracore.core.const import API_URL as SDK_API_URL
 from neuracore.core.data.dataset import Dataset
 from neuracore.core.organizations import list_my_orgs
 from tests.integration.platform.data_daemon.shared.runners import online_daemon_running
+
+ORG_NAME = "Service Account's Project"  # Enter your organization name.
+DATASET_NAME = "Data Upload Integrity Check"
 
 
 def _import_config(recording, dataset_name: str, robot_name: str):
@@ -135,7 +124,6 @@ def test_mcap_dataset_roundtrip(
     """Export every recording to MCAP, re-import it, and check it all lands."""
 
     assert ORG_NAME, "Set ORG_NAME at the top of this file"
-    assert SDK_API_URL == API_URL, "Run this file separately so the SDK uses API_URL"
 
     monkeypatch.setenv("NCD_VIDEO_CODEC", "h264_lossless")
 
