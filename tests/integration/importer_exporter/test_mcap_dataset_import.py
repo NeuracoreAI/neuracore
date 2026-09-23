@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tests.integration.importer import cli_option_tests
-from tests.integration.importer.utils import MCAP_KIND
+from tests.integration.importer_exporter import cli_option_tests
+from tests.integration.importer_exporter.utils import MCAP_KIND
 
 
 def test_import_mcap_dataset(tmp_path: Path, importer_mcap_dataset_case: dict) -> None:
