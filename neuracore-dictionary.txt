@@ -4,8 +4,8 @@ absolutises
 absolutising
 acked
 acks
-adarms
 ADARMS
+adarms
 addfinalizer
 addinivalue
 addoption
@@ -72,8 +72,8 @@ closedness
 cmap
 cmaps
 cmeel
-cnnmlp
 CNNMLP
+cnnmlp
 CNNMLPP
 Colab
 colab
@@ -103,10 +103,10 @@ dashmap
 dataconfig
 dataformats
 dataid
-ddim
 DDIM
-ddpm
+ddim
 DDPM
+ddpm
 debouncer
 delenv
 demux
@@ -154,8 +154,8 @@ execv
 expanduser
 extr
 extractall
-extrinsics
 Extrinsics
+extrinsics
 faceadr
 facecolor
 facenum
@@ -211,8 +211,8 @@ ghjdidnia
 gitignored
 GPTJ
 gptj
-groot
 Groot
+groot
 hdlc
 hookwrapper
 hparams
@@ -279,8 +279,8 @@ linalg
 lineno
 listconfig
 livelock
-llava
 Llava
+llava
 logdir
 loglevel
 loglik
@@ -477,9 +477,9 @@ setsid
 setuptools
 SFIXED
 shadowsize
-siglip
 SIGLIP
 Siglip
+siglip
 silu
 softmax
 solimp
@@ -506,8 +506,8 @@ teleop
 temb
 tensorboard
 testsrc
-tfds
 TFDS
+tfds
 tfrecord
 thiserror
 threadid
@@ -533,8 +533,8 @@ TTYNTK
 typer
 UFACTORY
 ultrawide
-unet
 Unet
+unet
 Unet's
 unflushed
 uninit
@@ -544,8 +544,8 @@ unitreeh
 unitreeh1
 unniced
 unnormalization
-unpaced
 Unpaced
+unpaced
 unpackb
 unparseable
 unraisable
@@ -571,8 +571,8 @@ vlln
 Vsqo
 vsync
 waitpid
-wakelock
 WAKELOCK
+wakelock
 wasmbind
 widowx
 worldbody
