@@ -213,7 +213,7 @@ class RecordingContext:
     def log_joints(
         self,
         data_type: str,
-        timestamp: float,
+        timestamp: float | int,
         joined_names: str,
         values: list[float],
     ) -> None:
@@ -221,22 +221,20 @@ class RecordingContext:
 
         Args:
             data_type:  Type of joint data e.g. DataType.JOINT_POSITIONS.
-            timestamp: the Unix timestamp of the sample.
+            timestamp: the sample's capture time, float seconds or integer ticks.
             joined_names: a single ``\0``-joined string of joint names.
             values: a flat list of joint values.
         """
         if not values:
             return
         robot_id = self._require_source("log_joints")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_joints(
             robot_id,
             self._robot_instance,
             data_type,
             joined_names,
             values,
-            timestamp_ns,
-            timestamp,
+            timestamp_to_ticks(timestamp),
         )
 
     def log_frame(
@@ -287,7 +285,7 @@ class RecordingContext:
         data_type: str,
         name: str,
         payload: bytes,
-        timestamp: float,
+        timestamp: float | int,
     ) -> None:
         """Forward one JSON sample to the daemon.
 
@@ -297,15 +295,13 @@ class RecordingContext:
         serialized, so the daemon stores it verbatim as a per-trace JSON sample.
         """
         robot_id = self._require_source("log_json")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         _load_native().log_json(
             robot_id,
             self._robot_instance,
             data_type,
             name,
             payload,
-            timestamp_ns,
-            timestamp,
+            timestamp_to_ticks(timestamp),
         )
 
     def cancel_recording(self, timestamp: float | int | None = None) -> None:

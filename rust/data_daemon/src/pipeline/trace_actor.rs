@@ -292,10 +292,8 @@ impl TraceActorContext {
 pub enum TraceActorMessage {
     /// One sensor sample routed to this trace after its holdback elapsed.
     Data {
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in ticks.
+        timestamp: i64,
         /// Opaque per-sample bytes.
         payload: Vec<u8>,
     },
@@ -461,14 +459,8 @@ pub async fn run(
 
     while let Some(message) = inbox.recv().await {
         match message {
-            TraceActorMessage::Data {
-                timestamp_ns,
-                timestamp_s,
-                payload,
-            } => {
-                state
-                    .handle_data(&context, timestamp_ns, timestamp_s, payload)
-                    .await;
+            TraceActorMessage::Data { timestamp, payload } => {
+                state.handle_data(&context, timestamp, payload).await;
             }
             TraceActorMessage::Video {
                 chunk_index,
@@ -561,8 +553,7 @@ impl ActorState {
     async fn handle_data(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
-        _timestamp_s: Option<f64>,
+        timestamp: i64,
         payload: Vec<u8>,
     ) {
         if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
@@ -575,7 +566,7 @@ impl ActorState {
         // UPDATE for this field; the bytes-written debouncer covers the rest.
         let bumped_status = self.frame_count == 0;
 
-        if let Err(error) = self.append_frame(context, timestamp_ns, payload) {
+        if let Err(error) = self.append_frame(context, timestamp, payload) {
             tracing::warn!(
                 %error,
                 trace_id = self.identity.trace_id,
@@ -660,7 +651,7 @@ impl ActorState {
     fn append_frame(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
+        timestamp: i64,
         payload: Vec<u8>,
     ) -> Result<(), FrameAppendError> {
         match &self.writer {
@@ -676,7 +667,7 @@ impl ActorState {
                 self.bytes_on_disk = self.bytes_on_disk.saturating_add(payload.len() as u64);
                 context
                     .json_writer
-                    .append(&self.identity.trace_id, timestamp_ns, payload);
+                    .append(&self.identity.trace_id, timestamp, payload);
                 Ok(())
             }
             TraceWriterKind::Video { .. } => {
@@ -1710,7 +1701,7 @@ mod tests {
     #[test]
     fn scalar_fallback_entry_wraps_non_json_payload() {
         let entry = crate::pipeline::json_writer::scalar_fallback_entry(123, &[0xFF, 0xFE]);
-        assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
+        assert_eq!(entry, json!({"timestamp": 123, "payload_len": 2}));
     }
 
     #[test]
@@ -1757,7 +1748,7 @@ mod tests {
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             state
-                .handle_data(&context, index * 1_000_000, None, payload)
+                .handle_data(&context, index * 1_000_000, payload)
                 .await;
         }
         state.finalise_trace(&context).await;
@@ -2023,7 +2014,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         for _ in 0..3 {
-            state.handle_data(&context, 0, None, vec![0u8; 20]).await;
+            state.handle_data(&context, 0, vec![0u8; 20]).await;
         }
         state.finalise_trace(&context).await;
         context.trace_writer.flush().await;
@@ -2060,12 +2051,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         state
-            .handle_data(
-                &context,
-                0,
-                None,
-                serde_json::to_vec(&json!({"i": 0})).unwrap(),
-            )
+            .handle_data(&context, 0, serde_json::to_vec(&json!({"i": 0})).unwrap())
             .await;
         assert!(state.bytes_on_disk > 0, "the frame was accounted on disk");
 
