@@ -249,16 +249,12 @@ jobs:
 
     - name: Read pending changelog
       id: read_pending
+      shell: bash
       run: |
         if [ -f "changelogs/pending-changelog.md" ]; then
-          PENDING_CONTENT=$(cat changelogs/pending-changelog.md | \
-            grep -v '^\[' | \
-            grep -v '<!--' | \
-            grep -v '-->' | \
-            sed '/^$/N;/^\n$/D' | \
-            sed 's/^# Pending Release Notes//')
+          PENDING_CONTENT=$(perl -0pe 's/<!--.*?-->//gs; s/^#+ (Pending Release Notes|Summary)[ \t]*$//mg' changelogs/pending-changelog.md)
 
-          if echo "$PENDING_CONTENT" | grep -qv '^#'; then
+          if [ -n "$(echo "$PENDING_CONTENT" | tr -d '[:space:]')" ]; then
             echo "Found pending changelog content"
             PENDING_CONTENT=$(echo "$PENDING_CONTENT" | jq -Rs .)
             echo "pending_content=$PENDING_CONTENT" >> $GITHUB_OUTPUT
@@ -287,21 +283,21 @@ jobs:
 
           const date = new Date().toISOString().split('T')[0];
 
-          const groups = {
-            breaking: [],
-            features: [],
-            fixes: [],
-            other: []
+          const bumps = { major: [], minor: [], patch: [], none: [] };
+          for (const pr of prData) (bumps[pr.bump_type] || bumps.none).push(pr);
+
+          const prLine = pr => `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
+
+          const typeOrder = pr => {
+            const type = (pr.title.match(/^(\w+)/) || [])[1] || '';
+            return type === 'feat' ? '0' : type === 'fix' ? '1' : `2${type}`;
           };
 
-          for (const pr of prData) {
-            switch (pr.bump_type) {
-              case 'major': groups.breaking.push(pr); break;
-              case 'minor': groups.features.push(pr); break;
-              case 'patch': groups.fixes.push(pr); break;
-              default: groups.other.push(pr);
-            }
-          }
+          const section = (heading, prs) => {
+            if (prs.length === 0) return '';
+            const sorted = prs.sort((a, b) => typeOrder(a).localeCompare(typeOrder(b)) || a.number - b.number);
+            return `## ${heading}\n\n${sorted.map(prLine).join('')}\n`;
+          };
 
           let changelog = `# Release v${version} - ${date}\n\n`;
 
@@ -313,37 +309,10 @@ jobs:
             changelog += `## Summary\n\n${pendingContent.trim()}\n\n---\n\n`;
           }
 
-          if (groups.breaking.length > 0) {
-            changelog += `## Breaking Changes\n\n`;
-            for (const pr of groups.breaking.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
-            }
-            changelog += '\n';
-          }
-
-          if (groups.features.length > 0) {
-            changelog += `## Features\n\n`;
-            for (const pr of groups.features.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
-            }
-            changelog += '\n';
-          }
-
-          if (groups.fixes.length > 0) {
-            changelog += `## Bug Fixes\n\n`;
-            for (const pr of groups.fixes.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
-            }
-            changelog += '\n';
-          }
-
-          if (groups.other.length > 0) {
-            changelog += `## Other Changes\n\n`;
-            for (const pr of groups.other.sort((a, b) => a.number - b.number)) {
-              changelog += `- **${pr.title}** ([#${pr.number}](${pr.url})) by @${pr.author}${pr.hotfix ? ' **(hotfix)**' : ''}\n`;
-            }
-            changelog += '\n';
-          }
+          changelog += section('Major', bumps.major);
+          changelog += section('Minor', bumps.minor);
+          changelog += section('Patch', bumps.patch);
+          changelog += section('Other Changes', bumps.none);
 
           changelog += `---\n\n`;
           changelog += `**Installation:**\n\`\`\`bash\npip install neuracore==${version}\n\`\`\`\n\n`;
@@ -354,10 +323,10 @@ jobs:
           core.setOutput('changelog_content', changelog);
 
           console.log(`\nChangelog Summary:`);
-          console.log(`- Major Changes: ${groups.breaking.length}`);
-          console.log(`- Minor Changes: ${groups.features.length}`);
-          console.log(`- Patch Changes: ${groups.fixes.length}`);
-          console.log(`- Misc/Chore Changes: ${groups.other.length}`);
+          console.log(`- Major Changes: ${bumps.major.length}`);
+          console.log(`- Minor Changes: ${bumps.minor.length}`);
+          console.log(`- Patch Changes: ${bumps.patch.length}`);
+          console.log(`- Misc/Chore Changes: ${bumps.none.length}`);
           console.log(`- Total PRs: ${prData.length}`);
 
   release:
