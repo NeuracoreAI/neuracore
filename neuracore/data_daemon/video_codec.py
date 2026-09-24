@@ -31,8 +31,8 @@ def set_active_profile_video_codec(codec: str) -> None:
     change is picked up by the daemon for the next recording.
 
     Args:
-        codec: The codec identifier to store (e.g. ``"h264_medium"`` or the
-            explicit ``"h264_lossless"`` option).
+        codec: The codec identifier to store (e.g. ``"h264_medium"``,
+            ``"h264_fast"`` or the explicit ``"h264_lossless"`` option).
 
     Raises:
         RuntimeError: If the profile could not be written.

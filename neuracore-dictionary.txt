@@ -398,6 +398,7 @@ pretraining
 prio
 proprio
 proprios
+psnr
 psutil
 pthread
 pyarrow
@@ -565,6 +566,8 @@ vdecode
 vencode
 vertadr
 vertnum
+veryfast
+veryslow
 VIPERX
 viser
 vlln

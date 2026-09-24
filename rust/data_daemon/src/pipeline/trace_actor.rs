@@ -803,6 +803,7 @@ impl ActorState {
             permit_total: context.ffmpeg_permit_total,
             encode_cores: context.encode_cores,
             encoder: context.video_encoder.clone(),
+            recording_index: self.identity.key.recording_index,
             trace_id: self.identity.trace_id.clone(),
             trace_dir,
             chunks_dir,
@@ -1255,6 +1256,8 @@ struct EncodeWorker {
     permit_total: usize,
     encode_cores: usize,
     encoder: VideoEncoder,
+    /// For `perf_events`: joins this worker's events to the recording's other phases.
+    recording_index: i64,
     trace_id: String,
     trace_dir: PathBuf,
     chunks_dir: PathBuf,
@@ -1412,6 +1415,7 @@ impl EncodeWorker {
             .permit_total
             .saturating_sub(self.permits.available_permits());
         let encode_threads = adaptive_encode_threads(self.encode_cores, active_encodes);
+        let batch_started = Instant::now();
         match self
             .encoder
             .encode_chunk_batch(&request, encode_threads)
@@ -1434,6 +1438,25 @@ impl EncodeWorker {
                     }
                 }
                 let frame_count = batch.iter().map(|chunk| chunk.frame_count).sum::<u32>();
+                crate::perf_events::emit(
+                    "video_encoding",
+                    "completed",
+                    Some(self.recording_index),
+                    Some(&self.trace_id),
+                    Some(batch_started.elapsed()),
+                    serde_json::json!({
+                        "scope": "chunk_batch",
+                        "codec": self.codec,
+                        "preset": self.codec.lossy_preset(),
+                        "encode_threads": encode_threads,
+                        "active_encodes": active_encodes,
+                        "chunks": batch.len(),
+                        "frame_count": frame_count,
+                        "lossy_bytes": encode.lossy_bytes,
+                        "lossless_bytes": encode.lossless_bytes,
+                        "outcome": "ok",
+                    }),
+                );
                 tracing::debug!(
                     trace_id = %self.trace_id,
                     first_chunk_index = first_index,
@@ -1461,10 +1484,26 @@ impl EncodeWorker {
                     },
                 }
             }
-            Err(error) => EncodeWorkerOutcome::Failed {
-                chunk_index: first_index,
-                error,
-            },
+            Err(error) => {
+                crate::perf_events::emit(
+                    "video_encoding",
+                    "failed",
+                    Some(self.recording_index),
+                    Some(&self.trace_id),
+                    Some(batch_started.elapsed()),
+                    serde_json::json!({
+                        "scope": "chunk_batch",
+                        "codec": self.codec,
+                        "preset": self.codec.lossy_preset(),
+                        "chunks": batch.len(),
+                        "outcome": "error",
+                    }),
+                );
+                EncodeWorkerOutcome::Failed {
+                    chunk_index: first_index,
+                    error,
+                }
+            }
         }
     }
 }
