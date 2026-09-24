@@ -13,6 +13,8 @@ from importlib import import_module
 from types import ModuleType
 from typing import NamedTuple
 
+from neuracore_types.timestamps import timestamp_to_ticks
+
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
@@ -55,13 +57,13 @@ class LiveRecording(NamedTuple):
             published for.
         cloud_recording_id: The cloud handle, once ``/recording/start`` has been
             notified. ``None`` while the recording is still local-only.
-        start_timestamp_ns: The recording's capture-clock start marker, as
-            returned by :meth:`RecordingContext.start_recording`.
+        start_timestamp: The recording's start marker in ticks, as returned by
+            :meth:`RecordingContext.start_recording`.
     """
 
     recording_index: int | None
     cloud_recording_id: str | None
-    start_timestamp_ns: int | None
+    start_timestamp: int | None
 
 
 class RecordingStateUnavailableError(RuntimeError):
@@ -110,8 +112,13 @@ def query_recording_state(
     return LiveRecording(
         recording_index=live["recording_index"],
         cloud_recording_id=live["cloud_recording_id"],
-        start_timestamp_ns=live["start_timestamp_ns"],
+        start_timestamp=live["start_timestamp"],
     )
+
+
+def _optional_ticks(timestamp: float | int | None) -> int | None:
+    """Convert an optional lifecycle timestamp to ticks, keeping ``None``."""
+    return None if timestamp is None else timestamp_to_ticks(timestamp)
 
 
 class LoggingStalledError(RuntimeError):
@@ -179,18 +186,19 @@ class RecordingContext:
 
         Cloud recording id is passed only when recording is started from web frontend
 
-        ``timestamp`` is the recording's *capture* start time (Unix seconds),
-        stored and reported as such. It does **not** bound the recording window,
-        which the daemon takes from a publish stamp inside this call.
+        ``timestamp`` is the recording's start on the caller's data clock
+        (float seconds or integer ticks), stored and reported in ticks, and
+        returned as this recording's start marker. It does **not** bound the
+        recording window, which the daemon takes from a publish stamp inside
+        this call.
 
         Returns:
-            The capture marker the daemon stored as this recording's
-            ``start_timestamp_ns``, which tells it apart from its predecessor
+            The start tick the daemon stored as this recording's
+            ``start_timestamp``, which tells it apart from its predecessor
             before either has a cloud id.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
 
         return _load_native().start_recording(
             robot_id,
@@ -198,7 +206,7 @@ class RecordingContext:
             robot_name,
             dataset_id,
             dataset_name,
-            timestamp_ns,
+            _optional_ticks(timestamp),
             cloud_recording_id,
         )
 
@@ -300,19 +308,18 @@ class RecordingContext:
             timestamp,
         )
 
-    def cancel_recording(self, timestamp: float | None = None) -> None:
+    def cancel_recording(self, timestamp: float | int | None = None) -> None:
         """Cancel the source's active recording — the daemon discards it.
 
         A cancel is a recording stop that discards data, so ``timestamp``
         behaves exactly like ``stop_recording``'s: it optionally pins the
-        recording's capture stop time (Unix seconds); when ``None`` the producer
-        stamps wall-clock now.
+        recording's stop (float seconds or integer ticks); when ``None`` the
+        producer stamps wall-clock now.
         """
         if not self._robot_id:
             return
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
         _load_native().cancel_recording(
-            self._robot_id, self._robot_instance, timestamp_ns
+            self._robot_id, self._robot_instance, _optional_ticks(timestamp)
         )
 
     def recording_epoch(self) -> int | None:
@@ -340,12 +347,13 @@ class RecordingContext:
             )
         return self._robot_id
 
-    def stop_recording(self, timestamp: float | None = None) -> None:
+    def stop_recording(self, timestamp: float | int | None = None) -> None:
         """Publish one ``StopRecording`` tagged with the source.
 
         The daemon uses the publish-clock stop boundary to close the recording
-        window. ``timestamp`` is the recording's *capture* stop time and is
-        separate from that boundary, never used for window membership.
+        window. ``timestamp`` is the recording's stop on the caller's data clock
+        (float seconds or integer ticks) and is separate from that boundary,
+        never used for window membership.
 
         This publishes the stop only; :meth:`flush_source` seals the writer's
         tail chunks and must be called straight after, so the caller can close
@@ -353,9 +361,8 @@ class RecordingContext:
         """
         if not self._robot_id:
             return
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, timestamp_ns
+            self._robot_id, self._robot_instance, _optional_ticks(timestamp)
         )
 
     def flush_source(self) -> None:

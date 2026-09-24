@@ -16,7 +16,7 @@ def test_is_recording_answers_from_the_daemon() -> None:
     robot.id = "robot-id-1"
 
     live = LiveRecording(
-        recording_index=7, cloud_recording_id="cloud-1", start_timestamp_ns=1_000
+        recording_index=7, cloud_recording_id="cloud-1", start_timestamp=1_000
     )
     with patch(
         "neuracore.core.robot.recording_context.query_recording_state",
@@ -65,7 +65,7 @@ def test_the_cloud_id_wait_is_handed_to_the_bridge() -> None:
     robot = Robot("robot", instance=0, org_id="org-1")
     robot.id = "robot-id-1"
     minted = LiveRecording(
-        recording_index=7, cloud_recording_id="cloud-1", start_timestamp_ns=1_000
+        recording_index=7, cloud_recording_id="cloud-1", start_timestamp=1_000
     )
 
     with patch(
@@ -83,7 +83,7 @@ def test_a_cloud_id_that_never_arrives_gives_up() -> None:
     robot = Robot("robot", instance=0, org_id="org-1")
     robot.id = "robot-id-1"
     pending = LiveRecording(
-        recording_index=7, cloud_recording_id=None, start_timestamp_ns=1_000
+        recording_index=7, cloud_recording_id=None, start_timestamp=1_000
     )
 
     with patch(

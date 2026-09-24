@@ -32,9 +32,9 @@
 //! and — for data — its **sensor** (`data_type`, `sensor_name`) and capture
 //! `timestamp_ns`. The producer publishes three fire-and-forget lifecycle
 //! events ([`Envelope::StartRecording`] / [`Envelope::StopRecording`] /
-//! [`Envelope::CancelRecording`]) carrying the lifecycle wall-clock timestamp,
-//! and the daemon decides — from its per-source active-window map — which
-//! recording (if any) each datum belongs to. There is no `recording_index`,
+//! [`Envelope::CancelRecording`]) carrying the lifecycle publish timestamp and
+//! the caller's tick, and the daemon decides from its per-source active-window
+//! map which recording (if any) each datum belongs to. There is no `recording_index`,
 //! `trace_id`, or `sequence_number` on the wire; the daemon assigns and
 //! stores those after routing. `StartRecording` carries an optional
 //! `recording_id` for the one case where the backend, not the daemon,
@@ -452,11 +452,11 @@ pub enum Envelope {
         /// envelope. The **only** key used for window membership, so routing
         /// never depends on the caller's capture clock.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// start — the recording's *own* clock, or the publish time when the
-        /// caller supplied none. Stored as the row's `start_timestamp_ns` and
-        /// POSTed to the backend as `start_time`; never used for routing.
-        timestamp_ns: i64,
+        /// Caller-supplied start of the recording in ticks, on the caller's
+        /// data clock. Stored as the row's `start_timestamp`, returned by
+        /// `start_recording` as the recording's marker, and POSTed to the
+        /// backend as `start_timestamp`; never used for routing.
+        timestamp: i64,
         /// Optional cloud recording id the backend already minted.
         recording_id: Option<String>,
     },
@@ -471,11 +471,10 @@ pub enum Envelope {
         /// recording window closes — the exclusive upper bound of the
         /// membership range, on the same publish clock as the data envelopes.
         publish_timestamp_ns: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the recording's
-        /// stop — or the publish time when the caller supplied none. Stored as
-        /// the row's `stop_timestamp_ns` and POSTed to the backend as
-        /// `end_time`; never used for routing.
-        timestamp_ns: i64,
+        /// Caller-supplied end of the recording in ticks. Stored as the row's
+        /// `stop_timestamp` and POSTed to the backend as `end_timestamp`;
+        /// never used for routing.
+        timestamp: i64,
     },
     /// Producer cancels the source's active recording — the daemon drops every
     /// in-flight per-trace actor, deletes the on-disk artefacts, marks the
@@ -484,13 +483,15 @@ pub enum Envelope {
     CancelRecording {
         robot_id: String,
         robot_instance: i64,
-        /// Caller-supplied capture time (Unix nanoseconds) for the cancel — or
-        /// the publish time when the caller supplied none. A cancel is a
+        /// Producer wall-clock publish time (Unix nanoseconds) of the cancel.
+        /// Not a window boundary, because cancelling drops the window outright;
+        /// the daemon POSTs it as the backend `end_time`.
+        publish_timestamp_ns: i64,
+        /// Caller-supplied end of the recording in ticks. A cancel is a
         /// recording stop that discards data, so the daemon stores this as the
-        /// row's `stop_timestamp_ns` and POSTs it as the backend `end_time`,
-        /// exactly like `StopRecording`. No window-boundary `publish_timestamp_ns`
-        /// is carried because cancelling drops the window outright.
-        timestamp_ns: i64,
+        /// row's `stop_timestamp` and POSTs it as the backend `end_timestamp`,
+        /// exactly like `StopRecording`.
+        timestamp: i64,
     },
     /// Producer delivers one sensor sample.
     ///
@@ -798,8 +799,8 @@ pub struct LiveRecording {
     /// The cloud handle, once `/recording/start` has been notified. `None`
     /// while the recording is still local-only.
     pub recording_id: Option<String>,
-    /// The recording's capture-clock start (Unix nanoseconds), when known.
-    pub start_timestamp_ns: Option<i64>,
+    /// The recording's start marker in ticks, when known.
+    pub start_timestamp: Option<i64>,
 }
 
 /// Reply to a [`RecordingStateQuery`].
@@ -965,7 +966,7 @@ mod tests {
             dataset_id: Some("ds-1".into()),
             dataset_name: Some("warehouse".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
             recording_id: None,
         };
         let bytes = original.encode().expect("encode");
@@ -1114,7 +1115,7 @@ mod tests {
             robot_id: "robot-1".into(),
             robot_instance: 2,
             publish_timestamp_ns: 1_700_000_000_000_000_000,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
         };
         let bytes = stop.encode().expect("encode");
         assert_eq!(stop, Envelope::decode(&bytes).expect("decode"));
@@ -1123,7 +1124,8 @@ mod tests {
         let cancel = Envelope::CancelRecording {
             robot_id: "robot-1".into(),
             robot_instance: 2,
-            timestamp_ns: 1_700_000_000_000_000_000,
+            publish_timestamp_ns: 1_700_000_000_000_000_000,
+            timestamp: 1_700_000_000_000_000,
         };
         let bytes = cancel.encode().expect("encode");
         assert_eq!(cancel, Envelope::decode(&bytes).expect("decode"));
