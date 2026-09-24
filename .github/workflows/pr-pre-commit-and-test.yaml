@@ -116,6 +116,17 @@ jobs:
             pip install "${EXTRAS}" --extra-index-url https://download.pytorch.org/whl/cpu
           fi
 
+      # Unit tests run against unreleased neuracore_types.
+      - name: Install neuracore_types from main
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          TYPES="neuracore_types @ git+https://github.com/NeuracoreAI/neuracore_types.git@main"
+          if [ "${{ matrix.package-manager }}" = "uv" ]; then
+            uv pip install --force-reinstall --no-deps "${TYPES}"
+          else
+            pip install --force-reinstall --no-deps "${TYPES}"
+          fi
+
       - name: Run non-ML unit tests
         if: env.SHOULD_RUN == 'true'
         shell: bash
@@ -214,6 +225,13 @@ jobs:
       - name: Install Python dependencies
         if: env.SHOULD_RUN == 'true'
         run: uv pip install ".[dev,ml]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
+
+      # Unit tests run against unreleased neuracore_types.
+      - name: Install neuracore_types from main
+        if: env.SHOULD_RUN == 'true'
+        run: |
+          uv pip install --force-reinstall --no-deps \
+            "neuracore_types @ git+https://github.com/NeuracoreAI/neuracore_types.git@main"
 
       - name: Run ML unit tests
         if: env.SHOULD_RUN == 'true'

@@ -49,6 +49,11 @@ jobs:
       - name: Install Python dependencies
         run: uv pip install ".[dev,ml]" --extra-index-url https://download.pytorch.org/whl/cpu --index-strategy unsafe-best-match
 
+      - name: Install neuracore_types from main
+        run: |
+          uv pip install --force-reinstall --no-deps \
+            "neuracore_types @ git+https://github.com/NeuracoreAI/neuracore_types.git@main"
+
       - name: Run slow ML unit tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
