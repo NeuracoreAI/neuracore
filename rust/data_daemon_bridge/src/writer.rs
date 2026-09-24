@@ -243,7 +243,8 @@ struct VideoChunkState {
     appended_since_sweep: bool,
     /// Frames already written into the in-progress chunk.
     frame_count: u32,
-    /// Per-stream PTS origin, microseconds since the Unix epoch.
+    /// Per-chunk PTS origin in ticks: the first frame's capture tick, moved
+    /// when a synthesized step re-anchors the chunk.
     pts_origin_us: Option<i64>,
     /// Last PTS written to any chunk for the stream; enforces monotonicity.
     last_pts_us: Option<u64>,
@@ -259,11 +260,9 @@ struct VideoChunkState {
     /// sustained disorder stretch (potentially every remaining frame of the
     /// chunk) flooding the log.
     pts_synth_warned: bool,
-    /// Per-frame capture time in ns for the in-progress chunk — drained into
-    /// the announcement so the daemon can bucket frames into a window.
-    frame_timestamps_ns: Vec<i64>,
-    /// Per-frame `timestamp_s` accumulator for the in-progress chunk.
-    frame_timestamps_s: Vec<f64>,
+    /// Per-frame capture tick for the in-progress chunk, drained into the
+    /// announcement for the daemon's `trace.json` sidecar.
+    frame_timestamps: Vec<i64>,
     /// Per-frame publish time as µs after `chunk_publish_ns`, which is what
     /// lets the daemon cut this chunk at a boundary inside it.
     frame_publish_offsets_us: Vec<u32>,
@@ -329,8 +328,8 @@ pub(crate) struct FrameJob {
     pub(crate) dtype: FrameDtype,
     /// Stamped on the *calling* thread when `log_frame` accepted the frame.
     pub(crate) publish_ns: i64,
-    pub(crate) timestamp_ns: i64,
-    pub(crate) timestamp_s: f64,
+    /// Caller-supplied capture time in ticks.
+    pub(crate) timestamp: i64,
     pub(crate) data: Vec<u8>,
 }
 
@@ -879,8 +878,7 @@ fn write_pending_frame(pending: PendingFrame, png: Vec<u8>) {
         pending.job.dtype,
         &png,
         pending.job.publish_ns,
-        pending.job.timestamp_ns,
-        pending.job.timestamp_s,
+        pending.job.timestamp,
     ) {
         tracing::warn!(%error, sensor_name = pending.job.sensor_name, "failed to spool video frame");
     }
@@ -1067,8 +1065,7 @@ fn record_video_frame(
     dtype: FrameDtype,
     png_payload: &[u8],
     publish_ns: i64,
-    timestamp_ns: i64,
-    timestamp_s: f64,
+    timestamp: i64,
 ) -> Result<(), ProducerError> {
     let key = stream_key(robot_id, robot_instance, data_type, sensor_name);
     // Resolve the slot, building the per-stream state (and its spool dir) only
@@ -1098,8 +1095,7 @@ fn record_video_frame(
             last_pts_us: None,
             observed_frame_gap_us: None,
             pts_synth_warned: false,
-            frame_timestamps_ns: Vec::new(),
-            frame_timestamps_s: Vec::new(),
+            frame_timestamps: Vec::new(),
             frame_publish_offsets_us: Vec::new(),
         }));
         registry.streams.insert(key.clone(), slot.clone());
@@ -1132,8 +1128,7 @@ fn record_video_frame(
             dtype,
             png_payload,
             publish_ns,
-            timestamp_ns,
-            timestamp_s,
+            timestamp,
         )
     };
 
@@ -1168,8 +1163,7 @@ fn append_frame_locked(
     dtype: FrameDtype,
     png_payload: &[u8],
     publish_ns: i64,
-    timestamp_ns: i64,
-    timestamp_s: f64,
+    timestamp: i64,
 ) -> Vec<Envelope> {
     let mut announcements: Vec<Envelope> = Vec::new();
     // The caller publishes the collected envelopes outside the lock.
@@ -1219,9 +1213,8 @@ fn append_frame_locked(
         state.last_pts_us = None;
         state.pts_synth_warned = false;
     }
-    let timestamp_us = timestamp_ns / 1_000;
-    let origin_us = *state.pts_origin_us.get_or_insert(timestamp_us);
-    let relative_us = timestamp_us.saturating_sub(origin_us).max(0);
+    let origin_us = *state.pts_origin_us.get_or_insert(timestamp);
+    let relative_us = timestamp.saturating_sub(origin_us).max(0);
     let mut pts = relative_us as u64;
     if let Some(previous) = state.last_pts_us {
         if pts <= previous {
@@ -1249,16 +1242,16 @@ fn append_frame_locked(
                 // worth chasing at its source).
                 tracing::warn!(
                     sensor_name,
-                    timestamp_us,
+                    timestamp,
                     previous_pts_us = previous,
                     step_us = step,
-                    behind_us = origin_us + previous as i64 - timestamp_us,
+                    behind_us = origin_us + previous as i64 - timestamp,
                     "video frame timestamp did not advance past the previous \
                      frame's PTS; synthesizing step (logged once per chunk)"
                 );
             }
             pts = previous.saturating_add(step);
-            state.pts_origin_us = Some(timestamp_us.saturating_sub(pts as i64));
+            state.pts_origin_us = Some(timestamp.saturating_sub(pts as i64));
         } else if pts - previous <= SYNTH_PTS_STEP_MAX_US {
             // Only a plausible frame interval counts as the healthy gap: a
             // forward spike (a future-stamped frame mid-chunk) must not become
@@ -1319,8 +1312,7 @@ fn append_frame_locked(
     // Set after the write, so a dropped frame never reads as progress.
     state.appended_since_sweep = true;
     state.frame_count = state.frame_count.saturating_add(1);
-    state.frame_timestamps_ns.push(timestamp_ns);
-    state.frame_timestamps_s.push(timestamp_s);
+    state.frame_timestamps.push(timestamp);
     state
         .frame_publish_offsets_us
         .push(publish_offset_us(state.chunk_publish_ns, publish_ns));
@@ -1355,8 +1347,7 @@ fn flush_chunk_locked(
                 "failed to finalise NUT chunk; dropping chunk"
             );
             state.frame_count = 0;
-            state.frame_timestamps_ns.clear();
-            state.frame_timestamps_s.clear();
+            state.frame_timestamps.clear();
             state.frame_publish_offsets_us.clear();
             return None;
         }
@@ -1365,8 +1356,7 @@ fn flush_chunk_locked(
     let publish_timestamp_ns = state.chunk_publish_ns;
     let thread_id = state.chunk_thread_id;
     let frame_count = state.frame_count;
-    let frame_timestamps_ns = std::mem::take(&mut state.frame_timestamps_ns);
-    let frame_timestamps_s = std::mem::take(&mut state.frame_timestamps_s);
+    let frame_timestamps = std::mem::take(&mut state.frame_timestamps);
     let frame_publish_offsets_us = std::mem::take(&mut state.frame_publish_offsets_us);
 
     state.frame_count = 0;
@@ -1383,8 +1373,7 @@ fn flush_chunk_locked(
         height: state.height,
         byte_count,
         frame_count,
-        frame_timestamps_ns,
-        frame_timestamps_s,
+        frame_timestamps,
         dtype: state.dtype,
         frame_publish_offsets_us,
     })
@@ -1565,6 +1554,7 @@ pub(crate) fn flush_source_detached(robot_id: &str, robot_instance: i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use data_daemon_shared::NANOSECONDS_PER_TICK;
 
     const TEST_PUBLISH_NS: i64 = 1_700_000_000_000_000_000;
 
@@ -1691,8 +1681,7 @@ mod tests {
             last_pts_us: None,
             observed_frame_gap_us: None,
             pts_synth_warned: false,
-            frame_timestamps_ns: Vec::new(),
-            frame_timestamps_s: Vec::new(),
+            frame_timestamps: Vec::new(),
             frame_publish_offsets_us: Vec::new(),
         }
     }
@@ -1720,7 +1709,6 @@ mod tests {
             &frame,
             logged_at,
             1_000,
-            0.0,
         );
 
         assert_eq!(
@@ -1749,9 +1737,7 @@ mod tests {
         let frame = vec![0u8; 2 * 2 * 3];
         let boundary = TEST_PUBLISH_NS;
 
-        for (publish_ns, timestamp_ns, timestamp_s) in
-            [(boundary - 1_000_000, 1_000, 0.0), (boundary, 2_000, 0.001)]
-        {
+        for (publish_ns, timestamp) in [(boundary - 1_000_000, 1_000), (boundary, 2_000)] {
             let sealed = append_frame_locked(
                 &mut state,
                 "r",
@@ -1763,8 +1749,7 @@ mod tests {
                 FrameDtype::Rgb8,
                 &frame,
                 publish_ns,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
             );
             assert!(
                 sealed.is_empty(),
@@ -1809,7 +1794,6 @@ mod tests {
             &[0u8; 2 * 2 * 3],
             TEST_PUBLISH_NS,
             1_000,
-            0.0,
         );
 
         assert!(
@@ -1840,7 +1824,6 @@ mod tests {
             &frame,
             TEST_PUBLISH_NS,
             1_000,
-            0.0,
         );
         assert!(sealed.is_empty(), "a fresh chunk is not yet old");
 
@@ -1856,7 +1839,6 @@ mod tests {
             &frame,
             TEST_PUBLISH_NS + CHUNK_MAX_OPEN_NS,
             2_000,
-            0.001,
         );
 
         match sealed.as_slice() {
@@ -1901,7 +1883,6 @@ mod tests {
             &frame,
             repeated,
             1_000,
-            0.0,
         );
         let first = state.chunk_publish_ns;
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state).expect("seal");
@@ -1918,7 +1899,6 @@ mod tests {
             &frame,
             repeated,
             2_000,
-            0.001,
         );
         let second = state.chunk_publish_ns;
 
@@ -1952,7 +1932,6 @@ mod tests {
             &frame_2x2,
             TEST_PUBLISH_NS,
             1_000,
-            0.0,
         );
         assert!(
             opened.is_empty(),
@@ -1975,7 +1954,6 @@ mod tests {
             &frame_4x4,
             TEST_PUBLISH_NS,
             2_000,
-            0.001,
         );
         assert_eq!(sealed.len(), 1, "the geometry change seals the prior chunk");
         match &sealed[0] {
@@ -2030,7 +2008,6 @@ mod tests {
             &png_payload,
             TEST_PUBLISH_NS,
             1_000,
-            0.0,
         );
         assert!(opened.is_empty());
         assert_eq!(state.dtype, FrameDtype::DepthF16);
@@ -2049,7 +2026,6 @@ mod tests {
             &png_payload,
             TEST_PUBLISH_NS,
             2_000,
-            0.001,
         );
 
         assert_eq!(sealed.len(), 1, "the dtype change seals the prior chunk");
@@ -2096,7 +2072,6 @@ mod tests {
             &frame,
             TEST_PUBLISH_NS,
             1_000,
-            0.0,
         );
         let envelope = flush_chunk_locked("r", 0, "DEPTH_IMAGES", "cam", &mut state)
             .expect("open chunk seals");
@@ -2133,7 +2108,7 @@ mod tests {
         let mut state = fresh_state(dir.path().to_path_buf(), 2, 2);
         let frame = vec![0u8; 2 * 2 * 3];
 
-        for (timestamp_ns, timestamp_s) in [(1_000, 0.0), (2_000, 0.001), (3_000, 0.002)] {
+        for timestamp in [1_000, 2_000, 3_000] {
             let announcements = append_frame_locked(
                 &mut state,
                 "r",
@@ -2145,8 +2120,7 @@ mod tests {
                 FrameDtype::Rgb8,
                 &frame,
                 TEST_PUBLISH_NS,
-                timestamp_ns,
-                timestamp_s,
+                timestamp,
             );
             assert!(
                 announcements.is_empty(),
@@ -2164,16 +2138,14 @@ mod tests {
                 height,
                 frame_count,
                 byte_count,
-                frame_timestamps_ns,
-                frame_timestamps_s,
+                frame_timestamps,
                 ..
             } => {
                 assert_eq!(sensor_name.as_deref(), Some("cam"));
                 assert_eq!((width, height), (2, 2));
                 assert_eq!(frame_count, 3);
                 assert!(byte_count > 0, "a sealed chunk has a non-zero NUT file");
-                assert_eq!(frame_timestamps_ns, vec![1_000, 2_000, 3_000]);
-                assert_eq!(frame_timestamps_s, vec![0.0, 0.001, 0.002]);
+                assert_eq!(frame_timestamps, vec![1_000, 2_000, 3_000]);
             }
             other => panic!("expected VideoChunkReady, got {other:?}"),
         }
@@ -2182,8 +2154,7 @@ mod tests {
         // so the next frame opens a brand-new chunk.
         assert!(state.nut_writer.is_none());
         assert_eq!(state.frame_count, 0);
-        assert!(state.frame_timestamps_ns.is_empty());
-        assert!(state.frame_timestamps_s.is_empty());
+        assert!(state.frame_timestamps.is_empty());
         assert!(state.frame_publish_offsets_us.is_empty());
     }
 
@@ -2196,7 +2167,7 @@ mod tests {
         let frame = vec![0u8; 2 * 2 * 3];
 
         // Publish stamps, with capture stamps on an unrelated clock.
-        for (index, capture_ns) in [10_000, 20_000, 30_000].into_iter().enumerate() {
+        for (index, capture_tick) in [10_000, 20_000, 30_000].into_iter().enumerate() {
             append_frame_locked(
                 &mut state,
                 "r",
@@ -2208,8 +2179,7 @@ mod tests {
                 FrameDtype::Rgb8,
                 &frame,
                 TEST_PUBLISH_NS + index as i64 * 33_333_333,
-                capture_ns,
-                capture_ns as f64 / 1e9,
+                capture_tick,
             );
         }
 
@@ -2251,7 +2221,7 @@ mod tests {
         let frame = vec![0u8; 2 * 2 * 3];
 
         // Three frames at the same instant, then one that goes backwards.
-        for timestamp_ns in [5_000, 5_000, 5_000, 4_000] {
+        for timestamp in [5_000, 5_000, 5_000, 4_000] {
             let _ = append_frame_locked(
                 &mut state,
                 "r",
@@ -2263,8 +2233,7 @@ mod tests {
                 FrameDtype::Rgb8,
                 &frame,
                 TEST_PUBLISH_NS,
-                timestamp_ns,
-                0.0,
+                timestamp,
             );
         }
         assert_eq!(
@@ -2289,8 +2258,7 @@ mod tests {
             height: 0,
             dtype: FrameDtype::Rgb8,
             publish_ns: TEST_PUBLISH_NS,
-            timestamp_ns: 0,
-            timestamp_s: 0.0,
+            timestamp: 0,
             data: vec![0u8; bytes],
         })
     }
@@ -2406,12 +2374,12 @@ mod tests {
     /// One frame interval at ~60 fps, in microseconds.
     const FRAME_GAP_US: i64 = 16_683;
 
-    /// Append one frame stamped `timestamp_us` to `state`, using a geometry
+    /// Append one frame with capture tick `timestamp` to `state`, using a geometry
     /// large enough (4096×4096, ~48 MiB logical per frame) that a chunk rolls
     /// after six frames — the PTS-collapse scenarios all sit at chunk
     /// rotation, so tests need cheap rolls. The payload is a stand-in blob:
     /// the NUT muxes it verbatim and these tests only read back PTS.
-    fn append_ts_us(state: &mut VideoChunkState, timestamp_us: i64) -> Vec<Envelope> {
+    fn append_tick(state: &mut VideoChunkState, timestamp: i64) -> Vec<Envelope> {
         append_frame_locked(
             state,
             "r",
@@ -2422,9 +2390,8 @@ mod tests {
             4096,
             FrameDtype::Rgb8,
             &[0u8; 4],
-            TEST_PUBLISH_NS + timestamp_us * 1_000,
-            timestamp_us * 1_000,
-            timestamp_us as f64 / 1e6,
+            TEST_PUBLISH_NS + timestamp * NANOSECONDS_PER_TICK,
+            timestamp,
         )
     }
 
@@ -2465,13 +2432,13 @@ mod tests {
 
         // Chunk 1: six clean ~60 fps frames (seals on the sixth).
         for index in 0..6 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+            append_tick(&mut state, base + index * FRAME_GAP_US);
         }
         // Chunk 2 opens on a frame stamped ~5 s in the future; the remaining
         // frames continue the true capture series.
-        append_ts_us(&mut state, base + 6 * FRAME_GAP_US + 5_000_000);
+        append_tick(&mut state, base + 6 * FRAME_GAP_US + 5_000_000);
         for index in 7..12 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+            append_tick(&mut state, base + index * FRAME_GAP_US);
         }
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
 
@@ -2495,11 +2462,11 @@ mod tests {
         let base: i64 = 1_753_000_000_000_000;
 
         for index in 0..3 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+            append_tick(&mut state, base + index * FRAME_GAP_US);
         }
         // The clock rewinds ~10 s mid-chunk and keeps advancing at 60 fps.
         for index in 3..6 {
-            append_ts_us(&mut state, base - 10_000_000 + index * FRAME_GAP_US);
+            append_tick(&mut state, base - 10_000_000 + index * FRAME_GAP_US);
         }
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
 
@@ -2523,15 +2490,15 @@ mod tests {
         let base: i64 = 1_753_000_000_000_000;
 
         for index in 0..3 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+            append_tick(&mut state, base + index * FRAME_GAP_US);
         }
         // Frame 3 spikes ~1 s forward; frames 4 and 5 resume the true series.
-        // `append_ts_us` publishes on the capture stamp, so the spike is kept
+        // `append_tick` publishes on the capture stamp, so the spike is kept
         // under CHUNK_MAX_OPEN_NS — a larger one would seal on the age cap and
         // split the chunk this test reads back.
-        append_ts_us(&mut state, base + 3 * FRAME_GAP_US + 1_000_000);
+        append_tick(&mut state, base + 3 * FRAME_GAP_US + 1_000_000);
         for index in 4..6 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+            append_tick(&mut state, base + index * FRAME_GAP_US);
         }
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
 
@@ -2554,21 +2521,27 @@ mod tests {
 
     #[test]
     fn clean_monotonic_input_keeps_chunk_relative_capture_pts() {
-        // The happy path must stay byte-identical: every chunk's PTS are the
-        // frame's capture time relative to the chunk's first frame.
+        // For advancing stamps every PTS is the frame's tick minus the tick
+        // of its chunk's first frame, with no synthesized step.
         let dir = tempfile::tempdir().unwrap();
         let mut state = fresh_state(dir.path().to_path_buf(), 4096, 4096);
         let base: i64 = 1_753_000_000_000_000;
+        let ticks: Vec<i64> = (0..12).map(|index| base + index * FRAME_GAP_US).collect();
 
-        for index in 0..12 {
-            append_ts_us(&mut state, base + index * FRAME_GAP_US);
+        for tick in &ticks {
+            append_tick(&mut state, *tick);
         }
         flush_chunk_locked("r", 0, "RGB", "cam", &mut state);
 
-        let expected: Vec<u64> = (0..6).map(|index| (index * FRAME_GAP_US) as u64).collect();
         let chunks = sealed_chunk_pts(dir.path());
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0], expected);
-        assert_eq!(chunks[1], expected);
+        for (chunk_pts, chunk_ticks) in chunks.iter().zip(ticks.chunks(6)) {
+            let origin = chunk_ticks[0];
+            let expected: Vec<u64> = chunk_ticks
+                .iter()
+                .map(|tick| (tick - origin) as u64)
+                .collect();
+            assert_eq!(*chunk_pts, expected);
+        }
     }
 }

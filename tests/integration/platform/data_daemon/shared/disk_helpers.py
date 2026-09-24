@@ -194,8 +194,6 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[int
                 ts = frame.get("timestamp")
                 if isinstance(ts, int):
                     ts_list.append(ts)
-                elif isinstance(ts, float):
-                    ts_list.append(seconds_to_ticks(ts))
         trace_timestamps[key] = ts_list
     return trace_timestamps
 
