@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
 use data_daemon_shared::NANOSECONDS_PER_TICK;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{ConnectOptions, SqliteConnection, SqlitePool};
@@ -765,9 +766,9 @@ impl StateStore for SqliteStateStore {
         let result = sqlx::query(
             "INSERT INTO recordings ( \
                  robot_id, robot_instance, dataset_id, \
-                 start_timestamp, start_publish_timestamp_ns, \
+                 start_timestamp, start_publish_timestamp_ns, ticks_per_second, \
                  created_at, last_updated \
-             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?6, ?6)",
+             ) VALUES (?1, ?2, ?3, COALESCE(?4, ?5 / ?7), ?5, ?8, ?6, ?6)",
         )
         .bind(new.robot_id)
         .bind(new.robot_instance)
@@ -776,6 +777,7 @@ impl StateStore for SqliteStateStore {
         .bind(new.start.publish_timestamp_ns)
         .bind(now)
         .bind(NANOSECONDS_PER_TICK)
+        .bind(VIDEO_SPOOL_TICKS_PER_SECOND)
         .execute(&mut *tx)
         .await?;
 
@@ -1707,6 +1709,10 @@ mod tests {
             (Some(1_700_000_005_123_456), Some(1_700_000_005_123_456_789))
         );
         assert_eq!(row.ticks_per_second, None, "its traces hold float seconds");
+
+        let new_index = seed_recording(&store, 0).await;
+        let new_row = store.get_recording(new_index).await.unwrap().unwrap();
+        assert_eq!(new_row.ticks_per_second, Some(1_000_000));
     }
 
     #[tokio::test]

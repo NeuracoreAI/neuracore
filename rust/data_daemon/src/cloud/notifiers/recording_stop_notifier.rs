@@ -149,6 +149,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_recording_without_a_tick_rate_posts_no_end_timestamp() {
+        // A recording an older daemon created holds float-second traces, so
+        // its stop must not tell the backend an end in ticks.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!("ok")))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-legacy-1").await;
+        store
+            .mark_recording_stopped(
+                index,
+                LifecycleStamp::observed_at(1_700_000_005_000_000_000),
+            )
+            .await
+            .expect("mark stopped");
+        sqlx::query("UPDATE recordings SET ticks_per_second = NULL WHERE recording_index = ?1")
+            .bind(index)
+            .execute(store.write_pool())
+            .await
+            .expect("mark legacy");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus,
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        let received = timeout(Duration::from_secs(3), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if !received.is_empty() {
+                    break received;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("sweep must POST within 3s");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "recording_id": "rec-legacy-1",
+                "end_time": 1_700_000_005.0,
+            })
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
     async fn posts_backend_stop_on_recording_stopped_event() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -206,8 +268,9 @@ mod tests {
             serde_json::json!({
                 "recording_id": "rec-stop-1",
                 "end_time": 1_700_000_005.0,
+                "end_timestamp": 42,
             }),
-            "end_time is the stop's publish time"
+            "end_time is the stop's publish time and end_timestamp the caller's tick"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);

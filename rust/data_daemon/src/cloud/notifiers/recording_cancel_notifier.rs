@@ -191,8 +191,9 @@ mod tests {
             serde_json::json!({
                 "recording_id": "rec-cancel-1",
                 "end_time": 5.0,
+                "end_timestamp": 42,
             }),
-            "end_time is the cancel's publish time"
+            "end_time is the cancel's publish time and end_timestamp the caller's tick"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);

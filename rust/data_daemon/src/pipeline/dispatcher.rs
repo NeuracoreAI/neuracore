@@ -60,7 +60,6 @@ use chrono::Utc;
 use dashmap::DashMap;
 use data_daemon_shared::{
     video_boundary, BatchedDataItem, Envelope, FrameDtype, LiveRecording, Source,
-    NANOSECONDS_PER_TICK,
 };
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -191,7 +190,7 @@ impl RecordingState {
             .map(|announced| LiveRecording {
                 recording_index: announced.recording_index,
                 recording_id: announced.recording_id.clone(),
-                start_timestamp: Some(announced.start_timestamp),
+                start_timestamp: announced.start.timestamp,
             })
     }
 }
@@ -207,10 +206,10 @@ struct AnnouncedRecording {
     /// The backend's id, when the announcement carried one.
     recording_id: Option<String>,
     dataset_id: Option<String>,
-    /// The window's lower bound on the publish clock.
-    open_at_ns: i64,
-    /// The recording's start in ticks → the row's `start_timestamp`.
-    start_timestamp: i64,
+    /// The start as announced: its publish time is the window's lower bound
+    /// before [`Dispatcher::open_announced_window`] floors it, and both values
+    /// are stored on the row and posted to the backend.
+    start: LifecycleStamp,
     /// The recording this announcement opened, once it has.
     recording_index: Option<i64>,
 }
@@ -547,8 +546,10 @@ impl Dispatcher {
                     source.clone(),
                     dataset_id,
                     recording_id,
-                    publish_timestamp_ns,
-                    timestamp,
+                    LifecycleStamp {
+                        publish_timestamp_ns,
+                        timestamp: Some(timestamp),
+                    },
                 )
                 .await;
                 // The envelope came over local IPC, so the producer that sent
@@ -563,22 +564,24 @@ impl Dispatcher {
                 publish_timestamp_ns,
                 timestamp,
             } => {
-                self.handle_stop(
-                    (robot_id, robot_instance),
+                let stop = LifecycleStamp {
                     publish_timestamp_ns,
-                    timestamp,
-                    recv_at,
-                )
-                .await;
+                    timestamp: Some(timestamp),
+                };
+                self.handle_stop((robot_id, robot_instance), stop, recv_at)
+                    .await;
             }
             Envelope::CancelRecording {
                 robot_id,
                 robot_instance,
+                publish_timestamp_ns,
                 timestamp,
-                ..
             } => {
-                self.handle_cancel((robot_id, robot_instance), timestamp)
-                    .await;
+                let cancel = LifecycleStamp {
+                    publish_timestamp_ns,
+                    timestamp: Some(timestamp),
+                };
+                self.handle_cancel((robot_id, robot_instance), cancel).await;
             }
             Envelope::Data {
                 robot_id,
@@ -740,8 +743,7 @@ impl Dispatcher {
         source: Source,
         dataset_id: Option<String>,
         recording_id: Option<String>,
-        publish_timestamp_ns: i64,
-        timestamp: i64,
+        start: LifecycleStamp,
     ) {
         // The same recording is announced more than once: every local process
         // connected to the source learns about a web-started recording
@@ -780,8 +782,7 @@ impl Dispatcher {
         let announced = AnnouncedRecording {
             recording_id,
             dataset_id,
-            open_at_ns: publish_timestamp_ns,
-            start_timestamp: timestamp,
+            start,
             recording_index: None,
         };
         tracing::debug!(robot_id = source.0, "recording announced");
@@ -803,12 +804,12 @@ impl Dispatcher {
         if announced.recording_index.is_some() {
             return;
         }
-        let mut open_at_ns = announced.open_at_ns.min(publish_ts);
+        let mut open_at_ns = announced.start.publish_timestamp_ns.min(publish_ts);
         // Catching up on a recording that began before this datum: floor the
         // window at any predecessor's close so it cannot claim that
         // recording's tail. A start opening its own window at its own publish
         // time spans no such gap, and keeps the boundary its envelope set.
-        if publish_ts > announced.open_at_ns {
+        if publish_ts > announced.start.publish_timestamp_ns {
             if let Some(entry) = self.windows.get(source) {
                 let predecessor_close_ns = entry
                     .closing
@@ -839,13 +840,14 @@ impl Dispatcher {
         // create_trace burst was folded into the write-behind (the actors no
         // longer create rows here), this is a single uncontended write.
         //
-        // The row's start is the caller's *capture* time (→ backend
-        // `start_time`); the window opens on the *publish* clock below.
+        // The row keeps the announced start (→ backend `start_time` and
+        // `start_timestamp`); the window opens at `publish_timestamp_ns` below,
+        // which may be floored at a predecessor's close and is never stored.
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
-            start: caller_stamp(announced.start_timestamp),
+            start: announced.start,
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -967,8 +969,7 @@ impl Dispatcher {
                     (robot_id, robot_instance),
                     dataset_id,
                     Some(recording_id),
-                    start_timestamp_ns,
-                    start_timestamp_ns / NANOSECONDS_PER_TICK,
+                    LifecycleStamp::observed_at(start_timestamp_ns),
                 )
                 .await;
             }
@@ -988,7 +989,7 @@ impl Dispatcher {
                     robot_id = source.0,
                     "closing a recording the backend reported stopped"
                 );
-                self.handle_stop(source, observed_at_ns, observed_at_ns, recv_at)
+                self.handle_stop(source, LifecycleStamp::observed_at(observed_at_ns), recv_at)
                     .await;
             }
         }
@@ -1029,13 +1030,8 @@ impl Dispatcher {
             .map(|(source, _)| source.clone())
     }
 
-    async fn handle_stop(
-        &mut self,
-        source: Source,
-        publish_timestamp_ns: i64,
-        timestamp: i64,
-        recv_at: Instant,
-    ) {
+    async fn handle_stop(&mut self, source: Source, stop: LifecycleStamp, recv_at: Instant) {
+        let publish_timestamp_ns = stop.publish_timestamp_ns;
         self.announced.0.remove(&source);
 
         let Some(entry) = self.windows.get_mut(&source) else {
@@ -1059,9 +1055,9 @@ impl Dispatcher {
                 .live
                 .take()
                 .expect("live window was checked immediately above");
-            // The window closes on the publish clock; the row's
-            // `stop_timestamp_ns` (→ backend `end_time`) is the caller's capture
-            // time.
+            // The window closes on the publish clock; the row keeps both the
+            // publish time (→ backend `end_time`) and the caller's tick (→
+            // backend `end_timestamp`).
             window.stopped_at_ns = Some(publish_timestamp_ns);
             window.stop_recv_at = Some(recv_at);
             window.awaiting_flush = true;
@@ -1072,7 +1068,7 @@ impl Dispatcher {
             // timestamp must be on disk first.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, caller_stamp(timestamp))
+                .mark_recording_stopped(recording_index, stop)
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark recording stopped");
@@ -1108,15 +1104,15 @@ impl Dispatcher {
                 recording_index,
                 "stop arrived after a later recording started; refining the retired recording's stop"
             );
-            // Refine the row's `stop_timestamp_ns` (→ backend `end_time`) to
-            // this true capture stop. `open_window` already marked the row with
+            // Refine the row's stop (→ backend `end_time` and `end_timestamp`)
+            // to this true stop. `open_window` already marked the row with
             // the successor start's time, and `mark_recording_stopped` is
             // COALESCE-idempotent, so a plain re-mark would no-op — a forced
             // overwrite is required, and correct because `stop < successor
             // start`.
             if let Err(error) = self
                 .store
-                .refine_recording_stop(recording_index, caller_stamp(timestamp))
+                .refine_recording_stop(recording_index, stop)
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
@@ -1152,7 +1148,7 @@ impl Dispatcher {
         }
     }
 
-    async fn handle_cancel(&mut self, source: Source, timestamp: i64) {
+    async fn handle_cancel(&mut self, source: Source, cancel: LifecycleStamp) {
         self.announced.0.remove(&source);
         let Some(entry) = self.windows.get_mut(&source) else {
             return;
@@ -1173,13 +1169,9 @@ impl Dispatcher {
             .trace_writer
             .drop_recording(recording_index)
             .await;
-        // The cancel's capture timestamp becomes the row's
-        // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
-        match self
-            .store
-            .cancel_recording(recording_index, caller_stamp(timestamp))
-            .await
-        {
+        // The cancel becomes the row's stop (→ backend `end_time` and
+        // `end_timestamp`), exactly as a stop.
+        match self.store.cancel_recording(recording_index, cancel).await {
             Ok((_, touched)) => {
                 tracing::info!(
                     recording_index,
@@ -1301,9 +1293,8 @@ impl Dispatcher {
 
     /// Force-close any live window whose source has been silent past
     /// [`IDLE_REAP`], giving it an open upper bound (`i64::MAX`) so any
-    /// straggler data still routes to it before eviction; the row's capture
-    /// stop time is the reap moment, so the recording reaches a terminal,
-    /// notifiable state.
+    /// straggler data still routes to it before eviction; the row's stop is the
+    /// reap moment, so the recording reaches a terminal, notifiable state.
     async fn reap_idle(&mut self, now: Instant) {
         let stale: Vec<Source> = self
             .windows
@@ -1331,9 +1322,9 @@ impl Dispatcher {
             // The producer crashed without a Stop, so there is no next
             // recording to partition against — keep the window's publish upper
             // bound open (`i64::MAX`) to catch any straggler data before
-            // eviction. The row's capture stop time (→ backend `end_time`) is
-            // the reap moment, so the backend reports a finite end rather than
-            // the year-2262 the `i64::MAX` window sentinel would imply.
+            // eviction. The row's stop (→ backend `end_time`) is the reap
+            // moment, so the backend reports a finite end rather than the
+            // year-2262 the `i64::MAX` window sentinel would imply.
             window.stopped_at_ns = Some(i64::MAX);
             window.stop_recv_at = Some(now);
             let recording_index = window.recording_index;
@@ -1759,15 +1750,6 @@ struct ChunkClaim {
     skip: u32,
     /// Frames it does own, counted from `skip`.
     count: u32,
-}
-
-/// The stamp for a lifecycle boundary the caller timed, carrying the caller's
-/// tick and the same instant in nanoseconds.
-fn caller_stamp(timestamp: i64) -> LifecycleStamp {
-    LifecycleStamp {
-        publish_timestamp_ns: timestamp.saturating_mul(NANOSECONDS_PER_TICK),
-        timestamp: Some(timestamp),
-    }
 }
 
 impl ChunkClaim {
@@ -2677,7 +2659,14 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: stop_ns,
+                    timestamp: Some(stop_ns),
+                },
+                opened_at,
+            )
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -2721,7 +2710,14 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), stop_ns, stop_ns, opened_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: stop_ns,
+                    timestamp: Some(stop_ns),
+                },
+                opened_at,
+            )
             .await;
 
         let (publish_ts, thread_id) = (150, 7);
@@ -2836,6 +2832,57 @@ mod tests {
             "0-based-content data must route into the window"
         );
         assert_eq!(traces[0].write_status, TraceWriteStatus::Written);
+    }
+
+    #[tokio::test]
+    async fn the_row_keeps_the_caller_ticks_beside_the_publish_times() {
+        // `start_recording` returns the start tick it published, so the row
+        // must store that tick verbatim for the marker lookup to resolve, and
+        // keep the publish times apart for the backend's wall-clock fields.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let (_shutdown_tx, shutdown_rx) = broadcast::channel(8);
+        let (tx, handle) = spawn(store.clone(), context.clone(), shutdown_rx);
+
+        let base = 1_700_000_000_000_000_000i64;
+        tx.send(Envelope::StartRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            robot_name: None,
+            dataset_id: None,
+            dataset_name: None,
+            publish_timestamp_ns: base,
+            timestamp: 12_500_000,
+            recording_id: None,
+        })
+        .await
+        .unwrap();
+        tx.send(Envelope::StopRecording {
+            robot_id: "robot-1".into(),
+            robot_instance: 0,
+            publish_timestamp_ns: base + 1_000,
+            timestamp: 13_500_000,
+        })
+        .await
+        .unwrap();
+
+        drop(tx);
+        timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .expect("dispatcher shut down in time");
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1);
+        let row = &recordings[0];
+        assert_eq!(
+            (row.start_timestamp, row.start_publish_timestamp_ns),
+            (Some(12_500_000), Some(base))
+        );
+        assert_eq!(
+            (row.stop_timestamp, row.stop_publish_timestamp_ns),
+            (Some(13_500_000), Some(base + 1_000))
+        );
     }
 
     #[tokio::test]
@@ -3277,7 +3324,14 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                stopped_at,
+            )
             .await;
         assert_eq!(
             dispatcher.windows.get(&source).unwrap().closing.len(),
@@ -3319,7 +3373,14 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                stopped_at,
+            )
             .await;
 
         // Well past the retention deadline.
@@ -3365,7 +3426,14 @@ mod tests {
             .await;
         let stopped_at = opened_at + Duration::from_millis(1);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                stopped_at,
+            )
             .await;
 
         let at_cap = stopped_at + FLUSH_MARKER_WAIT_CAP + Duration::from_millis(1);
@@ -3419,7 +3487,14 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                stopped_at,
+            )
             .await;
 
         // The lifecycle process owns no video, so its marker lands at once.
@@ -3480,7 +3555,14 @@ mod tests {
             .handle_inbound(start("robot-1", 100), opened_at)
             .await;
         dispatcher
-            .handle_stop(source.clone(), 200, 200, opened_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                opened_at,
+            )
             .await;
 
         // Published after the stop: past every window's upper bound.
@@ -3529,7 +3611,14 @@ mod tests {
 
         let stopped_at = opened_at + Duration::from_millis(2);
         dispatcher
-            .handle_stop(source.clone(), 200, 200, stopped_at)
+            .handle_stop(
+                source.clone(),
+                LifecycleStamp {
+                    publish_timestamp_ns: 200,
+                    timestamp: Some(200),
+                },
+                stopped_at,
+            )
             .await;
 
         // Producer B owns no video, so its marker lands immediately.
