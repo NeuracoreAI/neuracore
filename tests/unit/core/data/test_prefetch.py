@@ -140,6 +140,21 @@ class TestVideoStage:
             for camera_dir in rgb_root.iterdir():
                 assert (camera_dir / "0.png").exists()
 
+    def test_decode_summary_counts_videos_and_frames(
+        self, dataset_mock, details, caplog
+    ):
+        """Log one summary with the number of decoded videos and frames."""
+        prefetcher = _prefetcher(
+            dataset_mock, details, download_videos=True, decode_workers=2
+        )
+        with caplog.at_level("INFO", logger="neuracore.core.data.prefetch"):
+            prefetcher.run()
+
+        pngs = list(dataset_mock.cache_dir.rglob("*.png"))
+        num_videos = len({png.parent for png in pngs})
+        assert num_videos > 0
+        assert f"Decoded {num_videos} videos ({len(pngs)} frames)" in caplog.text
+
     def test_no_locks_are_left_behind(self, dataset_mock, details):
         """Every lock taken must be released, whatever happened to its camera."""
         prefetcher = _prefetcher(
