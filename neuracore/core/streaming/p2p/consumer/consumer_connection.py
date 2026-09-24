@@ -89,7 +89,7 @@ class PeerToPeerConsumerConnection:
         self.local_stream_id = local_stream_id
         self.remote_stream_id = remote_stream_id
         self.connection_details = connection_details
-        self.expected_tracks = expected_tracks
+        self._expected_tracks: list[RobotStreamTrack] = []
 
         if connection_details.video_format != VideoFormat.NEURACORE_CUSTOM:
             raise ValueError(
@@ -120,6 +120,11 @@ class PeerToPeerConsumerConnection:
         self.data_channels: dict[str, RTCDataChannel] = {}
         # track id -> channel
         self.connected_data_channels: dict[str, RTCDataChannel] = {}
+        # Messages that arrived before the signalling track for that channel.
+        self._pending_messages: dict[str, list[str]] = {}
+        self.latest_data = SynchronizedPoint()
+        # Setter flushes anything already buffered. Nothing is open yet.
+        self.expected_tracks = expected_tracks
 
         @self.connection.on("connectionstatechange")
         def on_connectionstatechange() -> None:
@@ -129,14 +134,62 @@ class PeerToPeerConsumerConnection:
         @self.connection.on("datachannel")
         def on_datachannel(channel: RTCDataChannel) -> None:
             self.data_channels[channel.label] = channel
-            track = next(
-                (track for track in self.expected_tracks if track.mid == channel.label),
-                None,
-            )
-            if track is not None:
-                self._connect_data_channel(channel, track)
+            self._pending_messages.setdefault(channel.label, [])
 
-        self.latest_data = SynchronizedPoint()
+            @channel.on("message")
+            def on_message(message: bytes | str) -> None:
+                assert isinstance(message, str), "Only string messages supported."
+                track = self._track_for_mid(channel.label)
+                if track is None:
+                    self._pending_messages[channel.label].append(message)
+                    return
+                self._ingest_message(message, track, channel)
+
+    @property
+    def expected_tracks(self) -> list[RobotStreamTrack]:
+        """Tracks the remote peer is expected to send on this connection."""
+        return self._expected_tracks
+
+    @expected_tracks.setter
+    def expected_tracks(self, expected_tracks: list[RobotStreamTrack]) -> None:
+        """Record the remote tracks and parse any samples buffered for them.
+
+        A data channel can open before its signalling description arrives. Samples
+        received in that gap are held until the description shows up here.
+        """
+        self._expected_tracks = expected_tracks
+        for mid in list(self.data_channels):
+            self._flush_pending_messages(mid)
+
+    def _track_for_mid(self, mid: str) -> RobotStreamTrack | None:
+        """Return the expected track whose media id matches this channel."""
+        return next(
+            (track for track in self._expected_tracks if track.mid == mid), None
+        )
+
+    def _flush_pending_messages(self, mid: str) -> None:
+        """Parse samples buffered for a channel once its track is known."""
+        track = self._track_for_mid(mid)
+        if track is None:
+            return
+        channel = self.data_channels.get(mid)
+        if channel is None:
+            return
+        pending = self._pending_messages.get(mid)
+        if not pending:
+            return
+        self._pending_messages[mid] = []
+        for message in pending:
+            self._ingest_message(message, track, channel)
+
+    def _ingest_message(
+        self, message: str, track: RobotStreamTrack, channel: RTCDataChannel
+    ) -> None:
+        """Merge one sample into the latest sync point for this connection."""
+        self.latest_data = merge_sync_points(
+            self.latest_data, parse_sync_point(message, track)
+        )
+        self.connected_data_channels[track.id] = channel
 
     def fully_connected(self) -> bool:
         """Get whether all expected remote tracks are connected.
@@ -147,25 +200,6 @@ class PeerToPeerConsumerConnection:
         connected_tracks_ids = set(self.connected_data_channels.keys())
 
         return all(track.id in connected_tracks_ids for track in self.expected_tracks)
-
-    def _connect_data_channel(
-        self, data_channel: RTCDataChannel, track: RobotStreamTrack
-    ) -> None:
-        """Starts listening to updates from a datachannel.
-
-        Args:
-            data_channel: The data channel to start listening to.
-            track: The track that this data channel is for.
-        """
-        assert data_channel.label == track.mid, "Incorrect data channel for track"
-
-        @data_channel.on("message")
-        def on_message(message: bytes | str) -> None:
-            assert isinstance(message, str), "Only string messages supported."
-            self.latest_data = merge_sync_points(
-                self.latest_data, parse_sync_point(message, track)
-            )
-            self.connected_data_channels[track.id] = data_channel
 
     def get_latest_data(self) -> SynchronizedPoint:
         """Get the latest data  provided on this connection.
