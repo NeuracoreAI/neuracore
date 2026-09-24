@@ -4,7 +4,7 @@ import json
 import logging
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -560,19 +560,25 @@ class SynchronizedRecording:
             delete_decoding_lock(lock_file)
 
     def _load_sync_point_payloads(
-        self, sync_point: SynchronizedPoint
+        self,
+        sync_point: SynchronizedPoint,
+        data_types: Collection[DataType] | None = None,
     ) -> SynchronizedPoint:
         """Load lazy sensor payloads from disk cache for a sync point.
 
         Args:
             sync_point: Sync point with metadata-only camera and point cloud entries.
+            data_types: Data types to load. Every data type loads when None.
 
         Returns:
-            Sync point with camera frames and point cloud arrays populated.
+            Sync point with camera frames and point cloud arrays populated,
+            holding only the requested data types.
         """
         # Build new data dict with loaded frames
         new_data = {}
         for data_type, data_dict in sync_point.data.items():
+            if data_types is not None and data_type not in data_types:
+                continue
             if data_type == DataType.RGB_IMAGES:
                 new_data[data_type] = self._get_frame_from_disk_cache(
                     DataType.RGB_IMAGES, data_dict
@@ -607,6 +613,29 @@ class SynchronizedRecording:
         """
         sync_point = self._episode_synced.observations[idx]
         return self._load_sync_point_payloads(sync_point)
+
+    def get_sync_points(
+        self, start: int, stop: int, data_types: Collection[DataType]
+    ) -> list[SynchronizedPoint]:
+        """Return the sync points from start up to stop with only data_types loaded.
+
+        Clamp the range to the recording the same way a slice does.
+
+        Args:
+            start: Index of the first sync point.
+            stop: Index one past the last sync point.
+            data_types: Data types to load for each sync point.
+
+        Returns:
+            The sync points in the range, each holding only data_types.
+        """
+        start, stop, _ = slice(start, stop).indices(len(self))
+        return [
+            self._load_sync_point_payloads(
+                self._episode_synced.observations[idx], data_types
+            )
+            for idx in range(start, stop)
+        ]
 
     def __iter__(self) -> "SynchronizedRecording":
         """Initialize iteration over the episode.

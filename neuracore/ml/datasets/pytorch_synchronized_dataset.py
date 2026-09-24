@@ -219,6 +219,24 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
                 self.merged_cross_embodiment_description.items()
             )
         }
+        self._input_ordered_items = {
+            robot_id: {
+                data_type: items
+                for data_type, items in ordered_items.items()
+                if data_type
+                in self.input_cross_embodiment_description.get(robot_id, {})
+            }
+            for robot_id, ordered_items in self._merged_ordered_items.items()
+        }
+        self._output_ordered_items = {
+            robot_id: {
+                data_type: items
+                for data_type, items in ordered_items.items()
+                if data_type
+                in self.output_cross_embodiment_description.get(robot_id, {})
+            }
+            for robot_id, ordered_items in self._merged_ordered_items.items()
+        }
 
         self._sample_cache = self._build_sample_cache() if sample_cache else None
 
@@ -466,9 +484,10 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         (aligned to the input step) and non-target types (next step onward)
         can share the same loaded sync points.
         """
-        output_sync_points = cast(
-            list[SynchronizedPoint],
-            synced_recording[timestep : timestep + 1 + self.output_prediction_horizon],
+        output_sync_points = synced_recording.get_sync_points(
+            timestep,
+            timestep + 1 + self.output_prediction_horizon,
+            ordered_items.keys(),
         )
         return [
             self._project_sync_point(sync_point, ordered_items)
@@ -532,20 +551,21 @@ class PytorchSynchronizedDataset(PytorchNeuracoreDataset):
         if timestep is None:
             timestep = self._get_timestep(episode_length)
 
-        input_sync_point = cast(SynchronizedPoint, synced_recording[timestep])
-
-        # Order the SynchronizedPoints to the merged embodiment description.
         robot_id = synced_recording.robot_id
+        input_ordered_items = self._input_ordered_items[robot_id]
+        input_sync_point = synced_recording.get_sync_points(
+            timestep, timestep + 1, input_ordered_items.keys()
+        )[0]
 
-        merged_ordered_items = self._merged_ordered_items[robot_id]
+        # Order the SynchronizedPoints to the input and output descriptions.
         input_sync_point = self._project_sync_point(
-            input_sync_point, merged_ordered_items
+            input_sync_point, input_ordered_items
         )
 
         output_sync_points = self._load_projected_output_sync_points(
             synced_recording=synced_recording,
             timestep=timestep,
-            ordered_items=merged_ordered_items,
+            ordered_items=self._output_ordered_items[robot_id],
         )
         recording_name = getattr(synced_recording, "name", "recording")
 
