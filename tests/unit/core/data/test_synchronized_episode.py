@@ -270,6 +270,19 @@ class TestSynchronizedRecording:
         assert len(frames) == 2
         assert all(isinstance(f, SynchronizedPoint) for f in frames)
 
+    def test_get_sync_points_loads_only_requested_data_types(
+        self, synced_recording: SynchronizedRecording
+    ):
+        """Skip frame loading for data types outside the requested set."""
+        with patch.object(
+            synced_recording, "_get_frame_from_disk_cache"
+        ) as mock_get_frame:
+            points = synced_recording.get_sync_points(0, 2, {DataType.JOINT_POSITIONS})
+
+        mock_get_frame.assert_not_called()
+        assert len(points) == 2
+        assert all(set(p.data) == {DataType.JOINT_POSITIONS} for p in points)
+
     def test_getitem_slice_with_step(
         self,
         dataset_mock,
