@@ -62,6 +62,21 @@ def test_round_trip_returns_an_equal_sample(tmp_path):
     assert restored.batch_size == original.batch_size
 
 
+def test_rgb_frames_are_stored_as_uint8_and_loaded_as_float32(tmp_path):
+    cache = _cache(tmp_path)
+    original = _sample(value=7.4)
+
+    cache.store("rec-1", 4, original)
+
+    on_disk = torch.load(next(cache.directory.rglob("*.pt")), weights_only=False)
+    assert on_disk.inputs[DataType.RGB_IMAGES][0].frame.dtype == torch.uint8
+    restored_frame = cache.load("rec-1", 4).inputs[DataType.RGB_IMAGES][0].frame
+    assert restored_frame.dtype == torch.float32
+    assert torch.equal(restored_frame, torch.full((1, 1, 3, 8, 8), 7.0))
+    original_frame = original.inputs[DataType.RGB_IMAGES][0].frame
+    assert torch.equal(original_frame, torch.full((1, 1, 3, 8, 8), 7.4))
+
+
 def test_miss_returns_none(tmp_path):
     assert _cache(tmp_path).load("rec-1", 4) is None
 
