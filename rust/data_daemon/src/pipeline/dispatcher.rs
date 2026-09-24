@@ -70,7 +70,7 @@ use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::trace_actor::{
     self, TraceActorContext, TraceActorMessage, TraceIdentity, TraceKey,
 };
-use crate::state::{DaemonEvent, NewRecording, SqliteStateStore, StateStore};
+use crate::state::{DaemonEvent, LifecycleStamp, NewRecording, SqliteStateStore, StateStore};
 use crate::storage::paths;
 
 /// Default holdback: each data envelope waits this long after daemon receipt
@@ -844,13 +844,13 @@ impl Dispatcher {
         // create_trace burst was folded into the write-behind (the actors no
         // longer create rows here), this is a single uncontended write.
         //
-        // The row's `start_timestamp_ns` is the caller's *capture* time (→
-        // backend `start_time`); the window opens on the *publish* clock below.
+        // The row's start is the caller's *capture* time (→ backend
+        // `start_time`); the window opens on the *publish* clock below.
         let new = NewRecording {
             robot_id: Some(&source.0),
             robot_instance: Some(source.1),
             dataset_id: announced.dataset_id.as_deref(),
-            start_timestamp_ns: announced.start_timestamp_ns,
+            start: caller_stamp(announced.start_timestamp_ns),
         };
         let recording_index = match self.store.create_recording(new).await {
             Ok(row) => row.recording_index,
@@ -919,7 +919,10 @@ impl Dispatcher {
             // notifiable state even if its own (late) stop never arrives.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(retired_index, publish_timestamp_ns)
+                .mark_recording_stopped(
+                    retired_index,
+                    LifecycleStamp::observed_at(publish_timestamp_ns),
+                )
                 .await
             {
                 tracing::warn!(%error, recording_index = retired_index, "failed to mark superseded recording stopped");
@@ -1074,7 +1077,7 @@ impl Dispatcher {
             // timestamp must be on disk first.
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, timestamp_ns)
+                .mark_recording_stopped(recording_index, caller_stamp(timestamp_ns))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark recording stopped");
@@ -1118,7 +1121,7 @@ impl Dispatcher {
             // start`.
             if let Err(error) = self
                 .store
-                .refine_recording_stop(recording_index, timestamp_ns)
+                .refine_recording_stop(recording_index, caller_stamp(timestamp_ns))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to refine retired recording stop");
@@ -1179,7 +1182,7 @@ impl Dispatcher {
         // `stop_timestamp_ns` (→ backend `end_time`), exactly as a stop.
         match self
             .store
-            .cancel_recording(recording_index, timestamp_ns)
+            .cancel_recording(recording_index, caller_stamp(timestamp_ns))
             .await
         {
             Ok((_, touched)) => {
@@ -1340,10 +1343,10 @@ impl Dispatcher {
             window.stop_recv_at = Some(now);
             let recording_index = window.recording_index;
             entry.closing.push(window);
-            let stop_capture_ns = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
+            let reaped_at_ns = Utc::now().timestamp_nanos_opt().unwrap_or(i64::MAX);
             if let Err(error) = self
                 .store
-                .mark_recording_stopped(recording_index, stop_capture_ns)
+                .mark_recording_stopped(recording_index, LifecycleStamp::observed_at(reaped_at_ns))
                 .await
             {
                 tracing::warn!(%error, recording_index, "failed to mark idle recording stopped");
@@ -1770,6 +1773,15 @@ struct ChunkClaim {
     skip: u32,
     /// Frames it does own, counted from `skip`.
     count: u32,
+}
+
+/// The stamp for a lifecycle boundary the caller timed, carrying the caller's
+/// capture clock in nanoseconds.
+fn caller_stamp(timestamp_ns: i64) -> LifecycleStamp {
+    LifecycleStamp {
+        publish_timestamp_ns: timestamp_ns,
+        timestamp: Some(timestamp_ns),
+    }
 }
 
 impl ChunkClaim {
@@ -2239,7 +2251,7 @@ mod tests {
             "recording A must be closed when the next start supersedes it"
         );
         assert_eq!(
-            recording_a.stop_timestamp_ns,
+            recording_a.stop_timestamp,
             Some(150),
             "recording A's stop must be refined to the true (earlier) stop"
         );
@@ -2248,7 +2260,7 @@ mod tests {
             "recording B must be closed by its own stop"
         );
         assert_eq!(
-            recording_b.stop_timestamp_ns,
+            recording_b.stop_timestamp,
             Some(300),
             "the stolen stop at 150 must not close B; only t4 does"
         );

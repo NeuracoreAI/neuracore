@@ -16,8 +16,8 @@ from tests.integration.platform.data_daemon.shared.assertions import (
 from tests.integration.platform.data_daemon.shared.auth import ensure_login
 from tests.integration.platform.data_daemon.shared.db_constants import (
     COLUMN_RECORDING_INDEX,
-    COLUMN_START_TIMESTAMP_NS,
-    COLUMN_STOP_TIMESTAMP_NS,
+    COLUMN_START_TIMESTAMP,
+    COLUMN_STOP_TIMESTAMP,
     TRACE_WRITE_WRITTEN,
 )
 from tests.integration.platform.data_daemon.shared.db_helpers import (
@@ -210,11 +210,11 @@ def test_explicit_capture_timestamps_are_stored_and_leave_the_window_alone() -> 
             )
 
             row = _fetch_only_recording(robot)
-            assert row[COLUMN_START_TIMESTAMP_NS] == int(capture_start_s * 1e9), (
+            assert row[COLUMN_START_TIMESTAMP] == int(capture_start_s * 1e9), (
                 "Recording row did not store the capture start time passed to"
                 f" start_recording; row={row}"
             )
-            assert row[COLUMN_STOP_TIMESTAMP_NS] == int(capture_stop_s * 1e9), (
+            assert row[COLUMN_STOP_TIMESTAMP] == int(capture_stop_s * 1e9), (
                 "Recording row did not store the capture stop time passed to"
                 f" stop_recording; row={row}"
             )
@@ -302,7 +302,7 @@ def test_a_recording_may_start_below_where_the_last_one_ended() -> None:
                 "Both recordings must survive as their own rows; the second is"
                 f" not a continuation of the first. rows={sorted(rows)}"
             )
-            assert rows[earlier_index][COLUMN_START_TIMESTAMP_NS] == int(
+            assert rows[earlier_index][COLUMN_START_TIMESTAMP] == int(
                 _EARLIER_CAPTURE_START_S * 1e9
             ), (
                 "The later recording did not store its own, earlier capture"
