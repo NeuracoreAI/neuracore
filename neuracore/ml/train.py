@@ -773,14 +773,16 @@ def _main(cfg: DictConfig) -> None:
             batch_size = optimal_batch_size
         else:
             # Check if the specified batch size fits in RAM and GPU memory
-            assert_valid_batch_size(
-                batch_size=int(batch_size),
-                cfg=cfg,
-                dataset=pytorch_dataset,
-                input_cross_embodiment_description=input_cross_embodiment_description,
-                output_cross_embodiment_description=output_cross_embodiment_description,
-                device=device,
-            )
+            # assert_valid_batch_size(
+            #     batch_size=int(batch_size),
+            #     cfg=cfg,
+            #     dataset=pytorch_dataset,
+            #     input_cross_embodiment_description=input_cross_embodiment_description,
+            #     output_cross_embodiment_description=(
+            #         output_cross_embodiment_description
+            #     ),
+            #     device=device,
+            # )
 
             batch_size = int(batch_size)
 

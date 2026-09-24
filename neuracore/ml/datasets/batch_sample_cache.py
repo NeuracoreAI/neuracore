@@ -1,15 +1,22 @@
 """On-disk cache of fully built training samples."""
 
+import dataclasses
 import hashlib
 import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import cast
 
 import torch
-from neuracore_types import CrossEmbodimentDescription
+from neuracore_types import (
+    BatchedNCData,
+    BatchedRGBData,
+    CrossEmbodimentDescription,
+    DataType,
+)
 
 from neuracore.core.const import DEFAULT_CACHE_DIR
 from neuracore.core.data.cache_manager import CacheManager
@@ -20,6 +27,52 @@ from neuracore.ml.utils.json_serialization import to_json_serializable
 logger = logging.getLogger(__name__)
 
 SAMPLE_CACHE_DIR = DEFAULT_CACHE_DIR / "sample_cache"
+
+
+def _frame_to_uint8(frame: torch.Tensor) -> torch.Tensor:
+    """Round an RGB frame in the range 0 to 255 to uint8."""
+    return frame.round().clamp(0, 255).to(torch.uint8)
+
+
+def _frame_to_float32(frame: torch.Tensor) -> torch.Tensor:
+    """Convert an RGB frame to float32."""
+    return frame.to(torch.float32)
+
+
+def _convert_rgb_frames(
+    sample: BatchedTrainingSamples,
+    convert: Callable[[torch.Tensor], torch.Tensor],
+) -> BatchedTrainingSamples:
+    """Return a copy of the sample with every RGB frame passed through convert.
+
+    Args:
+        sample: The sample to copy. This function leaves it unchanged.
+        convert: Function applied to each RGB frame tensor.
+
+    Returns:
+        A new sample sharing every tensor except the converted RGB frames.
+    """
+
+    def convert_section(
+        section: dict[DataType, list[BatchedNCData]],
+    ) -> dict[DataType, list[BatchedNCData]]:
+        return {
+            data_type: [
+                (
+                    item.model_copy(update={"frame": convert(item.frame)})
+                    if isinstance(item, BatchedRGBData)
+                    else item
+                )
+                for item in items
+            ]
+            for data_type, items in section.items()
+        }
+
+    return dataclasses.replace(
+        sample,
+        inputs=convert_section(sample.inputs),
+        outputs=convert_section(sample.outputs),
+    )
 
 
 class BatchSampleCache:
@@ -145,12 +198,16 @@ class BatchSampleCache:
             logger.warning("Discarding unreadable sample cache entry %s", path)
             path.unlink(missing_ok=True)
             return None
-        return cast(BatchedTrainingSamples, sample)
+        return _convert_rgb_frames(
+            cast(BatchedTrainingSamples, sample), _frame_to_float32
+        )
 
     def store(
         self, recording_id: str, timestep: int, sample: BatchedTrainingSamples
     ) -> None:
         """Write a built sample. A failure here costs a rebuild, nothing more.
+
+        Store RGB frames as uint8.
 
         Args:
             recording_id: Recording the sample was built from.
@@ -168,7 +225,7 @@ class BatchSampleCache:
                 dir=path.parent, suffix=".tmp", delete=False
             ) as handle:
                 staging = Path(handle.name)
-                torch.save(sample, handle)
+                torch.save(_convert_rgb_frames(sample, _frame_to_uint8), handle)
             os.replace(staging, path)
         except Exception:
             logger.warning("Could not write sample cache entry %s", path, exc_info=True)
