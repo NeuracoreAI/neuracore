@@ -735,6 +735,10 @@ def _main(cfg: DictConfig) -> None:
             on_sync_progress=_report_sync_progress,
             on_download_progress=_report_download_progress,
         )
+        # Progress callbacks are only needed during sync/prefetch. Leaving a
+        # local function on the dataset breaks multiprocessing pickle in
+        # batch-size autotune.
+        synchronized_dataset._on_download_progress = None
 
         if setup_storage_handler is not None:
             setup_storage_handler.wait_for_pending_progress_updates()

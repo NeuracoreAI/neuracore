@@ -110,6 +110,9 @@ class SynchronizedDataset:
 
         if not self._is_synced_recording_cache_complete():
             self._perform_synced_data_prefetch()
+        # Drop the callback so later deepcopy/pickle (e.g. batch-size autotune)
+        # does not fail on a non-picklable progress reporter.
+        self._on_download_progress = None
 
     def _is_synced_recording_cache_complete(self) -> bool:
         """Check whether every recording is already in the synced cache."""
