@@ -87,9 +87,11 @@ class TrainingStorageHandler(UploadStorageMixin):
         # progress stalled behind it.
         self._progress_executor: ThreadPoolExecutor | None = None
         self._progress_lock = threading.Lock()
-        self._pending_progress: tuple[int, int, float | None] | None = None
+        self._pending_progress: dict[str, Any] | None = None
         self._progress_future: Future | None = None
         self._progress_worker_running = False
+        self._last_reported_epoch = -1
+        self._last_reported_step = -1
 
     def _get_upload_url(self, filepath: str, content_type: str) -> str:
         """Get a signed upload URL for a file in cloud storage.
@@ -384,28 +386,54 @@ class TrainingStorageHandler(UploadStorageMixin):
 
     def update_training_progress(
         self,
-        epoch: int,
-        step: int,
+        epoch: int | None = None,
+        step: int | None = None,
         seconds_per_epoch: float | None = None,
+        status: str | None = None,
+        phase_progress_done: int | None = None,
+        phase_progress_total: int | None = None,
     ) -> None:
-        """Queue a training epoch/step progress update for cloud storage.
+        """Queue a training progress / phase update for cloud storage.
 
-        Called from inside the training loop, so the HTTP PUT runs on a
-        background worker rather than blocking the step. Updates coalesce: if a
-        request is already in flight this replaces the payload that will be
-        sent next, instead of queueing another.
+        Called from inside the training loop and pre-training phases, so the
+        HTTP PUT runs on a background worker rather than blocking. Updates
+        coalesce: if a request is already in flight this merges into the
+        payload that will be sent next, instead of queueing another.
 
         Args:
             epoch: Current training epoch.
             step: Current training step.
             seconds_per_epoch: Wall-clock seconds for the latest completed
                 post-warmup epoch, if measured.
+            status: Optional lifecycle phase (e.g. SYNCING_DATA, TRAINING).
+            phase_progress_done: Completed units for the current phase.
+            phase_progress_total: Total units for the current phase.
         """
         if not self.log_to_cloud:
             return
 
         with self._progress_lock:
-            self._pending_progress = (epoch, step, seconds_per_epoch)
+            pending = dict(self._pending_progress or {})
+            if epoch is not None:
+                pending["epoch"] = epoch
+                self._last_reported_epoch = epoch
+            elif "epoch" not in pending and self._last_reported_epoch >= 0:
+                pending["epoch"] = self._last_reported_epoch
+            if step is not None:
+                pending["step"] = step
+                self._last_reported_step = step
+            elif "step" not in pending and self._last_reported_step >= 0:
+                pending["step"] = self._last_reported_step
+            if seconds_per_epoch is not None:
+                pending["seconds_per_epoch"] = seconds_per_epoch
+            if status is not None:
+                pending["status"] = status
+            if phase_progress_done is not None:
+                pending["phase_progress_done"] = phase_progress_done
+            if phase_progress_total is not None:
+                pending["phase_progress_total"] = phase_progress_total
+            pending.setdefault("error", None)
+            self._pending_progress = pending
             if self._progress_worker_running:
                 # A worker is already draining and will observe what was just
                 # stored. The flag is cleared under this same lock, so a worker
@@ -433,22 +461,10 @@ class TrainingStorageHandler(UploadStorageMixin):
                     # starts a fresh worker.
                     self._progress_worker_running = False
                     return
-            self._send_training_progress(*pending)
+            self._send_training_progress(pending)
 
-    def _send_training_progress(
-        self,
-        epoch: int,
-        step: int,
-        seconds_per_epoch: float | None = None,
-    ) -> None:
+    def _send_training_progress(self, payload: dict[str, Any]) -> None:
         """Send one progress update, logging rather than raising on failure."""
-        payload: dict[str, int | float | None] = {
-            "epoch": epoch,
-            "step": step,
-            "error": None,
-        }
-        if seconds_per_epoch is not None:
-            payload["seconds_per_epoch"] = seconds_per_epoch
         try:
             response = self._put_request(
                 f"{API_URL}/org/{self.org_id}/training/jobs/{self.training_job_id}/update",

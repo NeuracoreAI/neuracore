@@ -3,6 +3,7 @@
 import logging
 import sys
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Union, cast
 
 import requests
@@ -58,6 +59,7 @@ class SynchronizedDataset:
         trim_start_end: bool = True,
         trim_no_movement_at_start_threshold: float | None = None,
         synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
+        on_download_progress: Callable[[int, int], None] | None = None,
     ):
         """Initialize a dataset from server response data.
 
@@ -82,6 +84,8 @@ class SynchronizedDataset:
             synced_recording_cache: Already-fetched synced recordings keyed by
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
+            on_download_progress: Optional callback ``(done, total)`` while
+                prefetching videos.
         """
         self.id = id
         self.dataset = dataset
@@ -98,6 +102,7 @@ class SynchronizedDataset:
         self._prefetch_videos = prefetch_videos
         self._max_prefetch_decode_workers = max_prefetch_decode_workers
         self._num_concurrent_prefetch_requests = num_concurrent_prefetch_requests
+        self._on_download_progress = on_download_progress
         self._recording_idx = 0
         self._synced_recording_cache: dict[int, SynchronizedRecording] = (
             dict(synced_recording_cache) if synced_recording_cache else {}
@@ -136,6 +141,7 @@ class SynchronizedDataset:
             inflight_requests=self._num_concurrent_prefetch_requests,
             decode_workers=self._max_prefetch_decode_workers,
             download_videos=self._prefetch_videos,
+            on_progress=self._on_download_progress,
         )
         episodes = prefetcher.run()
 
@@ -214,6 +220,7 @@ class SynchronizedDataset:
                     self.synchronization_details.trim_no_movement_at_start_threshold
                 ),
                 synced_recording_cache=sliced_cache,
+                on_download_progress=None,
             )
         else:
             # Handle single index

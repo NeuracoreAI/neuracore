@@ -15,6 +15,8 @@ import asyncio
 import logging
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +96,7 @@ class VideoPrefetcher:
         inflight_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         decode_workers: int = 4,
         download_videos: bool = True,
+        on_progress: Callable[[int, int], None] | None = None,
     ):
         """Initialize a prefetcher for one synchronized dataset.
 
@@ -105,6 +108,8 @@ class VideoPrefetcher:
             decode_workers: Threads used to run ffmpeg.
             download_videos: Whether to download videos, or only fetch the
                 synchronized metadata.
+            on_progress: Optional callback ``(done, total)`` for download
+                progress. ``total`` may grow as camera counts are discovered.
         """
         self.dataset = dataset
         self.recordings = recordings
@@ -112,12 +117,26 @@ class VideoPrefetcher:
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
         self.download_videos = download_videos
+        self.on_progress = on_progress
         self.episodes: dict[int, SynchronizedEpisodeModel] = {}
         self._failures = 0
         self._lock = threading.Lock()
         # Created once the event loop is running.
         self._api_requests: asyncio.Semaphore | None = None
         self._transfers: asyncio.Semaphore | None = None
+        self._last_progress_log_at = 0.0
+        self._PROGRESS_LOG_INTERVAL_S = 10.0
+
+    def _report_download_progress(self, done: int, total: int) -> None:
+        """Invoke the progress callback and periodically log download status."""
+        if self.on_progress is not None:
+            self.on_progress(done, max(total, done))
+        now = time.monotonic()
+        if now - self._last_progress_log_at >= self._PROGRESS_LOG_INTERVAL_S:
+            logger.info(
+                f"Downloading training data ({done}/{max(total, done)} videos)…"
+            )
+            self._last_progress_log_at = now
 
     def run(self) -> dict[int, SynchronizedEpisodeModel]:
         """Fetch metadata and, if enabled, download and decode every video.
@@ -287,6 +306,10 @@ class VideoPrefetcher:
         # The video total is not known until each recording's metadata says how
         # many cameras it has, so it grows as the pipeline discovers them.
         video_progress = tqdm(total=0, desc="Downloading videos", unit="Video")
+        logger.info("Downloading training data and videos…")
+        self._last_progress_log_at = 0.0
+        if self.on_progress is not None:
+            self.on_progress(0, len(self.recordings))
         queue: asyncio.Queue[_PendingDecode | None] = asyncio.Queue(
             maxsize=2 * self.decode_workers
         )
@@ -332,6 +355,9 @@ class VideoPrefetcher:
                     target.release()
                 finally:
                     video_progress.update(1)
+                    self._report_download_progress(
+                        int(video_progress.n), int(video_progress.total or 0)
+                    )
                 # Queued outside every budget: blocking here while the decoders
                 # are saturated must not hold a request slot.
                 if pending is not None:
@@ -377,6 +403,9 @@ class VideoPrefetcher:
                     return
                 video_progress.total += len(ready)
                 video_progress.refresh()
+                self._report_download_progress(
+                    int(video_progress.n), int(video_progress.total or 0)
+                )
                 await asyncio.gather(*[download(target) for target in ready])
 
             consumers = [
@@ -395,6 +424,11 @@ class VideoPrefetcher:
                 await asyncio.gather(*consumers, return_exceptions=True)
                 metadata_progress.close()
                 video_progress.close()
+                done = int(video_progress.n)
+                total = int(video_progress.total or done)
+                if self.on_progress is not None:
+                    self.on_progress(done, max(total, done))
+                logger.info("Training data download complete.")
 
     def _collect_download_targets(self) -> list["_DownloadTarget"]:
         """Find every camera whose frames are not already cached.

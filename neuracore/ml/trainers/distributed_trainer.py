@@ -335,7 +335,9 @@ class DistributedTrainer:
         """
         if self.rank == 0:
             self.storage_handler.update_training_progress(
-                epoch=start_epoch, step=self.global_train_step
+                epoch=start_epoch,
+                step=self.global_train_step,
+                status="TRAINING",
             )
 
         try:
@@ -423,7 +425,7 @@ class DistributedTrainer:
         """
         if not self.save_checkpoints or self.rank != 0:
             return
-        logger.info("Saving checkpoint...")
+        logger.info(f"Saving checkpoint for epoch {epoch}…")
 
         # Get the model state dict (different for DDP vs non-DDP models)
         model_state = self.get_model_without_ddp().state_dict()
@@ -449,7 +451,8 @@ class DistributedTrainer:
             )
             self.storage_handler.delete_checkpoint(checkpoint_to_remove)
 
-        logger.info("... checkpoint saved!")
+        self.storage_handler.wait_for_pending_uploads()
+        logger.info("Checkpoint uploaded.")
 
     def load_checkpoint(self, path: str) -> dict:
         """Load checkpoint and restore training state.

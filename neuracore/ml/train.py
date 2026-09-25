@@ -578,7 +578,7 @@ def run_training(
 
         # Start training
         try:
-            logger.info("Starting training...")
+            logger.info(f"Training started (target {cfg.epochs} epochs).")
             trainer.train(start_epoch=start_epoch)
             logger.info("Training completed successfully!")
         except Exception:
@@ -647,6 +647,7 @@ def _main(cfg: DictConfig) -> None:
         training_id = cfg.get("training_id")
         # If a training ID is provided,
         # We assume it is a Cloud Training Run
+        setup_storage_handler: TrainingStorageHandler | None = None
         if training_id is not None:
             setup_storage_handler = TrainingStorageHandler(
                 local_dir=cfg.local_output_dir,
@@ -696,6 +697,25 @@ def _main(cfg: DictConfig) -> None:
             cross_embodiment_union=cross_embodiment_union,
         )
 
+        def _report_sync_progress(done: int, total: int) -> None:
+            if setup_storage_handler is None:
+                return
+            if done < total:
+                setup_storage_handler.update_training_progress(
+                    status="SYNCING_DATA",
+                    phase_progress_done=done,
+                    phase_progress_total=total,
+                )
+
+        def _report_download_progress(done: int, total: int) -> None:
+            if setup_storage_handler is None:
+                return
+            setup_storage_handler.update_training_progress(
+                status="FETCHING_DATA",
+                phase_progress_done=done,
+                phase_progress_total=total,
+            )
+
         synchronized_dataset = dataset.synchronize(
             frequency=cfg.frequency,
             cross_embodiment_union=cross_embodiment_union,
@@ -712,7 +732,12 @@ def _main(cfg: DictConfig) -> None:
             trim_no_movement_at_start_threshold=getattr(
                 cfg, "trim_no_movement_at_start_threshold", None
             ),
+            on_sync_progress=_report_sync_progress,
+            on_download_progress=_report_download_progress,
         )
+
+        if setup_storage_handler is not None:
+            setup_storage_handler.wait_for_pending_progress_updates()
 
         # Check if distributed training is enabled and multiple GPUs are available
         world_size = torch.cuda.device_count()
@@ -761,6 +786,11 @@ def _main(cfg: DictConfig) -> None:
 
         # Handle batch size configuration
         if isinstance(batch_size, str) and batch_size.lower() == "auto":
+            if setup_storage_handler is not None:
+                setup_storage_handler.update_training_progress(
+                    status="TUNING_BATCH_SIZE"
+                )
+            logger.info("Finding the largest batch size that fits in GPU memory…")
             # Find the largest batch size that fits in RAM and GPU memory
             optimal_batch_size = determine_optimal_batch_size(
                 cfg=cfg,
@@ -783,6 +813,11 @@ def _main(cfg: DictConfig) -> None:
             )
 
             batch_size = int(batch_size)
+
+        logger.info(f"Using batch size {batch_size} per GPU.")
+        if setup_storage_handler is not None:
+            setup_storage_handler.update_training_progress(status="TRAINING")
+            setup_storage_handler.wait_for_pending_progress_updates()
 
         if world_size > 1:
             # Use multiprocessing to launch multiple processes
