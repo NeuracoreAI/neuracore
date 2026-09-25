@@ -97,6 +97,12 @@ pub enum DaemonEvent {
         /// Local recording index the event applies to.
         recording_index: i64,
     },
+    /// The backend answered 404 for the recording, so its remaining uploads
+    /// were failed. Uploads still in flight for it abort; its files are kept.
+    RecordingNotFound {
+        /// Local recording index the event applies to.
+        recording_index: i64,
+    },
     /// Connection state to the backend changed.
     ConnectionStateChanged(ConnectionState),
 }

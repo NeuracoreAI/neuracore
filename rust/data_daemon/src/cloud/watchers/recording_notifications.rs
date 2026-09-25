@@ -302,17 +302,23 @@ fn parse_notification(data: &str) -> Vec<RecordingCommand> {
         "INIT" => serde_json::from_value::<Vec<StartPayload>>(notification.payload)
             .map(|payloads| payloads.into_iter().map(open_command).collect())
             .unwrap_or_default(),
-        "STOP" | "DISCARDED" | "EXPIRED" => {
-            serde_json::from_value::<StopPayload>(notification.payload)
-                .map(|payload| {
-                    vec![RecordingCommand::Close {
-                        recording_id: payload.recording_id,
-                        end_timestamp_ns: payload.end_time.map(seconds_to_nanos),
-                        observed_at_ns: wall_clock_ns(),
-                    }]
-                })
-                .unwrap_or_default()
-        }
+        "STOP" | "EXPIRED" => serde_json::from_value::<StopPayload>(notification.payload)
+            .map(|payload| {
+                vec![RecordingCommand::Close {
+                    recording_id: payload.recording_id,
+                    end_timestamp_ns: payload.end_time.map(seconds_to_nanos),
+                    observed_at_ns: wall_clock_ns(),
+                }]
+            })
+            .unwrap_or_default(),
+        "DISCARDED" => serde_json::from_value::<StopPayload>(notification.payload)
+            .map(|payload| {
+                vec![RecordingCommand::Discard {
+                    cloud_recording_id: payload.recording_id,
+                    observed_at_ns: wall_clock_ns(),
+                }]
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -424,8 +430,8 @@ mod tests {
     }
 
     #[test]
-    fn every_terminal_type_becomes_a_close() {
-        for kind in ["STOP", "DISCARDED", "EXPIRED"] {
+    fn stop_and_expired_become_a_close() {
+        for kind in ["STOP", "EXPIRED"] {
             let commands = parse_notification(&format!(
                 r#"{{"type":"{kind}","payload":{{"recording_id":"rec-1",
                    "robot_id":"robot-1","instance":0}}}}"#
@@ -455,6 +461,20 @@ mod tests {
                 end_timestamp_ns, ..
             }] => assert_eq!(*end_timestamp_ns, Some(1_500_000_000)),
             other => panic!("STOP produced {other:?}"),
+        }
+    }
+
+    #[test]
+    fn discarded_becomes_a_discard() {
+        let commands = parse_notification(
+            r#"{"type":"DISCARDED","payload":{"recording_id":"rec-1",
+               "robot_id":"robot-1","instance":0}}"#,
+        );
+        match commands.as_slice() {
+            [RecordingCommand::Discard {
+                cloud_recording_id, ..
+            }] => assert_eq!(cloud_recording_id, "rec-1"),
+            other => panic!("DISCARDED produced {other:?}"),
         }
     }
 

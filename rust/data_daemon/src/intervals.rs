@@ -55,5 +55,10 @@ pub const RECORDING_RECLAIM: Duration = Duration::from_secs(60);
 /// how quickly a stuck recording becomes reclaimable again.
 pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 
+/// Recording-lifecycle notify re-sweep: how often stop and cancel POSTs that
+/// failed (5xx, a transport error) are queued again. Start POSTs are not
+/// re-sent on this timer, since they are not idempotent.
+pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
+
 /// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);

@@ -10,7 +10,8 @@
 //! 2. Tracks each in-flight trace (by `trace_id`, with its `recording_index`):
 //!    a trace is added on [`ReadyForUpload`](DaemonEvent::ReadyForUpload) and
 //!    removed on [`UploadComplete`](DaemonEvent::UploadComplete);
-//!    [`RecordingCancelled`](DaemonEvent::RecordingCancelled) drops only that
+//!    [`RecordingCancelled`](DaemonEvent::RecordingCancelled) and
+//!    [`RecordingNotFound`](DaemonEvent::RecordingNotFound) drop only that
 //!    recording's traces.
 //! 3. Spawns `systemd-inhibit --what=idle:sleep --mode=block sleep infinity`
 //!    on the empty→non-empty transition and kills it on the
@@ -82,7 +83,10 @@ pub fn spawn_wakelock(
                                 inhibitor.release();
                             }
                         }
-                        Ok(DaemonEvent::RecordingCancelled { recording_index }) => {
+                        Ok(
+                            DaemonEvent::RecordingCancelled { recording_index }
+                            | DaemonEvent::RecordingNotFound { recording_index },
+                        ) => {
                             // Drop only the cancelled recording's in-flight
                             // traces (whose actors were torn down, so their
                             // `UploadComplete` will never arrive) — releasing

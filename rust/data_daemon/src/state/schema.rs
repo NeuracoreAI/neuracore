@@ -125,6 +125,7 @@ string_enum! {
         NetworkError        => "network_error",
         ProgressReportError => "progress_report_error",
         RecordingCancelled  => "recording_cancelled",
+        RecordingNotPending => "recording_not_pending",
     }
 }
 
@@ -187,6 +188,9 @@ pub struct RecordingRow {
     /// `/recording/cancel` to the backend. `None` means either the recording
     /// was never cancelled, or cancellation has not yet been notified.
     pub backend_cancel_notified_at: Option<NaiveDateTime>,
+    /// Set when the backend answered 404 for the recording's uploads or
+    /// progress. Its remaining uploads are failed and its files kept.
+    pub backend_not_found_at: Option<NaiveDateTime>,
     /// First-seen timestamp.
     pub created_at: NaiveDateTime,
     /// Last write timestamp; bumped on every row mutation.
@@ -213,6 +217,7 @@ impl RecordingRow {
             backend_start_notified_at: row.try_get("backend_start_notified_at")?,
             backend_stop_notified_at: row.try_get("backend_stop_notified_at")?,
             backend_cancel_notified_at: row.try_get("backend_cancel_notified_at")?,
+            backend_not_found_at: row.try_get("backend_not_found_at")?,
             created_at: row.try_get("created_at")?,
             last_updated: row.try_get("last_updated")?,
         })

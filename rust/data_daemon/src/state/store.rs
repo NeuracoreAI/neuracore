@@ -138,8 +138,11 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Option<i64>, StateStoreError>;
 
     /// List recordings whose `/recording/start` POST has not yet succeeded:
-    /// `recording_id IS NULL`, `backend_start_notified_at IS NULL`, and the
-    /// recording is not cancelled. The start notifier's startup sweep.
+    /// `recording_id IS NULL` and `backend_start_notified_at IS NULL`. The
+    /// start notifier's startup sweep.
+    ///
+    /// Cancelled rows are included so the notifier can settle a cancel that
+    /// happened before `/recording/start`, allowing the reaper to remove it.
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
@@ -266,9 +269,10 @@ pub trait StateStore: Send + Sync {
     /// once the write finally commits.
     async fn promote_ready_traces_to_queued(&self) -> Result<Vec<(String, i64)>, StateStoreError>;
 
-    /// List recordings the progress reporter still has work for: stopped, not
-    /// cancelled, with a cloud id, and not yet fully reported (either the
-    /// progress report or the expected-trace-count PUT is still outstanding).
+    /// List recordings the progress reporter still has work for: stopped,
+    /// neither cancelled nor not found, with a cloud id, and not yet fully
+    /// reported (the progress report or the expected-trace-count PUT is still
+    /// outstanding).
     ///
     /// Server-side filtered so fully-settled recordings drop out of the
     /// reporter's periodic sweep instead of being scanned (and their traces
@@ -387,6 +391,16 @@ pub trait StateStore: Send + Sync {
         recording_index: i64,
         stop_timestamp_ns: i64,
     ) -> Result<(RecordingRow, u64), StateStoreError>;
+
+    /// Record that the backend answered 404 for this recording: stamp
+    /// `backend_not_found_at` and fail every trace upload that has not
+    /// finished, tagged `recording_not_pending`.
+    ///
+    /// Unlike [`cancel_recording`](Self::cancel_recording) this keeps the
+    /// files: `cancelled_at` stays unset and the failed uploads fail the
+    /// reaper's all-uploaded gate. Idempotent. Returns the number of traces
+    /// whose upload was failed.
+    async fn mark_recording_not_found(&self, recording_index: i64) -> Result<u64, StateStoreError>;
 
     /// Delete a recording and all of its trace rows in a single transaction.
     ///
@@ -872,7 +886,6 @@ impl StateStore for SqliteStateStore {
             "SELECT * FROM recordings \
               WHERE recording_id IS NULL \
                 AND backend_start_notified_at IS NULL \
-                AND cancelled_at IS NULL \
            ORDER BY recording_index ASC",
         )
         .fetch_all(&self.read_pool)
@@ -1191,7 +1204,13 @@ impl StateStore for SqliteStateStore {
 
     async fn traces_ready_for_upload(&self) -> Result<Vec<String>, StateStoreError> {
         let ids = sqlx::query_scalar::<_, String>(
-            "SELECT trace_id FROM traces WHERE upload_status IN ('queued', 'retrying')",
+            // A cancel or a 404 fails every row it can see, but a create still
+            // in the write-behind batcher can land after it.
+            "SELECT t.trace_id FROM traces t \
+               JOIN recordings r ON r.recording_index = t.recording_index \
+              WHERE t.upload_status IN ('queued', 'retrying') \
+                AND r.cancelled_at IS NULL \
+                AND r.backend_not_found_at IS NULL",
         )
         .fetch_all(&self.read_pool)
         .await?;
@@ -1205,10 +1224,15 @@ impl StateStore for SqliteStateStore {
         // (written) — `traces_ready_for_upload` only checks `upload_status`.
         let now = Utc::now().naive_utc();
         let rows = sqlx::query_as::<_, (String, i64)>(
+            // `failed` is not excluded above, so without the recording check
+            // this would re-queue the uploads a cancel or a 404 just failed.
             "UPDATE traces SET upload_status = ?1, last_updated = ?2 \
               WHERE registration_status = ?3 \
                 AND write_status = ?4 \
                 AND upload_status NOT IN ('queued', 'uploading', 'uploaded') \
+                AND recording_index NOT IN ( \
+                    SELECT recording_index FROM recordings \
+                     WHERE cancelled_at IS NOT NULL OR backend_not_found_at IS NOT NULL) \
             RETURNING trace_id, recording_index",
         )
         .bind(TraceUploadStatus::Queued.as_str())
@@ -1225,6 +1249,7 @@ impl StateStore for SqliteStateStore {
             "SELECT * FROM recordings \
               WHERE stopped_at IS NOT NULL \
                 AND cancelled_at IS NULL \
+                AND backend_not_found_at IS NULL \
                 AND recording_id IS NOT NULL \
                 AND (progress_reported != 'reported' OR expected_trace_count_reported = 0) \
            ORDER BY created_at ASC",
@@ -1627,6 +1652,40 @@ impl StateStore for SqliteStateStore {
 
         tx.commit().await?;
         Ok((record, write_result.rows_affected()))
+    }
+
+    async fn mark_recording_not_found(&self, recording_index: i64) -> Result<u64, StateStoreError> {
+        let mut tx = self.write_pool.begin().await?;
+        let now = Utc::now().naive_utc();
+        sqlx::query(
+            "UPDATE recordings \
+                SET backend_not_found_at = COALESCE(backend_not_found_at, ?2), \
+                    last_updated = ?2 \
+              WHERE recording_index = ?1",
+        )
+        .bind(recording_index)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+        let failed = sqlx::query(
+            "UPDATE traces \
+                SET upload_status = ?1, \
+                    error_code = ?2, \
+                    error_message = COALESCE(error_message, ?3), \
+                    last_updated = ?4 \
+              WHERE recording_index = ?5 \
+                AND upload_status NOT IN (?1, ?6)",
+        )
+        .bind(TraceUploadStatus::Failed.as_str())
+        .bind(TraceErrorCode::RecordingNotPending.as_str())
+        .bind("recording not found on the backend")
+        .bind(now)
+        .bind(recording_index)
+        .bind(TraceUploadStatus::Uploaded.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(failed.rows_affected())
     }
 
     async fn delete_recording_cascade(&self, recording_index: i64) -> Result<u64, StateStoreError> {
@@ -2124,6 +2183,180 @@ mod tests {
         assert_eq!(done.write_status, TraceWriteStatus::Written);
         let failed = store.get_trace("failed").await.unwrap().unwrap();
         assert_eq!(failed.error_code, None, "pre-existing rows untouched");
+    }
+
+    /// A trace that is registered and written, i.e. promotable, with its upload
+    /// at `upload_status`.
+    async fn seed_promotable_trace(
+        store: &SqliteStateStore,
+        recording_index: i64,
+        trace_id: &str,
+        upload_status: TraceUploadStatus,
+    ) {
+        store
+            .create_trace(recording_index, trace_id, Some("JOINT_POSITIONS"), None)
+            .await
+            .expect("create trace");
+        store
+            .update_trace(
+                trace_id,
+                TraceUpdate {
+                    write_status: Some(TraceWriteStatus::Written),
+                    registration_status: Some(TraceRegistrationStatus::Registered),
+                    upload_status: Some(upload_status),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .expect("update trace");
+    }
+
+    #[tokio::test]
+    async fn mark_recording_not_found_fails_unfinished_uploads_only() {
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
+        seed_promotable_trace(&store, recording_index, "queued", TraceUploadStatus::Queued).await;
+        seed_promotable_trace(
+            &store,
+            recording_index,
+            "uploaded",
+            TraceUploadStatus::Uploaded,
+        )
+        .await;
+
+        let failed = store
+            .mark_recording_not_found(recording_index)
+            .await
+            .expect("mark not found");
+        assert_eq!(failed, 1, "only the unfinished upload is failed");
+
+        let queued = store.get_trace("queued").await.unwrap().unwrap();
+        assert_eq!(queued.upload_status, TraceUploadStatus::Failed);
+        assert_eq!(queued.error_code, Some(TraceErrorCode::RecordingNotPending));
+        let uploaded = store.get_trace("uploaded").await.unwrap().unwrap();
+        assert_eq!(uploaded.upload_status, TraceUploadStatus::Uploaded);
+        assert_eq!(uploaded.error_code, None);
+
+        let row = store.get_recording(recording_index).await.unwrap().unwrap();
+        let first_stamp = row.backend_not_found_at.expect("stamped");
+        assert!(row.cancelled_at.is_none());
+
+        // Idempotent: a second 404 keeps the first stamp.
+        assert_eq!(
+            store
+                .mark_recording_not_found(recording_index)
+                .await
+                .unwrap(),
+            0
+        );
+        let row = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert_eq!(row.backend_not_found_at, Some(first_stamp));
+    }
+
+    /// Registration's 500 ms promotion re-queues `failed` uploads, so it must
+    /// skip a recording that is cancelled or not found, or the uploads those
+    /// failed would be retried forever.
+    #[tokio::test]
+    async fn promotion_skips_cancelled_and_not_found_recordings() {
+        let (store, _dir) = open_store().await;
+        let live = seed_recording(&store, 0).await;
+        let cancelled = seed_recording(&store, 1).await;
+        let not_found = seed_recording(&store, 2).await;
+        for (recording_index, trace_id) in [
+            (live, "live"),
+            (cancelled, "cancelled"),
+            (not_found, "not-found"),
+        ] {
+            seed_promotable_trace(
+                &store,
+                recording_index,
+                trace_id,
+                TraceUploadStatus::Pending,
+            )
+            .await;
+        }
+        store.cancel_recording(cancelled, 0).await.expect("cancel");
+        store
+            .mark_recording_not_found(not_found)
+            .await
+            .expect("mark not found");
+
+        let promoted = store
+            .promote_ready_traces_to_queued()
+            .await
+            .expect("promote");
+        assert_eq!(promoted, vec![("live".to_string(), live)]);
+        assert_eq!(
+            store.traces_ready_for_upload().await.unwrap(),
+            vec!["live".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_not_found_recording_leaves_the_progress_sweep() {
+        let (store, _dir) = open_store().await;
+        let recording_index = seed_recording(&store, 0).await;
+        store
+            .mark_recording_start_notified(recording_index, "rec-1")
+            .await
+            .unwrap();
+        store
+            .mark_recording_stopped(recording_index, 0)
+            .await
+            .unwrap();
+        assert_eq!(store.recordings_pending_progress().await.unwrap().len(), 1);
+
+        store
+            .mark_recording_not_found(recording_index)
+            .await
+            .unwrap();
+        assert!(store
+            .recordings_pending_progress()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recordings_traces_are_never_offered_for_upload() {
+        // A create still in the write-behind batcher can commit *after* the
+        // cancel burned every row it could see, landing a fresh `queued` row
+        // for a recording that is gone. The query itself must exclude it.
+        let (store, _dir) = open_store().await;
+        let row = store
+            .create_recording(NewRecording::default())
+            .await
+            .expect("create recording");
+        let recording_index = row.recording_index;
+        store
+            .cancel_recording(recording_index, 0)
+            .await
+            .expect("cancel");
+
+        // A late create, after the burn.
+        store
+            .create_trace(recording_index, "late-trace", Some("JOINT_POSITIONS"), None)
+            .await
+            .expect("create trace");
+        store
+            .update_trace(
+                "late-trace",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .expect("queue it");
+
+        assert!(
+            store
+                .traces_ready_for_upload()
+                .await
+                .expect("query")
+                .is_empty(),
+            "a cancelled recording's traces must never be offered for upload"
+        );
     }
 
     #[tokio::test]

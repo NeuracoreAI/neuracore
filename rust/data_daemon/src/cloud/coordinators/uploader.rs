@@ -10,15 +10,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use tokio::sync::{broadcast, Semaphore};
+use tokio::sync::{broadcast, watch, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{interval, MissedTickBehavior};
 
 use super::status::StatusUpdate;
-use super::upload_transfer::{upload_one_file, UploadFileOutcome};
+use super::upload_transfer::{upload_one_file, UploadFileError, UploadFileOutcome};
 use crate::api::ApiClient;
 use crate::cloud::cloud_files::content_type_for_filename;
 use crate::cloud::OrgIdRx;
@@ -70,6 +70,7 @@ pub fn spawn_uploader(
         // join_next from re-queuing a trace whose task hasn't yet run the
         // DB update to mark itself Uploading.
         let mut in_flight_ids: HashSet<String> = HashSet::new();
+        let aborts = UploadAborts::default();
         // Safety-net rescan: catch any traces that were skipped when the
         // semaphore was full during a drain, without relying on bus events.
         let mut rescan_tick = interval(crate::intervals::UPLOAD_RESCAN);
@@ -102,6 +103,7 @@ pub fn spawn_uploader(
                             &semaphore,
                             &mut in_flight,
                             &mut in_flight_ids,
+                            &aborts,
                         )
                         .await;
                     }
@@ -122,6 +124,7 @@ pub fn spawn_uploader(
                                     &semaphore,
                                     &mut in_flight,
                                     &mut in_flight_ids,
+                                    &aborts,
                                 )
                                 .await;
                             }
@@ -142,12 +145,18 @@ pub fn spawn_uploader(
                                 &semaphore,
                                 &mut in_flight,
                                 &mut in_flight_ids,
+                                &aborts,
                                 trace_id,
                             );
                         }
+                        Ok(
+                            DaemonEvent::RecordingCancelled { recording_index }
+                            | DaemonEvent::RecordingNotFound { recording_index },
+                        ) => aborts.abort(recording_index),
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "uploader missed bus events; rescanning");
+                            aborts.abort_settled(&store).await;
                             if connected {
                                 drain_ready_traces(
                                     &store,
@@ -160,6 +169,7 @@ pub fn spawn_uploader(
                                     &semaphore,
                                     &mut in_flight,
                                     &mut in_flight_ids,
+                                    &aborts,
                                 )
                                 .await;
                             }
@@ -180,6 +190,7 @@ pub fn spawn_uploader(
                             &semaphore,
                             &mut in_flight,
                             &mut in_flight_ids,
+                            &aborts,
                         )
                         .await;
                     }
@@ -203,6 +214,7 @@ async fn drain_ready_traces(
     semaphore: &Arc<Semaphore>,
     in_flight: &mut JoinSet<String>,
     in_flight_ids: &mut HashSet<String>,
+    aborts: &UploadAborts,
 ) {
     // Server-side filter for `queued`/`retrying` traces (uses
     // `idx_traces_upload_status`) instead of walking every recording's full
@@ -227,6 +239,7 @@ async fn drain_ready_traces(
             semaphore,
             in_flight,
             in_flight_ids,
+            aborts,
             trace_id,
         );
     }
@@ -244,6 +257,7 @@ fn spawn_upload_task(
     semaphore: &Arc<Semaphore>,
     in_flight: &mut JoinSet<String>,
     in_flight_ids: &mut HashSet<String>,
+    aborts: &UploadAborts,
     trace_id: String,
 ) {
     if in_flight_ids.contains(&trace_id) {
@@ -262,21 +276,110 @@ fn spawn_upload_task(
     let recordings_root = Arc::clone(recordings_root);
     let org_rx = org_rx.clone();
     let status_tx = status_tx.clone();
+    let aborts = aborts.clone();
     in_flight.spawn(async move {
-        upload_single(
-            &store,
-            &trace_writer,
-            &bus,
-            &client,
-            &recordings_root,
-            &org_rx,
-            &status_tx,
-            &trace_id,
-        )
-        .await;
+        if let Some(abort) = aborts.watch_trace(&store, &trace_id).await {
+            tokio::select! {
+                () = upload_single(
+                    &store,
+                    &trace_writer,
+                    &bus,
+                    &client,
+                    &recordings_root,
+                    &org_rx,
+                    &status_tx,
+                    &trace_id,
+                ) => {}
+                // Dropping the upload future cuts the PUT off mid-chunk.
+                () = aborted(abort) => {
+                    tracing::info!(trace_id, "recording cancelled or not found; aborted its upload");
+                }
+            }
+        }
         drop(permit);
         trace_id
     });
+}
+
+/// One abort signal per recording, raised by the uploader loop when the
+/// recording is cancelled or not found, so upload tasks need no bus
+/// subscription of their own.
+#[derive(Clone, Default)]
+struct UploadAborts(Arc<Mutex<HashMap<i64, watch::Sender<bool>>>>);
+
+impl UploadAborts {
+    /// The abort signal for `trace_id`'s recording, or `None` when the
+    /// recording is already cancelled or not found and must not upload.
+    ///
+    /// Registers before reading the recording, so an abort raised between the
+    /// two is not missed. An unreadable store never aborts an upload.
+    async fn watch_trace(
+        &self,
+        store: &Arc<SqliteStateStore>,
+        trace_id: &str,
+    ) -> Option<watch::Receiver<bool>> {
+        let Ok(Some(trace)) = store.get_trace(trace_id).await else {
+            return Some(watch::channel(false).1);
+        };
+        let abort = self.watch(trace.recording_index);
+        if is_settled(store, trace.recording_index).await {
+            return None;
+        }
+        Some(abort)
+    }
+
+    fn watch(&self, recording_index: i64) -> watch::Receiver<bool> {
+        let mut senders = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        senders.retain(|_, sender| sender.receiver_count() > 0);
+        senders
+            .entry(recording_index)
+            .or_insert_with(|| watch::channel(false).0)
+            .subscribe()
+    }
+
+    fn abort(&self, recording_index: i64) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&recording_index);
+        if let Some(sender) = sender {
+            let _ = sender.send(true);
+        }
+    }
+
+    /// Abort every watched recording the store shows as settled, for when the
+    /// loop may have missed the event that would have aborted it.
+    async fn abort_settled(&self, store: &Arc<SqliteStateStore>) {
+        let watched: Vec<i64> = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        for recording_index in watched {
+            if is_settled(store, recording_index).await {
+                self.abort(recording_index);
+            }
+        }
+    }
+}
+
+/// Resolve once the recording is aborted. Never resolves otherwise.
+async fn aborted(mut abort: watch::Receiver<bool>) {
+    if abort.wait_for(|aborted| *aborted).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// True when the recording is cancelled or not found. A failed read answers
+/// `false`.
+async fn is_settled(store: &Arc<SqliteStateStore>, recording_index: i64) -> bool {
+    matches!(
+        store.get_recording(recording_index).await,
+        Ok(Some(row)) if row.cancelled_at.is_some() || row.backend_not_found_at.is_some()
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -440,7 +543,37 @@ async fn upload_single(
                     persist_session_uris(store, trace_id, &session_uris).await;
                 }
             }
-            Err(error) => {
+            Err(UploadFileError::RecordingCancelled) => {
+                emit_upload_failed(
+                    &trace,
+                    &filename,
+                    upload_started,
+                    total_uploaded,
+                    "recording_cancelled",
+                );
+                // Before the discard publishes the event that aborts this task.
+                mark_failed_and_emit(store, bus, status_tx, &trace, "recording cancelled").await;
+                super::discard_recording_locally(store, bus, trace.recording_index).await;
+                return;
+            }
+            Err(UploadFileError::RecordingNotFound) => {
+                emit_upload_failed(
+                    &trace,
+                    &filename,
+                    upload_started,
+                    total_uploaded,
+                    "recording_not_found",
+                );
+                super::stop_uploading_not_found_recording(
+                    store,
+                    bus,
+                    trace.recording_index,
+                    &recording_id,
+                )
+                .await;
+                return;
+            }
+            Err(UploadFileError::Retry(error)) => {
                 tracing::warn!(%error, trace_id, "upload failed; rolling back to retrying");
                 crate::perf_events::emit(
                     "upload",
@@ -481,6 +614,28 @@ async fn upload_single(
         }),
     );
     finalise_upload(store, bus, status_tx, &trace, total_uploaded).await;
+}
+
+fn emit_upload_failed(
+    trace: &TraceRecord,
+    filename: &str,
+    upload_started: Instant,
+    bytes_uploaded: i64,
+    reason: &str,
+) {
+    crate::perf_events::emit(
+        "upload",
+        "failed",
+        Some(trace.recording_index),
+        Some(&trace.trace_id),
+        Some(upload_started.elapsed()),
+        serde_json::json!({
+            "outcome": "error",
+            "reason": reason,
+            "filename": file_basename(filename),
+            "bytes_uploaded": bytes_uploaded,
+        }),
+    );
 }
 
 async fn finalise_upload(
@@ -616,6 +771,7 @@ mod tests {
     use std::time::Duration;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
+    use tokio::time::{sleep, timeout};
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
@@ -822,6 +978,132 @@ mod tests {
             count += 1;
         }
         assert!(count >= 1);
+    }
+
+    /// Upload `trace-1` against an expired session whose URI refetch answers
+    /// `refetch`. Returns the store, its tempdir, the recording index, the
+    /// trace's local file and every event published.
+    async fn upload_with_refetch_answering(
+        refetch: ResponseTemplate,
+    ) -> (
+        SqliteStateStore,
+        TempDir,
+        i64,
+        std::path::PathBuf,
+        Vec<DaemonEvent>,
+    ) {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/dead"))
+            .respond_with(ResponseTemplate::new(410))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/org/org-1/recording/rec-1/resumable_upload_url"))
+            .respond_with(refetch)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let (recording_index, local) = seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/dead", server.uri()),
+            b"payload",
+        )
+        .await;
+
+        let bus = EventBus::new();
+        let mut subscriber = bus.subscribe();
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        run_upload_single(
+            &store,
+            recordings_root,
+            &client(&server),
+            &bus,
+            &status_tx,
+            "trace-1",
+        )
+        .await;
+
+        let mut events = Vec::new();
+        while let Ok(event) = subscriber.try_recv() {
+            events.push(event);
+        }
+        (store, tempdir, recording_index, local, events)
+    }
+
+    #[tokio::test]
+    async fn session_uri_refetch_cancelled_410_discards_the_recording() {
+        let (store, _tempdir, recording_index, _local, events) =
+            upload_with_refetch_answering(ResponseTemplate::new(410).set_body_json(
+                serde_json::json!({
+                    "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+                }),
+            ))
+            .await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        let row = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(
+            row.cancelled_at.is_some(),
+            "a cancelled 410 discards the recording"
+        );
+        assert!(
+            row.backend_cancel_notified_at.is_some(),
+            "the backend already has the cancel; it must not be POSTed back"
+        );
+        assert!(events.contains(&DaemonEvent::RecordingCancelled { recording_index }));
+    }
+
+    /// A 404 can mean the recording was saved or reaped, or nothing about the
+    /// recording at all, so uploading stops but the files stay.
+    #[tokio::test]
+    async fn session_uri_refetch_404_stops_uploading_but_keeps_the_recording() {
+        let (store, _tempdir, recording_index, local, events) = upload_with_refetch_answering(
+            ResponseTemplate::new(404)
+                .set_body_json(serde_json::json!({ "detail": "Recording not found." })),
+        )
+        .await;
+
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        assert_eq!(
+            trace.error_code,
+            Some(crate::state::TraceErrorCode::RecordingNotPending)
+        );
+        let row = store.get_recording(recording_index).await.unwrap().unwrap();
+        assert!(
+            row.cancelled_at.is_none(),
+            "a 404 must not cancel the recording"
+        );
+        assert!(row.backend_not_found_at.is_some());
+        assert!(local.exists(), "a 404 must not delete the local file");
+        assert!(events.contains(&DaemonEvent::RecordingNotFound { recording_index }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DaemonEvent::RecordingCancelled { .. })));
+        assert!(
+            store.traces_ready_for_upload().await.unwrap().is_empty(),
+            "nothing is left queued to retry"
+        );
+        assert!(
+            store
+                .recordings_pending_reclaim()
+                .await
+                .unwrap()
+                .iter()
+                .all(|row| row.recording_index != recording_index),
+            "the reaper must not reclaim it"
+        );
     }
 
     #[tokio::test]
@@ -1173,6 +1455,213 @@ mod tests {
         assert!(status_rx.try_recv().unwrap().completed);
     }
 
+    /// Dispatch `trace-1` through `spawn_upload_task` with `aborts`.
+    async fn dispatch_upload(
+        store: &SqliteStateStore,
+        recordings_root: std::path::PathBuf,
+        api: &Arc<ApiClient>,
+        aborts: &UploadAborts,
+    ) -> JoinSet<String> {
+        let store_arc = Arc::new(store.clone());
+        let (trace_writer, owner) =
+            crate::state::trace_event_database_writer::spawn(store_arc.clone());
+        // The writer must outlive the upload task.
+        Box::leak(Box::new(owner));
+        let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+        let mut in_flight: JoinSet<String> = JoinSet::new();
+        spawn_upload_task(
+            &store_arc,
+            &trace_writer,
+            &EventBus::new(),
+            api,
+            &Arc::new(recordings_root),
+            &org_rx(Some("org-1")),
+            &status_tx,
+            &Arc::new(Semaphore::new(MAX_CONCURRENT_UPLOADS)),
+            &mut in_flight,
+            &mut HashSet::new(),
+            aborts,
+            "trace-1".to_string(),
+        );
+        in_flight
+    }
+
+    async fn wait_for_put(server: &MockServer, upload_path: &str) {
+        timeout(Duration::from_secs(10), async {
+            loop {
+                let received = server.received_requests().await.unwrap_or_default();
+                if received
+                    .iter()
+                    .any(|request| request.url.path() == upload_path)
+                {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the upload PUT must be in flight within 10s");
+    }
+
+    #[tokio::test]
+    async fn an_abort_cuts_off_an_in_flight_upload() {
+        let server = MockServer::start().await;
+        // Never realistically returns, so an upload that is not aborted times
+        // out rather than passing by luck.
+        Mock::given(method("PUT"))
+            .and(path("/upload/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let (recording_index, _) = seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/slow", server.uri()),
+            b"payload",
+        )
+        .await;
+
+        let aborts = UploadAborts::default();
+        let mut in_flight =
+            dispatch_upload(&store, recordings_root, &client(&server), &aborts).await;
+        wait_for_put(&server, "/upload/slow").await;
+        aborts.abort(recording_index);
+
+        let joined = timeout(Duration::from_secs(10), in_flight.join_next())
+            .await
+            .expect("the abort must end the upload well inside the 120s PUT");
+        assert!(matches!(joined, Some(Ok(trace_id)) if trace_id == "trace-1"));
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_ne!(trace.upload_status, TraceUploadStatus::Uploaded);
+    }
+
+    #[tokio::test]
+    async fn a_trace_of_a_not_found_recording_is_never_uploaded() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/upload/abc"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let (store, tempdir) = open_store().await;
+        let recordings_root = tempdir.path().join("recordings");
+        let (recording_index, _) = seed_ready_trace(
+            &store,
+            &recordings_root,
+            "rec-1",
+            "trace-1",
+            "JOINT_POSITIONS",
+            "arm",
+            &format!("{}/upload/abc", server.uri()),
+            b"payload",
+        )
+        .await;
+        // Not found after this trace was dispatched, before its task ran.
+        store
+            .mark_recording_not_found(recording_index)
+            .await
+            .unwrap();
+
+        let mut in_flight = dispatch_upload(
+            &store,
+            recordings_root,
+            &client(&server),
+            &UploadAborts::default(),
+        )
+        .await;
+        timeout(Duration::from_secs(5), in_flight.join_next())
+            .await
+            .expect("the task returns without uploading");
+        let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+        assert_eq!(trace.upload_status, TraceUploadStatus::Failed);
+        // The `expect(0)` mock asserts no PUT was sent.
+    }
+
+    /// The uploader loop, not each task, turns the bus events into aborts.
+    #[tokio::test]
+    async fn the_uploader_aborts_uploads_on_cancel_and_not_found_events() {
+        for not_found in [false, true] {
+            let server = MockServer::start().await;
+            let payload = b"hello world";
+            let checksum = format!(
+                "crc32c={}",
+                BASE64.encode(crc32c::crc32c(payload).to_be_bytes())
+            );
+            // Completes after a short delay, so an upload that is not aborted
+            // ends up `Uploaded`.
+            Mock::given(method("PUT"))
+                .and(path("/upload/abc"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("X-Goog-Hash", checksum.as_str())
+                        .set_delay(Duration::from_millis(1500)),
+                )
+                .mount(&server)
+                .await;
+            let (store, tempdir) = open_store().await;
+            let recordings_root = tempdir.path().join("recordings");
+            let (recording_index, _) = seed_ready_trace(
+                &store,
+                &recordings_root,
+                "rec-1",
+                "trace-1",
+                "JOINT_POSITIONS",
+                "arm",
+                &format!("{}/upload/abc", server.uri()),
+                payload,
+            )
+            .await;
+
+            let bus = EventBus::new();
+            let (status_tx, _status_rx) = mpsc::unbounded_channel::<StatusUpdate>();
+            let (shutdown_tx, shutdown_rx) = broadcast::channel::<ShutdownSignal>(1);
+            let store_arc = Arc::new(store.clone());
+            let (trace_writer, _owner) =
+                crate::state::trace_event_database_writer::spawn(store_arc.clone());
+            let handle = spawn_uploader(
+                store.clone(),
+                trace_writer,
+                bus.clone(),
+                client(&server),
+                Arc::new(recordings_root),
+                org_rx(Some("org-1")),
+                status_tx,
+                shutdown_rx,
+            );
+            sleep(Duration::from_millis(50)).await;
+            bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Up));
+            wait_for_put(&server, "/upload/abc").await;
+
+            if not_found {
+                store
+                    .mark_recording_not_found(recording_index)
+                    .await
+                    .unwrap();
+                bus.publish(DaemonEvent::RecordingNotFound { recording_index });
+            } else {
+                store.cancel_recording(recording_index, 0).await.unwrap();
+                bus.publish(DaemonEvent::RecordingCancelled { recording_index });
+            }
+            sleep(Duration::from_millis(2500)).await;
+
+            let trace = store.get_trace("trace-1").await.unwrap().unwrap();
+            assert_eq!(
+                trace.upload_status,
+                TraceUploadStatus::Failed,
+                "the upload must be aborted, not completed (not_found = {not_found})"
+            );
+            let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+            handle.join().await;
+        }
+    }
+
     #[tokio::test]
     async fn spawn_upload_task_skips_already_dispatched_trace() {
         // The dedup guard: a trace already in `in_flight_ids` must not be
@@ -1203,6 +1692,7 @@ mod tests {
             &semaphore,
             &mut in_flight,
             &mut in_flight_ids,
+            &UploadAborts::default(),
             "trace-1".to_string(),
         );
 
@@ -1238,6 +1728,7 @@ mod tests {
             &semaphore,
             &mut in_flight,
             &mut in_flight_ids,
+            &UploadAborts::default(),
             "trace-1".to_string(),
         );
 

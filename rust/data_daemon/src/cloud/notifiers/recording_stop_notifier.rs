@@ -100,7 +100,9 @@ mod tests {
     use crate::api::auth::StaticAuthProvider;
     use crate::api::{ApiClient, ApiClientOptions};
     use crate::lifecycle::shutdown::ShutdownSignal;
-    use crate::state::{DaemonEvent, EventBus, NewRecording, SqliteStateStore, StateStore};
+    use crate::state::{
+        ConnectionState, DaemonEvent, EventBus, NewRecording, SqliteStateStore, StateStore,
+    };
 
     async fn open_store() -> (SqliteStateStore, TempDir) {
         let dir = TempDir::new().expect("tempdir");
@@ -195,6 +197,59 @@ mod tests {
         })
         .await
         .expect("expected one POST within 3s");
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_410_settles_the_stop() {
+        // A stop for a recording cancelled from the web gets 410
+        // RECORDING_CANCELLED, and must be settled rather than retried.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(410).set_body_json(serde_json::json!({
+                "detail": { "error": "Recording has been cancelled.", "error_code": "RECORDING_CANCELLED" }
+            })))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-stop-gone").await;
+        store
+            .mark_recording_stopped(index, 1)
+            .await
+            .expect("mark stopped");
+
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = spawn_recording_stop_notifier(
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+        );
+
+        bus.publish(DaemonEvent::RecordingStopped {
+            recording_index: index,
+        });
+
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let row = store.get_recording(index).await.unwrap().unwrap();
+                if row.backend_stop_notified_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a cancelled 410 must stamp backend_stop_notified_at within 3s");
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
@@ -444,6 +499,147 @@ mod tests {
         assert!(
             received.is_empty(),
             "no backend POST expected for a recording that has not stopped"
+        );
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    async fn wait_until_stop_notified(store: &SqliteStateStore, index: i64, within: Duration) {
+        timeout(within, async {
+            loop {
+                let row = store.get_recording(index).await.unwrap().unwrap();
+                if row.backend_stop_notified_at.is_some() {
+                    break;
+                }
+                sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the stop must be notified in time");
+    }
+
+    #[tokio::test]
+    async fn holds_stops_while_offline_and_sends_them_on_reconnect() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let index = seed_notified_recording(&store, "rec-offline").await;
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = super::super::notifier::spawn_notifier_every(
+            StopNotifier,
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+            Duration::from_millis(50),
+        );
+
+        bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Down));
+        store.mark_recording_stopped(index, 1).await.expect("stop");
+        bus.publish(DaemonEvent::RecordingStopped {
+            recording_index: index,
+        });
+        // Several re-sweep periods pass while offline.
+        sleep(Duration::from_millis(300)).await;
+        assert!(
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty(),
+            "nothing is POSTed while the connection is down"
+        );
+
+        bus.publish(DaemonEvent::ConnectionStateChanged(ConnectionState::Up));
+        wait_until_stop_notified(&store, index, Duration::from_secs(3)).await;
+
+        let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
+        handle.join().await;
+    }
+
+    /// A sweep only queues work, so a live stop waits behind at most the one
+    /// sweep POST already in flight.
+    #[tokio::test]
+    async fn a_live_stop_is_not_held_behind_the_sweep_backlog() {
+        const BACKLOG: usize = 5;
+        const SLOW_POST: Duration = Duration::from_millis(400);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .and(body_partial_json(
+                serde_json::json!({ "recording_id": "rec-live" }),
+            ))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/org/org-1/recording/stop"))
+            .respond_with(ResponseTemplate::new(200).set_delay(SLOW_POST))
+            .mount(&server)
+            .await;
+
+        let (store, _dir) = open_store().await;
+        let mut backlog = Vec::new();
+        for n in 0..BACKLOG {
+            let index = seed_notified_recording(&store, &format!("rec-backlog-{n}")).await;
+            store.mark_recording_stopped(index, 1).await.expect("stop");
+            backlog.push(index);
+        }
+        let auth = Arc::new(StaticAuthProvider::new("token-1"));
+        let client = Arc::new(ApiClient::new(options(server.uri()), auth).expect("client"));
+        let bus = EventBus::new();
+        let (shutdown_tx, _) = broadcast::channel::<ShutdownSignal>(8);
+        let handle = super::super::notifier::spawn_notifier_every(
+            StopNotifier,
+            store.clone(),
+            bus.clone(),
+            client,
+            org_rx(Some("org-1")),
+            shutdown_tx.subscribe(),
+            Duration::from_secs(3600),
+        );
+
+        // The startup sweep's backlog is being sent.
+        timeout(Duration::from_secs(5), async {
+            while server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .is_empty()
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the backlog starts sending");
+
+        let live = seed_notified_recording(&store, "rec-live").await;
+        store.mark_recording_stopped(live, 1).await.expect("stop");
+        bus.publish(DaemonEvent::RecordingStopped {
+            recording_index: live,
+        });
+        wait_until_stop_notified(&store, live, SLOW_POST * 2).await;
+
+        let mut still_queued = 0;
+        for index in backlog {
+            let row = store.get_recording(index).await.unwrap().unwrap();
+            if row.backend_stop_notified_at.is_none() {
+                still_queued += 1;
+            }
+        }
+        assert!(
+            still_queued >= 2,
+            "the live stop must overtake the backlog, but only {still_queued} were left"
         );
 
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);

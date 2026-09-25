@@ -4,32 +4,39 @@
 //! but their machinery is identical: subscribe to the event bus, sweep any
 //! recordings whose notification is pending from a previous (offline) session,
 //! then POST whenever the relevant lifecycle event fires — retrying via a
-//! startup sweep and on broadcast lag. This module owns that machinery once; a
-//! notifier supplies only the three things that actually differ via
-//! [`RecordingNotifier`]: which event(s) trigger it, which "pending" query
-//! drives its recovery sweep, and the per-recording POST itself.
+//! startup sweep, a periodic re-sweep, and on broadcast lag. This module owns
+//! that machinery once; a notifier supplies only the three things that
+//! actually differ via [`RecordingNotifier`]: which event(s) trigger it, which
+//! "pending" query drives its recovery sweep, and the per-recording POST
+//! itself.
 //!
-//! Events are processed sequentially: each POST is awaited inline before the
-//! next event is read, so a slow or retrying POST delays later events on the
-//! same notifier and can push the broadcast channel into `Lagged`. That is
-//! handled by re-running the recovery sweep (the POSTs are idempotent), which
-//! is the recovery mechanism rather than a failure.
+//! POSTs run one at a time, never concurrently, because `/recording/start` is
+//! not idempotent. A sweep only queues the recordings it finds; the loop sends
+//! one queued POST between bus events, so a live stop waits behind at most one
+//! sweep POST rather than the whole backlog. While the connection is down
+//! nothing is sent: live triggers join the queue, and the queue drains once
+//! the connection is back. A slow POST can still push the broadcast channel
+//! into `Lagged`, which queues a full sweep.
 //!
 //! Each `recording_*_notifier` module defines a small unit struct implementing
 //! the trait plus a thin `spawn_recording_*_notifier` wrapper, so the call
 //! sites (and their tests) are unchanged.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::state::{
-    DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore, StateStoreError,
+    ConnectionState, DaemonEvent, EventBus, RecordingRow, SqliteStateStore, StateStore,
+    StateStoreError,
 };
 
 /// Handle returned by every recording notifier's `spawn_*` wrapper.
@@ -83,6 +90,16 @@ pub trait RecordingNotifier: Send + Sync + 'static {
         store: &Arc<SqliteStateStore>,
     ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
+    /// The subset of [`pending`](Self::pending) that is safe to re-send on the
+    /// periodic re-sweep. Defaults to all of it, which suits any notifier whose
+    /// POST is idempotent.
+    async fn periodic_pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        self.pending(store).await
+    }
+
     /// Fire the backend POST for one recording. Idempotent and self-logging:
     /// the shared loop never inspects the result.
     async fn notify(&self, ctx: &NotifierCtx, recording_index: i64);
@@ -90,15 +107,36 @@ pub trait RecordingNotifier: Send + Sync + 'static {
 
 /// Spawn a notifier task driven by `notifier` on the current Tokio runtime.
 ///
-/// Sweeps pending notifications first (so recordings that finished while the
-/// daemon was offline recover), then serves live bus events until shutdown.
+/// Queues the notifications left pending by a previous session, then serves
+/// live bus events and that queue until shutdown.
 pub fn spawn_notifier<N: RecordingNotifier>(
     notifier: N,
     store: SqliteStateStore,
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> NotifierHandle {
+    spawn_notifier_every(
+        notifier,
+        store,
+        bus,
+        client,
+        org_rx,
+        shutdown_rx,
+        crate::intervals::NOTIFY_RESWEEP,
+    )
+}
+
+/// [`spawn_notifier`] with the re-sweep interval as a parameter, for tests.
+pub fn spawn_notifier_every<N: RecordingNotifier>(
+    notifier: N,
+    store: SqliteStateStore,
+    bus: EventBus,
+    client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+    resweep_every: Duration,
 ) -> NotifierHandle {
     let label = notifier.label();
     let mut subscriber = bus.subscribe();
@@ -109,16 +147,16 @@ pub fn spawn_notifier<N: RecordingNotifier>(
         org_rx,
     };
     let join = tokio::spawn(async move {
-        // Recover pending notifications before serving live events. Run inside a
-        // `select!` against shutdown so a long sweep cannot hold up exit.
-        tokio::select! {
-            biased;
-            signal = shutdown_rx.recv() => {
-                tracing::debug!(?signal, notifier = label, "recording notifier shutting down before sweep");
-                return;
-            }
-            _ = sweep(&notifier, &ctx) => {}
-        }
+        // Assume online until the connection monitor says otherwise: it can
+        // publish its initial `Down` before this task subscribes, and missing
+        // that must not leave the notifier believing it is offline.
+        let mut connected = true;
+        let mut backlog = Backlog::default();
+        backlog.sweep(&notifier, &ctx, SweepScope::Full).await;
+        let mut resweep = interval(resweep_every);
+        resweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // The first tick fires immediately, and the startup sweep just ran.
+        resweep.reset();
         loop {
             tokio::select! {
                 biased;
@@ -128,9 +166,20 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                 }
                 event = subscriber.recv() => {
                     match event {
+                        Ok(DaemonEvent::ConnectionStateChanged(state)) => {
+                            let reconnected = !connected && state == ConnectionState::Up;
+                            connected = state == ConnectionState::Up;
+                            if reconnected {
+                                backlog.sweep(&notifier, &ctx, SweepScope::Periodic).await;
+                            }
+                        }
                         Ok(event) => {
                             if let Some(recording_index) = notifier.triggered_by(&event) {
-                                notifier.notify(&ctx, recording_index).await;
+                                if connected {
+                                    notifier.notify(&ctx, recording_index).await;
+                                } else {
+                                    backlog.push(recording_index);
+                                }
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -139,7 +188,7 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                                 notifier = label,
                                 "recording notifier missed bus events; re-sweeping pending notifications",
                             );
-                            sweep(&notifier, &ctx).await;
+                            backlog.sweep(&notifier, &ctx, SweepScope::Full).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::debug!(notifier = label, "event bus closed; recording notifier exiting");
@@ -147,38 +196,86 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                         }
                     }
                 }
+                () = std::future::ready(()), if connected && !backlog.is_empty() => {
+                    if let Some(recording_index) = backlog.pop() {
+                        notifier.notify(&ctx, recording_index).await;
+                    }
+                }
+                // A failed POST is never re-triggered by its event, so the
+                // pending set is re-queued on a timer.
+                _ = resweep.tick(), if connected => {
+                    backlog.sweep(&notifier, &ctx, SweepScope::Periodic).await;
+                }
             }
         }
     });
     NotifierHandle { join, label }
 }
 
-/// Notify every recording the notifier reports as pending.
-async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx) {
-    let pending = match notifier.pending(&ctx.store).await {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(%error, notifier = notifier.label(), "failed to query recordings pending notify");
+/// Which set a sweep draws from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SweepScope {
+    /// Everything pending — startup and post-lag recovery.
+    Full,
+    /// Only what is safe to re-drive on a timer.
+    Periodic,
+}
+
+/// Recordings queued for a notify, each at most once, in arrival order.
+#[derive(Default)]
+struct Backlog(VecDeque<i64>);
+
+impl Backlog {
+    fn push(&mut self, recording_index: i64) {
+        if !self.0.contains(&recording_index) {
+            self.0.push_back(recording_index);
+        }
+    }
+
+    fn pop(&mut self) -> Option<i64> {
+        self.0.pop_front()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Queue every recording the notifier reports as pending for `scope`.
+    async fn sweep<N: RecordingNotifier>(
+        &mut self,
+        notifier: &N,
+        ctx: &NotifierCtx,
+        scope: SweepScope,
+    ) {
+        let query = match scope {
+            SweepScope::Full => notifier.pending(&ctx.store).await,
+            SweepScope::Periodic => notifier.periodic_pending(&ctx.store).await,
+        };
+        let pending = match query {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, notifier = notifier.label(), "failed to query recordings pending notify");
+                return;
+            }
+        };
+        if pending.is_empty() {
             return;
         }
-    };
-    if pending.is_empty() {
-        return;
-    }
-    tracing::info!(
-        count = pending.len(),
-        notifier = notifier.label(),
-        "sweeping recordings with pending backend notify",
-    );
-    for row in pending {
-        notifier.notify(ctx, row.recording_index).await;
+        tracing::info!(
+            count = pending.len(),
+            notifier = notifier.label(),
+            "queueing recordings with pending backend notify",
+        );
+        for row in pending {
+            self.push(row.recording_index);
+        }
     }
 }
 
 /// Which `/recording/*` endpoint a lifecycle notify targets. The stop and
 /// cancel notifiers run the *same* guard chain (row fetch → already-notified
 /// guard → has-happened guard → cloud-id guard → org guard →
-/// `stop_timestamp_ns` guard → POST → 404-as-success → mark-notified); only
+/// `stop_timestamp_ns` guard → POST → 404/410-as-success → mark-notified); only
 /// these per-kind bits differ.
 #[derive(Clone, Copy)]
 pub enum LifecycleKind {
@@ -214,11 +311,10 @@ impl LifecycleKind {
 
 /// Run the shared stop/cancel backend-notify flow for one recording.
 ///
-/// Idempotent and self-logging (the spawn loop never inspects the result): a
-/// 404 is treated as success (the recording is already closed server-side, or
-/// the backend reaped it as an abandoned pending recording), and a persist
-/// failure after a successful POST is left for the next sweep since the POST is
-/// idempotent.
+/// Idempotent and self-logging (the spawn loop never inspects the result). A
+/// 404 or a 410 `RECORDING_CANCELLED` counts as success, since either way the
+/// backend no longer has the recording open. A persist failure after a
+/// successful POST is left for the next sweep, since the POST is idempotent.
 pub async fn notify_recording_lifecycle(
     kind: LifecycleKind,
     store: &Arc<SqliteStateStore>,
@@ -298,10 +394,34 @@ pub async fn notify_recording_lifecycle(
 
     let mark_result = match &post_result {
         Ok(()) => mark_notified(kind, store, recording_index).await,
-        // 404 means the backend does not have this recording open — already
+        // The backend does not have this recording open — cancelled, already
         // closed, or reaped as an abandoned pending recording. That is the
         // post-condition we wanted, so record it rather than re-sweeping.
-        Err(error) if error.is_not_found() => mark_notified(kind, store, recording_index).await,
+        Err(error) if error.is_recording_cancelled() || error.is_not_found() => {
+            mark_notified(kind, store, recording_index).await
+        }
+        // A cancel that lost the race with upload completion can never succeed.
+        Err(error)
+            if matches!(kind, LifecycleKind::Cancel) && error.is_recording_already_uploaded() =>
+        {
+            tracing::info!(
+                recording_index,
+                recording_id,
+                "recording finished uploading before it could be cancelled"
+            );
+            mark_notified(kind, store, recording_index).await
+        }
+        // 403 is permanent: left unstamped, the row would be re-POSTed on every
+        // sweep and never reclaimed.
+        Err(error) if error.is_forbidden() => {
+            tracing::error!(
+                %error,
+                recording_index,
+                recording_id,
+                "not permitted to {action} this recording; giving up on the backend notify"
+            );
+            mark_notified(kind, store, recording_index).await
+        }
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, "failed to notify backend of recording {action}");
             return;
