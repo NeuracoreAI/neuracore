@@ -16,6 +16,7 @@ from neuracore.ml.preprocessing.base import (
     PreprocessingConfiguration,
     PreprocessingMethod,
 )
+from neuracore.ml.preprocessing.methods.resize_pad import ResizePad
 
 
 def validate_preprocessing_configuration(
@@ -65,6 +66,28 @@ def resolve_preprocessing_config(
     })
     validate_preprocessing_configuration(preprocessing_config=resolved_config)
     return resolved_config
+
+
+def cached_rgb_frame_size(
+    *configs: PreprocessingConfiguration,
+) -> tuple[int, int] | None:
+    """Return the size to cache RGB frames at for every given configuration.
+
+    Args:
+        configs: Preprocessing configurations that read the same cached frames.
+
+    Returns:
+        The ResizePad size when ResizePad is the first dataset stage RGB method
+        of every configuration and all of them share that size, otherwise None.
+    """
+    sizes = set()
+    for config in configs:
+        methods = config.split_by_stage()[0].get(DataType.RGB_IMAGES, [])
+        if not methods or not isinstance(methods[0], ResizePad):
+            return None
+        height, width = methods[0].size
+        sizes.add((int(height), int(width)))
+    return sizes.pop() if len(sizes) == 1 else None
 
 
 def resolve_input_output_preprocessing(

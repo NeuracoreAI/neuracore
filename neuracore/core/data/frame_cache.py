@@ -1,6 +1,9 @@
 """On-disk video frame cache: its lock protocol and its decoding step.
 
 Frames live at ``<cache_dir>/<recording_id>/<data_type>/<sensor_id>/<idx>.png``.
+RGB frames cached at a fixed size live instead in one uint8 array of shape
+(frames, height, width, 3) at <sensor_id>.<height>x<width>/frames.npy, next to
+the full resolution directory.
 A directory is published with a single ``os.replace`` once decoding finishes, so
 one that exists is always complete; while it is being produced, a sibling
 ``<sensor_id>.recording.lock`` marks it as owned.
@@ -13,6 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import numpy as np
 from neuracore_types import DataType
 from PIL import Image
 
@@ -23,6 +27,12 @@ STALE_LOCK_TIMEOUT_S = 300
 
 PNG_COMPRESSION_LEVEL = 3
 """zlib level used when writing cached frames."""
+
+FRAME_ARRAY_FILENAME = "frames.npy"
+"""File holding every frame of a camera cached at a fixed size."""
+
+FRAME_ARRAY_DECODE_CHUNK = 64
+"""Frames decoded before each resize and write to the frame array."""
 
 _RGB_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4", "lossy.mp4")
 _DEPTH_VIDEO_FILENAME_PREFERENCE = ("lossless.mp4",)
@@ -49,6 +59,131 @@ def video_filename_preference(camera_type: DataType) -> tuple[str, ...]:
     if camera_type == DataType.DEPTH_IMAGES:
         return _DEPTH_VIDEO_FILENAME_PREFERENCE
     return _RGB_VIDEO_FILENAME_PREFERENCE
+
+
+def frames_dir_for(
+    cache_dir: Path,
+    recording_id: str,
+    data_type: DataType,
+    sensor_id: str,
+    rgb_frame_size: tuple[int, int] | None = None,
+) -> Path:
+    """Return the directory a camera's cached frames are published to.
+
+    Args:
+        cache_dir: Root of the recording cache.
+        recording_id: Recording the camera belongs to.
+        data_type: Type of camera.
+        sensor_id: Camera identifier.
+        rgb_frame_size: Height and width RGB frames are fitted within, or None
+            for full resolution frames.
+
+    Returns:
+        The frames directory, named after the frame size when RGB frames are
+        cached at a fixed size.
+    """
+    camera_type_dir = cache_dir / recording_id / data_type.value
+    if rgb_frame_size is None or data_type != DataType.RGB_IMAGES:
+        return camera_type_dir / sensor_id
+    height, width = rgb_frame_size
+    return camera_type_dir / f"{sensor_id}.{height}x{width}"
+
+
+def fit_within(height: int, width: int, size: tuple[int, int]) -> tuple[int, int]:
+    """Return the largest frame shape within size that keeps the aspect ratio.
+
+    Uses the same rounding as the ResizePad preprocessing method, so ResizePad
+    leaves a fitted frame at its shape and only pads it.
+
+    Args:
+        height: Source frame height.
+        width: Source frame width.
+        size: Target height and width.
+
+    Returns:
+        Fitted height and width.
+    """
+    scale = min(size[0] / height, size[1] / width)
+    return max(1, int(round(height * scale))), max(1, int(round(width * scale)))
+
+
+def resize_frames(frames: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Resize a stack of uint8 frames with bilinear interpolation.
+
+    Args:
+        frames: Frames of shape (frames, height, width, 3).
+        shape: Target height and width.
+
+    Returns:
+        Resized uint8 frames of shape (frames, height, width, 3).
+    """
+    if frames.shape[1:3] == shape:
+        return frames
+
+    import torch
+
+    channels_first = torch.from_numpy(frames).permute(0, 3, 1, 2)
+    resized = torch.nn.functional.interpolate(
+        channels_first, size=shape, mode="bilinear"
+    )
+    return resized.permute(0, 2, 3, 1).contiguous().numpy()
+
+
+def decode_video_to_array(
+    video_location: Path, output_file: Path, size: tuple[int, int]
+) -> None:
+    """Decode every frame of a video, fit it within size and write one npy array.
+
+    The frames stream to disk in chunks, so memory stays bounded for any video
+    length.
+
+    Args:
+        video_location: Path to the video file.
+        output_file: Path of the npy file to write.
+        size: Height and width to fit each frame within.
+    """
+    import av
+
+    with av.open(str(video_location)) as container, open(output_file, "wb") as out:
+        stream = container.streams.video[0]
+        stream.thread_count = 1
+        height, width = fit_within(
+            stream.codec_context.height, stream.codec_context.width, size
+        )
+
+        def write_header(num_frames: int) -> int:
+            np.lib.format.write_array_header_1_0(
+                out,
+                {
+                    "descr": np.lib.format.dtype_to_descr(np.dtype(np.uint8)),
+                    "fortran_order": False,
+                    "shape": (num_frames, height, width, 3),
+                },
+            )
+            return out.tell()
+
+        header_length = write_header(0)
+        num_frames = 0
+        chunk: list[np.ndarray] = []
+
+        def flush() -> None:
+            nonlocal num_frames
+            resize_frames(np.stack(chunk), (height, width)).tofile(out)
+            num_frames += len(chunk)
+            chunk.clear()
+
+        for frame in container.decode(stream):
+            chunk.append(frame.to_ndarray(format="rgb24"))
+            if len(chunk) == FRAME_ARRAY_DECODE_CHUNK:
+                flush()
+        if chunk:
+            flush()
+
+        # The npy header pads the first axis for growth, so the final frame
+        # count fits in the space the placeholder header took.
+        out.seek(0)
+        if write_header(num_frames) != header_length:
+            raise RuntimeError(f"Frame array header for {output_file} changed size")
 
 
 def lock_file_for(frames_dir: Path) -> Path:
@@ -283,7 +418,10 @@ def decode_video(video_location: Path, video_frame_cache_path: Path) -> None:
 
 
 def publish_decoded_frames(
-    video_path: Path, staging_dir: Path, frames_dir: Path
+    video_path: Path,
+    staging_dir: Path,
+    frames_dir: Path,
+    frame_size: tuple[int, int] | None = None,
 ) -> None:
     """Decode a video into a staging directory and publish it atomically.
 
@@ -294,8 +432,15 @@ def publish_decoded_frames(
         video_path: Video to decode.
         staging_dir: Empty directory on the same filesystem to decode into.
         frames_dir: Final location to publish the frames to.
+        frame_size: Height and width to fit frames within, written as one frame
+            array. None writes full resolution PNG frames.
     """
     if frames_dir.exists():
         return
-    decode_video(video_path, staging_dir)
+    if frame_size is None:
+        decode_video(video_path, staging_dir)
+    else:
+        decode_video_to_array(
+            video_path, staging_dir / FRAME_ARRAY_FILENAME, frame_size
+        )
     os.replace(staging_dir, frames_dir)

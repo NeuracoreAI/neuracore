@@ -31,8 +31,10 @@ from pydantic import ValidationError as PydanticValidationError
 
 from neuracore.core.data.cache_manager import CacheManager
 from neuracore.core.data.frame_cache import (
+    FRAME_ARRAY_FILENAME,
     acquire_decoding_lock,
     delete_decoding_lock,
+    frames_dir_for,
     lock_file_for,
     point_cloud_lock_file_for,
     publish_decoded_frames,
@@ -103,6 +105,7 @@ class SynchronizedRecording:
         synchronization_details: SynchronizationDetails,
         prefetch_videos: bool = False,
         episode_synced: SynchronizedEpisodeModel | None = None,
+        rgb_frame_size: tuple[int, int] | None = None,
     ):
         """Initialize episode iterator for a specific recording.
 
@@ -119,6 +122,8 @@ class SynchronizedRecording:
             prefetch_videos: Whether to prefetch video data to cache on initialization.
             episode_synced: Already-fetched synchronized metadata for this
                 recording. When omitted, it is requested here.
+            rgb_frame_size: Height and width to fit cached RGB frames within,
+                keeping the aspect ratio. None caches full resolution frames.
         """
         self.dataset = dataset
         self.id = recording_id
@@ -127,6 +132,7 @@ class SynchronizedRecording:
         self.cache_dir: Path = dataset.cache_dir
         self.robot_id = robot_id
         self.instance = instance
+        self.rgb_frame_size = rgb_frame_size
 
         self._episode_synced = (
             episode_synced if episode_synced is not None else self._get_synced_data()
@@ -429,7 +435,10 @@ class SynchronizedRecording:
                     self._get_video_url(camera_type, camera_id), video_location
                 )
                 publish_decoded_frames(
-                    video_location, staging_dir, video_frame_cache_path
+                    video_location,
+                    staging_dir,
+                    video_frame_cache_path,
+                    self.rgb_frame_size if camera_type == DataType.RGB_IMAGES else None,
                 )
         finally:
             delete_decoding_lock(lock_file)
@@ -454,7 +463,9 @@ class SynchronizedRecording:
         # Create new dict with new CameraData instances to avoid mutating originals
         result = {}
         for cam_id, cam_data in camera_data.items():
-            cam_id_rgb_root = self.cache_dir / f"{self.id}" / camera_type.value / cam_id
+            cam_id_rgb_root = frames_dir_for(
+                self.cache_dir, self.id, camera_type, cam_id, self.rgb_frame_size
+            )
             lock_file = lock_file_for(cam_id_rgb_root)
             wait_for_lock_release(lock_file, cam_id_rgb_root)
 
@@ -465,8 +476,11 @@ class SynchronizedRecording:
                     camera_type, cam_id, cam_id_rgb_root
                 )
 
-            frame_file = cam_id_rgb_root / f"{cam_data.frame_idx}.png"
-            frame = Image.open(frame_file)
+            if camera_type == DataType.RGB_IMAGES and self.rgb_frame_size is not None:
+                frames = np.load(cam_id_rgb_root / FRAME_ARRAY_FILENAME, mmap_mode="r")
+                frame = np.array(frames[cam_data.frame_idx])
+            else:
+                frame = Image.open(cam_id_rgb_root / f"{cam_data.frame_idx}.png")
 
             if transform_fn:
                 frame = Image.fromarray(transform_fn(np.array(frame)))

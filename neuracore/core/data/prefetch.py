@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import aiohttp
+import numpy as np
 from neuracore_types import DataType, SynchronizationDetails
 from neuracore_types import SynchronizedEpisode as SynchronizedEpisodeModel
 from neuracore_types import (
@@ -35,10 +36,12 @@ from tqdm import tqdm
 from neuracore.core.auth import get_auth
 from neuracore.core.const import API_URL
 from neuracore.core.data.frame_cache import (
+    FRAME_ARRAY_FILENAME,
     check_stale_lock_file,
     clear_stale_lock,
     create_decoding_lock,
     delete_decoding_lock,
+    frames_dir_for,
     lock_file_for,
     publish_decoded_frames,
     video_filename_preference,
@@ -77,6 +80,7 @@ class _PendingDecode:
     frames_dir: Path
     lock_file: Path
     temp_dir: tempfile.TemporaryDirectory
+    frame_size: tuple[int, int] | None = None
 
 
 class VideoPrefetcher:
@@ -95,6 +99,7 @@ class VideoPrefetcher:
         inflight_requests: int = DEFAULT_CONCURRENT_PREFETCH_REQUESTS,
         decode_workers: int = 4,
         download_videos: bool = True,
+        rgb_frame_size: tuple[int, int] | None = None,
     ):
         """Initialize a prefetcher for one synchronized dataset.
 
@@ -106,6 +111,8 @@ class VideoPrefetcher:
             decode_workers: Threads used to run ffmpeg.
             download_videos: Whether to download videos, or only fetch the
                 synchronized metadata.
+            rgb_frame_size: Height and width to fit cached RGB frames within,
+                keeping the aspect ratio. None caches full resolution frames.
         """
         self.dataset = dataset
         self.recordings = recordings
@@ -113,6 +120,7 @@ class VideoPrefetcher:
         self.inflight_requests = max(1, inflight_requests)
         self.decode_workers = max(1, decode_workers)
         self.download_videos = download_videos
+        self.rgb_frame_size = rgb_frame_size
         self.episodes: dict[int, SynchronizedEpisodeModel] = {}
         self._failures = 0
         self._lock = threading.Lock()
@@ -465,8 +473,12 @@ class VideoPrefetcher:
         observation = episode.observations[0]
         for data_type in _VIDEO_DATA_TYPES:
             for camera_id in observation.data.get(data_type, {}):
-                frames_dir = (
-                    self.dataset.cache_dir / recording.id / data_type.value / camera_id
+                frames_dir = frames_dir_for(
+                    self.dataset.cache_dir,
+                    recording.id,
+                    data_type,
+                    camera_id,
+                    self.rgb_frame_size,
                 )
                 lock_file = lock_file_for(frames_dir)
 
@@ -537,6 +549,9 @@ class VideoPrefetcher:
             frames_dir=target.frames_dir,
             lock_file=target.lock_file,
             temp_dir=temp_dir,
+            frame_size=(
+                self.rgb_frame_size if target.data_type == DataType.RGB_IMAGES else None
+            ),
         )
 
     async def _stream_video(
@@ -630,8 +645,14 @@ def _decode_and_publish(pending: _PendingDecode) -> int:
     """
     try:
         publish_decoded_frames(
-            pending.video_path, pending.staging_dir, pending.frames_dir
+            pending.video_path,
+            pending.staging_dir,
+            pending.frames_dir,
+            pending.frame_size,
         )
+        frame_array = pending.frames_dir / FRAME_ARRAY_FILENAME
+        if frame_array.exists():
+            return len(np.load(frame_array, mmap_mode="r"))
         return sum(1 for _ in pending.frames_dir.iterdir())
     finally:
         delete_decoding_lock(pending.lock_file)

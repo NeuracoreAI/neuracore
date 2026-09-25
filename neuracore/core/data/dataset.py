@@ -770,6 +770,7 @@ class Dataset:
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
         trim_no_movement_at_start_threshold: float | None = None,
+        rgb_frame_size: tuple[int, int] | None = None,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -789,6 +790,8 @@ class Dataset:
                 start of each episode while every joint position stays within
                 this threshold of its value in the first frame. None keeps
                 every frame.
+            rgb_frame_size: Height and width to fit cached RGB frames within,
+                keeping the aspect ratio. None caches full resolution frames.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -838,6 +841,7 @@ class Dataset:
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
             trim_no_movement_at_start_threshold=trim_no_movement_at_start_threshold,
+            rgb_frame_size=rgb_frame_size,
         )
 
     def get_full_embodiment_description(self, robot_id: str) -> EmbodimentDescription:
