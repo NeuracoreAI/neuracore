@@ -38,6 +38,9 @@ logging_frequency: 50
 # nothing. 0 disables it.
 system_logging_frequency: 200
 keep_last_n_checkpoints: 2
+# Train in bf16 autocast with TF32 matrix multiplies and a channels_last model.
+# Applies only on GPUs with native bf16 support (A100, H100, L4 and newer).
+mixed_precision: true
 device: null  # e.g., "cuda:0", "mps", "cpu"
 
 input_data_types:

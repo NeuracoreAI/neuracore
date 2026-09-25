@@ -35,6 +35,7 @@ from neuracore.ml import BatchedTrainingOutputs, NeuracoreModel
 from neuracore.ml.datasets.pytorch_synchronized_dataset import (
     PytorchSynchronizedDataset,
 )
+from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.train import (
     _resolve_recording_cache_dir,
     _serialize_cross_embodiment_description,
@@ -191,7 +192,9 @@ class MainTestSetup:
             return_value=self.mock_synchronized_dataset
         )
         self.mock_pytorch_dataset_class = Mock(return_value=self.mock_pytorch_dataset)
-        self.mock_resolve_input_output_preprocessing = Mock(return_value=({}, {}))
+        self.mock_resolve_input_output_preprocessing = Mock(
+            return_value=(PreprocessingConfiguration(), PreprocessingConfiguration())
+        )
         self.mock_run_training = Mock()
         self.mock_cuda_device_count = Mock(return_value=self.cuda_device_count)
         self.mock_storage_handler = Mock()

@@ -564,6 +564,7 @@ def run_training(
             ),
             keep_last_n_checkpoints=cfg.keep_last_n_checkpoints,
             clip_grad_norm=algorithm_config.get("clip_grad_norm", None),
+            mixed_precision=cfg.get("mixed_precision", False),
             rank=rank,
             world_size=world_size,
             device=device,
