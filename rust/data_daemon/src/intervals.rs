@@ -55,5 +55,14 @@ pub const RECORDING_RECLAIM: Duration = Duration::from_secs(60);
 /// how quickly a stuck recording becomes reclaimable again.
 pub const COMPLETION_RECONCILE: Duration = Duration::from_secs(30);
 
+/// Recording-lifecycle notify re-sweep: re-drives the start / stop / cancel
+/// POSTs whose delivery never landed (offline, 5xx, a transport error). Each
+/// notifier's own `pending()` query is the sweep set and every POST is
+/// idempotent, so the relaxed cadence only bounds how long a recording waits
+/// before its backend state — and, for a cancel, its eligibility for
+/// reclaim — catches up. Without it a failed POST is retried only at the next
+/// daemon start.
+pub const NOTIFY_RESWEEP: Duration = Duration::from_secs(30);
+
 /// Connection health probe cadence.
 pub const CONNECTION_HEALTH_CHECK: Duration = Duration::from_secs(10);

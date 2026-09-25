@@ -4,7 +4,8 @@
 //! but their machinery is identical: subscribe to the event bus, sweep any
 //! recordings whose notification is pending from a previous (offline) session,
 //! then POST whenever the relevant lifecycle event fires — retrying via a
-//! startup sweep and on broadcast lag. This module owns that machinery once; a
+//! startup sweep, a periodic re-sweep, and on broadcast lag. This module owns
+//! that machinery once; a
 //! notifier supplies only the three things that actually differ via
 //! [`RecordingNotifier`]: which event(s) trigger it, which "pending" query
 //! drives its recovery sweep, and the per-recording POST itself.
@@ -20,10 +21,12 @@
 //! sites (and their tests) are unchanged.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::ApiClient;
 use crate::cloud::OrgIdRx;
@@ -83,6 +86,17 @@ pub trait RecordingNotifier: Send + Sync + 'static {
         store: &Arc<SqliteStateStore>,
     ) -> Result<Vec<RecordingRow>, StateStoreError>;
 
+    /// The subset of [`pending`](Self::pending) that is safe to re-drive on
+    /// the periodic re-sweep, which fires for the life of the daemon rather
+    /// than once per start. Defaults to the whole set, which is right for any
+    /// notifier whose POST is idempotent.
+    async fn periodic_pending(
+        &self,
+        store: &Arc<SqliteStateStore>,
+    ) -> Result<Vec<RecordingRow>, StateStoreError> {
+        self.pending(store).await
+    }
+
     /// Fire the backend POST for one recording. Idempotent and self-logging:
     /// the shared loop never inspects the result.
     async fn notify(&self, ctx: &NotifierCtx, recording_index: i64);
@@ -98,7 +112,31 @@ pub fn spawn_notifier<N: RecordingNotifier>(
     bus: EventBus,
     client: Arc<ApiClient>,
     org_rx: OrgIdRx,
+    shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+) -> NotifierHandle {
+    spawn_notifier_every(
+        notifier,
+        store,
+        bus,
+        client,
+        org_rx,
+        shutdown_rx,
+        crate::intervals::NOTIFY_RESWEEP,
+    )
+}
+
+/// [`spawn_notifier`] with the re-sweep cadence spelled out, so a test can
+/// drive the retry path without waiting a real [`NOTIFY_RESWEEP`].
+///
+/// [`NOTIFY_RESWEEP`]: crate::intervals::NOTIFY_RESWEEP
+pub fn spawn_notifier_every<N: RecordingNotifier>(
+    notifier: N,
+    store: SqliteStateStore,
+    bus: EventBus,
+    client: Arc<ApiClient>,
+    org_rx: OrgIdRx,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
+    resweep_every: Duration,
 ) -> NotifierHandle {
     let label = notifier.label();
     let mut subscriber = bus.subscribe();
@@ -117,8 +155,13 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                 tracing::debug!(?signal, notifier = label, "recording notifier shutting down before sweep");
                 return;
             }
-            _ = sweep(&notifier, &ctx) => {}
+            _ = sweep(&notifier, &ctx, SweepScope::Full) => {}
         }
+        let mut resweep = interval(resweep_every);
+        resweep.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        // The interval fires immediately on its first tick; the sweep above
+        // has just run, so skip straight to the first real deadline.
+        resweep.reset();
         loop {
             tokio::select! {
                 biased;
@@ -126,6 +169,14 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                     tracing::debug!(?signal, notifier = label, "recording notifier shutting down");
                     break;
                 }
+                // A POST can fail for reasons no event will ever repeat —
+                // offline, 5xx, a dropped connection — and the event that
+                // triggered it does not come round again. Re-run the pending
+                // set on a timer so delivery is eventually guaranteed within
+                // one daemon lifetime rather than only across a restart.
+                // Cheap when idle: `pending()` is a server-side filter that
+                // returns nothing once every recording is settled.
+                _ = resweep.tick() => sweep(&notifier, &ctx, SweepScope::Periodic).await,
                 event = subscriber.recv() => {
                     match event {
                         Ok(event) => {
@@ -139,7 +190,7 @@ pub fn spawn_notifier<N: RecordingNotifier>(
                                 notifier = label,
                                 "recording notifier missed bus events; re-sweeping pending notifications",
                             );
-                            sweep(&notifier, &ctx).await;
+                            sweep(&notifier, &ctx, SweepScope::Full).await;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             tracing::debug!(notifier = label, "event bus closed; recording notifier exiting");
@@ -153,9 +204,22 @@ pub fn spawn_notifier<N: RecordingNotifier>(
     NotifierHandle { join, label }
 }
 
-/// Notify every recording the notifier reports as pending.
-async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx) {
-    let pending = match notifier.pending(&ctx.store).await {
+/// Which set a sweep draws from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SweepScope {
+    /// Everything pending — startup and post-lag recovery.
+    Full,
+    /// Only what is safe to re-drive on a timer.
+    Periodic,
+}
+
+/// Notify every recording the notifier reports as pending for `scope`.
+async fn sweep<N: RecordingNotifier>(notifier: &N, ctx: &NotifierCtx, scope: SweepScope) {
+    let query = match scope {
+        SweepScope::Full => notifier.pending(&ctx.store).await,
+        SweepScope::Periodic => notifier.periodic_pending(&ctx.store).await,
+    };
+    let pending = match query {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(%error, notifier = notifier.label(), "failed to query recordings pending notify");
@@ -237,15 +301,22 @@ pub async fn notify_recording_lifecycle(
         // Another path (sweep or earlier event) already notified.
         return;
     }
-    // Stop is also triggered by `RecordingCloudIdAssigned`, which can fire for a
-    // still-running recording; hold the POST until it has actually stopped.
-    // (A cancel only ever reaches here once `cancelled_at` is stamped.)
-    if matches!(kind, LifecycleKind::Stop) && row.stopped_at.is_none() {
-        return;
+    // Both kinds are also triggered by `RecordingCloudIdAssigned`, which fires
+    // for every recording whose start POST lands — including ones that are
+    // still running, and ones that were never stopped or cancelled at all. Hold
+    // the POST until this recording has actually reached the state it names.
+    match kind {
+        LifecycleKind::Stop if row.stopped_at.is_none() => return,
+        LifecycleKind::Cancel if row.cancelled_at.is_none() => return,
+        _ => {}
     }
-    let Some(recording_id) = row.recording_id else {
-        // No cloud id → nothing exists server-side to act on. The sweep
-        // re-fires once the start notifier mints the id.
+    let Some(recording_id) = row.recording_id.clone() else {
+        // No cloud id → either the start POST was never made (nothing exists
+        // server-side to act on) or it is in flight right now. Defer either
+        // way: the start notifier owns the distinction. It settles a cancel
+        // itself when it skips the POST, and publishes
+        // `RecordingCloudIdAssigned` when the POST lands, which brings the
+        // recording back here with an id.
         tracing::debug!(
             recording_index,
             "recording has no cloud id at {action} time; deferring backend notify"
@@ -292,6 +363,31 @@ pub async fn notify_recording_lifecycle(
         // closed, or reaped as an abandoned pending recording. That is the
         // post-condition we wanted, so record it rather than re-sweeping.
         Err(error) if error.is_not_found() => mark_notified(kind, store, recording_index).await,
+        // Cancellation can lose a race with upload completion. The backend
+        // cannot cancel an already-uploaded recording, so retrying would only
+        // pin the local row and artefacts forever.
+        Err(error)
+            if matches!(kind, LifecycleKind::Cancel) && error.is_recording_already_uploaded() =>
+        {
+            tracing::info!(
+                recording_index,
+                recording_id,
+                "recording finished uploading before it could be cancelled"
+            );
+            mark_notified(kind, store, recording_index).await
+        }
+        // 403 is permanent, unlike a transport or 5xx failure. Left unstamped
+        // it would re-POST on every sweep and, since the reaper only reclaims
+        // a notified recording, pin the row and its artefacts forever.
+        Err(error) if error.is_forbidden() => {
+            tracing::error!(
+                %error,
+                recording_index,
+                recording_id,
+                "not permitted to {action} this recording; giving up on the backend notify"
+            );
+            mark_notified(kind, store, recording_index).await
+        }
         Err(error) => {
             tracing::warn!(%error, recording_index, recording_id, "failed to notify backend of recording {action}");
             return;

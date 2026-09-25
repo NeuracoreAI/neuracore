@@ -90,6 +90,38 @@ impl ApiClientError {
     pub fn is_not_found(&self) -> bool {
         matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::NOT_FOUND)
     }
+
+    /// True when the backend responded `403 Forbidden`.
+    ///
+    /// Permanent: the caller is neither the recording's owner nor an org
+    /// manager, so retrying cannot change the answer.
+    pub fn is_forbidden(&self) -> bool {
+        matches!(self, ApiClientError::Status { status, .. } if *status == StatusCode::FORBIDDEN)
+    }
+
+    /// True when cancellation lost a race with upload completion.
+    ///
+    /// Only this specific 409 Conflict is terminal. Other conflicts may be
+    /// recoverable and must continue through the normal failure path.
+    pub fn is_recording_already_uploaded(&self) -> bool {
+        let ApiClientError::Status { status, body } = self else {
+            return false;
+        };
+        if *status != StatusCode::CONFLICT {
+            return false;
+        }
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("detail")?
+                    .get("error_code")?
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .as_deref()
+            == Some("RECORDING_ALREADY_UPLOADED")
+    }
 }
 
 /// Upload connection-pool tuning for [`build_upload_client`]. Sized together for

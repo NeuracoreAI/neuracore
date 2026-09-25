@@ -440,6 +440,8 @@ reraises
 respawns
 restartability
 resumably
+resweep
+RESWEEP
 RETRYABLE
 REUSEADDR
 rgba
@@ -545,6 +547,7 @@ unitreeh
 unitreeh1
 unniced
 unnormalization
+unnotified
 Unpaced
 unpaced
 unpackb

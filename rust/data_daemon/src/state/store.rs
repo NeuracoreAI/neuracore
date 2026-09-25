@@ -125,8 +125,11 @@ pub trait StateStore: Send + Sync {
     ) -> Result<Option<i64>, StateStoreError>;
 
     /// List recordings whose `/recording/start` POST has not yet succeeded:
-    /// `recording_id IS NULL`, `backend_start_notified_at IS NULL`, and the
-    /// recording is not cancelled. The start notifier's startup sweep.
+    /// `recording_id IS NULL` and `backend_start_notified_at IS NULL`. The
+    /// start notifier's startup sweep.
+    ///
+    /// Cancelled rows are included so the notifier can settle a cancel that
+    /// happened before `/recording/start`, allowing the reaper to remove it.
     async fn recordings_pending_start_notify(&self) -> Result<Vec<RecordingRow>, StateStoreError>;
 
     /// Insert a trace row in the [`TraceWriteStatus::Initializing`] state under
@@ -833,7 +836,6 @@ impl StateStore for SqliteStateStore {
             "SELECT * FROM recordings \
               WHERE recording_id IS NULL \
                 AND backend_start_notified_at IS NULL \
-                AND cancelled_at IS NULL \
            ORDER BY recording_index ASC",
         )
         .fetch_all(&self.read_pool)
@@ -1152,7 +1154,14 @@ impl StateStore for SqliteStateStore {
 
     async fn traces_ready_for_upload(&self) -> Result<Vec<String>, StateStoreError> {
         let ids = sqlx::query_scalar::<_, String>(
-            "SELECT trace_id FROM traces WHERE upload_status IN ('queued', 'retrying')",
+            // Excludes cancelled recordings: the cancel burns every row it can
+            // see, but a create still in the write-behind batcher can land
+            // after it, and a coordinator reacting to a 404 has no writer
+            // handle to purge with.
+            "SELECT t.trace_id FROM traces t \
+               JOIN recordings r ON r.recording_index = t.recording_index \
+              WHERE t.upload_status IN ('queued', 'retrying') \
+                AND r.cancelled_at IS NULL",
         )
         .fetch_all(&self.read_pool)
         .await?;
@@ -2046,6 +2055,48 @@ mod tests {
         assert_eq!(done.write_status, TraceWriteStatus::Written);
         let failed = store.get_trace("failed").await.unwrap().unwrap();
         assert_eq!(failed.error_code, None, "pre-existing rows untouched");
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_recordings_traces_are_never_offered_for_upload() {
+        // A create still in the write-behind batcher can commit *after* the
+        // cancel burned every row it could see, landing a fresh `queued` row
+        // for a recording that is gone. The query itself must exclude it.
+        let (store, _dir) = open_store().await;
+        let row = store
+            .create_recording(NewRecording::default())
+            .await
+            .expect("create recording");
+        let recording_index = row.recording_index;
+        store
+            .cancel_recording(recording_index, 0)
+            .await
+            .expect("cancel");
+
+        // A late create, after the burn.
+        store
+            .create_trace(recording_index, "late-trace", Some("JOINT_POSITIONS"), None)
+            .await
+            .expect("create trace");
+        store
+            .update_trace(
+                "late-trace",
+                TraceUpdate {
+                    upload_status: Some(TraceUploadStatus::Queued),
+                    ..TraceUpdate::default()
+                },
+            )
+            .await
+            .expect("queue it");
+
+        assert!(
+            store
+                .traces_ready_for_upload()
+                .await
+                .expect("query")
+                .is_empty(),
+            "a cancelled recording's traces must never be offered for upload"
+        );
     }
 
     #[tokio::test]

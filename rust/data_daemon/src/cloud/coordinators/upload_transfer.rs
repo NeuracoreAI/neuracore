@@ -57,6 +57,23 @@ pub(crate) struct UploadFileOutcome {
     pub(crate) final_session_uri: Option<String>,
 }
 
+/// Why [`upload_one_file`] gave up, and whether trying again could ever help.
+pub(crate) enum UploadFileError {
+    /// Transient or unclassified: the caller rolls the trace back to `retrying`.
+    Retry(String),
+    /// The recording was cancelled: the session-URI request 404s and always
+    /// will. Terminal — see [`super::discard_recording_locally`].
+    RecordingGone,
+}
+
+/// Bare `String` failures are retryable — keeps the existing `map_err` sites
+/// unchanged.
+impl From<String> for UploadFileError {
+    fn from(message: String) -> Self {
+        UploadFileError::Retry(message)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_one_file(
     client: &Arc<ApiClient>,
@@ -70,7 +87,7 @@ pub(crate) async fn upload_one_file(
     cloud_filepath: &str,
     content_type: &str,
     session_uri: String,
-) -> Result<UploadFileOutcome, String> {
+) -> Result<UploadFileOutcome, UploadFileError> {
     let metadata = tokio::fs::metadata(local_path)
         .await
         .map_err(|error| format!("stat {} failed: {error}", local_path.display()))?;
@@ -93,7 +110,9 @@ pub(crate) async fn upload_one_file(
     let recording_index = trace.recording_index;
     let trace_id = trace.trace_id.clone();
     let Some(org_id) = org_rx.borrow().clone() else {
-        return Err("no current org_id configured; cannot refresh session URI".to_string());
+        return Err(UploadFileError::Retry(
+            "no current org_id configured; cannot refresh session URI".to_string(),
+        ));
     };
 
     tracing::info!(
@@ -157,11 +176,11 @@ pub(crate) async fn upload_one_file(
                 let server_offset = parse_resume_offset(&headers).unwrap_or(offset);
                 match resume_decision(offset, chunk_len, server_offset) {
                     ResumeDecision::Behind => {
-                        return Err(format!(
+                        return Err(UploadFileError::Retry(format!(
                             "server resume offset {server_offset} is behind local offset \
                              {offset}; refusing to corrupt {}",
                             local_path.display()
-                        ));
+                        )));
                     }
                     ResumeDecision::Ahead { new_offset } => {
                         // Server has bytes we didn't send this session (e.g. a
@@ -221,16 +240,30 @@ pub(crate) async fn upload_one_file(
                         server_crc = None;
                         continue;
                     }
+                    // Cancelled: there is no session to re-acquire, and never
+                    // will be.
+                    Err(error) if error.is_not_found() => {
+                        tracing::info!(
+                            trace_id,
+                            recording_id,
+                            path = %local_path.display(),
+                            "recording no longer exists on the backend; \
+                             abandoning upload"
+                        );
+                        return Err(UploadFileError::RecordingGone);
+                    }
                     Err(error) => {
-                        return Err(format!("failed to fetch fresh session URI: {error}"));
+                        return Err(UploadFileError::Retry(format!(
+                            "failed to fetch fresh session URI: {error}"
+                        )));
                     }
                 }
             }
             PutChunkOutcome::Failed { status, body } => {
-                return Err(format!(
+                return Err(UploadFileError::Retry(format!(
                     "upload failed with HTTP {status} for {}: {body}",
                     local_path.display()
-                ));
+                )));
             }
         }
 
@@ -239,11 +272,11 @@ pub(crate) async fn upload_one_file(
         } else {
             stalled_iterations += 1;
             if stalled_iterations >= MAX_RETRIES {
-                return Err(format!(
+                return Err(UploadFileError::Retry(format!(
                     "upload of {} stalled at offset {offset}: server reported no \
                      progress after {MAX_RETRIES} consecutive attempts",
                     local_path.display()
-                ));
+                )));
             }
         }
 
@@ -285,10 +318,10 @@ pub(crate) async fn upload_one_file(
     );
     if let Some(expected) = server_crc {
         if expected != crc {
-            return Err(format!(
+            return Err(UploadFileError::Retry(format!(
                 "crc32c mismatch for {}: local={crc:#010x} server={expected:#010x}",
                 local_path.display()
-            ));
+            )));
         }
     }
     let final_session_uri = (session_uri != original_uri).then_some(session_uri);

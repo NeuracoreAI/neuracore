@@ -73,7 +73,7 @@ def remote_control_post(path: str, payload: dict) -> dict:
         timeout=REMOTE_CONTROL_REQUEST_TIMEOUT_S,
     )
     response.raise_for_status()
-    return response.json()
+    return response.json() if response.content else {}
 
 
 def await_gate(
@@ -277,6 +277,41 @@ class RemoteRecordingController(RecordingController):
             overdue=(
                 f"the stop of recording {self._cloud_recording_id} did not reach "
                 f"this process within {REMOTE_STOP_PROPAGATION_SLA_S}s"
+            ),
+        )
+        self._cloud_recording_id = None
+        return ControlBracket(called_at=called_at, settled_at=settled_at)
+
+    def cancel(self, capture_stop_s: float) -> ControlBracket:
+        """Ask the backend to cancel the recording and await its notification.
+
+        This drives the same endpoint as the web frontend. The daemon learns
+        about the discard only through its real notification stream.
+        """
+        assert self._cloud_recording_id is not None, "cancel() before open()"
+        called_at = time.time()
+        with Timer(
+            MAX_TIME_TO_START_S,
+            label="remote.cancel_recording",
+            always_log=True,
+            assert_deadline=self.spec.assert_deadline,
+        ):
+            remote_control_post(
+                "/recording/cancel",
+                {
+                    "recording_id": self._cloud_recording_id,
+                    "end_time": capture_stop_s,
+                },
+            )
+        settled_at = await_gate(
+            self.robot,
+            open_gate=False,
+            deadline=time.time() + REMOTE_STOP_PROPAGATION_SLA_S,
+            label="remote.cancel_gate_wait",
+            assert_deadline=self.spec.assert_deadline,
+            overdue=(
+                f"the cancel of recording {self._cloud_recording_id} did not "
+                f"reach this process within {REMOTE_STOP_PROPAGATION_SLA_S}s"
             ),
         )
         self._cloud_recording_id = None
