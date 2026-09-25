@@ -58,6 +58,7 @@ class SynchronizedDataset:
         trim_start_end: bool = True,
         trim_no_movement_at_start_threshold: float | None = None,
         synced_recording_cache: dict[int, SynchronizedRecording] | None = None,
+        rgb_frame_size: tuple[int, int] | None = None,
     ):
         """Initialize a dataset from server response data.
 
@@ -82,6 +83,8 @@ class SynchronizedDataset:
             synced_recording_cache: Already-fetched synced recordings keyed by
                 index, used when slicing to avoid re-fetching data the parent
                 dataset already loaded.
+            rgb_frame_size: Height and width to fit cached RGB frames within,
+                keeping the aspect ratio. None caches full resolution frames.
         """
         self.id = id
         self.dataset = dataset
@@ -96,6 +99,7 @@ class SynchronizedDataset:
             trim_no_movement_at_start_threshold=(trim_no_movement_at_start_threshold),
         )
         self._prefetch_videos = prefetch_videos
+        self._rgb_frame_size = rgb_frame_size
         self._max_prefetch_decode_workers = max_prefetch_decode_workers
         self._num_concurrent_prefetch_requests = num_concurrent_prefetch_requests
         self._recording_idx = 0
@@ -136,6 +140,7 @@ class SynchronizedDataset:
             inflight_requests=self._num_concurrent_prefetch_requests,
             decode_workers=self._max_prefetch_decode_workers,
             download_videos=self._prefetch_videos,
+            rgb_frame_size=self._rgb_frame_size,
         )
         episodes = prefetcher.run()
 
@@ -153,6 +158,7 @@ class SynchronizedDataset:
                 synchronization_details=self.synchronization_details,
                 prefetch_videos=self._prefetch_videos,
                 episode_synced=episodes.get(idx),
+                rgb_frame_size=self._rgb_frame_size,
             )
 
     def __iter__(self) -> "SynchronizedDataset":
@@ -214,6 +220,7 @@ class SynchronizedDataset:
                     self.synchronization_details.trim_no_movement_at_start_threshold
                 ),
                 synced_recording_cache=sliced_cache,
+                rgb_frame_size=self._rgb_frame_size,
             )
         else:
             # Handle single index
@@ -232,6 +239,7 @@ class SynchronizedDataset:
                         instance=rec.instance,
                         synchronization_details=self.synchronization_details,
                         prefetch_videos=self._prefetch_videos,
+                        rgb_frame_size=self._rgb_frame_size,
                     )
                     self._synced_recording_cache[idx] = synced_recording
                 return self._synced_recording_cache[idx]
@@ -262,6 +270,7 @@ class SynchronizedDataset:
                     instance=recording.instance,
                     synchronization_details=self.synchronization_details,
                     prefetch_videos=self._prefetch_videos,
+                    rgb_frame_size=self._rgb_frame_size,
                 )
                 self._synced_recording_cache[self._recording_idx] = s
 

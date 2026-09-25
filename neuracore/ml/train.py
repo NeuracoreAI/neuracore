@@ -51,7 +51,10 @@ from neuracore.ml.utils.algorithm_loader import AlgorithmLoader
 from neuracore.ml.utils.algorithm_storage_handler import AlgorithmStorageHandler
 from neuracore.ml.utils.dataset_utils import split_train_val_datasets
 from neuracore.ml.utils.device_utils import cpu_count, get_default_device
-from neuracore.ml.utils.preprocessing import resolve_input_output_preprocessing
+from neuracore.ml.utils.preprocessing import (
+    cached_rgb_frame_size,
+    resolve_input_output_preprocessing,
+)
 from neuracore.ml.utils.training_config import (
     resolve_to_complete_config,
     resolve_user_input_config,
@@ -696,6 +699,21 @@ def _main(cfg: DictConfig) -> None:
             cross_embodiment_union=cross_embodiment_union,
         )
 
+        (
+            train_input_preprocessing_config,
+            train_output_preprocessing_config,
+        ) = resolve_input_output_preprocessing(
+            cfg.get("train_preprocessing"),
+            role_name="train_preprocessing",
+        )
+        (
+            inference_input_preprocessing_config,
+            inference_output_preprocessing_config,
+        ) = resolve_input_output_preprocessing(
+            cfg.get("inference_preprocessing"),
+            role_name="inference_preprocessing",
+        )
+
         synchronized_dataset = dataset.synchronize(
             frequency=cfg.frequency,
             cross_embodiment_union=cross_embodiment_union,
@@ -711,6 +729,10 @@ def _main(cfg: DictConfig) -> None:
             trim_start_end=cfg.trim_start_end,
             trim_no_movement_at_start_threshold=getattr(
                 cfg, "trim_no_movement_at_start_threshold", None
+            ),
+            rgb_frame_size=cached_rgb_frame_size(
+                train_input_preprocessing_config,
+                inference_input_preprocessing_config,
             ),
         )
 
@@ -730,21 +752,6 @@ def _main(cfg: DictConfig) -> None:
             device = torch.device(cfg.device)
         else:
             device = get_default_device()
-
-        (
-            train_input_preprocessing_config,
-            train_output_preprocessing_config,
-        ) = resolve_input_output_preprocessing(
-            cfg.get("train_preprocessing"),
-            role_name="train_preprocessing",
-        )
-        (
-            inference_input_preprocessing_config,
-            inference_output_preprocessing_config,
-        ) = resolve_input_output_preprocessing(
-            cfg.get("inference_preprocessing"),
-            role_name="inference_preprocessing",
-        )
 
         # Create a pytorch synchronized dataset
         # NOTE: we are creating it here, and not in training to access the first sample

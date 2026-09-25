@@ -118,6 +118,7 @@ denoised
 denoising
 Deque
 descheduled
+descr
 deserialise
 devnull
 diaginertia
@@ -519,6 +520,7 @@ tinyxml
 tlsv
 tmpfs
 tobytes
+tofile
 tolist
 torchdynamo
 torchserve
