@@ -17,7 +17,10 @@ import yaml
 import neuracore as nc
 from neuracore.core.config.get_current_org import get_current_org
 from neuracore.core.robot import Robot, list_organization_robots
-from tests.integration.importer.conftest import ROBOTS_REPO_COMMIT, ROBOTS_REPO_URL
+from tests.integration.importer_exporter.conftest import (
+    ROBOTS_REPO_COMMIT,
+    ROBOTS_REPO_URL,
+)
 from tests.integration.platform.data_daemon.shared.test_case.build_test_case import (
     has_configured_org,
 )

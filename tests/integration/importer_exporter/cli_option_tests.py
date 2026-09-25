@@ -6,7 +6,7 @@ from pathlib import Path
 
 import neuracore as nc
 from neuracore.core.data.dataset import Dataset
-from tests.integration.importer.utils import (
+from tests.integration.importer_exporter.utils import (
     ImporterIntegrationKind,
     assert_no_high_robot_instances,
     build_importer_command,
