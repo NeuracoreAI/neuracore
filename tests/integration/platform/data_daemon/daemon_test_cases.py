@@ -105,7 +105,7 @@ PRE_NETWORK_INTEGRITY_CASES = (
         producer_pacing=PACING_BURST_VIDEO,
         video_detail=DETAIL_FLAT,
     ),
-    # The only lossy-codec case: asserts the lossless archive is *absent*.
+    # Lossy-codec case: asserts the lossless archive is *absent*.
     # Deliberately the plainest RGB shape, so the codec is the sole variable.
     Synchronous(
         duration_sec=10,
@@ -115,6 +115,18 @@ PRE_NETWORK_INTEGRITY_CASES = (
         image_height=64,
         image_width=64,
         video_codec="h264_medium",
+        producer_pacing=PACING_SATURATE,
+        video_detail=DETAIL_FLAT,
+    ),
+    # Same shape as the case above; the two differ only in codec/preset.
+    Synchronous(
+        duration_sec=10,
+        joint_count=7,
+        recording_count=1,
+        video_count=1,
+        image_height=64,
+        image_width=64,
+        video_codec="h264_fast",
         producer_pacing=PACING_SATURATE,
         video_detail=DETAIL_FLAT,
     ),

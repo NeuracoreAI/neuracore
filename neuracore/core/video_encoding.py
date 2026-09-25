@@ -5,6 +5,12 @@ By default each RGB camera is stored as a single, compact lossy video
 lossless :class:`Codec` also stores a lossless archive (``lossless.mp4``),
 trading substantially larger uploads for exact captured pixels.
 
+The two lossy-only codecs differ only in the libx264 preset they encode at.
+``H264_MEDIUM`` spends CPU on image fidelity; ``H264_FAST`` uses ``veryfast``,
+measured on camera footage at 2.4-3x quicker to encode and 11-22% smaller, for
+roughly 2 dB less PSNR. Pick it when capture-to-cloud wall time matters more
+than the last of the fidelity.
+
 Depth cameras always keep their lossless storage: their lossy proxy is a
 visualisation, not precise depth, so it is never a valid training source.
 """
@@ -17,7 +23,13 @@ from typing import TypedDict
 
 from neuracore_types import Codec
 
-__all__ = ["Codec", "Libx264Options", "codec_option_overrides", "resolve_codec"]
+__all__ = [
+    "Codec",
+    "H264_FAST_CANDIDATE_PRESETS",
+    "Libx264Options",
+    "codec_option_overrides",
+    "resolve_codec",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +41,18 @@ class Libx264Options(TypedDict, total=False):
     preset: str
 
 
+H264_FAST_CANDIDATE_PRESETS = ("superfast", "veryfast", "faster")
+"""Presets :attr:`Codec.H264_FAST` may use: between ``fast`` and ``ultrafast``
+on the x264 ladder, endpoints excluded. The daemon pins the same band."""
+
 _LOSSY_CODEC_OPTIONS: dict[Codec, Libx264Options] = {
     Codec.H264_MEDIUM: {"crf": "23", "preset": "medium"},
+    Codec.H264_FAST: {"crf": "23", "preset": "veryfast"},
 }
+
+assert (
+    _LOSSY_CODEC_OPTIONS[Codec.H264_FAST]["preset"] in H264_FAST_CANDIDATE_PRESETS
+), "H264_FAST must use a preset between fast and ultrafast"
 
 _DEFAULT_CODEC = Codec.H264_MEDIUM
 
@@ -68,7 +89,8 @@ def codec_option_overrides(value: str | None) -> Libx264Options | None:
 
     Unset or unknown values select the default lossy RGB encoder. The explicit
     lossless codec returns ``None``, selecting the lossless-plus-preview
-    encoders. A fresh options copy is returned so the caller can mutate it safely.
+    encoders. Every lossy-only codec returns its own preset at the same CRF.
+    A fresh options copy is returned so the caller can mutate it safely.
 
     Args:
         value: The configured codec identifier, or ``None``.

@@ -6,7 +6,12 @@ import logging
 
 import pytest
 
-from neuracore.core.video_encoding import Codec, codec_option_overrides, resolve_codec
+from neuracore.core.video_encoding import (
+    H264_FAST_CANDIDATE_PRESETS,
+    Codec,
+    codec_option_overrides,
+    resolve_codec,
+)
 
 _MODULE_LOGGER = "neuracore.core.video_encoding"
 
@@ -17,6 +22,23 @@ def test_h264_medium_resolves_and_maps_to_crf_23_medium() -> None:
         "crf": "23",
         "preset": "medium",
     }
+
+
+def test_h264_fast_resolves_and_maps_to_crf_23_veryfast() -> None:
+    assert resolve_codec("h264_fast") is Codec.H264_FAST
+    assert codec_option_overrides("h264_fast") == {
+        "crf": "23",
+        "preset": "veryfast",
+    }
+
+
+def test_h264_fast_preset_stays_inside_the_specified_band() -> None:
+    options = codec_option_overrides("h264_fast")
+    assert options is not None
+    assert options["preset"] in H264_FAST_CANDIDATE_PRESETS
+    assert H264_FAST_CANDIDATE_PRESETS == ("superfast", "veryfast", "faster")
+    for excluded in ("ultrafast", "fast", "medium", "slow", "veryslow"):
+        assert excluded not in H264_FAST_CANDIDATE_PRESETS
 
 
 def test_h264_lossless_resolves_and_uses_lossless_encoders() -> None:
@@ -58,6 +80,7 @@ def test_known_and_unset_codecs_do_not_warn(
     with caplog.at_level(logging.WARNING, logger=_MODULE_LOGGER):
         resolve_codec("h264_lossless")
         resolve_codec("h264_medium")
+        resolve_codec("h264_fast")
         resolve_codec(None)
         resolve_codec("")
     assert [r for r in caplog.records if r.levelno == logging.WARNING] == []

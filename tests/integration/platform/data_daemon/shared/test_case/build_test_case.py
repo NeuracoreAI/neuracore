@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     )
 
 from neuracore.core.config.config_manager import get_config_manager
+from neuracore.core.video_encoding import Codec, codec_option_overrides
 from tests.integration.platform.data_daemon.shared.process_control import (
     BUCKET_KEYS,
     LATENCY_BUCKETS_S,
@@ -78,6 +79,14 @@ _BATCH_PARAMS = frozenset({
 
 def _unsupported_combination(case: DataDaemonTestCase) -> str | None:
     """Return why *case*'s parameters cannot run together, or None if they can."""
+    if case.video_codec is not None and case.video_codec not in {
+        member.value for member in Codec
+    }:
+        # Otherwise the SDK silently falls back to the default lossy codec.
+        return (
+            f"video_codec={case.video_codec!r} is not a known codec; expected "
+            f"one of: {', '.join(member.value for member in Codec)}"
+        )
     if case.producer_pacing == PACING_BURST_VIDEO and not (
         case.has_video or case.has_depth
     ):
@@ -298,10 +307,13 @@ class DataDaemonTestCase:
             batch with ``skip=True`` forces every case to skip regardless of
             this per-case value.
         video_codec: When set, the case selects that global video codec via
-            ``nc.set_video_encoding_options`` before recording. ``None`` makes
+            ``nc.set_video_encoding_options`` before recording. Must be a
+            :class:`~neuracore.core.video_encoding.Codec` value. ``None`` makes
             the integration harness explicitly select ``h264_lossless`` to
             preserve its exact-pixel baseline; it does not exercise the daemon's
-            lossy default.
+            lossy default. Any lossy-only codec (``h264_medium``,
+            ``h264_fast``) drops the archive, which is what ``lossy_only``
+            reports.
         depth_count: Number of depth camera streams to log per recording. A
             value of ``0`` disables depth entirely. Depth cameras are
             independent streams from RGB cameras (distinct trace identities,
@@ -402,8 +414,14 @@ class DataDaemonTestCase:
 
     @property
     def lossy_only(self) -> bool:
-        """Return True when the case drops the lossless archive for RGB video."""
-        return self.video_codec == "h264_medium"
+        """Return True when the case drops the lossless archive for RGB video.
+
+        Derived from the SDK's own codec table rather than a codec name, so a
+        newly added lossy-only codec is covered without editing this.
+        """
+        if self.video_codec is None:
+            return False
+        return codec_option_overrides(self.video_codec) is not None
 
     @property
     def expected_joint_frames(self) -> int:

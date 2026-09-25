@@ -1445,8 +1445,9 @@ def set_video_encoding_options(codec: Codec | str) -> None:
 
     Args:
         codec: The video codec to use, e.g. the default
-            ``nc.Codec.H264_MEDIUM`` (lossy-only) or
-            ``nc.Codec.H264_LOSSLESS``.
+            ``nc.Codec.H264_MEDIUM`` (lossy-only), ``nc.Codec.H264_FAST``
+            (lossy-only at a faster preset, for the shortest
+            capture-to-cloud wall time) or ``nc.Codec.H264_LOSSLESS``.
 
     Raises:
         ValueError: If ``codec`` is not a recognised codec.
