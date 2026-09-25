@@ -4,7 +4,7 @@ import logging
 import sys
 import threading
 import time
-from collections.abc import Generator, Iterator
+from collections.abc import Callable, Generator, Iterator
 from typing import Final, Literal, Optional, Union
 
 import requests
@@ -770,6 +770,8 @@ class Dataset:
         allow_duplicates: bool = True,
         trim_start_end: bool = True,
         trim_no_movement_at_start_threshold: float | None = None,
+        on_sync_progress: Callable[[int, int], None] | None = None,
+        on_download_progress: Callable[[int, int], None] | None = None,
     ) -> SynchronizedDataset:
         """Synchronize the dataset with specified frequency and data types.
 
@@ -789,6 +791,10 @@ class Dataset:
                 start of each episode while every joint position stays within
                 this threshold of its value in the first frame. None keeps
                 every frame.
+            on_sync_progress: Optional callback ``(done, total)`` invoked while
+                waiting for recordings to synchronize.
+            on_download_progress: Optional callback ``(done, total)`` invoked
+                while prefetching recordings onto the machine.
 
         Returns:
             SynchronizedDataset instance containing synchronized data.
@@ -813,6 +819,8 @@ class Dataset:
             pbar = tqdm(total=total, desc="Synchronizing dataset", unit="recording")
             pbar.n = processed
             pbar.refresh()
+            if on_sync_progress is not None:
+                on_sync_progress(processed, total)
             while processed < total:
                 time.sleep(SYNC_PROGRESS_POLL_INTERVAL_S)
                 synchronization_progress = self._get_synchronization_progress(
@@ -822,9 +830,16 @@ class Dataset:
                 if new_processed > processed:
                     pbar.update(new_processed - processed)
                     processed = new_processed
+                    if on_sync_progress is not None:
+                        on_sync_progress(processed, total)
             pbar.close()
+            logger.info("Dataset synchronization complete.")
+            if on_sync_progress is not None:
+                on_sync_progress(total, total)
         else:
             logger.info("Dataset is already synchronized.")
+            if on_sync_progress is not None:
+                on_sync_progress(total, total)
 
         return SynchronizedDataset(
             id=synced_dataset.id,
@@ -838,6 +853,7 @@ class Dataset:
             allow_duplicates=allow_duplicates,
             trim_start_end=trim_start_end,
             trim_no_movement_at_start_threshold=trim_no_movement_at_start_threshold,
+            on_download_progress=on_download_progress,
         )
 
     def get_full_embodiment_description(self, robot_id: str) -> EmbodimentDescription:
