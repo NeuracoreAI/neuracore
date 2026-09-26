@@ -15,13 +15,6 @@
 
 </div>
 
-<p align="center">
-  Getting started
-</p>
-<p align="center">
-  <a target="_blank" href="https://www.neuracore.com/try-on-colab"><img src="https://img.shields.io/badge/Try%20on%20Google%20Colab-303030?style=for-the-badge&logo=googlecolab" alt="Discord" /></a>
-</p>
-
 <div align="center">
 
 </br> 
@@ -90,7 +83,7 @@ pip install neuracore[mjcf]
 # 🍰 A Short Taste
 
 Here is a short taste on what neuracore can do.\
-For a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#-documentation), or [try it yourself on Google Colab](https://www.neuracore.com/try-on-colab).
+For a detailed walk-through, please refer to the [tutorial](./docs/tutorial.md) and [documentation](#-documentation).
 
 ```python
 import neuracore as nc # pip install neuracore
