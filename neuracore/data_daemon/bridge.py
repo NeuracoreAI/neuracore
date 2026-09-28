@@ -13,6 +13,8 @@ from importlib import import_module
 from types import ModuleType
 from typing import NamedTuple
 
+from neuracore_types.timestamps import seconds_to_us
+
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
@@ -55,13 +57,13 @@ class LiveRecording(NamedTuple):
             published for.
         cloud_recording_id: The cloud handle, once ``/recording/start`` has been
             notified. ``None`` while the recording is still local-only.
-        start_timestamp_ns: The recording's capture-clock start marker, as
+        start_timestamp_us: The recording's start marker in microseconds, as
             returned by :meth:`RecordingContext.start_recording`.
     """
 
     recording_index: int | None
     cloud_recording_id: str | None
-    start_timestamp_ns: int | None
+    start_timestamp_us: int | None
 
 
 class RecordingStateUnavailableError(RuntimeError):
@@ -110,8 +112,13 @@ def query_recording_state(
     return LiveRecording(
         recording_index=live["recording_index"],
         cloud_recording_id=live["cloud_recording_id"],
-        start_timestamp_ns=live["start_timestamp_ns"],
+        start_timestamp_us=live["start_timestamp_us"],
     )
+
+
+def _optional_microseconds(timestamp: float | None) -> int | None:
+    """Convert an optional lifecycle timestamp in seconds to microseconds."""
+    return None if timestamp is None else seconds_to_us(timestamp)
 
 
 class LoggingStalledError(RuntimeError):
@@ -175,18 +182,18 @@ class RecordingContext:
         Publishes one ``StartRecording`` envelope tagged with the source
         ``(robot_id, robot_instance)``. The daemon gets the cloud id from the backend.
 
-        ``timestamp`` is the recording's *capture* start time (Unix seconds),
-        stored and reported as such. It does **not** bound the recording window,
+        ``timestamp`` is the recording's start on the caller's capture clock
+        (Unix seconds), stored in microseconds and returned as this
+        recording's start marker. It does **not** bound the recording window,
         which the daemon takes from a publish stamp inside this call.
 
         Returns:
-            The capture marker the daemon stored as this recording's
-            ``start_timestamp_ns``, which tells it apart from its predecessor
+            The start in microseconds the daemon stored as this recording's
+            ``start_timestamp_us``, which tells it apart from its predecessor
             before either has a cloud id.
         """
         ensure_daemon_running()
         self.bind_source(robot_id, robot_instance)
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
 
         return _load_native().start_recording(
             robot_id,
@@ -194,7 +201,7 @@ class RecordingContext:
             robot_name,
             dataset_id,
             dataset_name,
-            timestamp_ns,
+            _optional_microseconds(timestamp),
         )
 
     def log_joints(
@@ -305,9 +312,8 @@ class RecordingContext:
         """
         if not self._robot_id:
             return
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
         _load_native().cancel_recording(
-            self._robot_id, self._robot_instance, timestamp_ns
+            self._robot_id, self._robot_instance, _optional_microseconds(timestamp)
         )
 
     def recording_epoch(self) -> int | None:
@@ -348,9 +354,8 @@ class RecordingContext:
         """
         if not self._robot_id:
             return
-        timestamp_ns = int(timestamp * 1_000_000_000) if timestamp is not None else None
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, timestamp_ns
+            self._robot_id, self._robot_instance, _optional_microseconds(timestamp)
         )
 
     def flush_source(self) -> None:
