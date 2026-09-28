@@ -23,7 +23,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use data_daemon_shared::microseconds_to_seconds;
 use tokio::sync::broadcast;
 
 use super::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
@@ -146,12 +145,16 @@ async fn notify_backend(
         return;
     };
     // The producer captured this as the recording window's real lower bound;
-    // the backend requires it (seconds) and derives the reported duration from
-    // it, so a late notify (e.g. after reconnecting) still reports correctly.
-    let start_time = microseconds_to_seconds(start_timestamp_us);
-
+    // the backend derives the reported duration from it, so a late notify
+    // (e.g. after reconnecting) still reports correctly.
     match client
-        .recording_start(&org_id, &robot_id, instance, &dataset_id, start_time)
+        .recording_start(
+            &org_id,
+            &robot_id,
+            instance,
+            &dataset_id,
+            start_timestamp_us,
+        )
         .await
     {
         Ok(recording_id) => {
@@ -238,7 +241,7 @@ mod tests {
                 dataset_id: Some("ds-1"),
                 start: LifecycleStamp {
                     publish_timestamp_ns: 1_700_000_000_000_000_000,
-                    timestamp_us: Some(1_600_000_000_000_000),
+                    timestamp_us: Some(1_600_000_000_123_457),
                 },
             })
             .await
@@ -314,9 +317,10 @@ mod tests {
                 "robot_id": "robot-1",
                 "instance": 7,
                 "dataset_id": "ds-1",
-                "start_time": 1_600_000_000.0,
+                "start_time": 1_600_000_000.123_457,
+                "start_timestamp_us": 1_600_000_000_123_457_i64,
             }),
-            "start_time is the caller's start"
+            "the start carries the caller's start in microseconds and in seconds"
         );
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;

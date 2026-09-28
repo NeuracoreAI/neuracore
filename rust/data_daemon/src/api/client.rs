@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use data_daemon_shared::microseconds_to_seconds;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use reqwest::{Client, Method, Request, Response, StatusCode};
 use serde::Serialize;
@@ -282,40 +283,51 @@ impl ApiClient {
     }
 
     /// `POST /org/{org}/recording/stop` with a JSON body carrying
-    /// `recording_id` and the producer-captured `end_time` (Unix seconds).
+    /// `recording_id`, the producer-captured `end_timestamp_us` and the same
+    /// instant in seconds as `end_time`.
     ///
-    /// `end_time` is the recording window's real upper bound captured by the
+    /// The end is the recording window's real upper bound captured by the
     /// producer, so the backend reports the true duration even for recordings
     /// notified late (e.g. after reconnecting).
     pub async fn recording_stop(
         &self,
         org_id: &str,
         recording_id: &str,
-        end_time: f64,
+        end_timestamp_us: i64,
     ) -> Result<(), ApiClientError> {
-        self.recording_lifecycle_post(org_id, "stop", recording_id, end_time)
-            .await
+        self.recording_lifecycle_post(
+            org_id,
+            "stop",
+            recording_id,
+            microseconds_to_seconds(end_timestamp_us),
+            Some(end_timestamp_us),
+        )
+        .await
     }
 
-    /// Shared body/send for the byte-identical `/recording/stop` and
-    /// `/recording/cancel` POSTs — they differ only in the trailing URL segment
-    /// (`action`) and both carry `{recording_id, end_time}`.
+    /// Shared body/send for the `/recording/stop` and `/recording/cancel`
+    /// POSTs. They differ in the trailing URL segment (`action`) and in
+    /// `end_timestamp_us`, which only the stop carries.
     async fn recording_lifecycle_post(
         &self,
         org_id: &str,
         action: &str,
         recording_id: &str,
         end_time: f64,
+        end_timestamp_us: Option<i64>,
     ) -> Result<(), ApiClientError> {
         let path = format!("/org/{org_id}/recording/{action}");
         #[derive(Serialize)]
         struct Body<'a> {
             recording_id: &'a str,
             end_time: f64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            end_timestamp_us: Option<i64>,
         }
         let body = Body {
             recording_id,
             end_time,
+            end_timestamp_us,
         };
         let _ = self
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))
@@ -323,9 +335,9 @@ impl ApiClient {
         Ok(())
     }
 
-    /// `POST /org/{org}/recording/cancel` with a JSON body carrying
-    /// `recording_id` and `end_time` (the cancel time, Unix seconds) — the same
-    /// body shape the backend requires for `/recording/stop`.
+    /// `POST /org/{org}/recording/cancel` with the JSON body
+    /// `{recording_id, end_time}`, where `end_time` is the cancel time in Unix
+    /// seconds. The stop body also carries `end_timestamp_us`.
     ///
     /// Cancels the recording server-side, discarding its data. The daemon's
     /// cancel notifier owns this call, making it best-effort once the cloud
@@ -334,10 +346,16 @@ impl ApiClient {
         &self,
         org_id: &str,
         recording_id: &str,
-        end_time: f64,
+        end_timestamp_us: i64,
     ) -> Result<(), ApiClientError> {
-        self.recording_lifecycle_post(org_id, "cancel", recording_id, end_time)
-            .await
+        self.recording_lifecycle_post(
+            org_id,
+            "cancel",
+            recording_id,
+            microseconds_to_seconds(end_timestamp_us),
+            None,
+        )
+        .await
     }
 
     /// `POST /org/{org}/recording/start`.
@@ -348,15 +366,15 @@ impl ApiClient {
     /// notifier POSTs it in the background once the local recording row
     /// exists, absorbing staging POST tail latency off the SDK's hot path.
     /// The body carries the source identity plus the client-captured
-    /// `start_time` (Unix seconds) the backend requires; the response is
-    /// `{"id": "..."}`.
+    /// `start_timestamp_us` and the same instant in seconds as `start_time`,
+    /// which the backend requires; the response is `{"id": "..."}`.
     pub async fn recording_start(
         &self,
         org_id: &str,
         robot_id: &str,
         instance: i64,
         dataset_id: &str,
-        start_time: f64,
+        start_timestamp_us: i64,
     ) -> Result<String, ApiClientError> {
         let path = format!("/org/{org_id}/recording/start");
         #[derive(Serialize)]
@@ -365,12 +383,14 @@ impl ApiClient {
             instance: i64,
             dataset_id: &'a str,
             start_time: f64,
+            start_timestamp_us: i64,
         }
         let body = Body {
             robot_id,
             instance,
             dataset_id,
-            start_time,
+            start_time: microseconds_to_seconds(start_timestamp_us),
+            start_timestamp_us,
         };
         let response = self
             .send_with_retry(Method::POST, &path, |builder| builder.json(&body))

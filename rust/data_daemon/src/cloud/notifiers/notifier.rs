@@ -22,7 +22,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use data_daemon_shared::microseconds_to_seconds;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
@@ -270,19 +269,18 @@ pub async fn notify_recording_lifecycle(
         return;
     };
     // The producer captured this as the recording window's real upper bound;
-    // the backend requires it (seconds) and derives the reported duration from
-    // it, so a late notify still reports correctly.
-    let end_time = microseconds_to_seconds(stop_timestamp_us);
-
+    // the backend derives the reported duration from it, so a late notify
+    // still reports correctly. A cancel sends it in seconds only, because the
+    // backend deletes a cancelled recording.
     let post_result = match kind {
         LifecycleKind::Stop => {
             client
-                .recording_stop(&org_id, &recording_id, end_time)
+                .recording_stop(&org_id, &recording_id, stop_timestamp_us)
                 .await
         }
         LifecycleKind::Cancel => {
             client
-                .recording_cancel(&org_id, &recording_id, end_time)
+                .recording_cancel(&org_id, &recording_id, stop_timestamp_us)
                 .await
         }
     };
