@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from mcap.reader import make_reader
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import (
+    MICROSECONDS_PER_SECOND,
+    NANOSECONDS_PER_MICROSECOND,
+    now_us,
+)
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -180,21 +184,21 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
             f"Importing MCAP file {label} ({item.index + 1}/{len(self.mcap_files)})"
         )
 
-        recording_start_timestamp = time.time()
-        recording_stop_timestamp = recording_start_timestamp
+        recording_start_us = now_us()
+        recording_stop_us = recording_start_us
 
         if not self.dry_run:
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=instance,
-                timestamp=recording_start_timestamp,
+                timestamp=recording_start_us / MICROSECONDS_PER_SECOND,
             )
         try:
-            message_count, recording_stop_timestamp = self._stream_episode_file(
+            message_count, recording_stop_us = self._stream_episode_file(
                 episode_file_path=file_path,
                 item=item,
                 label=label,
-                recording_start_timestamp=recording_start_timestamp,
+                recording_start_us=recording_start_us,
             )
         finally:
             if not self.dry_run:
@@ -202,7 +206,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                     robot_name=self.robot_name,
                     instance=instance,
                     wait=True,
-                    timestamp=recording_stop_timestamp,
+                    timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
                 )
 
         self.logger.info(f"Completed MCAP file {label} | messages={message_count}")
@@ -231,16 +235,20 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         episode_file_path: Path,
         item: ImportItem,
         label: str,
-        recording_start_timestamp: float,
-    ) -> tuple[int, float]:
-        """Stream messages from one MCAP episode file."""
+        recording_start_us: int,
+    ) -> tuple[int, int]:
+        """Stream messages from one MCAP episode file.
+
+        Returns:
+            The message count and the recording stop in microseconds.
+        """
         topics = get_mcap_topics(topic_map=self.topic_map)
         # Fresh decoder factories per episode. mcap decoder factories cache
         # generated message classes by schema id, and schema ids are file local,
         # so a factory reused across files decodes with the wrong class.
         factories = list_decoder_factories(logger=self.logger)
         source_start_timestamp_ns: int | None = None
-        recording_stop_timestamp = recording_start_timestamp
+        recording_stop_us = recording_start_us
         message_count = 0
         # Fresh video decoders per episode: state must never carry across files.
         self._video_decoders = {}
@@ -270,15 +278,18 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
                 relative_timestamp_ns = max(
                     0, decoded_message.timestamp_ns - source_start_timestamp_ns
                 )
-                timestamp = recording_start_timestamp + relative_timestamp_ns / 1e9
-                recording_stop_timestamp = max(recording_stop_timestamp, timestamp)
+                timestamp_us = (
+                    recording_start_us
+                    + relative_timestamp_ns // NANOSECONDS_PER_MICROSECOND
+                )
+                recording_stop_us = max(recording_stop_us, timestamp_us)
 
                 decoded_data = convert_decoded_mcap_data(
                     decoded_data=decoded_message.data
                 )
                 self._record_step(
                     step={decoded_message.topic: decoded_data},
-                    timestamp=timestamp,
+                    timestamp=timestamp_us / MICROSECONDS_PER_SECOND,
                 )
                 message_count += 1
                 if message_count % 100 == 0:
@@ -297,7 +308,7 @@ class MCAPDatasetImporter(NeuracoreDatasetImporter):
         )
         self._log_video_decoder_summary(label=label)
         self._video_decoders = {}
-        return message_count, recording_stop_timestamp
+        return message_count, recording_stop_us
 
     def _log_video_decoder_summary(self, label: str) -> None:
         """Report frames dropped before each video stream's first keyframe."""

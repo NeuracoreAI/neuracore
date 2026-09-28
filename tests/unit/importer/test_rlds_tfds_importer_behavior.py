@@ -1,11 +1,12 @@
 """Tests for shared RLDS/TFDS importer behavior and RLDS overrides."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from neuracore_types import DataType, JointPositionInputTypeConfig
 from neuracore_types.importer.config import LanguageConfig
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, seconds_to_us
 
 from neuracore.importer.core.base import ImportItem, WorkerError
 from neuracore.importer.core.exceptions import ImportError
@@ -77,6 +78,48 @@ def test_rlds_handle_step_error_non_step_mode_returns_false():
     assert handled is False
     importer._error_queue.put.assert_not_called()
     importer._log_worker_error.assert_not_called()
+
+
+def test_rlds_import_item_logs_steps_on_a_microsecond_frequency_grid():
+    """Steps are logged at microseconds on the dataset frequency grid."""
+    importer = object.__new__(RLDSDatasetImporter)
+    importer.ik_init_config = None
+    importer._episode_iter = iter([{"steps": [{"v": 1}, {"v": 2}]}])
+    importer.frequency = 30.0
+    importer._worker_id = 0
+    importer._instance_base = 0
+    importer.num_episodes = 1
+    importer.robot_name = "test_robot"
+    importer.dry_run = False
+    importer.logger = MagicMock()
+    importer._emit_progress = MagicMock()
+    importer._record_step = MagicMock()
+
+    with (
+        patch(
+            "neuracore.importer.rlds_tfds_importer.now_us",
+            return_value=1_000_000_000,
+        ),
+        patch(
+            "neuracore.importer.rlds_tfds_importer.nc.start_recording"
+        ) as start_recording,
+        patch(
+            "neuracore.importer.rlds_tfds_importer.nc.stop_recording"
+        ) as stop_recording,
+    ):
+        importer.import_item(ImportItem(index=0))
+
+    step_timestamps = [call.args[1] for call in importer._record_step.call_args_list]
+    assert [seconds_to_us(stamp) for stamp in step_timestamps] == [
+        1_000_033_333,
+        1_000_066_667,
+    ]
+    start_recording.assert_called_once_with(
+        robot_name="test_robot",
+        instance=0,
+        timestamp=1_000_000_000 / MICROSECONDS_PER_SECOND,
+    )
+    assert seconds_to_us(stop_recording.call_args.kwargs["timestamp"]) == 1_000_100_000
 
 
 def test_rlds_record_step_supports_empty_source_path_for_language():
