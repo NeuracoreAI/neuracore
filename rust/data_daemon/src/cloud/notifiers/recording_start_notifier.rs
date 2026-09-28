@@ -23,6 +23,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use data_daemon_shared::microseconds_to_seconds;
 use tokio::sync::broadcast;
 
 use super::notifier::{spawn_notifier, NotifierCtx, NotifierHandle, RecordingNotifier};
@@ -137,17 +138,17 @@ async fn notify_backend(
         return;
     };
     let instance = row.robot_instance.unwrap_or(0);
-    let Some(start_timestamp_ns) = row.start_timestamp_ns else {
+    let Some(start_timestamp_us) = row.start_timestamp_us else {
         tracing::warn!(
             recording_index,
-            "recording has no start_timestamp_ns at start time; skipping backend notify",
+            "recording has no start_timestamp_us at start time; skipping backend notify",
         );
         return;
     };
     // The producer captured this as the recording window's real lower bound;
     // the backend requires it (seconds) and derives the reported duration from
     // it, so a late notify (e.g. after reconnecting) still reports correctly.
-    let start_time = start_timestamp_ns as f64 / 1_000_000_000.0;
+    let start_time = microseconds_to_seconds(start_timestamp_us);
 
     match client
         .recording_start(&org_id, &robot_id, instance, &dataset_id, start_time)
@@ -195,6 +196,7 @@ async fn notify_backend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LifecycleStamp;
 
     use std::time::Duration;
 
@@ -227,13 +229,17 @@ mod tests {
     }
 
     /// Insert a fresh recording (no cloud id yet) and return its local index.
+    /// The caller's start is on its own clock, apart from the publish time.
     async fn seed_recording(store: &SqliteStateStore) -> i64 {
         store
             .create_recording(NewRecording {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(7),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: LifecycleStamp {
+                    publish_timestamp_ns: 1_700_000_000_000_000_000,
+                    timestamp_us: Some(1_600_000_000_000_000),
+                },
             })
             .await
             .expect("create recording")
@@ -300,6 +306,18 @@ mod tests {
         .await
         .expect("cloud recording_id must be persisted within 3s");
 
+        let received = server.received_requests().await.expect("recorded requests");
+        let body: serde_json::Value = received[0].body_json().expect("json body");
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "robot_id": "robot-1",
+                "instance": 7,
+                "dataset_id": "ds-1",
+                "start_time": 1_600_000_000.0,
+            }),
+            "start_time is the caller's start"
+        );
         let _ = shutdown_tx.send(ShutdownSignal::Sigterm);
         handle.join().await;
     }

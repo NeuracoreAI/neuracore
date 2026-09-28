@@ -141,6 +141,7 @@ async fn reclaim(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::LifecycleStamp;
     use std::path::Path;
 
     use tempfile::TempDir;
@@ -162,7 +163,7 @@ mod tests {
             robot_id: Some("robot-1"),
             robot_instance: Some(instance),
             dataset_id: Some("ds-1"),
-            start_timestamp_ns: 1_700_000_000_000_000_000,
+            start: LifecycleStamp::observed_at(1_700_000_000_000_000_000),
         }
     }
 
@@ -205,7 +206,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped(index, 1).await.unwrap();
+        store
+            .mark_recording_stopped(index, LifecycleStamp::observed_at(1))
+            .await
+            .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();
         store.set_expected_trace_count(index, 1).await.unwrap();
         store
@@ -261,7 +265,10 @@ mod tests {
             .mark_recording_start_notified(index, &format!("cloud-{instance}"))
             .await
             .unwrap();
-        store.cancel_recording(index, 1).await.unwrap();
+        store
+            .cancel_recording(index, LifecycleStamp::observed_at(1))
+            .await
+            .unwrap();
         store.mark_recording_cancel_notified(index).await.unwrap();
         index
     }
