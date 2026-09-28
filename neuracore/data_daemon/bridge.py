@@ -13,8 +13,6 @@ from importlib import import_module
 from types import ModuleType
 from typing import NamedTuple
 
-from neuracore_types.timestamps import seconds_to_us
-
 from neuracore.data_daemon.daemon_control import ensure_daemon_running
 
 logger = logging.getLogger(__name__)
@@ -116,11 +114,6 @@ def query_recording_state(
     )
 
 
-def _optional_microseconds(timestamp: float | None) -> int | None:
-    """Convert an optional lifecycle timestamp in seconds to microseconds."""
-    return None if timestamp is None else seconds_to_us(timestamp)
-
-
 class LoggingStalledError(RuntimeError):
     """The daemon is not draining its spool backlog fast enough to admit a frame."""
 
@@ -175,16 +168,17 @@ class RecordingContext:
         robot_name: str | None = None,
         dataset_id: str | None = None,
         dataset_name: str | None = None,
-        timestamp: float | None = None,
+        *,
+        timestamp_us: int,
     ) -> int:
         """Announce a recording to the daemon for a source.
 
         Publishes one ``StartRecording`` envelope tagged with the source
         ``(robot_id, robot_instance)``. The daemon gets the cloud id from the backend.
 
-        ``timestamp`` is the recording's start on the caller's capture clock
-        (Unix seconds), stored in microseconds and returned as this
-        recording's start marker. It does **not** bound the recording window,
+        ``timestamp_us`` is the recording's start in microseconds on the
+        caller's capture clock, stored and returned as this recording's start
+        marker. It does **not** bound the recording window,
         which the daemon takes from a publish stamp inside this call.
 
         Returns:
@@ -201,13 +195,13 @@ class RecordingContext:
             robot_name,
             dataset_id,
             dataset_name,
-            _optional_microseconds(timestamp),
+            timestamp_us,
         )
 
     def log_joints(
         self,
         data_type: str,
-        timestamp: float,
+        timestamp_us: int,
         joined_names: str,
         values: list[float],
     ) -> None:
@@ -215,7 +209,7 @@ class RecordingContext:
 
         Args:
             data_type:  Type of joint data e.g. DataType.JOINT_POSITIONS.
-            timestamp: the Unix timestamp of the sample.
+            timestamp_us: the sample's capture time in microseconds.
             joined_names: a single ``\0``-joined string of joint names.
             values: a flat list of joint values.
         """
@@ -228,7 +222,7 @@ class RecordingContext:
             data_type,
             joined_names,
             values,
-            seconds_to_us(timestamp),
+            timestamp_us,
         )
 
     def log_frame(
@@ -239,7 +233,7 @@ class RecordingContext:
         height: int,
         dtype: str,
         payload: bytes | memoryview,
-        timestamp: float,
+        timestamp_us: int,
     ) -> None:
         """Forward one video frame to the daemon.
 
@@ -253,7 +247,7 @@ class RecordingContext:
                 depth. Parsed once at the native boundary so every internal
                 Rust component works with a strongly typed representation.
             payload: Raw video frame bytes.
-            timestamp: the Unix timestamp of the sample.
+            timestamp_us: the frame's capture time in microseconds.
         """
         robot_id = self._require_source("log_frame")
         native = _load_native()
@@ -267,7 +261,7 @@ class RecordingContext:
                 int(height),
                 dtype,
                 payload,
-                seconds_to_us(timestamp),
+                timestamp_us,
             )
         except native.LoggingStalledError as error:
             raise LoggingStalledError(str(error)) from error
@@ -277,7 +271,7 @@ class RecordingContext:
         data_type: str,
         name: str,
         payload: bytes,
-        timestamp: float,
+        timestamp_us: int,
     ) -> None:
         """Forward one JSON sample to the daemon.
 
@@ -293,21 +287,20 @@ class RecordingContext:
             data_type,
             name,
             payload,
-            seconds_to_us(timestamp),
+            timestamp_us,
         )
 
-    def cancel_recording(self, timestamp: float | None = None) -> None:
+    def cancel_recording(self, timestamp_us: int) -> None:
         """Cancel the source's active recording — the daemon discards it.
 
-        A cancel is a recording stop that discards data, so ``timestamp``
-        behaves exactly like ``stop_recording``'s: it optionally pins the
-        recording's capture stop time (Unix seconds); when ``None`` the producer
-        stamps wall-clock now.
+        A cancel is a recording stop that discards data, so ``timestamp_us``
+        behaves exactly like ``stop_recording``'s: it is the recording's
+        capture stop time in microseconds.
         """
         if not self._robot_id:
             return
         _load_native().cancel_recording(
-            self._robot_id, self._robot_instance, _optional_microseconds(timestamp)
+            self._robot_id, self._robot_instance, timestamp_us
         )
 
     def recording_epoch(self) -> int | None:
@@ -335,12 +328,13 @@ class RecordingContext:
             )
         return self._robot_id
 
-    def stop_recording(self, timestamp: float | None = None) -> None:
+    def stop_recording(self, timestamp_us: int) -> None:
         """Publish one ``StopRecording`` tagged with the source.
 
         The daemon uses the publish-clock stop boundary to close the recording
-        window. ``timestamp`` is the recording's *capture* stop time and is
-        separate from that boundary, never used for window membership.
+        window. ``timestamp_us`` is the recording's *capture* stop time in
+        microseconds and is separate from that boundary, never used for window
+        membership.
 
         This publishes the stop only; :meth:`flush_source` seals the writer's
         tail chunks and must be called straight after, so the caller can close
@@ -349,7 +343,7 @@ class RecordingContext:
         if not self._robot_id:
             return
         _load_native().stop_recording(
-            self._robot_id, self._robot_instance, _optional_microseconds(timestamp)
+            self._robot_id, self._robot_instance, timestamp_us
         )
 
     def flush_source(self) -> None:

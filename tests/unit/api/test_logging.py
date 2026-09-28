@@ -109,8 +109,8 @@ def test_logging_reaches_the_daemon_from_a_process_that_started_nothing(
         robot,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         "gripper",
-        ParallelGripperOpenAmountData(timestamp=1.0, open_amount=0.4),
-        1.0,
+        ParallelGripperOpenAmountData(timestamp_us=1_000_000, open_amount=0.4),
+        1_000_000,
     )
 
     native.log_joints.assert_called_once()
@@ -548,13 +548,13 @@ def test_sse_started_recording_logs_with_bound_robot_source(monkeypatch) -> None
         lambda: "cloud-recording-id-from-sse",
     )
 
-    sample = ParallelGripperOpenAmountData(timestamp=12.5, open_amount=0.4)
+    sample = ParallelGripperOpenAmountData(timestamp_us=12_500_000, open_amount=0.4)
     api_logging._record_json_to_daemon(
         robot,
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         "secondary_gripper",
         sample,
-        sample.timestamp,
+        sample.timestamp_us,
     )
 
     native.start_recording.assert_not_called()
@@ -733,3 +733,119 @@ def test_the_monotonic_check_spans_a_recording_not_a_stream(
     # The next recording is free to start below where the last one ended.
     native.recording_epoch.return_value = 2_000
     nc.log_rgb("front_camera", frame, timestamp=1.0)
+
+
+_UNIT_POSE = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+
+LOG_ENTRY_POINTS = [
+    ("log_joint_positions", {"positions": {"j": 0.5}}, "log_joints"),
+    ("log_joint_position", {"name": "j", "position": 0.5}, "log_joints"),
+    ("log_joint_target_positions", {"target_positions": {"j": 0.5}}, "log_joints"),
+    (
+        "log_joint_target_position",
+        {"name": "j", "target_position": 0.5},
+        "log_joints",
+    ),
+    ("log_joint_velocities", {"velocities": {"j": 0.5}}, "log_joints"),
+    ("log_joint_velocity", {"name": "j", "velocity": 0.5}, "log_joints"),
+    ("log_joint_torques", {"torques": {"j": 0.5}}, "log_joints"),
+    ("log_joint_torque", {"name": "j", "torque": 0.5}, "log_joints"),
+    ("log_visual_joint_positions", {"positions": {"j": 0.5}}, "log_joints"),
+    ("log_visual_joint_position", {"name": "j", "position": 0.5}, "log_joints"),
+    ("log_custom_1d", {"name": "c", "data": np.zeros(3)}, "log_json"),
+    ("log_pose", {"name": "p", "pose": _UNIT_POSE}, "log_json"),
+    ("log_end_effector_pose", {"name": "e", "pose": _UNIT_POSE}, "log_json"),
+    ("log_parallel_gripper_open_amount", {"name": "g", "value": 0.5}, "log_json"),
+    ("log_parallel_gripper_open_amounts", {"values": {"g": 0.5}}, "log_json"),
+    (
+        "log_parallel_gripper_target_open_amount",
+        {"name": "g", "value": 0.5},
+        "log_json",
+    ),
+    (
+        "log_parallel_gripper_target_open_amounts",
+        {"values": {"g": 0.5}},
+        "log_json",
+    ),
+    ("log_language", {"name": "l", "language": "pick"}, "log_json"),
+    ("log_rgb", {"name": "r", "rgb": np.zeros((8, 8, 3), dtype=np.uint8)}, "log_frame"),
+    (
+        "log_depth",
+        {"name": "d", "depth": np.ones((8, 8), dtype=np.float32)},
+        "log_frame",
+    ),
+    (
+        "log_point_cloud",
+        {"name": "pc", "points": np.zeros((4, 3), dtype=np.float16)},
+        "log_json",
+    ),
+]
+
+PATCHED_NOW_US = 42_000_000
+
+
+@pytest.fixture
+def daemon_robot(monkeypatch):
+    """A recording robot whose daemon bridge is a mock, with live data disabled."""
+    robot = Robot("test_robot", instance=0, org_id="org-1")
+    robot.id = "robot-1"
+    native = MagicMock()
+    native.recording_epoch.return_value = 1_000
+    monkeypatch.setattr(recording_context, "_load_native", lambda: native)
+    monkeypatch.setattr(api_logging, "_get_robot", lambda *_args: robot)
+    monkeypatch.setattr(
+        api_logging,
+        "get_provide_live_data_enabled_manager",
+        lambda: MagicMock(is_disabled=lambda: True),
+    )
+    monkeypatch.setattr(
+        "neuracore.core.utils.microseconds.now_us", lambda: PATCHED_NOW_US
+    )
+    yield native
+    # Avoid Robot.__del__ consulting the process-global recording manager.
+    robot.id = None
+
+
+@pytest.mark.parametrize(
+    "timestamp,expected_us", [(None, PATCHED_NOW_US), (12.5, 12_500_000)]
+)
+@pytest.mark.parametrize("function_name,kwargs,native_method", LOG_ENTRY_POINTS)
+def test_log_entry_points_pass_microseconds_to_the_daemon(
+    daemon_robot, function_name, kwargs, native_method, timestamp, expected_us
+) -> None:
+    getattr(nc, function_name)(**kwargs, timestamp=timestamp)
+
+    native_call = getattr(daemon_robot, native_method).call_args
+    assert native_call.args[-1] == expected_us
+    if native_method == "log_json":
+        payload = json.loads(native_call.args[4])
+        assert payload["timestamp_us"] == expected_us
+        assert payload["timestamp"] == expected_us / 1_000_000
+
+
+def test_two_floats_that_round_to_one_microsecond_are_rejected(daemon_robot) -> None:
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    nc.log_rgb("front_camera", frame, timestamp=1.0)
+
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        nc.log_rgb("front_camera", frame, timestamp=1.0000004)
+
+
+def test_a_two_microsecond_regression_is_rejected(daemon_robot) -> None:
+    """A sample two microseconds before the previous one on its stream fails."""
+    nc.log_joint_positions({"j": 0.5}, timestamp=100.000002)
+
+    with pytest.raises(ValueError, match="Non-monotonic timestamp"):
+        nc.log_joint_positions({"j": 0.5}, timestamp=100.0)
+
+
+@pytest.mark.parametrize(
+    "timestamp", [float("nan"), float("inf"), -1.0, 2**53 / 1_000_000]
+)
+def test_a_timestamp_outside_the_microsecond_range_is_rejected(
+    daemon_robot, timestamp
+) -> None:
+    with pytest.raises(ValueError):
+        nc.log_joint_positions({"j": 0.5}, timestamp=timestamp)
+
+    daemon_robot.log_joints.assert_not_called()

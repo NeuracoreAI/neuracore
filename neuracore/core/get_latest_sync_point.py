@@ -6,9 +6,8 @@ It supports merging data from local robot streams with data from remote
 sources via the Neuracore platform's live data streaming capabilities.
 """
 
-import time
-
 from neuracore_types import DataType, JointData, SynchronizedPoint
+from neuracore_types.timestamps import now_us
 
 from neuracore.api.globals import GlobalSingleton
 from neuracore.core.exceptions import RobotError
@@ -104,7 +103,7 @@ def get_latest_sync_point(
         robot = GlobalSingleton()._active_robot
     if robot is None:
         raise RobotError("No active robot. Call connect_robot() first.")
-    sync_point = SynchronizedPoint(timestamp=time.time())
+    sync_point = SynchronizedPoint(timestamp_us=now_us())
     for stream_name, stream in robot.list_all_streams().items():
         stream_data = stream.get_latest_data()
         assert stream_data is not None

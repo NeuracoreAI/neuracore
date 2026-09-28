@@ -12,6 +12,7 @@ from urllib.parse import quote
 import av
 import requests
 from neuracore_types import DataType
+from neuracore_types.timestamps import NANOSECONDS_PER_MICROSECOND
 from neuracore_types.utils.name_utils import to_safe_name
 from PIL import Image
 
@@ -36,6 +37,17 @@ class McapExporter(DatasetExporter):
     def _timestamp_ns(value: int | float) -> int:
         """Convert Unix seconds to MCAP nanoseconds without float multiplication."""
         return int(Decimal(str(value)) * 1_000_000_000)
+
+    @classmethod
+    def _sample_timestamp_ns(cls, sample: dict) -> int:
+        """Return a trace sample's capture time in MCAP nanoseconds.
+
+        A sample with ``timestamp_us`` is exact in microseconds; an older
+        sample has only ``timestamp`` in seconds.
+        """
+        if "timestamp_us" in sample:
+            return sample["timestamp_us"] * NANOSECONDS_PER_MICROSECOND
+        return cls._timestamp_ns(sample["timestamp"])
 
     @staticmethod
     def _media(
@@ -191,7 +203,12 @@ class McapExporter(DatasetExporter):
                         }
                         if media is not None:
                             path, media_type, payload = media
-                            timestamp = self._timestamp_ns(recording.start_time)
+                            timestamp = (
+                                recording.start_timestamp_us
+                                * NANOSECONDS_PER_MICROSECOND
+                                if recording.start_timestamp_us is not None
+                                else self._timestamp_ns(recording.start_time)
+                            )
                             writer.add_attachment(
                                 create_time=timestamp,
                                 log_time=timestamp,
@@ -213,9 +230,11 @@ class McapExporter(DatasetExporter):
                         for sequence, item in enumerate(
                             self._samples(trace, data_type, media)
                         ):
-                            if not isinstance(item, dict) or "timestamp" not in item:
+                            if not isinstance(item, dict) or not (
+                                "timestamp_us" in item or "timestamp" in item
+                            ):
                                 raise ValueError(f"Invalid trace sample: {prefix}.")
-                            timestamp = self._timestamp_ns(item["timestamp"])
+                            timestamp = self._sample_timestamp_ns(item)
                             writer.add_message(
                                 channel_id=channel_id,
                                 log_time=timestamp,

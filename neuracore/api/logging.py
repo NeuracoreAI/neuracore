@@ -7,7 +7,6 @@ All logging functions support optional robot identification and timestamping.
 
 import json
 import logging
-import time
 from dataclasses import dataclass
 from itertools import islice
 from warnings import filterwarnings, warn
@@ -46,6 +45,7 @@ from neuracore.core.streaming.p2p.stream_manager_orchestrator import (
     StreamManagerOrchestrator,
 )
 from neuracore.core.utils.depth_utils import MAX_DEPTH
+from neuracore.core.utils.microseconds import resolve_timestamp_us
 from neuracore.core.video_encoding import Codec
 from neuracore.data_daemon.bridge import notify_daemon_config_changed
 from neuracore.data_daemon.video_codec import set_active_profile_video_codec
@@ -199,7 +199,7 @@ def _record_json_to_daemon(
         | LanguageData
         | PointCloudData
     ),
-    timestamp: float,
+    timestamp_us: int,
 ) -> None:
     """Forward one JSON sample to the daemon's recording pipeline.
 
@@ -214,11 +214,11 @@ def _record_json_to_daemon(
         data_type: Wire label for the sample's trace.
         storage_name: Sensor name the trace is stored under.
         data: Data object to serialize and persist.
-        timestamp: Capture timestamp in seconds.
+        timestamp_us: Capture time in microseconds.
     """
     payload = json.dumps(data.model_dump(mode="json")).encode("utf-8")
     robot._get_daemon_recording_context().log_json(
-        data_type.value, storage_name, payload, timestamp
+        data_type.value, storage_name, payload, timestamp_us
     )
 
 
@@ -294,8 +294,7 @@ def _log_group_of_joint_data(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If joint_data is not a dictionary of floats
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     if not isinstance(joint_data, dict):
         raise ValueError("Joint data must be a dictionary of floats")
     if dry_run:
@@ -333,9 +332,9 @@ def _log_group_of_joint_data(
     if live_data_orchestrator is None:
         native_values = list(joint_data.values())
         for binding, joint_value in zip(group.bindings, native_values):
-            binding.stream.record_scalar(timestamp, joint_value, recording_epoch)
+            binding.stream.record_scalar(timestamp_us, joint_value, recording_epoch)
         robot._get_daemon_recording_context().log_joints(
-            data_type.value, timestamp, group.joined_names, native_values
+            data_type.value, timestamp_us, group.joined_names, native_values
         )
         return
 
@@ -345,7 +344,7 @@ def _log_group_of_joint_data(
         if robot_id is not None:
             # A live consumer needs the materialised sample now, so build it and
             # publish it; the stream keeps it as its latest data.
-            data = JointData(timestamp=timestamp, value=joint_value)
+            data = JointData(timestamp_us=timestamp_us, value=joint_value)
             binding.stream.log(data=data, recording_epoch=recording_epoch)
             live_data_orchestrator.get_provider_manager(
                 robot_id, robot_instance
@@ -358,13 +357,13 @@ def _log_group_of_joint_data(
             # No live consumer: stash the raw scalar and defer building the
             # JointData to get_latest_data(), keeping the per-joint hot path
             # allocation-free (see JointDataStream).
-            binding.stream.record_scalar(timestamp, joint_value, recording_epoch)
+            binding.stream.record_scalar(timestamp_us, joint_value, recording_epoch)
 
         native_values.append(joint_value)
 
     if native_values:
         robot._get_daemon_recording_context().log_joints(
-            data_type.value, timestamp, group.joined_names, native_values
+            data_type.value, timestamp_us, group.joined_names, native_values
         )
 
 
@@ -467,7 +466,7 @@ def _log_camera_data(
         int(image.shape[0]),
         image.dtype.name,
         memoryview(contiguous).cast("B"),
-        camera_data_without_frame.timestamp,
+        camera_data_without_frame.timestamp_us,
     )
 
     _publish_video_to_p2p(robot, name, camera_type, camera_data_without_frame, image)
@@ -499,8 +498,7 @@ def log_custom_1d(
         raise ValueError("Data must be a numpy ndarray")
     if data.ndim != 1:
         raise ValueError("Data must be a 1D numpy ndarray")
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
 
     storage_name = validate_safe_name(name)
     if dry_run:
@@ -519,10 +517,10 @@ def log_custom_1d(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
-    custom_data = Custom1DData(timestamp=timestamp, data=data)
+    custom_data = Custom1DData(timestamp_us=timestamp_us, data=data)
     stream.log(custom_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
-        robot, DataType.CUSTOM_1D, storage_name, custom_data, timestamp
+        robot, DataType.CUSTOM_1D, storage_name, custom_data, timestamp_us
     )
     _publish_json_to_p2p(robot, str_id, DataType.CUSTOM_1D, custom_data)
 
@@ -878,8 +876,7 @@ def log_pose(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If pose is not a 7-element numpy array
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     if not isinstance(pose, np.ndarray):
         raise ValueError(
             f"Pose must be a numpy array, got {type(pose).__name__} for '{name}'."
@@ -905,9 +902,9 @@ def log_pose(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
-    pose_data = PoseData(timestamp=timestamp, pose=pose.tolist())
+    pose_data = PoseData(timestamp_us=timestamp_us, pose=pose.tolist())
     stream.log(pose_data, recording_epoch=robot._recording_epoch())
-    _record_json_to_daemon(robot, DataType.POSES, storage_name, pose_data, timestamp)
+    _record_json_to_daemon(robot, DataType.POSES, storage_name, pose_data, timestamp_us)
     _publish_json_to_p2p(robot, str_id, DataType.POSES, pose_data)
 
 
@@ -929,8 +926,7 @@ def log_end_effector_pose(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
 
     if not isinstance(pose, np.ndarray):
         raise ValueError(
@@ -968,10 +964,10 @@ def log_end_effector_pose(
 
     assert isinstance(stream, JsonDataStream)
 
-    ee_pose_data = EndEffectorPoseData(timestamp=timestamp, pose=pose.tolist())
+    ee_pose_data = EndEffectorPoseData(timestamp_us=timestamp_us, pose=pose.tolist())
     stream.log(ee_pose_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
-        robot, DataType.END_EFFECTOR_POSES, storage_name, ee_pose_data, timestamp
+        robot, DataType.END_EFFECTOR_POSES, storage_name, ee_pose_data, timestamp_us
     )
     _publish_json_to_p2p(robot, str_id, DataType.END_EFFECTOR_POSES, ee_pose_data)
 
@@ -994,8 +990,20 @@ def log_parallel_gripper_open_amount(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    _log_parallel_gripper_open_amount(
+        name, value, robot_name, instance, resolve_timestamp_us(timestamp), dry_run
+    )
+
+
+def _log_parallel_gripper_open_amount(
+    name: str,
+    value: float,
+    robot_name: str | None,
+    instance: int,
+    timestamp_us: int,
+    dry_run: bool,
+) -> None:
+    """Log one gripper open amount at a resolved microsecond timestamp."""
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -1024,7 +1032,7 @@ def log_parallel_gripper_open_amount(
     assert isinstance(stream, JsonDataStream)
 
     parallel_gripper_open_amount_data = ParallelGripperOpenAmountData(
-        timestamp=timestamp, open_amount=value
+        timestamp_us=timestamp_us, open_amount=value
     )
     stream.log(
         parallel_gripper_open_amount_data, recording_epoch=robot._recording_epoch()
@@ -1034,7 +1042,7 @@ def log_parallel_gripper_open_amount(
         DataType.PARALLEL_GRIPPER_OPEN_AMOUNTS,
         storage_name,
         parallel_gripper_open_amount_data,
-        timestamp,
+        timestamp_us,
     )
     _publish_json_to_p2p(
         robot,
@@ -1061,16 +1069,10 @@ def log_parallel_gripper_open_amounts(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     for name, value in values.items():
-        log_parallel_gripper_open_amount(
-            name=name,
-            value=value,
-            robot_name=robot_name,
-            instance=instance,
-            timestamp=timestamp,
-            dry_run=dry_run,
+        _log_parallel_gripper_open_amount(
+            name, value, robot_name, instance, timestamp_us, dry_run
         )
 
 
@@ -1095,8 +1097,20 @@ def log_parallel_gripper_target_open_amount(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    _log_parallel_gripper_target_open_amount(
+        name, value, robot_name, instance, resolve_timestamp_us(timestamp), dry_run
+    )
+
+
+def _log_parallel_gripper_target_open_amount(
+    name: str,
+    value: float,
+    robot_name: str | None,
+    instance: int,
+    timestamp_us: int,
+    dry_run: bool,
+) -> None:
+    """Log one gripper target open amount at a resolved microsecond timestamp."""
     if not isinstance(name, str):
         raise ValueError(
             f"Parallel gripper names must be strings. " f"{name} is not a string."
@@ -1128,7 +1142,7 @@ def log_parallel_gripper_target_open_amount(
     assert isinstance(stream, JsonDataStream)
 
     parallel_gripper_target_open_amount_data = ParallelGripperOpenAmountData(
-        timestamp=timestamp, open_amount=value
+        timestamp_us=timestamp_us, open_amount=value
     )
     stream.log(
         parallel_gripper_target_open_amount_data,
@@ -1139,7 +1153,7 @@ def log_parallel_gripper_target_open_amount(
         DataType.PARALLEL_GRIPPER_TARGET_OPEN_AMOUNTS,
         storage_name,
         parallel_gripper_target_open_amount_data,
-        timestamp,
+        timestamp_us,
     )
     _publish_json_to_p2p(
         robot,
@@ -1169,16 +1183,10 @@ def log_parallel_gripper_target_open_amounts(
         timestamp: Optional timestamp
         dry_run: If True, skip actual logging (validation only)
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     for name, value in values.items():
-        log_parallel_gripper_target_open_amount(
-            name=name,
-            value=value,
-            robot_name=robot_name,
-            instance=instance,
-            timestamp=timestamp,
-            dry_run=dry_run,
+        _log_parallel_gripper_target_open_amount(
+            name, value, robot_name, instance, timestamp_us, dry_run
         )
 
 
@@ -1204,8 +1212,7 @@ def log_language(
         RobotError: If no robot is active and no robot_name provided
         ValueError: If language is not a string
     """
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     if not isinstance(language, str):
         raise ValueError("Language must be a string")
 
@@ -1225,10 +1232,10 @@ def log_language(
         stream, JsonDataStream
     ), "Expected stream to be instance of JSONDataStream"
 
-    language_data = LanguageData(timestamp=timestamp, text=language)
+    language_data = LanguageData(timestamp_us=timestamp_us, text=language)
     stream.log(language_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
-        robot, DataType.LANGUAGE, storage_name, language_data, timestamp
+        robot, DataType.LANGUAGE, storage_name, language_data, timestamp_us
     )
     _publish_json_to_p2p(robot, str_id, DataType.LANGUAGE, language_data)
 
@@ -1264,10 +1271,9 @@ def log_rgb(
     if rgb.dtype != np.uint8:
         raise ValueError("Image must be uint8 with range 0-255")
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     rgb_camera_data = RGBCameraData(
-        timestamp=timestamp,
+        timestamp_us=timestamp_us,
         extrinsics=extrinsics,
         intrinsics=intrinsics,
         frame=None,
@@ -1322,10 +1328,9 @@ def log_depth(
             "The values you are passing in are likely in millimeters."
         )
     extrinsics, intrinsics = _validate_extrinsics_intrinsics(extrinsics, intrinsics)
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     depth_camera_data = DepthCameraData(
-        timestamp=timestamp,
+        timestamp_us=timestamp_us,
         extrinsics=extrinsics,
         intrinsics=intrinsics,
         frame=None,
@@ -1373,8 +1378,7 @@ def log_point_cloud(
         "Point cloud logging is experimental and may change in future releases.",
         ExperimentalPointCloudWarning,
     )
-    if timestamp is None:
-        timestamp = time.time()
+    timestamp_us = resolve_timestamp_us(timestamp)
     if not isinstance(points, np.ndarray):
         raise ValueError("Point cloud must be a numpy array")
     if points.dtype != np.float16:
@@ -1411,7 +1415,7 @@ def log_point_cloud(
         stream, PointCloudDataStream
     ), "Expected stream to be instance of PointCloudDataStream"
     point_data = PointCloudData(
-        timestamp=timestamp,
+        timestamp_us=timestamp_us,
         points=points,
         rgb_points=rgb_points,
         extrinsics=extrinsics,
@@ -1419,7 +1423,7 @@ def log_point_cloud(
     )
     stream.log(point_data, recording_epoch=robot._recording_epoch())
     _record_json_to_daemon(
-        robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp
+        robot, DataType.POINT_CLOUDS, storage_name, point_data, timestamp_us
     )
     _publish_json_to_p2p(robot, str_id, DataType.POINT_CLOUDS, point_data)
 

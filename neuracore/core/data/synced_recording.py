@@ -137,6 +137,8 @@ class SynchronizedRecording:
         # as they reflect trim_start_end settings from synchronization
         self.start_time = self._episode_synced.start_time
         self.end_time = self._episode_synced.end_time
+        self.start_timestamp_us = self._episode_synced.start_timestamp_us
+        self.end_timestamp_us = self._episode_synced.end_timestamp_us
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
