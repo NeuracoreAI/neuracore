@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, seconds_to_us
+
 from neuracore.data_daemon.helpers import get_daemon_recordings_root_path
 from tests.integration.platform.data_daemon.shared.test_case.constants import (
     CONDEMNED_PROVENANCE_MARGIN_S,
@@ -21,7 +23,6 @@ from tests.integration.platform.data_daemon.shared.test_case.constants import (
     FRAME_COLOR_CHANNELS,
     FRAME_GRID_SIZE,
     LOSSLESS_CONTENT_BYTES_PER_PIXEL,
-    MICROSECONDS_PER_SECOND,
 )
 from tests.integration.platform.data_daemon.shared.test_case.frame_source import (
     frame_code_base,
@@ -173,13 +174,19 @@ def _result_recording_keys(result: ContextResult) -> list[tuple[str, int | str]]
     ]
 
 
-def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[float]]:
-    """Return mapping of trace file key (joint/camera name) to timestamps
-    from every trace.json under a recording dir."""
-    trace_timestamps: dict[str, list[float]] = {}
+def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[int]]:
+    """Return mapping of trace file key (joint/camera name) to timestamps in
+    microseconds from every trace.json under a recording dir.
+
+    A joint or JSON entry must carry ``timestamp_us`` and a ``timestamp`` in
+    seconds that equals it. A video entry without ``timestamp_us`` is converted
+    from its ``timestamp`` in seconds.
+    """
+    trace_timestamps: dict[str, list[int]] = {}
     for trace_json_path in recording_dir.rglob(TRACE_JSON_NAME):
         # Key is the parent directory name (joint or camera name)
         key = trace_json_path.parent.name
+        is_video_trace = trace_json_path.parent.parent.name in VIDEO_TRACE_DATA_TYPES
         try:
             frames = json.loads(trace_json_path.read_bytes())
         except Exception:
@@ -188,31 +195,36 @@ def collect_trace_timestamps_per_file(recording_dir: Path) -> dict[str, list[flo
             continue
         ts_list = []
         for frame in frames:
-            if isinstance(frame, dict):
-                ts = frame.get("timestamp")
-                if isinstance(ts, (int, float)):
-                    ts_list.append(float(ts))
+            if not isinstance(frame, dict):
+                continue
+            if not is_video_trace:
+                assert (
+                    "timestamp_us" in frame
+                ), f"{trace_json_path} entry has no timestamp_us: {frame}"
+                assert (
+                    frame["timestamp"]
+                    == frame["timestamp_us"] / MICROSECONDS_PER_SECOND
+                ), f"{trace_json_path} entry seconds and microseconds differ: {frame}"
+            if "timestamp_us" in frame:
+                ts_list.append(frame["timestamp_us"])
+            elif isinstance(frame.get("timestamp"), (int, float)):
+                ts_list.append(seconds_to_us(frame["timestamp"]))
         trace_timestamps[key] = ts_list
     return trace_timestamps
-
-
-def _round_to_microseconds(timestamp_s: float) -> float:
-    """Round *timestamp_s* the way the data models round a logged timestamp."""
-    return round(timestamp_s * MICROSECONDS_PER_SECOND) / MICROSECONDS_PER_SECOND
 
 
 def _assert_timestamps_match(
     *,
     recording_id: str,
     trace_key: str,
-    timestamps: list[float],
-    expected_timestamps: list[float],
+    timestamps: list[int],
+    expected_timestamps: list[int],
     failures: list[TraceFailure],
     durations: dict[str, float],
-    unknowable_timestamps: frozenset[float] = frozenset(),
-    condemned_timestamps: dict[float, str] | None = None,
+    unknowable_timestamps: frozenset[int] = frozenset(),
+    condemned_timestamps: dict[int, str] | None = None,
 ) -> None:
-    """Assert all timestamps match the expected list to the microsecond.
+    """Assert all microsecond timestamps exactly match the expected list (no tolerance).
 
     Applies to both phase modes: the producer emitted this exact sequence, so
     random-phase offsets need no tolerance window of their own.
@@ -228,16 +240,6 @@ def _assert_timestamps_match(
     aggregate traces that share the same failure body (e.g. all joints failing
     with the same mismatch pattern).
     """
-    timestamps = [_round_to_microseconds(ts) for ts in timestamps]
-    expected_timestamps = [_round_to_microseconds(ts) for ts in expected_timestamps]
-    unknowable_timestamps = frozenset(
-        _round_to_microseconds(ts) for ts in unknowable_timestamps
-    )
-    condemned_timestamps = {
-        _round_to_microseconds(ts): reason
-        for ts, reason in (condemned_timestamps or {}).items()
-    }
-
     if unknowable_timestamps:
         timestamps = [ts for ts in timestamps if ts not in unknowable_timestamps]
         expected_timestamps = [
@@ -246,7 +248,7 @@ def _assert_timestamps_match(
 
     if len(timestamps) != len(expected_timestamps):
         located = _locate_count_mismatch(
-            timestamps, expected_timestamps, condemned_timestamps
+            timestamps, expected_timestamps, condemned_timestamps or {}
         )
         failures.append(
             TraceFailure(
@@ -266,7 +268,7 @@ def _assert_timestamps_match(
     ]
     if mismatches:
         examples = "; ".join(
-            f"[{i}] actual={actual:.6f} expected={expected:.6f}"
+            f"[{i}] actual={actual} expected={expected}"
             for i, actual, expected in mismatches[:3]
         )
         body = (
@@ -277,17 +279,19 @@ def _assert_timestamps_match(
         return
 
     if timestamps:
-        durations[f"{recording_id}:{trace_key}"] = timestamps[-1] - timestamps[0]
+        durations[f"{recording_id}:{trace_key}"] = (
+            timestamps[-1] - timestamps[0]
+        ) / MICROSECONDS_PER_SECOND
 
 
-def _render_timestamps(values: list[float], limit: int = 3) -> str:
+def _render_timestamps(values: list[int], limit: int = 3) -> str:
     """Render the first *limit* timestamps, noting how many were withheld."""
-    shown = ", ".join(f"{value:.6f}" for value in values[:limit])
+    shown = ", ".join(str(value) for value in values[:limit])
     remainder = len(values) - limit
     return shown + (f" (+{remainder} more)" if remainder > 0 else "")
 
 
-def _explain_surplus(values: list[float], condemned: dict[float, str]) -> str:
+def _explain_surplus(values: list[int], condemned: dict[int, str]) -> str:
     """Render *values* with the distinct reasons they were ruled out."""
     rendered = _render_timestamps(values)
     reasons = sorted({condemned[ts] for ts in values if ts in condemned})
@@ -302,9 +306,9 @@ def _explain_surplus(values: list[float], condemned: dict[float, str]) -> str:
 
 
 def _locate_count_mismatch(
-    timestamps: list[float],
-    expected_timestamps: list[float],
-    condemned: dict[float, str],
+    timestamps: list[int],
+    expected_timestamps: list[int],
+    condemned: dict[int, str],
 ) -> str:
     """Say where a count mismatch's surplus and shortfall sit, and why."""
     surplus = sorted((Counter(timestamps) - Counter(expected_timestamps)).elements())
@@ -329,7 +333,7 @@ def _locate_count_mismatch(
         ("past the last expected", [ts for ts in surplus if ts > last], last),
     ):
         if values:
-            distances = [abs(edge - ts) for ts in values]
+            distances = [abs(edge - ts) / MICROSECONDS_PER_SECOND for ts in values]
             parts.append(
                 f"{len(values)} surplus {min(distances):.3f}s-{max(distances):.3f}s"
                 f" {label}: {_explain_surplus(values, condemned)}"
@@ -454,7 +458,7 @@ def assert_disk_recording_properties(
                 uuid_to_semantic[uuid] = key
 
             # Map trace_timestamps keys (UUIDs) to semantic keys for assertion
-            mapped_trace_timestamps: dict[str, list[float]] = {}
+            mapped_trace_timestamps: dict[str, list[int]] = {}
             for uuid, timestamps in trace_timestamps.items():
                 semantic = uuid_to_semantic.get(uuid, uuid)
                 mapped_trace_timestamps[semantic] = timestamps
@@ -494,13 +498,18 @@ def assert_disk_recording_properties(
                     recording_id=recording_key,
                     trace_key=trace_key,
                     timestamps=timestamps,
-                    expected_timestamps=classification.owed_timestamps,
+                    expected_timestamps=[
+                        seconds_to_us(ts) for ts in classification.owed_timestamps
+                    ],
                     failures=trace_failures,
                     durations=durations,
                     unknowable_timestamps=frozenset(
-                        classification.unknowable_timestamps
+                        seconds_to_us(ts) for ts in classification.unknowable_timestamps
                     ),
-                    condemned_timestamps=classification.condemned_reasons,
+                    condemned_timestamps={
+                        seconds_to_us(ts): reason
+                        for ts, reason in classification.condemned_reasons.items()
+                    },
                 )
 
             for trace_key, classification in expected.items():
