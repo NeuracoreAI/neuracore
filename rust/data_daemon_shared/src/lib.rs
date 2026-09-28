@@ -240,17 +240,16 @@ pub mod service_name {
     ///
     /// All envelope payloads are now metadata-sized: non-video frames are
     /// small JSON, the integration matrix's 1000-joint batch encodes to
-    /// about 110 KiB, and `VideoChunkReady`'s `frame_timestamps_s` vector is
+    /// about 110 KiB, and `VideoChunkReady`'s `frame_timestamps_us` vector is
     /// ~30 KiB even for a 128 MiB 1080p chunk. 1 MiB leaves generous
     /// headroom for the worst case.
     pub const COMMANDS_MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
 
     /// Worst-case postcard size of one frame's contribution to a
-    /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_ns`
-    /// element is an `i64` zigzag varint (≤10 bytes for a full-range Unix-ns
-    /// value), a `frame_timestamps_s` element is a fixed 8-byte `f64`, and a
-    /// `frame_publish_offsets_us` element is a `u32` varint (≤5 bytes).
-    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 8 + 5;
+    /// [`crate::Envelope::VideoChunkReady`] announcement: a `frame_timestamps_us`
+    /// element is an `i64` zigzag varint (at most 10 bytes for a full-range value) and
+    /// a `frame_publish_offsets_us` element is a `u32` varint (at most 5 bytes).
+    pub const VIDEO_CHUNK_BYTES_PER_FRAME: usize = 10 + 5;
 
     /// Bytes held back from [`COMMANDS_MAX_PAYLOAD_BYTES`] for a
     /// `VideoChunkReady` envelope's fixed fields — the enum tag, source ids,
@@ -263,7 +262,7 @@ pub mod service_name {
     /// The producer seals a chunk at the **lower** of its byte threshold and
     /// this frame cap. The cap exists so a [`crate::Envelope::VideoChunkReady`]
     /// announcement always fits one [`COMMANDS_MAX_PAYLOAD_BYTES`] sample: the
-    /// per-frame `frame_timestamps_{ns,s}` and `frame_publish_offsets_us`
+    /// per-frame `frame_timestamps_us` and `frame_publish_offsets_us`
     /// vectors are the only unbounded part
     /// of the envelope, so a long recording of small frames — which never
     /// reaches the byte threshold mid-recording — would otherwise accumulate
@@ -282,10 +281,11 @@ pub mod service_name {
     /// send waits out this bound and settles on the source's silence instead.
     pub const VIDEO_CHUNK_MAX_OPEN_NS: i64 = 5 * 1_000_000_000;
 
-    /// The microsecond clock shared by every stage of the video path: the
-    /// producer writes spool NUT chunks with a `1/1_000_000` time base, and
-    /// the daemon pins its per-chunk encode outputs to the same clock
-    /// (`-enc_time_base` / `-video_track_timescale`). Sharing one constant
+    /// The microsecond clock of every capture timestamp and of every stage of
+    /// the video path: a frame's PTS is its `timestamp_us` minus the chunk
+    /// origin, the producer writes spool NUT chunks with a `1/1_000_000` time
+    /// base, and the daemon pins its per-chunk encode outputs to the same
+    /// clock (`-enc_time_base` / `-video_track_timescale`). Sharing one constant
     /// keeps the two in lockstep — if they diverge, ffmpeg falls back to a
     /// per-chunk *guessed* frame rate, chunks of one recording land on
     /// different timescales, and the stream-copy concat corrupts the merged
@@ -572,9 +572,9 @@ pub enum Envelope {
     /// threshold (or a lifecycle event rolls it) the producer finishes the NUT
     /// and publishes this envelope so the daemon can route the chunk into the
     /// right recording window (by `publish_timestamp_ns`), relink the NUT under
-    /// the recording, and encode it to a sealed MP4 segment. Per-frame `timestamp_s` values are
-    /// carried inline so the daemon-side `trace.json` sidecar matches the
-    /// bit-exact assertion.
+    /// the recording, and encode it to a sealed MP4 segment. Per-frame capture
+    /// times in microseconds are carried inline for the daemon-side
+    /// `trace.json` sidecar.
     VideoChunkReady {
         robot_id: String,
         robot_instance: i64,
@@ -606,14 +606,10 @@ pub enum Envelope {
         byte_count: u64,
         /// Number of frames packed into this chunk.
         frame_count: u32,
-        /// Per-frame capture time in nanoseconds since the Unix epoch, in
-        /// arrival order. Length equals `frame_count`. Capture-clock content for
-        /// the trace sidecar; routing uses `frame_publish_offsets_us`.
-        frame_timestamps_ns: Vec<i64>,
-        /// Per-frame `timestamp_s` (Unix seconds, f64) in arrival order.
-        /// Length equals `frame_count`; values round-trip bit-exact through
-        /// postcard for the metadata sidecar.
-        frame_timestamps_s: Vec<f64>,
+        /// Per-frame capture time in microseconds, in arrival order. Length equals
+        /// `frame_count`. Capture-clock content for the trace sidecar and the
+        /// spooled PTS; routing uses `frame_publish_offsets_us`.
+        frame_timestamps_us: Vec<i64>,
         /// Original dtype of every frame in this chunk (never mixed — the
         /// producer seals and reopens a chunk on a dtype change, mirroring a
         /// geometry change). The daemon never decodes pixels; it threads this
@@ -1168,17 +1164,11 @@ mod tests {
             height: 1080,
             byte_count: 128 * 1024 * 1024,
             frame_count: 4,
-            frame_timestamps_ns: vec![
-                1_700_000_000_000_000_000,
-                1_700_000_000_016_666_700,
-                1_700_000_000_033_333_300,
-                1_700_000_000_050_000_000,
-            ],
-            frame_timestamps_s: vec![
-                1_700_000_000.0,
-                1_700_000_000.016_666_7,
-                1_700_000_000.033_333_3,
-                7.0_f64 / 60.0_f64,
+            frame_timestamps_us: vec![
+                1_700_000_000_000_000,
+                1_700_000_000_016_667,
+                1_700_000_000_033_333,
+                1_700_000_000_050_000,
             ],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us: vec![0, 16, 33, 50],
@@ -1211,8 +1201,7 @@ mod tests {
                 height: 128,
                 byte_count: 4096,
                 frame_count: 1,
-                frame_timestamps_ns: vec![1_700_000_000_000_000_000],
-                frame_timestamps_s: vec![1_700_000_000.0],
+                frame_timestamps_us: vec![1_700_000_000_000_000],
                 dtype,
                 frame_publish_offsets_us: vec![0],
             };
@@ -1254,10 +1243,9 @@ mod tests {
 
     #[test]
     fn video_chunk_ready_worst_case_fits_commands_slice() {
-        // Two timestamps plus a publish offset per frame stays well under
+        // A capture time plus a publish offset per frame stays well under
         // COMMANDS_MAX_PAYLOAD_BYTES even at an implausible frame count.
-        let frame_timestamps_ns: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000_000).collect();
-        let frame_timestamps_s: Vec<f64> = (0..10_000).map(|i| i as f64 * 1e-3).collect();
+        let frame_timestamps_us: Vec<i64> = (0..10_000).map(|i| i as i64 * 1_000).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..10_000).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1270,9 +1258,8 @@ mod tests {
             width: 1920,
             height: 1080,
             byte_count: 128 * 1024 * 1024,
-            frame_count: frame_timestamps_ns.len() as u32,
-            frame_timestamps_ns,
-            frame_timestamps_s,
+            frame_count: frame_timestamps_us.len() as u32,
+            frame_timestamps_us,
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
@@ -1289,14 +1276,13 @@ mod tests {
     fn video_chunk_ready_at_frame_cap_fits_commands_slice() {
         // The producer caps a chunk at MAX_VIDEO_CHUNK_FRAMES frames so its
         // announcement always fits one commands sample. Prove the cap holds at
-        // the absolute worst case: every per-frame ns timestamp a full-range
+        // the absolute worst case: every per-frame capture time a full-range
         // i64 (10-byte postcard zigzag varint), every publish offset a
         // full-range u32 (5-byte varint), and every fixed field maxed out.
         // Without the cap a long recording of tiny frames overflows the slice
         // and the whole recording's video announcement fails to publish.
         let count = service_name::MAX_VIDEO_CHUNK_FRAMES as usize;
-        let frame_timestamps_ns: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
-        let frame_timestamps_s: Vec<f64> = (0..count).map(|i| i as f64).collect();
+        let frame_timestamps_us: Vec<i64> = (0..count).map(|i| i64::MAX - i as i64).collect();
         let frame_publish_offsets_us: Vec<u32> = (0..count).map(|_| u32::MAX).collect();
         let envelope = Envelope::VideoChunkReady {
             robot_id: "11111111-2222-3333-4444-555555555555".into(),
@@ -1310,8 +1296,7 @@ mod tests {
             height: u32::MAX,
             byte_count: u64::MAX,
             frame_count: count as u32,
-            frame_timestamps_ns,
-            frame_timestamps_s,
+            frame_timestamps_us,
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us,
         };
