@@ -264,7 +264,6 @@ class RecordingContext:
                 16 values.
         """
         robot_id = self._require_source("log_frame")
-        timestamp_ns = int(timestamp * 1_000_000_000)
         native = _load_native()
         try:
             native.log_frame(
@@ -276,8 +275,7 @@ class RecordingContext:
                 int(height),
                 dtype,
                 payload,
-                timestamp_ns,
-                timestamp,
+                seconds_to_us(timestamp),
                 depth_scale_m,
                 intrinsics,
                 extrinsics,

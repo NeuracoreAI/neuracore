@@ -220,6 +220,7 @@ mod tests {
 
         let mut entry_a = Map::new();
         entry_a.insert("timestamp".to_string(), json!(1.5));
+        entry_a.insert("timestamp_us".to_string(), json!(1_500_000));
         entry_a.insert("width".to_string(), json!(640));
         entry_a.insert("height".to_string(), json!(480));
         accumulator.record_frame(entry_a);
@@ -236,7 +237,7 @@ mod tests {
         let written_bytes = accumulator.finish(tempdir.path()).unwrap();
         let actual = read_back(&tempdir.path().join(TRACE_JSON_FILENAME));
 
-        let expected = br#"[{"timestamp":1.5,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
+        let expected = br#"[{"timestamp":1.5,"timestamp_us":1500000,"width":640,"height":480,"frame":null,"frame_idx":0},{"timestamp":2,"source":"rgb-camera","extra":{"sequence":17,"flag":true},"frame":null,"frame_idx":1}]"#.to_vec();
         assert_eq!(
             actual, expected,
             "metadata sidecar bytes diverged from expected fixture"
