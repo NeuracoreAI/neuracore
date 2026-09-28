@@ -1,13 +1,16 @@
-"""Tests for the depth video source."""
+"""Tests for the live video sources."""
 
 import json
 from unittest.mock import MagicMock
 
 import numpy as np
-from neuracore_types import DataType, DepthCameraData, RobotStreamTrack
+from neuracore_types import DataType, DepthCameraData, RGBCameraData, RobotStreamTrack
 
 from neuracore.core.streaming.p2p.consumer.sync_point_parser import parse_sync_point
-from neuracore.core.streaming.p2p.provider.video_source import DepthVideoSource
+from neuracore.core.streaming.p2p.provider.video_source import (
+    DepthVideoSource,
+    VideoSource,
+)
 from neuracore.core.utils.depth_utils import depth_to_log_gray
 
 
@@ -15,6 +18,18 @@ def _depth_source() -> DepthVideoSource:
     source = DepthVideoSource(stream_enabled=MagicMock())
     source.custom_data_source = MagicMock()
     return source
+
+
+def test_published_frame_carries_the_timestamp_in_both_units():
+    source = VideoSource(stream_enabled=MagicMock())
+    source.custom_data_source = MagicMock()
+
+    source.add_frame(
+        RGBCameraData(timestamp_us=12_500_000), np.zeros((8, 8, 3), dtype=np.uint8)
+    )
+
+    published = source.custom_data_source.publish.call_args.args[0]
+    assert (published["timestamp"], published["timestamp_us"]) == (12.5, 12_500_000)
 
 
 def test_depth_data_channel_round_trips_every_sensor_value():
