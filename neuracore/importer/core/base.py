@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import math
 import multiprocessing as mp
 import os
 import random
@@ -29,6 +28,7 @@ from neuracore_types.importer.config import (
 from neuracore_types.importer.data_config import DataFormat
 from neuracore_types.nc_data import DatasetImportConfig, DataType, NCDataImportConfig
 from neuracore_types.nc_data.nc_data import MappingItem
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, seconds_to_us
 from rich.console import Console
 from rich.progress import (
     BarColumn,
@@ -66,7 +66,7 @@ from .exceptions import (
 )
 
 JOINT_TARGET_CHECK_TOLERANCE = 1e-6
-TIMESTAMP_COLLISION_TOLERANCE_S = 1e-6
+TIMESTAMP_COLLISION_TOLERANCE_US = 1
 
 
 @dataclass(frozen=True)
@@ -190,7 +190,7 @@ class NeuracoreDatasetImporter(ABC):
         self.random_sample = random_sample
         self.debug_target_ee_frame = (debug_target_ee_frame or "").strip() or None
         self.worker_errors: list[WorkerError] = []
-        self._last_logged_timestamps: dict[tuple[DataType, str], float] = {}
+        self._last_logged_timestamps_us: dict[tuple[DataType, str], int] = {}
         self._logged_error_keys: set[tuple[int | None, int | None, str]] = set()
         self.logger = logging.getLogger(
             f"{self.__class__.__module__}.{self.__class__.__name__}"
@@ -404,7 +404,7 @@ class NeuracoreDatasetImporter(ABC):
     def _reset_episode_state(self) -> None:
         """Reset episode-specific state at the start of each episode."""
         self.prev_ik_solution = self.ik_init_config
-        self._last_logged_timestamps = {}
+        self._last_logged_timestamps_us = {}
 
     def _reset_step_state(self) -> None:
         """Reset step-specific state at the start of each step."""
@@ -790,34 +790,50 @@ class NeuracoreDatasetImporter(ABC):
             )
             raise
 
+    @staticmethod
+    def _step_timestamp_us(base_us: int, step_index: int, frequency: float) -> int:
+        """Return the capture time of a step on a fixed frequency grid.
+
+        Args:
+            base_us: The episode's base time in microseconds.
+            step_index: The step's position on the grid.
+            frequency: The dataset frequency in steps per second.
+
+        Returns:
+            int: ``base_us`` plus ``step_index`` step intervals, in microseconds.
+        """
+        return base_us + round(step_index * MICROSECONDS_PER_SECOND / frequency)
+
     def _strictly_increasing_timestamp(
         self, data_type: DataType, name: str, timestamp: float
     ) -> float:
         """Return a timestamp strictly greater than the last one for this stream.
 
-        Track the last value per data type and name, matching the granularity
-        Neuracore enforces per stream. Distinct nanosecond capture times can
-        resolve to the same float64 at Unix epoch magnitudes, so raise a
-        timestamp that trails the previous one by at most
-        TIMESTAMP_COLLISION_TOLERANCE_S by one unit in the last place. Return a
-        larger regression unchanged, leaving Neuracore to reject it.
+        Track the last value in microseconds per data type and name, matching
+        the granularity Neuracore enforces per stream. Distinct source capture
+        times can round to the same microsecond, so a timestamp that trails the
+        previous one by at most TIMESTAMP_COLLISION_TOLERANCE_US is logged one
+        microsecond after the previous one. Return a larger regression
+        unchanged, leaving Neuracore to reject it.
 
         Args:
             data_type: The type of data being logged.
             name: The name of the data.
-            timestamp: The timestamp of the data.
+            timestamp: The timestamp of the data in seconds.
 
         Returns:
             float: The timestamp to log, nudged up only when it collides.
         """
         key = (data_type, name)
-        previous = self._last_logged_timestamps.get(key)
+        candidate_us = seconds_to_us(timestamp)
+        previous_us = self._last_logged_timestamps_us.get(key)
         if (
-            previous is not None
-            and 0.0 <= previous - timestamp <= TIMESTAMP_COLLISION_TOLERANCE_S
+            previous_us is not None
+            and 0 <= previous_us - candidate_us <= TIMESTAMP_COLLISION_TOLERANCE_US
         ):
-            timestamp = math.nextafter(previous, math.inf)
-        self._last_logged_timestamps[key] = timestamp
+            candidate_us = previous_us + 1
+            timestamp = candidate_us / MICROSECONDS_PER_SECOND
+        self._last_logged_timestamps_us[key] = candidate_us
         return timestamp
 
     def _log_transformed_data(
