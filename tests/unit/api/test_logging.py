@@ -232,7 +232,7 @@ def test_log_depth_uint16_reaches_the_bridge_unchanged_with_its_scale(
     assert call.args[6] == "uint16"
     recorded = np.frombuffer(bytes(call.args[7]), dtype="<u2").reshape(2, 2)
     np.testing.assert_array_equal(recorded, depth)
-    assert call.args[10] == 0.001
+    assert call.args[9] == 0.001
     latest = robot.get_data_stream(
         f"{DataType.DEPTH_IMAGES.value}:depth_u16"
     ).get_latest_data()
@@ -273,10 +273,10 @@ def test_log_rgb_forwards_camera_calibration_to_the_daemon(
     nc.log_rgb("uncalibrated", rgb)
 
     calibrated, uncalibrated = native.log_frame.call_args_list
-    assert calibrated.args[11] == intrinsics.reshape(-1).tolist()
-    assert calibrated.args[12] == extrinsics.reshape(-1).tolist()
+    assert calibrated.args[10] == intrinsics.reshape(-1).tolist()
+    assert calibrated.args[11] == extrinsics.reshape(-1).tolist()
+    assert uncalibrated.args[10] is None
     assert uncalibrated.args[11] is None
-    assert uncalibrated.args[12] is None
 
     depth = np.zeros((2, 2), dtype=np.uint16)
     nc.log_depth(
@@ -288,8 +288,8 @@ def test_log_rgb_forwards_camera_calibration_to_the_daemon(
     )
 
     depth_call = native.log_frame.call_args
-    assert depth_call.args[11] == intrinsics.reshape(-1).tolist()
-    assert depth_call.args[12] == extrinsics.reshape(-1).tolist()
+    assert depth_call.args[10] == intrinsics.reshape(-1).tolist()
+    assert depth_call.args[11] == extrinsics.reshape(-1).tolist()
 
 
 def test_log_frame_forwards_dtype_derived_from_the_array(
@@ -318,7 +318,7 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
     monkeypatch.setattr(robot, "get_cloud_recording_id", lambda: "rec-1")
 
     rgb_uint8 = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
-    nc.log_rgb("front_camera", rgb_uint8)
+    nc.log_rgb("front_camera", rgb_uint8, timestamp=12.5)
     depth = np.ones((100, 100), dtype=np.uint16)
     nc.log_depth("depth_camera", depth, depth_scale_m=0.001)
 
@@ -330,6 +330,8 @@ def test_log_frame_forwards_dtype_derived_from_the_array(
         DataType.RGB_IMAGES.value: "uint8",
         DataType.DEPTH_IMAGES.value: "uint16",
     }
+    rgb_call = native.log_frame.call_args_list[0]
+    assert rgb_call.args[8] == 12_500_000
 
     # Avoid Robot.__del__ consulting the process-global recording manager.
     robot.id = None

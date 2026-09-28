@@ -419,8 +419,9 @@ struct Held {
     payload: HeldPayload,
 }
 
-/// The data carried by a held envelope. `timestamp_us` here is
-/// the data's *own* capture clock (content), never routing.
+/// The data carried by a held envelope. `timestamp_us` and
+/// `frame_timestamps_us` here are on the data's *own* capture clock
+/// (content), never routing.
 enum HeldPayload {
     Data {
         data_type: String,
@@ -442,7 +443,7 @@ enum HeldPayload {
         height: u32,
         byte_count: u64,
         frame_count: u32,
-        frame_timestamps_s: Vec<f64>,
+        frame_timestamps_us: Vec<i64>,
         frame_calibrations: Vec<FrameCalibration>,
         dtype: FrameDtype,
         /// Per-frame publish time as µs after the chunk's open stamp
@@ -671,15 +672,13 @@ impl Dispatcher {
                 height,
                 byte_count,
                 frame_count,
-                frame_timestamps_ns,
-                frame_timestamps_s,
+                frame_timestamps_us,
                 frame_calibrations,
                 dtype,
                 frame_publish_offsets_us,
             } => {
                 let source = (robot_id, robot_instance);
                 self.touch_source(&source, recv_at);
-                let _ = frame_timestamps_ns; // capture-clock content, not routing
                 self.held.push_back(Held {
                     source,
                     release_at: recv_at + self.holdback,
@@ -693,7 +692,7 @@ impl Dispatcher {
                         height,
                         byte_count,
                         frame_count,
-                        frame_timestamps_s,
+                        frame_timestamps_us,
                         frame_calibrations,
                         dtype,
                         frame_publish_offsets_us,
@@ -1594,7 +1593,7 @@ impl Dispatcher {
                 height,
                 byte_count,
                 frame_count,
-                frame_timestamps_s,
+                frame_timestamps_us,
                 frame_calibrations,
                 dtype,
                 frame_publish_offsets_us,
@@ -1610,7 +1609,7 @@ impl Dispatcher {
                     height,
                     byte_count,
                     frame_count,
-                    frame_timestamps_s,
+                    frame_timestamps_us,
                     frame_calibrations,
                     dtype,
                     frame_publish_offsets_us,
@@ -1757,7 +1756,7 @@ impl Dispatcher {
         height: u32,
         byte_count: u64,
         frame_count: u32,
-        frame_timestamps_s: Vec<f64>,
+        frame_timestamps_us: Vec<i64>,
         frame_calibrations: Vec<FrameCalibration>,
         dtype: FrameDtype,
         frame_publish_offsets_us: Vec<u32>,
@@ -1821,7 +1820,7 @@ impl Dispatcher {
                      published inside it"
                 );
             }
-            let claimed_timestamps = claim.per_frame(&frame_timestamps_s);
+            let claimed_timestamps = claim.per_frame(&frame_timestamps_us);
             let claimed_calibrations = claim.per_frame(&frame_calibrations);
 
             let recording_index = window.recording_index;
@@ -1849,7 +1848,7 @@ impl Dispatcher {
                     byte_count,
                     frame_count: claim.count,
                     skip_frames: claim.skip,
-                    frame_timestamps_s: claimed_timestamps,
+                    frame_timestamps_us: claimed_timestamps,
                     frame_calibrations: claimed_calibrations,
                     dtype,
                 })
@@ -2642,7 +2641,7 @@ mod tests {
     fn a_claim_slices_the_sidecar_to_the_frames_it_owns() {
         // The sidecar indexes the encoded mp4, so its stamps must be the same
         // run the encode keeps: `skip` off the head, `count` off the tail.
-        let stamps = [0.0, 0.1, 0.2, 0.3, 0.4];
+        let stamps = [0, 100_000, 200_000, 300_000, 400_000];
         let claim = |skip, count| {
             ChunkClaim {
                 slot: WindowSlot::Live,
@@ -2653,12 +2652,12 @@ mod tests {
         };
 
         assert_eq!(claim(0, 5), stamps, "an uncut claim keeps every stamp");
-        assert_eq!(claim(0, 3), vec![0.0, 0.1, 0.2], "tail cut");
-        assert_eq!(claim(2, 3), vec![0.2, 0.3, 0.4], "head cut");
-        assert_eq!(claim(1, 2), vec![0.1, 0.2], "cut at both ends");
+        assert_eq!(claim(0, 3), vec![0, 100_000, 200_000], "tail cut");
+        assert_eq!(claim(2, 3), vec![200_000, 300_000, 400_000], "head cut");
+        assert_eq!(claim(1, 2), vec![100_000, 200_000], "cut at both ends");
         // A claim can only ever be clamped to `frame_count`, but the slice
         // must not panic if the stamps run short of it.
-        assert_eq!(claim(3, 9), vec![0.3, 0.4]);
+        assert_eq!(claim(3, 9), vec![300_000, 400_000]);
         assert!(claim(9, 2).is_empty());
     }
 
@@ -2800,10 +2799,6 @@ mod tests {
         producer_pid: u32,
         publish_offsets_us: &[u32],
     ) -> Envelope {
-        let capture_stamps: Vec<i64> = publish_offsets_us
-            .iter()
-            .map(|offset| publish_ts + i64::from(*offset) * 1_000)
-            .collect();
         Envelope::VideoChunkReady {
             robot_id: robot.into(),
             robot_instance: 0,
@@ -2816,8 +2811,7 @@ mod tests {
             height: 64,
             byte_count: 9,
             frame_count: publish_offsets_us.len() as u32,
-            frame_timestamps_s: capture_stamps.iter().map(|ns| *ns as f64 / 1e9).collect(),
-            frame_timestamps_ns: capture_stamps,
+            frame_timestamps_us: publish_offsets_us.iter().map(|us| i64::from(*us)).collect(),
             frame_calibrations: vec![FrameCalibration::default(); publish_offsets_us.len()],
             dtype: FrameDtype::Rgb8,
             frame_publish_offsets_us: publish_offsets_us.to_vec(),
