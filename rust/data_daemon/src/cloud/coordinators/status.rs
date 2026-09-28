@@ -456,6 +456,7 @@ impl RecordingBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RecordingTimestamp;
 
     use crate::api::auth::StaticAuthProvider;
     use crate::api::client::ApiClientOptions;
@@ -676,7 +677,10 @@ mod tests {
             )
             .await
             .unwrap();
-        store.mark_recording_stopped(index, 1).await.unwrap();
+        store
+            .mark_recording_stopped(index, RecordingTimestamp::observed_at(1))
+            .await
+            .unwrap();
         store.mark_recording_stop_notified(index).await.unwrap();
         store.set_expected_trace_count(index, 1).await.unwrap();
         store

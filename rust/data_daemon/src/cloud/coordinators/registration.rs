@@ -528,6 +528,7 @@ mod tests {
     use crate::api::client::ApiClientOptions;
     use crate::config::DaemonConfig;
     use crate::state::store::TraceUpdate;
+    use crate::state::RecordingTimestamp;
     use crate::state::{NewRecording, TraceUploadStatus, TraceWriteStatus};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -578,7 +579,7 @@ mod tests {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
             .await
             .unwrap()
@@ -900,7 +901,7 @@ mod tests {
                 robot_id: Some("robot-1"),
                 robot_instance: Some(0),
                 dataset_id: Some("ds-1"),
-                start_timestamp_ns: 1_700_000_000_000_000_000,
+                start: RecordingTimestamp::observed_at(1_700_000_000_000_000_000),
             })
             .await
             .unwrap()
