@@ -11,14 +11,14 @@ NEXT_RECORDING = 2_000
 
 
 class _DummyCameraData:
-    def __init__(self, timestamp: float) -> None:
-        self.timestamp = timestamp
+    def __init__(self, timestamp_us: int) -> None:
+        self.timestamp_us = timestamp_us
         self.frame = None
 
     def model_dump(self, mode: str = "json", exclude: set[str] | None = None) -> dict:
         del mode
         payload = {
-            "timestamp": self.timestamp,
+            "timestamp_us": self.timestamp_us,
             "frame": self.frame,
         }
         for key in exclude or set():
@@ -32,7 +32,7 @@ def test_stream_tracks_latest_sample() -> None:
     width, height = 4, 3
     stream = RGBDataStream("front_camera", width=width, height=height)
 
-    metadata = _DummyCameraData(timestamp=1.0)
+    metadata = _DummyCameraData(timestamp_us=1_000_000)
     frame = np.arange(width * height * 3, dtype=np.uint8).reshape((height, width, 3))
     stream.log(metadata, frame, recording_epoch=RECORDING)
 
@@ -43,42 +43,52 @@ def test_video_stream_rejects_non_increasing_timestamp() -> None:
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
-    stream.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=RECORDING)
-    stream.log(_DummyCameraData(timestamp=2.0), frame, recording_epoch=RECORDING)
+    stream.log(
+        _DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=RECORDING
+    )
+    stream.log(
+        _DummyCameraData(timestamp_us=2_000_000), frame, recording_epoch=RECORDING
+    )
 
     with pytest.raises(ValueError, match="Non-monotonic timestamp"):
-        stream.log(_DummyCameraData(timestamp=2.0), frame, recording_epoch=RECORDING)
+        stream.log(
+            _DummyCameraData(timestamp_us=2_000_000), frame, recording_epoch=RECORDING
+        )
     with pytest.raises(ValueError, match="Non-monotonic timestamp"):
-        stream.log(_DummyCameraData(timestamp=1.5), frame, recording_epoch=RECORDING)
+        stream.log(
+            _DummyCameraData(timestamp_us=1_500_000), frame, recording_epoch=RECORDING
+        )
 
 
 def test_joint_stream_record_scalar_rejects_non_increasing_timestamp() -> None:
     stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
 
-    stream.record_scalar(1.0, 0.5, RECORDING)
-    stream.record_scalar(2.0, 0.6, RECORDING)
+    stream.record_scalar(1_000_000, 0.5, RECORDING)
+    stream.record_scalar(2_000_000, 0.6, RECORDING)
 
     with pytest.raises(ValueError, match="Non-monotonic timestamp"):
-        stream.record_scalar(2.0, 0.7, RECORDING)
+        stream.record_scalar(2_000_000, 0.7, RECORDING)
 
 
 def test_joint_stream_log_rejects_non_increasing_timestamp() -> None:
     stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
 
-    stream.log(JointData(timestamp=1.0, value=0.5), recording_epoch=RECORDING)
+    stream.log(JointData(timestamp_us=1_000_000, value=0.5), recording_epoch=RECORDING)
 
     with pytest.raises(ValueError, match="Non-monotonic timestamp"):
-        stream.log(JointData(timestamp=0.9, value=0.6), recording_epoch=RECORDING)
+        stream.log(
+            JointData(timestamp_us=900_000, value=0.6), recording_epoch=RECORDING
+        )
 
 
 def test_joint_stream_materialises_deferred_scalar_on_demand() -> None:
     stream = JointDataStream(data_type=DataType.JOINT_POSITIONS, data_type_name="j1")
 
-    stream.record_scalar(1.0, 0.5, RECORDING)
+    stream.record_scalar(1_000_000, 0.5, RECORDING)
 
     latest = stream.get_latest_data()
     assert isinstance(latest, JointData)
-    assert (latest.timestamp, latest.value) == (1.0, 0.5)
+    assert (latest.timestamp_us, latest.value) == (1_000_000, 0.5)
 
 
 def test_monotonic_check_is_per_stream() -> None:
@@ -87,10 +97,18 @@ def test_monotonic_check_is_per_stream() -> None:
     front = RGBDataStream("front_camera", width=4, height=3)
     wrist = RGBDataStream("wrist_camera", width=4, height=3)
 
-    front.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=RECORDING)
-    wrist.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=RECORDING)
-    front.log(_DummyCameraData(timestamp=2.0), frame, recording_epoch=RECORDING)
-    wrist.log(_DummyCameraData(timestamp=2.0), frame, recording_epoch=RECORDING)
+    front.log(
+        _DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=RECORDING
+    )
+    wrist.log(
+        _DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=RECORDING
+    )
+    front.log(
+        _DummyCameraData(timestamp_us=2_000_000), frame, recording_epoch=RECORDING
+    )
+    wrist.log(
+        _DummyCameraData(timestamp_us=2_000_000), frame, recording_epoch=RECORDING
+    )
 
 
 def test_monotonic_check_skipped_when_not_recording() -> None:
@@ -100,8 +118,8 @@ def test_monotonic_check_skipped_when_not_recording() -> None:
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
-    stream.log(_DummyCameraData(timestamp=5.0), frame, recording_epoch=None)
-    stream.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=None)
+    stream.log(_DummyCameraData(timestamp_us=5_000_000), frame, recording_epoch=None)
+    stream.log(_DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=None)
 
 
 def test_a_new_recording_may_restart_the_timeline_lower() -> None:
@@ -111,12 +129,18 @@ def test_a_new_recording_may_restart_the_timeline_lower() -> None:
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
-    stream.log(_DummyCameraData(timestamp=5.0), frame, recording_epoch=RECORDING)
-    stream.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=NEXT_RECORDING)
+    stream.log(
+        _DummyCameraData(timestamp_us=5_000_000), frame, recording_epoch=RECORDING
+    )
+    stream.log(
+        _DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=NEXT_RECORDING
+    )
 
     with pytest.raises(ValueError, match="Non-monotonic timestamp"):
         stream.log(
-            _DummyCameraData(timestamp=0.5), frame, recording_epoch=NEXT_RECORDING
+            _DummyCameraData(timestamp_us=500_000),
+            frame,
+            recording_epoch=NEXT_RECORDING,
         )
 
 
@@ -126,5 +150,7 @@ def test_a_stale_timeline_does_not_survive_a_gap_outside_a_recording() -> None:
     stream = RGBDataStream("front_camera", width=4, height=3)
     frame = np.zeros((3, 4, 3), dtype=np.uint8)
 
-    stream.log(_DummyCameraData(timestamp=5.0), frame, recording_epoch=None)
-    stream.log(_DummyCameraData(timestamp=1.0), frame, recording_epoch=RECORDING)
+    stream.log(_DummyCameraData(timestamp_us=5_000_000), frame, recording_epoch=None)
+    stream.log(
+        _DummyCameraData(timestamp_us=1_000_000), frame, recording_epoch=RECORDING
+    )

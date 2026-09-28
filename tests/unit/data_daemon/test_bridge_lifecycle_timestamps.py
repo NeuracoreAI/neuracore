@@ -1,4 +1,4 @@
-"""The bridge sends lifecycle timestamps to the daemon in microseconds."""
+"""The bridge passes lifecycle timestamps to the daemon in microseconds."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import pytest
 
 from neuracore.data_daemon import bridge
 
-TIMESTAMP_S = 12.5
 TIMESTAMP_US = 12_500_000
 ROBOT_ID = "robot-1"
 ROBOT_INSTANCE = 2
@@ -22,36 +21,23 @@ def native(monkeypatch) -> MagicMock:
     return native_module
 
 
-@pytest.mark.parametrize(
-    ("timestamp", "expected_us"), [(TIMESTAMP_S, TIMESTAMP_US), (None, None)]
-)
-def test_start_recording_sends_microseconds(
-    native: MagicMock, timestamp: float | None, expected_us: int | None
-) -> None:
+def test_start_recording_sends_microseconds(native: MagicMock) -> None:
     bridge.RecordingContext().start_recording(
-        ROBOT_ID, ROBOT_INSTANCE, timestamp=timestamp
+        ROBOT_ID, ROBOT_INSTANCE, timestamp_us=TIMESTAMP_US
     )
 
     native.start_recording.assert_called_once_with(
-        ROBOT_ID, ROBOT_INSTANCE, None, None, None, expected_us
+        ROBOT_ID, ROBOT_INSTANCE, None, None, None, TIMESTAMP_US
     )
 
 
 @pytest.mark.parametrize("operation", ["stop_recording", "cancel_recording"])
-@pytest.mark.parametrize(
-    ("timestamp", "expected_us"), [(TIMESTAMP_S, TIMESTAMP_US), (None, None)]
-)
-def test_stop_and_cancel_send_microseconds(
-    native: MagicMock,
-    operation: str,
-    timestamp: float | None,
-    expected_us: int | None,
-) -> None:
+def test_stop_and_cancel_send_microseconds(native: MagicMock, operation: str) -> None:
     context = bridge.RecordingContext()
     context.bind_source(ROBOT_ID, ROBOT_INSTANCE)
 
-    getattr(context, operation)(timestamp)
+    getattr(context, operation)(TIMESTAMP_US)
 
     getattr(native, operation).assert_called_once_with(
-        ROBOT_ID, ROBOT_INSTANCE, expected_us
+        ROBOT_ID, ROBOT_INSTANCE, TIMESTAMP_US
     )

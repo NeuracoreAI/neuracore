@@ -41,7 +41,7 @@ class DataStream(ABC):
         self._data_type = data_type
         self._stream_name = stream_name
         self._recording_epoch: int | None = None
-        self._last_logged_timestamp: float | None = None
+        self._last_logged_timestamp_us: int | None = None
 
     @property
     def data_type(self) -> DataType:
@@ -57,7 +57,7 @@ class DataStream(ABC):
         return self._latest_data
 
     def _enforce_monotonic_timestamp(
-        self, timestamp: float, recording_epoch: int | None
+        self, timestamp_us: int, recording_epoch: int | None
     ) -> None:
         """Reject a timestamp that does not strictly increase within a recording.
 
@@ -75,27 +75,31 @@ class DataStream(ABC):
         recordings must not be failed for it.
 
         Args:
-            timestamp: Capture timestamp, in seconds, of the sample being logged.
+            timestamp_us: Capture time, in microseconds, of the sample being
+                logged.
             recording_epoch: Identity of the source's open recording, or ``None``.
 
         Raises:
-            ValueError: If ``timestamp`` is not strictly greater than the last
+            ValueError: If ``timestamp_us`` is not strictly greater than the last
                 timestamp logged to this stream during the current recording.
         """
         if recording_epoch != self._recording_epoch:
             self._recording_epoch = recording_epoch
-            self._last_logged_timestamp = None
+            self._last_logged_timestamp_us = None
         if recording_epoch is None:
             return
-        last_logged_timestamp = self._last_logged_timestamp
-        if last_logged_timestamp is not None and timestamp <= last_logged_timestamp:
+        last_logged_timestamp_us = self._last_logged_timestamp_us
+        if (
+            last_logged_timestamp_us is not None
+            and timestamp_us <= last_logged_timestamp_us
+        ):
             raise ValueError(
                 f"Non-monotonic timestamp for '{self._stream_name}' "
-                f"({self._data_type.value}): {timestamp} is not greater than the "
-                f"previous timestamp {last_logged_timestamp}. Logged timestamps "
-                "must be strictly increasing within a recording."
+                f"({self._data_type.value}): {timestamp_us} us is not greater than "
+                f"the previous timestamp {last_logged_timestamp_us} us. Logged "
+                "timestamps must be strictly increasing within a recording."
             )
-        self._last_logged_timestamp = timestamp
+        self._last_logged_timestamp_us = timestamp_us
 
 
 class JsonDataStream(DataStream):
@@ -122,7 +126,7 @@ class JsonDataStream(DataStream):
             data: Data object implementing NCData interface
             recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(data.timestamp, recording_epoch)
+        self._enforce_monotonic_timestamp(data.timestamp_us, recording_epoch)
         self._latest_data = data
 
 
@@ -145,12 +149,12 @@ class JointDataStream(JsonDataStream):
     def __init__(self, data_type: DataType, data_type_name: str) -> None:
         """Initialize the joint data stream."""
         super().__init__(data_type=data_type, data_type_name=data_type_name)
-        self._pending_timestamp: float = 0.0
+        self._pending_timestamp_us: int = 0
         self._pending_value: float = 0.0
         self._has_pending_latest = False
 
     def record_scalar(
-        self, timestamp: float, value: float, recording_epoch: int | None = None
+        self, timestamp_us: int, value: float, recording_epoch: int | None = None
     ) -> None:
         """Stash the latest scalar sample without building a ``JointData``.
 
@@ -160,8 +164,8 @@ class JointDataStream(JsonDataStream):
         atomically), but it never raises and never returns a partially
         constructed ``JointData``.
         """
-        self._enforce_monotonic_timestamp(timestamp, recording_epoch)
-        self._pending_timestamp = timestamp
+        self._enforce_monotonic_timestamp(timestamp_us, recording_epoch)
+        self._pending_timestamp_us = timestamp_us
         self._pending_value = value
         self._has_pending_latest = True
 
@@ -174,7 +178,7 @@ class JointDataStream(JsonDataStream):
         """Return the latest sample, materialising a deferred scalar on demand."""
         if self._has_pending_latest:
             self._latest_data = JointData(
-                timestamp=self._pending_timestamp,
+                timestamp_us=self._pending_timestamp_us,
                 value=self._pending_value,
             )
             self._has_pending_latest = False
@@ -199,7 +203,7 @@ class PointCloudDataStream(DataStream):
             data: Point cloud data to log
             recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(data.timestamp, recording_epoch)
+        self._enforce_monotonic_timestamp(data.timestamp_us, recording_epoch)
         self._latest_data = data
 
 
@@ -240,7 +244,7 @@ class VideoDataStream(DataStream):
             frame: Video frame as numpy array
             recording_epoch: Identity of the source's open recording, or None.
         """
-        self._enforce_monotonic_timestamp(metadata.timestamp, recording_epoch)
+        self._enforce_monotonic_timestamp(metadata.timestamp_us, recording_epoch)
         metadata.frame = frame
         self._latest_data = metadata
 

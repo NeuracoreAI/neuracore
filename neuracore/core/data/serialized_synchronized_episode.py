@@ -61,4 +61,6 @@ class SerializedSynchronizedEpisode:
         self.robot_id = episode.robot_id
         self.start_time = episode.start_time
         self.end_time = episode.end_time
+        self.start_timestamp_us = episode.start_timestamp_us
+        self.end_timestamp_us = episode.end_timestamp_us
         self.observations = SerializedSynchronizedPoints(episode.observations)
