@@ -293,10 +293,8 @@ impl TraceActorContext {
 pub enum TraceActorMessage {
     /// One sensor sample routed to this trace after its holdback elapsed.
     Data {
-        /// Caller-supplied capture time in nanoseconds since the Unix epoch.
-        timestamp_ns: i64,
-        /// Optional caller-supplied capture time in seconds.
-        timestamp_s: Option<f64>,
+        /// Caller-supplied capture time in microseconds.
+        timestamp_us: i64,
         /// Opaque per-sample bytes.
         payload: Vec<u8>,
     },
@@ -477,13 +475,10 @@ pub async fn run(
     while let Some(message) = inbox.recv().await {
         match message {
             TraceActorMessage::Data {
-                timestamp_ns,
-                timestamp_s,
+                timestamp_us,
                 payload,
             } => {
-                state
-                    .handle_data(&context, timestamp_ns, timestamp_s, payload)
-                    .await;
+                state.handle_data(&context, timestamp_us, payload).await;
             }
             TraceActorMessage::Video {
                 chunk_index,
@@ -578,8 +573,7 @@ impl ActorState {
     async fn handle_data(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
-        _timestamp_s: Option<f64>,
+        timestamp_us: i64,
         payload: Vec<u8>,
     ) {
         if !self.budget_allows_frame(&context.storage_budget, payload.len()) {
@@ -592,7 +586,7 @@ impl ActorState {
         // UPDATE for this field; the bytes-written debouncer covers the rest.
         let bumped_status = self.frame_count == 0;
 
-        if let Err(error) = self.append_frame(context, timestamp_ns, payload) {
+        if let Err(error) = self.append_frame(context, timestamp_us, payload) {
             tracing::warn!(
                 %error,
                 trace_id = self.identity.trace_id,
@@ -677,7 +671,7 @@ impl ActorState {
     fn append_frame(
         &mut self,
         context: &Arc<TraceActorContext>,
-        timestamp_ns: i64,
+        timestamp_us: i64,
         payload: Vec<u8>,
     ) -> Result<(), FrameAppendError> {
         match &self.writer {
@@ -693,7 +687,7 @@ impl ActorState {
                 self.bytes_on_disk = self.bytes_on_disk.saturating_add(payload.len() as u64);
                 context
                     .json_writer
-                    .append(&self.identity.trace_id, timestamp_ns, payload);
+                    .append(&self.identity.trace_id, timestamp_us, payload);
                 Ok(())
             }
             TraceWriterKind::Video { .. } => {
@@ -1775,6 +1769,7 @@ mod tests {
     use super::*;
     use crate::state::{SqliteStateStore, StateStore, TraceWriteStatus};
     use crate::storage::budget::StoragePolicy;
+    use data_daemon_shared::microseconds_to_seconds;
     use serde_json::json;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -1889,8 +1884,11 @@ mod tests {
 
     #[test]
     fn scalar_fallback_entry_wraps_non_json_payload() {
-        let entry = crate::pipeline::json_writer::scalar_fallback_entry(123, &[0xFF, 0xFE]);
-        assert_eq!(entry, json!({"timestamp_ns": 123, "payload_len": 2}));
+        let entry = crate::pipeline::json_writer::scalar_fallback_entry(2_000_000, &[0xFF, 0xFE]);
+        assert_eq!(
+            entry,
+            json!({"timestamp": 2.0, "timestamp_us": 2_000_000, "payload_len": 2})
+        );
     }
 
     #[test]
@@ -1937,7 +1935,7 @@ mod tests {
         for index in 0..3i64 {
             let payload = serde_json::to_vec(&json!({"i": index})).unwrap();
             state
-                .handle_data(&context, index * 1_000_000, None, payload)
+                .handle_data(&context, index * 1_000_000, payload)
                 .await;
         }
         state.finalise_trace(&context).await;
@@ -2285,7 +2283,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         for _ in 0..3 {
-            state.handle_data(&context, 0, None, vec![0u8; 20]).await;
+            state.handle_data(&context, 0, vec![0u8; 20]).await;
         }
         state.finalise_trace(&context).await;
         context.trace_writer.flush().await;
@@ -2322,12 +2320,7 @@ mod tests {
         let mut state = ActorState::new(identity(1, "trace-1", "joints"));
         state.send_create(&context);
         state
-            .handle_data(
-                &context,
-                0,
-                None,
-                serde_json::to_vec(&json!({"i": 0})).unwrap(),
-            )
+            .handle_data(&context, 0, serde_json::to_vec(&json!({"i": 0})).unwrap())
             .await;
         assert!(state.bytes_on_disk > 0, "the frame was accounted on disk");
 
@@ -2415,7 +2408,7 @@ mod tests {
         let frame_timestamps_s: Vec<f64> = capture_us
             .iter()
             .take(owned_frames as usize)
-            .map(|us| *us as f64 / 1e6)
+            .map(|us| microseconds_to_seconds(*us))
             .collect();
         send_video_chunk_with_nut_pts(
             state,
@@ -2581,7 +2574,10 @@ mod tests {
                 byte_count: 0,
                 frame_count: frame_capture_us.len() as u32,
                 skip_frames: 0,
-                frame_timestamps_s: frame_capture_us.iter().map(|us| *us as f64 / 1e6).collect(),
+                frame_timestamps_s: frame_capture_us
+                    .iter()
+                    .map(|us| microseconds_to_seconds(*us))
+                    .collect(),
                 frame_calibrations: vec![FrameCalibration::default(); frame_capture_us.len()],
                 dtype: FrameDtype::Rgb8,
                 width: 16,
@@ -2682,8 +2678,11 @@ mod tests {
             let (first_index, completed) = completed_chunks.iter().next().unwrap();
             assert_eq!(*first_index, 0, "the batch is keyed by its first index");
             assert_eq!(completed.frame_count, 6, "frame_count is the batch sum");
-            let expected_timestamps: Vec<f64> =
-                chunks.iter().flatten().map(|us| *us as f64 / 1e6).collect();
+            let expected_timestamps: Vec<f64> = chunks
+                .iter()
+                .flatten()
+                .map(|us| microseconds_to_seconds(*us))
+                .collect();
             assert_eq!(
                 completed.frame_timestamps_s, expected_timestamps,
                 "timestamps concatenate in chunk order"

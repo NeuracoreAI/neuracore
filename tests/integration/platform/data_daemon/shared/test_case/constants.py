@@ -80,8 +80,6 @@ PACING_SATURATE = "saturate"  # no stream waits; a spool wedge fails the run
 # Frames a burst-video stream withholds and then releases back-to-back.
 BURST_VIDEO_FRAMES = 8
 
-MICROSECONDS_PER_SECOND = 1_000_000
-
 # Capture timestamp of the first frame of context 0. It is above the largest
 # random-phase offset, so no frame gets a negative timestamp.
 FIRST_CONTEXT_START_S = 1.0
