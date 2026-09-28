@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 from neuracore_types import DataType, JointPositionInputTypeConfig
 from neuracore_types.importer.config import LanguageConfig
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, seconds_to_us
 
 from neuracore.importer.core.base import ImportItem, WorkerError
 from neuracore.importer.core.exceptions import ImportError
@@ -119,8 +120,8 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
 
     with (
         patch(
-            "neuracore.importer.lerobot_importer.time.time",
-            return_value=100.0,
+            "neuracore.importer.lerobot_importer.now_us",
+            return_value=100_000_000,
         ),
         patch(
             "neuracore.importer.lerobot_importer.nc.start_recording"
@@ -131,7 +132,11 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     ):
         importer.import_item(ImportItem(index=0))
 
-    assert importer._record_step.call_count == 2
+    step_timestamps = [call.args[1] for call in importer._record_step.call_args_list]
+    assert [seconds_to_us(stamp) for stamp in step_timestamps] == [
+        100_100_000,
+        100_200_000,
+    ]
     importer._error_queue.put.assert_called_once()
     queued_error = importer._error_queue.put.call_args.args[0]
     assert isinstance(queued_error, WorkerError)
@@ -149,7 +154,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     start_recording.assert_called_once_with(
         robot_name="test_robot",
         instance=2,
-        timestamp=100.0,
+        timestamp=100_000_000 / MICROSECONDS_PER_SECOND,
     )
 
     stop_recording.assert_called_once()
@@ -157,7 +162,7 @@ def test_lerobot_import_item_step_mode_skips_failing_steps():
     assert stop_kwargs["robot_name"] == "test_robot"
     assert stop_kwargs["instance"] == 2
     assert stop_kwargs["wait"] is True
-    assert stop_kwargs["timestamp"] == pytest.approx(100.3)
+    assert stop_kwargs["timestamp"] == 100_300_000 / MICROSECONDS_PER_SECOND
 
 
 def test_lerobot_import_item_non_step_mode_re_raises():

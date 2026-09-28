@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import time
 import traceback
 from collections.abc import Sequence
 from pathlib import Path
@@ -24,6 +23,7 @@ from neuracore_types.importer.data_config import (
     RGBCameraDataMappingItem,
 )
 from neuracore_types.nc_data import DatasetImportConfig
+from neuracore_types.timestamps import MICROSECONDS_PER_SECOND, now_us
 
 import neuracore as nc
 from neuracore.core.robot import JointInfo
@@ -222,13 +222,13 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         if self.frequency is None:
             raise ImportError("Frequency is required for importing episodes.")
         total_steps = self._infer_total_steps(steps)
-        base_time = time.time()
-        recording_stop_timestamp = base_time
+        base_us = now_us()
+        recording_stop_us = base_us
         if not self.dry_run:
             nc.start_recording(
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
-                timestamp=base_time,
+                timestamp=base_us / MICROSECONDS_PER_SECOND,
             )
         episode_label = (
             f"{item.split or 'episode'} #{item.index}"
@@ -251,10 +251,12 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
         )
         for idx, step in enumerate(steps, start=1):
             self._reset_step_state()
-            timestamp = base_time + (idx / self.frequency)
-            recording_stop_timestamp = timestamp + (1.0 / self.frequency)
+            timestamp_us = self._step_timestamp_us(base_us, idx, self.frequency)
+            recording_stop_us = self._step_timestamp_us(
+                base_us, idx + 1, self.frequency
+            )
             try:
-                self._record_step(step, timestamp)
+                self._record_step(step, timestamp_us / MICROSECONDS_PER_SECOND)
             except Exception as exc:  # importer-specific policy hook
                 if self._handle_step_error(exc, item, idx):
                     continue
@@ -270,7 +272,7 @@ class RLDSAndTFDSDatasetImporterBase(NeuracoreDatasetImporter):
                 robot_name=self.robot_name,
                 instance=self.robot_instance(self._worker_id),
                 wait=True,
-                timestamp=recording_stop_timestamp,
+                timestamp=recording_stop_us / MICROSECONDS_PER_SECOND,
             )
         self.logger.info("[%s] Completed %s", worker_label, episode_label)
 
