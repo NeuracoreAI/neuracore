@@ -780,6 +780,28 @@ impl Dispatcher {
                     );
                 }
             }
+            // A live recording with no id yet is one this daemon started whose
+            // start POST has not returned, so this is its echo.
+            let live_index = self
+                .windows
+                .get(&source)
+                .and_then(|entry| entry.live.as_ref())
+                .map(|window| window.recording_index);
+            if let Some(mut announcement) = self.announced.0.get_mut(&source) {
+                if announcement.recording_id.is_none()
+                    && announcement.recording_index.is_some()
+                    && announcement.recording_index == live_index
+                {
+                    announcement.recording_id = Some(recording_id.to_string());
+                    tracing::debug!(
+                        recording_index = announcement.recording_index,
+                        recording_id,
+                        robot_id = source.0,
+                        "echo arrived before the start POST returned; ignoring duplicate start"
+                    );
+                    return;
+                }
+            }
         }
 
         let announced = AnnouncedRecording {
@@ -3023,6 +3045,41 @@ mod tests {
             entry.closing.is_empty(),
             "the replay retired the live window"
         );
+        assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 100);
+    }
+
+    #[tokio::test]
+    async fn an_echo_that_beats_the_start_post_changes_nothing() {
+        // A recording started here learns its cloud id from its own start POST,
+        // and the backend's echo of it can arrive first.
+        fast_holdback();
+        let (store, dir) = open_store().await;
+        let context = test_context(dir.path().join("recordings"), store.clone());
+        let mut dispatcher = Dispatcher::new(store.clone(), context, DispatcherContext::default());
+
+        let now = Instant::now();
+        dispatcher.handle_inbound(start("robot-1", 100), now).await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 110, 1), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(1))
+            .await;
+
+        dispatcher
+            .handle_recording_command(announced("robot-1", "rec-a", 100), now)
+            .await;
+        dispatcher
+            .handle_inbound(datum("robot-1", 120, 2), now)
+            .await;
+        dispatcher
+            .release_due_holdback(now + dispatcher.holdback + Duration::from_millis(2))
+            .await;
+
+        let recordings = store.recordings_for_source("robot-1", 0).await.unwrap();
+        assert_eq!(recordings.len(), 1, "the echo opened a second recording");
+        let entry = &dispatcher.windows[&("robot-1".to_string(), 0)];
+        assert!(entry.closing.is_empty(), "the echo retired the live window");
         assert_eq!(entry.live.as_ref().unwrap().started_at_ns, 100);
     }
 
