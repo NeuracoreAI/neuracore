@@ -60,11 +60,9 @@ class NestedModule(nn.Module):
         return self.neuracore_model.training_step(batch)
 
 
-def _supports_native_bf16(device: torch.device) -> bool:
-    """Return whether the device runs bf16 math natively."""
-    return device.type == "cuda" and torch.cuda.is_bf16_supported(
-        including_emulation=False
-    )
+def _supports_tf32(device: torch.device) -> bool:
+    """Return whether the device runs TF32 matrix multiplies."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) >= (8, 0)
 
 
 class DistributedTrainer:
@@ -94,7 +92,6 @@ class DistributedTrainer:
         rank: int = 0,
         world_size: int = 1,
         device: torch.device | None = None,
-        mixed_precision: bool = False,
     ):
         """Initialize the distributed trainer.
 
@@ -124,9 +121,6 @@ class DistributedTrainer:
             rank: Rank of this process
             world_size: Total number of processes/GPUs
             device: Optional device to use for training
-            mixed_precision: Whether to run forward passes in bf16 autocast
-                with TF32 matrix multiplies and a channels_last model. Applies
-                only on GPUs with native bf16 support.
         """
         if keep_last_n_checkpoints <= 0:
             raise ValueError("keep_last_n_checkpoints must be greater than 0")
@@ -135,18 +129,14 @@ class DistributedTrainer:
 
         logger.info(f"Process {rank} using device: {self.device}")
 
-        self.mixed_precision = mixed_precision and _supports_native_bf16(self.device)
-        if mixed_precision and not self.mixed_precision:
-            logger.info(
-                f"Mixed precision is off: {self.device} has no native bf16 support"
-            )
-        if self.mixed_precision:
+        use_tf32 = _supports_tf32(self.device)
+        if use_tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
             torch.backends.cudnn.allow_tf32 = True
-            logger.info("Training with bf16 autocast, TF32 and channels_last")
+            logger.info("Training with TF32 matrix multiplies and channels_last")
 
         # Set up the model for distributed training
-        if self.mixed_precision:
+        if use_tf32:
             self.model = model.to(self.device, memory_format=torch.channels_last)
         else:
             self.model = model.to(self.device)
@@ -196,14 +186,6 @@ class DistributedTrainer:
             self.checkpoint_dir = output_dir / "checkpoints"
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    def _autocast(self) -> torch.autocast:
-        """Return the autocast context for forward passes."""
-        return torch.autocast(
-            device_type=self.device.type,
-            dtype=torch.bfloat16,
-            enabled=self.mixed_precision,
-        )
-
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """Run one epoch of training.
 
@@ -241,16 +223,13 @@ class DistributedTrainer:
             apply_device_preprocessing(batch, *self.train_device_preprocessing)
 
             # Forward pass
-            with self._autocast():
-                if self.world_size > 1:
-                    batch_output = self.model(batch)
-                else:
-                    batch_output = cast(NeuracoreModel, self.model).training_step(batch)
-                loss = (
-                    torch.stack(list(batch_output.losses.values()), dim=0)
-                    .sum(dim=0)
-                    .mean()
-                )
+            if self.world_size > 1:
+                batch_output = self.model(batch)
+            else:
+                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
+            loss = (
+                torch.stack(list(batch_output.losses.values()), dim=0).sum(dim=0).mean()
+            )
 
             # Backward pass
             loss.backward()
@@ -340,11 +319,10 @@ class DistributedTrainer:
             apply_device_preprocessing(batch, *self.inference_device_preprocessing)
 
             # Forward pass
-            with self._autocast():
-                if self.world_size > 1:
-                    batch_output = self.model(batch)
-                else:
-                    batch_output = cast(NeuracoreModel, self.model).training_step(batch)
+            if self.world_size > 1:
+                batch_output = self.model(batch)
+            else:
+                batch_output = cast(NeuracoreModel, self.model).training_step(batch)
 
             if self.log_freq > 0 and self.global_val_step % self.log_freq == 0:
                 self._log_scalars(
