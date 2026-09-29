@@ -9,6 +9,7 @@ one that exists is always complete; while it is being produced, a sibling
 ``<sensor_id>.recording.lock`` marks it as owned.
 """
 
+import functools
 import logging
 import os
 import shutil
@@ -184,6 +185,50 @@ def decode_video_to_array(
         out.seek(0)
         if write_header(num_frames) != header_length:
             raise RuntimeError(f"Frame array header for {output_file} changed size")
+
+
+@functools.cache
+def _frame_array_layout(frame_array: Path) -> tuple[int, tuple[int, ...]]:
+    """Return the data offset and shape of a frame array file.
+
+    Args:
+        frame_array: Path of a uint8 npy frame array.
+
+    Returns:
+        Byte offset of the first frame and the array shape.
+    """
+    with open(frame_array, "rb") as handle:
+        np.lib.format.read_magic(handle)
+        shape, _, _ = np.lib.format.read_array_header_1_0(handle)
+        return handle.tell(), shape
+
+
+def read_frame(frame_array: Path, frame_idx: int) -> np.ndarray:
+    """Read one frame from a frame array with a single exact-length read.
+
+    Args:
+        frame_array: Path of a uint8 npy frame array.
+        frame_idx: Index of the frame to read.
+
+    Returns:
+        The frame as a uint8 array of shape (height, width, 3).
+
+    Raises:
+        IndexError: If frame_idx is outside the array.
+        OSError: If the file holds fewer bytes than the frame needs.
+    """
+    offset, shape = _frame_array_layout(frame_array)
+    if not 0 <= frame_idx < shape[0]:
+        raise IndexError(f"Frame {frame_idx} is outside {frame_array} ({shape[0]})")
+    frame = np.empty(shape[1:], dtype=np.uint8)
+    fd = os.open(frame_array, os.O_RDONLY)
+    try:
+        read = os.preadv(fd, [frame], offset + frame_idx * frame.nbytes)
+    finally:
+        os.close(fd)
+    if read != frame.nbytes:
+        raise OSError(f"Short read of frame {frame_idx} from {frame_array}")
+    return frame
 
 
 def lock_file_for(frames_dir: Path) -> Path:

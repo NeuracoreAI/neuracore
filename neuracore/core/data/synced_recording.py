@@ -39,6 +39,7 @@ from neuracore.core.data.frame_cache import (
     lock_file_for,
     point_cloud_lock_file_for,
     publish_decoded_frames,
+    read_frame,
     video_filename_preference,
     wait_for_lock_release,
 )
@@ -511,8 +512,9 @@ class SynchronizedRecording:
                 )
 
             if camera_type == DataType.RGB_IMAGES and self.rgb_frame_size is not None:
-                frames = np.load(cam_id_rgb_root / FRAME_ARRAY_FILENAME, mmap_mode="r")
-                frame = np.array(frames[cam_data.frame_idx])
+                frame = read_frame(
+                    cam_id_rgb_root / FRAME_ARRAY_FILENAME, cam_data.frame_idx
+                )
             else:
                 frame = Image.open(cam_id_rgb_root / f"{cam_data.frame_idx}.png")
 

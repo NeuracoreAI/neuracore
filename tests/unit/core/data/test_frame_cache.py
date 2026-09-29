@@ -4,6 +4,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 from neuracore_types import DataType
 
@@ -16,6 +17,7 @@ from neuracore.core.data.frame_cache import (
     decode_video,
     delete_decoding_lock,
     lock_file_for,
+    read_frame,
     video_filename_preference,
     wait_for_lock_release,
 )
@@ -241,3 +243,24 @@ class TestResolveFrameSyncArg:
             assert _resolve_frame_sync_arg() == "-fps_mode"
 
         mock_run.assert_called_once()
+
+
+class TestReadFrame:
+    """Reading single frames from a frame array file."""
+
+    def test_returns_each_frame_of_the_array(self, tmp_path):
+        """Every frame read back matches the array that was saved."""
+        frames = np.random.default_rng(0).integers(0, 256, (5, 7, 9, 3), dtype=np.uint8)
+        path = tmp_path / "frames.npy"
+        np.save(path, frames)
+
+        for idx in range(len(frames)):
+            np.testing.assert_array_equal(read_frame(path, idx), frames[idx])
+
+    def test_rejects_an_index_outside_the_array(self, tmp_path):
+        """An index past the last frame raises rather than reading garbage."""
+        path = tmp_path / "frames.npy"
+        np.save(path, np.zeros((2, 4, 4, 3), dtype=np.uint8))
+
+        with pytest.raises(IndexError):
+            read_frame(path, 2)

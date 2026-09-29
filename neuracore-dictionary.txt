@@ -389,6 +389,7 @@ POLLIN
 pooler
 popleft
 posinf
+preadv
 precheck
 precomputes
 preds
@@ -431,6 +432,7 @@ rawvideo
 rclpy
 RCVTIMEO
 RDEM
+RDONLY
 RDWR
 reannounce
 rels
