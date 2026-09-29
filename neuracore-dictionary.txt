@@ -207,6 +207,7 @@ getbuffer
 getgroup
 getpgid
 getpid
+getrlimit
 gettid
 ghjdidnia
 gitignored
@@ -343,6 +344,7 @@ nextafter
 nhead
 nheads
 njoints
+NOFILE
 nokey
 Nonblock
 noprint
@@ -450,6 +452,7 @@ rgbd
 rgbs
 rlds
 rlib
+RLIMIT
 Robotiq
 rosdep
 rotvec
@@ -477,6 +480,7 @@ sess
 sessionfinish
 setpriority
 setpts
+setrlimit
 setsid
 setuptools
 SFIXED

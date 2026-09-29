@@ -71,6 +71,21 @@ logger = logging.getLogger(__name__)
 MAX_AUTOTUNE_SAMPLE_CANDIDATES = 1000
 
 
+def _raise_open_file_limit() -> None:
+    """Raise the soft open file limit to the hard limit."""
+    if sys.platform == "win32":
+        return
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft == hard:
+        return
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    except (OSError, ValueError):
+        logger.warning("Could not raise the open file limit from %d", soft)
+
+
 def _resolve_recording_cache_dir(cfg: DictConfig) -> Path:
     """Resolve recording cache directory for synchronized dataset downloads."""
     configured_dir = cfg.get("recording_cache_dir")
@@ -632,6 +647,8 @@ def _main(cfg: DictConfig) -> None:
     Args:
         cfg: Fully resolved Hydra configuration.
     """
+    _raise_open_file_limit()
+
     # Merge Config with the base config from the algorithm
     cfg = resolve_user_input_config(cfg)
 

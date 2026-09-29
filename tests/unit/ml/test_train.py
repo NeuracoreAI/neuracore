@@ -37,6 +37,7 @@ from neuracore.ml.datasets.pytorch_synchronized_dataset import (
 )
 from neuracore.ml.preprocessing.base import PreprocessingConfiguration
 from neuracore.ml.train import (
+    _raise_open_file_limit,
     _resolve_recording_cache_dir,
     _serialize_cross_embodiment_description,
     assert_valid_batch_size,
@@ -840,6 +841,30 @@ class TestTrainingConfigMerge:
                 "JOINT_TARGET_POSITIONS": {0: "target_1"},
             }
         }
+
+
+class TestRaiseOpenFileLimit:
+    def test_raises_the_soft_limit_to_the_hard_limit(self):
+        """The soft open file limit rises to the hard limit."""
+        import resource
+
+        with (
+            patch.object(resource, "getrlimit", return_value=(1024, 65536)),
+            patch.object(resource, "setrlimit") as mock_setrlimit,
+        ):
+            _raise_open_file_limit()
+
+        mock_setrlimit.assert_called_once_with(resource.RLIMIT_NOFILE, (65536, 65536))
+
+    def test_keeps_going_when_the_limit_cannot_be_raised(self):
+        """A refused limit change logs a warning instead of failing training."""
+        import resource
+
+        with (
+            patch.object(resource, "getrlimit", return_value=(1024, 65536)),
+            patch.object(resource, "setrlimit", side_effect=ValueError),
+        ):
+            _raise_open_file_limit()
 
 
 class TestResolveRecordingCacheDir:
