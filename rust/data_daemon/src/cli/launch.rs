@@ -502,6 +502,7 @@ fn run_daemon(
                 transport,
                 dispatcher_tx.clone(),
                 recording_state,
+                state_store.clone(),
                 shutdown_tx.subscribe(),
             )
             .await;

@@ -36,9 +36,7 @@
 //! and the daemon decides — from its per-source active-window map — which
 //! recording (if any) each datum belongs to. There is no `recording_index`,
 //! `trace_id`, or `sequence_number` on the wire; the daemon assigns and
-//! stores those after routing. `StartRecording` carries an optional
-//! `recording_id` for the one case where the backend, not the daemon,
-//! already minted it — a recording started from the web frontend.
+//! stores those after routing.
 //!
 //! All envelopes — lifecycle, joints/scalars, and the chunk-ready
 //! notifications for video traces — travel over a single `commands` service.
@@ -452,8 +450,6 @@ pub enum Envelope {
         /// caller supplied none. Stored as the row's `start_timestamp_ns` and
         /// POSTed to the backend as `start_time`; never used for routing.
         timestamp_ns: i64,
-        /// Optional cloud recording id the backend already minted.
-        recording_id: Option<String>,
     },
     /// Producer announces that the source's active recording has stopped.
     ///
@@ -961,7 +957,6 @@ mod tests {
             dataset_name: Some("warehouse".into()),
             publish_timestamp_ns: 1_700_000_000_000_000_000,
             timestamp_ns: 1_700_000_000_000_000_000,
-            recording_id: None,
         };
         let bytes = original.encode().expect("encode");
         let decoded = Envelope::decode(&bytes).expect("decode");

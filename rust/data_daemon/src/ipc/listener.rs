@@ -32,6 +32,7 @@ use tokio::time::sleep;
 use crate::ipc::node::IpcTransport;
 use crate::lifecycle::shutdown::ShutdownSignal;
 use crate::pipeline::dispatcher::RecordingState;
+use crate::state::SqliteStateStore;
 
 /// Poll cadence while envelopes are actively flowing.
 ///
@@ -70,6 +71,7 @@ pub async fn run(
     transport: IpcTransport,
     dispatcher_tx: mpsc::Sender<Envelope>,
     recording_state: RecordingState,
+    store: SqliteStateStore,
     mut shutdown_rx: broadcast::Receiver<ShutdownSignal>,
 ) {
     tracing::info!(
@@ -127,7 +129,8 @@ pub async fn run(
         // Every process on this host reads its recording state from here
         // rather than from its own subscription to the backend. The reply
         // carries the cloud id too, so this is the only state service.
-        serve_recording_state_queries(transport.recording_state_server(), &recording_state).await;
+        serve_recording_state_queries(transport.recording_state_server(), &recording_state, &store)
+            .await;
 
         // -- Yield / shutdown ---------------------------------------------------
         // Poll fast while data is flowing; relax once the bus has been empty
@@ -237,7 +240,8 @@ fn serve_version(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
 /// local producers bracket *and* the ones the backend announced over the
 /// notification stream, which it alone subscribes to. So a process that
 /// started nothing — on a node that has logged nothing — still gets the true
-/// answer, and it never depends on a row existing yet.
+/// answer, and it never depends on a row existing yet. Only the cloud id of a
+/// recording started on this host is read from its row.
 ///
 /// Bounded per tick rather than unbounded: each client keeps at most one
 /// request in flight (it awaits the reply before sending the next), so a single
@@ -247,6 +251,7 @@ fn serve_version(server: &Server<ipc::Service, [u8], (), [u8], ()>) {
 async fn serve_recording_state_queries(
     server: &Server<ipc::Service, [u8], (), [u8], ()>,
     recording_state: &RecordingState,
+    store: &SqliteStateStore,
 ) {
     loop {
         let active = match server.receive() {
@@ -267,7 +272,9 @@ async fn serve_recording_state_queries(
         };
 
         let reply = RecordingStateReply {
-            recording: recording_state.live(&query.robot_id, query.robot_instance),
+            recording: recording_state
+                .live(store, &query.robot_id, query.robot_instance)
+                .await,
         };
 
         let bytes = match reply.encode() {
