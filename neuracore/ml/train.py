@@ -669,7 +669,9 @@ def _main(cfg: DictConfig) -> None:
 
         cfg = resolve_to_complete_config(cfg, dataset=dataset)
         logger.info("Training configuration:")
-        logger.info(OmegaConf.to_yaml(cfg, resolve=False))
+        # This log is uploaded, so the config must not read secrets via oc.env.
+        logged_cfg = OmegaConf.masked_copy(cfg, [k for k in cfg if k != "hydra"])
+        logger.info(OmegaConf.to_yaml(logged_cfg, resolve=True))
         logger.info(f"Training run directory: {cfg.local_output_dir}")
 
         dataset.cache_dir = _resolve_recording_cache_dir(cfg)
