@@ -157,7 +157,7 @@ class SynchronizedDataset:
                 instance=recording.instance,
                 synchronization_details=self.synchronization_details,
                 prefetch_videos=self._prefetch_videos,
-                episode_synced=episodes.get(idx),
+                episode_synced=episodes.pop(idx, None),
                 rgb_frame_size=self._rgb_frame_size,
             )
 

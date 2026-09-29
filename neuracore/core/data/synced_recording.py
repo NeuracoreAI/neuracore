@@ -2,9 +2,10 @@
 
 import json
 import logging
+import pickle
 import tempfile
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -92,6 +93,39 @@ def _describe_download_failure(error: requests.RequestException) -> str:
     return type(error).__name__
 
 
+class PackedSyncPoints:
+    """Sync points pickled into one shared byte array, unpickled on access."""
+
+    def __init__(self, sync_points: Sequence[SynchronizedPoint]):
+        """Pickle every sync point into one byte array.
+
+        Args:
+            sync_points: The sync points to store, in order.
+        """
+        blobs = [
+            pickle.dumps(sync_point, protocol=pickle.HIGHEST_PROTOCOL)
+            for sync_point in sync_points
+        ]
+        self._offsets = np.cumsum([0, *map(len, blobs)], dtype=np.int64)
+        self._buffer = np.frombuffer(b"".join(blobs), dtype=np.uint8)
+
+    def __len__(self) -> int:
+        """Return the number of stored sync points."""
+        return len(self._offsets) - 1
+
+    def __getitem__(self, idx: int) -> SynchronizedPoint:
+        """Unpickle and return the sync point at idx.
+
+        Args:
+            idx: Index of the sync point, from 0 up to the length.
+
+        Returns:
+            A new copy of the stored sync point.
+        """
+        start, stop = self._offsets[idx], self._offsets[idx + 1]
+        return cast(SynchronizedPoint, pickle.loads(self._buffer[start:stop]))
+
+
 class SynchronizedRecording:
     """Synchronized recording iterator."""
 
@@ -134,15 +168,15 @@ class SynchronizedRecording:
         self.instance = instance
         self.rgb_frame_size = rgb_frame_size
 
-        self._episode_synced = (
-            episode_synced if episode_synced is not None else self._get_synced_data()
-        )
-        self._episode_length = len(self._episode_synced.observations)
+        if episode_synced is None:
+            episode_synced = self._get_synced_data()
+        self._sync_points = PackedSyncPoints(episode_synced.observations)
+        self._episode_length = len(self._sync_points)
 
         # Use start_time and end_time from the synchronized episode,
         # as they reflect trim_start_end settings from synchronization
-        self.start_time = self._episode_synced.start_time
-        self.end_time = self._episode_synced.end_time
+        self.start_time = episode_synced.start_time
+        self.end_time = episode_synced.end_time
         self.cache_manager = CacheManager(
             self.cache_dir,
         )
@@ -625,8 +659,7 @@ class SynchronizedRecording:
             SynchronizedPoint object containing synchronized data
                 for the specified index.
         """
-        sync_point = self._episode_synced.observations[idx]
-        return self._load_sync_point_payloads(sync_point)
+        return self._load_sync_point_payloads(self._sync_points[idx])
 
     def get_sync_points(
         self, start: int, stop: int, data_types: Collection[DataType]
@@ -645,9 +678,7 @@ class SynchronizedRecording:
         """
         start, stop, _ = slice(start, stop).indices(len(self))
         return [
-            self._load_sync_point_payloads(
-                self._episode_synced.observations[idx], data_types
-            )
+            self._load_sync_point_payloads(self._sync_points[idx], data_types)
             for idx in range(start, stop)
         ]
 
@@ -705,7 +736,7 @@ class SynchronizedRecording:
         Raises:
             StopIteration: When all timesteps have been processed.
         """
-        if self._iter_idx >= len(self._episode_synced.observations):
+        if self._iter_idx >= len(self._sync_points):
             raise StopIteration
         sync_point = self._get_sync_point(self._iter_idx)
         self._iter_idx += 1

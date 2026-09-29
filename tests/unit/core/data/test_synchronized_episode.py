@@ -12,7 +12,6 @@ from neuracore_types import (
     DataType,
     JointData,
     SynchronizationDetails,
-    SynchronizedEpisode,
     SynchronizedPoint,
     SynchronizeRecordingRequest,
 )
@@ -150,18 +149,21 @@ class TestSynchronizedRecording:
         self, synced_recording: SynchronizedRecording, synced_data
     ):
         """Test that _get_synced_data correctly retrieves synchronized data."""
-        result = synced_recording._episode_synced
+        stored = [
+            synced_recording._sync_points[idx] for idx in range(len(synced_recording))
+        ]
 
-        assert result.robot_id == synced_data.robot_id
-        assert len(result.observations) == len(synced_data.observations)
-        assert result.start_time == synced_data.start_time
-        assert result.end_time == synced_data.end_time
+        assert [p.model_dump(mode="json") for p in stored] == [
+            p.model_dump(mode="json") for p in synced_data.observations
+        ]
+        assert synced_recording.start_time == synced_data.start_time
+        assert synced_recording.end_time == synced_data.end_time
 
     def test_construction_initializes_episode_state(
         self, synced_recording: SynchronizedRecording, synced_data
     ):
         """Construction still populates the episode state from the download."""
-        assert synced_recording._episode_synced is not None
+        assert len(synced_recording._sync_points) == len(synced_data.observations)
         assert synced_recording._episode_length == len(synced_data.observations)
         assert synced_recording.start_time == synced_data.start_time
         assert synced_recording.end_time == synced_data.end_time
@@ -344,7 +346,7 @@ class TestSynchronizedRecording:
         iter(synced_recording)
 
         # Exhaust the iterator
-        synced_recording._iter_idx = len(synced_recording._episode_synced.observations)
+        synced_recording._iter_idx = len(synced_recording)
 
         with pytest.raises(StopIteration):
             next(synced_recording)
@@ -634,8 +636,9 @@ class TestSyncedEpisodeRetrieval:
         assert progress.call_count == 1
         assert progress.last_request.qs == {"recording_id": ["rec1"]}
         assert download.call_count == 1
-        assert isinstance(recording._episode_synced, SynchronizedEpisode)
-        assert recording._episode_synced.robot_id == synced_data.robot_id
+        assert recording._sync_points[0].model_dump(mode="json") == (
+            synced_data.observations[0].model_dump(mode="json")
+        )
         assert len(recording) == len(synced_data.observations)
 
     def test_pending_polls_until_ready(
