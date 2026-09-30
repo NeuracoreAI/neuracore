@@ -310,6 +310,7 @@ def mock_synced_recording(
             self.sync_points = sync_points
             self.robot_id = ROBOT_ID
             self.id = "mock_recording"
+            self.requested_data_types: list[set[DataType]] = []
 
         def __len__(self):
             return len(self.sync_points)
@@ -327,6 +328,10 @@ def mock_synced_recording(
 
         def __iter__(self):
             return iter(self.sync_points)
+
+        def get_sync_points(self, start, stop, data_types):
+            self.requested_data_types.append(set(data_types))
+            return self.sync_points[start:stop]
 
     return MockSynchronizedRecording()
 
@@ -518,6 +523,7 @@ def mock_synced_recording_with_depth(
             self.sync_points = sync_points
             self.robot_id = ROBOT_ID
             self.id = "mock_recording"
+            self.requested_data_types: list[set[DataType]] = []
 
         def __len__(self):
             return len(self.sync_points)
@@ -535,6 +541,10 @@ def mock_synced_recording_with_depth(
 
         def __iter__(self):
             return iter(self.sync_points)
+
+        def get_sync_points(self, start, stop, data_types):
+            self.requested_data_types.append(set(data_types))
+            return self.sync_points[start:stop]
 
     return MockSynchronizedRecording()
 
@@ -924,6 +934,42 @@ class TestDataLoading:
         mock_login.assert_called_once()
 
     @patch("neuracore.login")
+    def test_load_sample_requests_input_types_then_output_types(
+        self, mock_login, mock_synchronized_dataset, mock_synced_recording
+    ):
+        """Load input types for the input step and output types for the window."""
+        input_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_POSITIONS: _indexed_names(DataType.JOINT_POSITIONS, 3),
+                DataType.RGB_IMAGES: _indexed_names(DataType.RGB_IMAGES, 3),
+            }
+        }
+        output_description: CrossEmbodimentDescription = {
+            ROBOT_ID: {
+                DataType.JOINT_TARGET_POSITIONS: _indexed_names(
+                    DataType.JOINT_TARGET_POSITIONS, 3
+                )
+            }
+        }
+        dataset = PytorchSynchronizedDataset(
+            synchronized_dataset=mock_synchronized_dataset,
+            input_cross_embodiment_description=input_description,
+            output_cross_embodiment_description=output_description,
+            output_prediction_horizon=3,
+            input_preprocessing_config=_default_preprocessing_config(),
+            output_preprocessing_config=_default_preprocessing_config(),
+            sample_cache=False,
+        )
+
+        with patch.object(dataset, "_memory_monitor"):
+            dataset.load_sample(episode_idx=0, timestep=2)
+
+        assert mock_synced_recording.requested_data_types == [
+            {DataType.JOINT_POSITIONS, DataType.RGB_IMAGES},
+            {DataType.JOINT_TARGET_POSITIONS},
+        ]
+
+    @patch("neuracore.login")
     def test_load_sample_memory_monitoring(self, mock_login, mock_synchronized_dataset):
         """Test memory monitoring during sample loading."""
         input_description: CrossEmbodimentDescription = {
@@ -1145,6 +1191,9 @@ class TestOutputTimestepAlignment:
                     step = idx.step or 1
                     return self.sync_points[start:stop:step]
                 raise TypeError(f"Invalid index type: {type(idx)}")
+
+            def get_sync_points(self, start, stop, data_types):
+                return self.sync_points[start:stop]
 
         return TimestepRecording()
 
