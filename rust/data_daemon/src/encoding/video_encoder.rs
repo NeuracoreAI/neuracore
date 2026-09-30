@@ -45,12 +45,46 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::time::Duration;
 
 use data_daemon_shared::ffmpeg::passthrough_frame_sync_arg;
 use data_daemon_shared::service_name::VIDEO_SPOOL_TICKS_PER_SECOND;
 use serde::{Serialize, Serializer};
 
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 use tokio::process::Command;
+
+/// How long ffmpeg may go without advancing its output before it is killed.
+const FFMPEG_STALL_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a killed ffmpeg's stderr is read for before it is abandoned.
+const FFMPEG_STDERR_GRACE: Duration = Duration::from_secs(1);
+
+/// Read ffmpeg `-progress` output to EOF, failing if `out_time_us` stops
+/// advancing for `stall_timeout`. Either way, returns the last `out_time_us`.
+async fn watch_progress(
+    progress: impl AsyncRead + Unpin,
+    stall_timeout: Duration,
+) -> Result<Option<String>, Option<String>> {
+    let mut lines = BufReader::new(progress).lines();
+    let mut last_out_time: Option<String> = None;
+    let mut deadline = tokio::time::Instant::now() + stall_timeout;
+    loop {
+        match tokio::time::timeout_at(deadline, lines.next_line()).await {
+            Err(_) => return Err(last_out_time),
+            Ok(Ok(Some(line))) => {
+                let Some(out_time) = line.strip_prefix("out_time_us=") else {
+                    continue;
+                };
+                if last_out_time.as_deref() != Some(out_time) {
+                    last_out_time = Some(out_time.to_owned());
+                    deadline = tokio::time::Instant::now() + stall_timeout;
+                }
+            }
+            Ok(_) => return Ok(last_out_time),
+        }
+    }
+}
 
 /// Default ffmpeg binary name. Tests override via [`VideoEncoder::with_binary`]
 /// when they need to point at a specific build.
@@ -340,6 +374,20 @@ pub enum VideoEncodeError {
         #[source]
         source: std::io::Error,
     },
+    /// `ffmpeg` made no progress within the stall timeout and was killed.
+    #[error(
+        "`ffmpeg` made no progress on {path} for {stalled_s}s after out_time_us={last_out_time_us} and was killed: {stderr_tail}"
+    )]
+    Stalled {
+        /// Output being written when ffmpeg stalled.
+        path: PathBuf,
+        /// Stall timeout that elapsed, in seconds.
+        stalled_s: u64,
+        /// Last `out_time_us` ffmpeg reported, or `none` if it reported none.
+        last_out_time_us: String,
+        /// Tail of ffmpeg's stderr, capped at 4 KiB.
+        stderr_tail: String,
+    },
     /// `concat_segments` was called with no input segments — caller bug.
     #[error("concat_segments called with empty segment list")]
     EmptySegments,
@@ -492,8 +540,9 @@ impl VideoEncoder {
         let mp4_probe_out =
             std::env::temp_dir().join(format!("ncd_ffmpeg_preflight_{}.mp4", std::process::id()));
         let frame_sync_arg = self.frame_sync_arg();
+        let _cleanup = RemoveFileOnDrop(&mp4_probe_out);
 
-        let child = std::process::Command::new(&self.binary)
+        let mut child = std::process::Command::new(&self.binary)
             .arg("-y")
             .arg("-hide_banner")
             .arg("-loglevel")
@@ -550,14 +599,7 @@ impl VideoEncoder {
             .map_err(|source| FfmpegPreflightError::NotFound {
                 binary: self.binary.clone(),
                 source,
-            });
-        let mut child = match child {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = std::fs::remove_file(&mp4_probe_out);
-                return Err(error);
-            }
-        };
+            })?;
 
         // The frame is far smaller than a pipe buffer, so writing then dropping
         // stdin cannot deadlock against ffmpeg's reads.
@@ -566,7 +608,6 @@ impl VideoEncoder {
         }
 
         let output = child.wait_with_output();
-        let _ = std::fs::remove_file(&mp4_probe_out);
         let output = output.map_err(|source| FfmpegPreflightError::NotFound {
             binary: self.binary.clone(),
             source,
@@ -770,9 +811,6 @@ impl VideoEncoder {
         lossless_out: Option<&Path>,
     ) -> Result<ChunkEncodeOutcome, VideoEncodeError> {
         command
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
             // ffmpeg keeps file descriptors open across `fork`/`exec`; the
             // daemon's iceoryx2 sockets must NOT leak into the encoder, so we
             // rely on Tokio's default `cloexec` behaviour and additionally
@@ -791,13 +829,9 @@ impl VideoEncoder {
             });
         }
 
-        let output = command
-            .output()
-            .await
-            .map_err(|source| VideoEncodeError::Spawn {
-                binary: self.binary.clone(),
-                source,
-            })?;
+        let output = self
+            .run_watched(command, lossy_out, FFMPEG_STALL_TIMEOUT)
+            .await?;
 
         if !output.status.success() {
             let stderr_tail = tail_stderr(&output.stderr);
@@ -820,6 +854,62 @@ impl VideoEncoder {
             lossless_bytes,
         })
     }
+    /// Run an ffmpeg `command` writing `out`, killing it if its progress
+    /// stalls for `stall_timeout`.
+    async fn run_watched(
+        &self,
+        mut command: Command,
+        out: &Path,
+        stall_timeout: Duration,
+    ) -> Result<std::process::Output, VideoEncodeError> {
+        let spawn_error = |source| VideoEncodeError::Spawn {
+            binary: self.binary.clone(),
+            source,
+        };
+        let mut child = command
+            .arg("-progress")
+            .arg("pipe:1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(spawn_error)?;
+        let progress = child.stdout.take().expect("stdout is piped");
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let stderr_reader = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let (last_out_time, status) = match watch_progress(progress, stall_timeout).await {
+            Ok(last) => (
+                last,
+                tokio::time::timeout(stall_timeout, child.wait()).await.ok(),
+            ),
+            Err(last) => (last, None),
+        };
+        let Some(status) = status else {
+            let _ = child.start_kill();
+            let stderr = tokio::time::timeout(FFMPEG_STDERR_GRACE, stderr_reader)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            return Err(VideoEncodeError::Stalled {
+                path: out.to_path_buf(),
+                stalled_s: stall_timeout.as_secs(),
+                last_out_time_us: last_out_time.unwrap_or_else(|| "none".to_owned()),
+                stderr_tail: tail_stderr(&stderr),
+            });
+        };
+        Ok(std::process::Output {
+            status: status.map_err(spawn_error)?,
+            stdout: Vec::new(),
+            stderr: stderr_reader.await.unwrap_or_default(),
+        })
+    }
+
     /// Stream-copy concatenate `segments` into `out`.
     ///
     /// Uses ffmpeg's `concat` demuxer with `-c copy`, so no transcode
@@ -846,7 +936,10 @@ impl VideoEncoder {
         let list_path = list_file_for(out);
         write_concat_list(&list_path, segments, spans_to_next_us)?;
 
-        let result = Command::new(&self.binary)
+        // Always try to clean up the list file, even on failure
+        let _cleanup = RemoveFileOnDrop(&list_path);
+        let mut command = Command::new(&self.binary);
+        command
             .arg("-y")
             .arg("-hide_banner")
             .arg("-nostdin")
@@ -864,21 +957,8 @@ impl VideoEncoder {
             .arg("-c")
             .arg("copy")
             .arg(out)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .output()
-            .await;
-
-        // Always try to clean up the list file, even on failure — leaving it
-        // around just clutters the trace directory.
-        let _ = std::fs::remove_file(&list_path);
-
-        let output = result.map_err(|source| VideoEncodeError::Spawn {
-            binary: self.binary.clone(),
-            source,
-        })?;
+            .kill_on_drop(true);
+        let output = self.run_watched(command, out, FFMPEG_STALL_TIMEOUT).await?;
 
         if !output.status.success() {
             let stderr_tail = tail_stderr(&output.stderr);
@@ -1176,6 +1256,15 @@ fn head_skip_filter(skip_frames: u32) -> String {
     format!("trim=start_frame={skip_frames},setpts=PTS-STARTPTS")
 }
 
+struct RemoveFileOnDrop<'a>(&'a Path);
+
+impl Drop for RemoveFileOnDrop<'_> {
+    /// Removes the file at path referenced when dropped, ignoring failures.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
 /// Build the ffmpeg `-vf` value that downscales the lossy preview proxy to at
 /// most `max_height` lines.
 ///
@@ -1363,6 +1452,73 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
+
+    fn shell_command(script: &str) -> Command {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script).kill_on_drop(true);
+        command
+    }
+
+    #[tokio::test]
+    async fn run_watched_kills_ffmpeg_that_stops_progressing() {
+        let encoder = VideoEncoder::new().with_binary("sh");
+        let command = shell_command("echo out_time_us=1; echo stuck >&2; exec sleep 30");
+        let started = std::time::Instant::now();
+
+        let error = encoder
+            .run_watched(command, Path::new("out.mp4"), Duration::from_millis(200))
+            .await
+            .expect_err("a stalled child must be killed");
+
+        let VideoEncodeError::Stalled {
+            last_out_time_us,
+            stderr_tail,
+            ..
+        } = error
+        else {
+            panic!("expected Stalled, got {error}");
+        };
+        assert_eq!(last_out_time_us, "1");
+        assert_eq!(stderr_tail, "stuck\n");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[tokio::test]
+    async fn run_watched_keeps_ffmpeg_that_is_still_progressing() {
+        // Runs well past the stall timeout, but advances every 100ms.
+        let encoder = VideoEncoder::new().with_binary("sh");
+        let command = shell_command(
+            "for t in 1 2 3 4 5 6 7 8; do echo frame=$t; echo out_time_us=$t; sleep 0.1; done; \
+             echo progress=end; echo done >&2",
+        );
+
+        let output = encoder
+            .run_watched(command, Path::new("out.mp4"), Duration::from_millis(300))
+            .await
+            .expect("a progressing child must run to completion");
+
+        assert!(output.status.success());
+        assert_eq!(output.stderr, b"done\n");
+    }
+
+    #[tokio::test]
+    async fn run_watched_kills_ffmpeg_repeating_the_same_progress() {
+        let encoder = VideoEncoder::new().with_binary("sh");
+        let command = shell_command("while true; do echo out_time_us=0; sleep 0.05; done");
+
+        let error = encoder
+            .run_watched(command, Path::new("out.mp4"), Duration::from_millis(300))
+            .await
+            .expect_err("unchanged progress is a stall");
+
+        let VideoEncodeError::Stalled {
+            last_out_time_us, ..
+        } = error
+        else {
+            panic!("expected Stalled, got {error}");
+        };
+        assert_eq!(last_out_time_us, "0");
+    }
 
     /// Locate an ffmpeg-suite binary on `PATH`. Returns `None` (with a
     /// caller-side skip) so the suite stays green in sandboxes that lack
