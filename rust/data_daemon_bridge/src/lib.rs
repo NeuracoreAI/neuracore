@@ -75,13 +75,8 @@ use crate::writer::{note_video_activity, writer_queue, FrameJob, WriterMsg};
 /// what the daemon stores as `start_timestamp_ns` and POSTs as the backend
 /// `start_time`. The capture timestamp is returned because it is what tells
 /// this recording apart from its predecessor before either has a cloud id.
-///
-/// `cloud_recording_id` is set only when the backend already minted the id
-/// itself (a recording started from the web frontend) — the daemon then
-/// reuses it instead of POSTing `/recording/start`.
 #[pyfunction]
-#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, timestamp_ns = None, cloud_recording_id = None))]
-#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (robot_id, robot_instance, robot_name = None, dataset_id = None, dataset_name = None, timestamp_ns = None))]
 fn start_recording(
     py: Python<'_>,
     robot_id: &str,
@@ -90,7 +85,6 @@ fn start_recording(
     dataset_id: Option<String>,
     dataset_name: Option<String>,
     timestamp_ns: Option<i64>,
-    cloud_recording_id: Option<String>,
 ) -> PyResult<i64> {
     if robot_id.is_empty() {
         return Err(PyValueError::new_err("robot_id must not be empty"));
@@ -110,7 +104,6 @@ fn start_recording(
             dataset_name,
             publish_timestamp_ns,
             timestamp_ns: capture_timestamp_ns,
-            recording_id: cloud_recording_id,
         })?;
         // The daemon stores this exact value as the recording's start, so this
         // process now holds the same identity a refresh would fetch — a
